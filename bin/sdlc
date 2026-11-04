@@ -76,10 +76,19 @@ _cpus_in_list() {               # "0-3,7,10-11" -> 7
 
 _cgroup_cpu_ceiling() {         # cpu.max from leaf to root, smallest quota wins
   _dir=$(awk -F: '$2=="" {print $3; exit}' /proc/self/cgroup 2>/dev/null) || _dir=
-  [ -n "${_dir:-}" ] || { printf '0'; return; }
+  # Inside a container with its own cgroup namespace -- podman's default, and
+  # the GitHub runner on gloval -- the path is "/" or climbs with "..". Both
+  # mean "the namespace root", which is /sys/fs/cgroup itself, and the root is
+  # exactly where a container's quota lives, so it is read, not skipped.
+  case "$_dir" in /|*..*) _dir= ;; esac
+  _path="/sys/fs/cgroup${_dir%/}"
   _best=0
-  _path="/sys/fs/cgroup$_dir"
-  while [ -n "$_path" ] && [ "$_path" != "/sys/fs/cgroup" ]; do
+  # The walk ends AT /sys/fs/cgroup or anywhere outside it, never by hoping
+  # dirname lands there exactly. It used to stop only on an exact match, so
+  # "/sys/fs/cgroup/" walked to "/" and then dirname'd "/" forever: every
+  # command, `--help` included, hung inside a container before printing a
+  # line. That was 30 minutes of a CI job doing nothing.
+  while :; do
     if [ -r "$_path/cpu.max" ]; then
       _q=$(awk '{print $1}' "$_path/cpu.max" 2>/dev/null) || _q=max
       _p=$(awk '{print $2}' "$_path/cpu.max" 2>/dev/null) || _p=100000
@@ -89,7 +98,10 @@ _cgroup_cpu_ceiling() {         # cpu.max from leaf to root, smallest quota wins
         if [ "$_best" -eq 0 ] || [ "$_n" -lt "$_best" ]; then _best=$_n; fi
       fi
     fi
-    _path=$(dirname "$_path")
+    case "$_path" in
+      /sys/fs/cgroup/*) _path=$(dirname "$_path") ;;
+      *) break ;;
+    esac
   done
   printf '%s' "$_best"
 }
