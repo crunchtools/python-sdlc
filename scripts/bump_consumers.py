@@ -111,6 +111,26 @@ def bump(repo: str, version: str) -> str:
         return url
 
 
+def survey(repos: list[str], version: str) -> tuple[list[str], list[str], list[str]]:
+    """Split repos into those pinning `version`, those behind it, and unreadable ones."""
+    current, stale, failed = [], [], []
+    for repo in repos:
+        try:
+            rev = pinned_rev(repo)
+        except RuntimeError as read_error:
+            print(f"{repo}: {read_error}", file=sys.stderr)
+            failed.append(repo)
+            continue
+        if rev is None:
+            continue
+        if rev == version:
+            current.append(repo)
+            continue
+        print(f"{repo}: {rev} -> {version}")
+        stale.append(repo)
+    return current, stale, failed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("version")
@@ -122,27 +142,29 @@ def main() -> int:
         return 2
 
     repos = args.only.split(",") if args.only else org_repos()
-    failed = []
-    for repo in repos:
-        try:
-            rev = pinned_rev(repo)
-        except RuntimeError as read_error:
-            print(f"{repo}: {read_error}", file=sys.stderr)
-            failed.append(repo)
-            continue
-        if rev is None or rev == args.version:
-            continue
-        print(f"{repo}: {rev} -> {args.version}")
-        if args.dry_run:
-            continue
-        try:
-            print(f"  {bump(repo, args.version)}")
-        except subprocess.CalledProcessError as command_error:
-            print(f"  FAILED: {command_error}: {command_error.stderr}", file=sys.stderr)
-            failed.append(repo)
-        except RuntimeError as bump_error:
-            print(f"  FAILED: {bump_error}", file=sys.stderr)
-            failed.append(repo)
+    current, stale, failed = survey(repos, args.version)
+    opened = []
+    if not args.dry_run:
+        for repo in stale:
+            try:
+                print(f"  {bump(repo, args.version)}")
+                opened.append(repo)
+            except (subprocess.CalledProcessError, RuntimeError) as bump_error:
+                detail = getattr(bump_error, "stderr", "") or ""
+                print(f"  FAILED: {bump_error}: {detail}".rstrip(": "), file=sys.stderr)
+                failed.append(repo)
+
+    # Always say what happened. A run with nothing to do and a run that could
+    # not open a pull request both used to print nothing at all, which is how
+    # RT#1553 -- the App had no `pull_requests: write` -- survived two releases
+    # looking like a job that had half worked.
+    did = f"{len(stale)} would be bumped" if args.dry_run else f"{len(opened)} bumped"
+    print(
+        f"{len(current) + len(stale)} repo(s) pin python-sdlc: "
+        f"{did} to {args.version}, {len(current)} already there, {len(failed)} failed"
+    )
+    if not current and not stale and not failed:
+        print("no repo pins python-sdlc; nothing was bumped", file=sys.stderr)
     if failed:
         print(f"rerun with --only {','.join(failed)}", file=sys.stderr)
         return 1
