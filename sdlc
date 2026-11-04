@@ -185,12 +185,13 @@ RESERVED = (*COMMANDS, "plan", "tiers", "list", "versions", "pytest-deps", "code
 def sdlc_config() -> dict:
     """`[tool.sdlc]`, checked for shape before anything trusts it."""
     cfg = pyproject().get("tool", {}).get("sdlc", {}) or {}
-    stray = sorted(set(cfg) - set(COMMANDS))
+    stray = sorted(set(cfg) - set(COMMANDS) - {"project"})
     if stray:
         cannot(
-            f"[tool.sdlc] has {', '.join(stray)}; the only blocks are "
-            f"[tool.sdlc.commit], [tool.sdlc.push] and [tool.sdlc.ci]"
+            f"[tool.sdlc] has {', '.join(stray)}; the only keys are "
+            f"[tool.sdlc.commit], [tool.sdlc.push], [tool.sdlc.ci] and `project`"
         )
+    project_dir()  # validated here, so a bad path is caught on the next commit
     # The WHOLE config is checked whichever command runs, so a typo in the ci
     # block is found on the next commit rather than in CI.
     for command in COMMANDS:
@@ -571,7 +572,7 @@ PYTEST_PACKAGES = ("pytest", "pytest-asyncio", "pytest-xdist", "pytest-timeout")
 def t_pytest_deps() -> int:
     """Install the lock's pytest into the cache volume for `pytest-in-image`."""
     need_lock_dep("pytest")
-    lock = tomllib.loads((REPO / "uv.lock").read_text(encoding="utf-8"))
+    lock = tomllib.loads((project_dir() / "uv.lock").read_text(encoding="utf-8"))
     pins = sorted(
         f"{pkg['name']}=={pkg['version']}"
         for pkg in lock.get("package", [])
@@ -583,16 +584,46 @@ def t_pytest_deps() -> int:
         return CLEAN
     shutil.rmtree(target, ignore_errors=True)
     step(f"install {', '.join(pins)} for the in-image run")
-    rc, _ = run(["uv", "pip", "install", "--target", str(target), *pins], env=project_env())
+    rc, _ = run(
+        ["uv", "pip", "install", "--target", str(target), *pins],
+        env=project_env(),
+        cwd=project_dir(),
+    )
     if rc != 0:
         cannot("could not install pytest for the in-image run")
     stamp.write_text("\n".join(pins), encoding="utf-8")
     return CLEAN
 
 
+def project_dir() -> Path:
+    """Where the uv project is, which is not always the repo root.
+
+    `[tool.sdlc] project = "image-server"` in the ROOT pyproject.toml points the
+    uv-driven checks -- mypy, pytest, pip-audit and the sync they share -- at a
+    subdirectory. Everything repo-wide stays at the root: the constitution
+    validator, Gourmand, Gatehouse, CodeQL and `ruff check .`, whose own config
+    is hierarchical and already picks up a nested pyproject for files under it.
+
+    Written in the root pyproject and nowhere else, because the two hooks and
+    the CI job all read that file and must agree; an env var or a CI argument
+    would have to be told to three entry points separately.
+    """
+    raw = pyproject().get("tool", {}).get("sdlc", {}).get("project", ".")
+    if not isinstance(raw, str):
+        cannot(f"[tool.sdlc] project must be a string, not {type(raw).__name__}")
+    if Path(raw).is_absolute() or ".." in Path(raw).parts:
+        cannot(f"[tool.sdlc] project must be a relative path inside the repo; got {raw!r}")
+    target = (REPO / raw).resolve()
+    if not str(target).startswith(str(REPO.resolve())):
+        cannot(f"[tool.sdlc] project escapes the repo: {raw!r}")
+    if raw != "." and not (target / "pyproject.toml").is_file():
+        cannot(f"[tool.sdlc] project {raw!r} has no pyproject.toml")
+    return target
+
+
 def need_project() -> None:
     """Assert this is a Python project, for the targets that require one."""
-    if not (REPO / "pyproject.toml").is_file():
+    if not (project_dir() / "pyproject.toml").is_file():
         cannot(
             "pyproject.toml does not exist, so this target has no project to "
             "check. constitution, gourmand and gatehouse work on any repo; "
@@ -608,7 +639,11 @@ def project_env() -> dict[str, str]:
     UV_PROJECT_ENVIRONMENT across different Python versions make uv rebuild the
     venv on every invocation, in both directions, forever.
     """
-    name = os.environ.get("SDLC_PROJECT", REPO.name)
+    # The subdirectory is part of the key: one repo can hold two projects, and
+    # sharing a venv between them would make uv rebuild it on every invocation.
+    sub = project_dir().relative_to(REPO.resolve())
+    default = REPO.name if str(sub) == "." else f"{REPO.name}-{str(sub).replace('/', '-')}"
+    name = os.environ.get("SDLC_PROJECT", default)
     pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
     env = dict(os.environ)
     env.update(
@@ -630,6 +665,9 @@ def run(
     env: dict[str, str] | None = None,
     stdin: bytes | None = None,
     tee: bool = False,
+    # Where the tool runs. Defaults to the repo root; the uv-driven checks
+    # pass the project directory, which [tool.sdlc] project may move.
+    cwd: Path | None = None,
 ) -> tuple[int, str]:
     """Run a tool and return (ITS exit status, captured output).
 
@@ -642,7 +680,7 @@ def run(
         if tee:
             proc = subprocess.run(
                 cmd,
-                cwd=REPO,
+                cwd=cwd or REPO,
                 env=env if env is not None else dict(os.environ),
                 input=stdin,
                 check=False,
@@ -656,7 +694,7 @@ def run(
         else:
             proc = subprocess.run(
                 cmd,
-                cwd=REPO,
+                cwd=cwd or REPO,
                 env=env if env is not None else dict(os.environ),
                 input=stdin,
                 check=False,
@@ -684,7 +722,7 @@ def need_lock_dep(name: str) -> None:
     makes "the repo forgot to depend on mypy" a real case, and the honest answer
     to it is 2, not 0.
     """
-    lock = REPO / "uv.lock"
+    lock = project_dir() / "uv.lock"
     if not lock.is_file():
         cannot("uv.lock is missing; mypy and pytest resolve from the project lock")
     try:
@@ -703,7 +741,7 @@ def need_lock_dep(name: str) -> None:
 def sync_project(env: dict[str, str]) -> None:
     """Build the project venv, or fail as 'could not run'."""
     step("uv sync --locked --all-extras")
-    rc, _ = run(["uv", "sync", "--locked", "--all-extras"], env=env)
+    rc, _ = run(["uv", "sync", "--locked", "--all-extras"], env=env, cwd=project_dir())
     if rc != 0:
         cannot(
             "uv sync --locked failed. The lockfile is out of date with "
@@ -750,6 +788,7 @@ def t_mypy(s: dict) -> int:
             str(CACHE / "mypy" / project_name()),
         ],
         env=env,
+        cwd=project_dir(),
     )[0]
 
 
@@ -774,9 +813,9 @@ def t_pytest(s: dict) -> int:
         "no:cacheprovider",
         *args,
     ]
-    if jobs != "0" and "pytest-xdist" in (REPO / "uv.lock").read_text(encoding="utf-8"):
+    if jobs != "0" and "pytest-xdist" in (project_dir() / "uv.lock").read_text(encoding="utf-8"):
         cmd += ["-n", jobs]
-    return run(cmd, env=env)[0]
+    return run(cmd, env=env, cwd=project_dir())[0]
 
 
 def t_gourmand(s: dict) -> int:
@@ -849,6 +888,7 @@ def t_pip_audit(s: dict) -> int:
     rc, out = run(
         ["uv", "run", "--locked", "--all-extras", "--with", "pip-audit", "pip-audit"],
         env=env,
+        cwd=project_dir(),
         tee=True,
     )
     unaudited = [

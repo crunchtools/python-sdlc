@@ -61,6 +61,21 @@ CI, one job, which reads the release from that same `rev:`:
 That `rev:` pins the launcher, the image and every tool inside it, for the
 laptop and CI both. One pin.
 
+### A project in a subdirectory
+
+If the repo's Python is not at the root -- a JavaScript repo with a Python
+service beside it, say -- name the directory in the ROOT `pyproject.toml`:
+
+```toml
+[tool.sdlc]
+project = "image-server"
+```
+
+Only the uv-driven checks move: mypy, pytest, pip-audit and the sync they
+share. The constitution validator, Gourmand, Gatehouse, CodeQL and
+`ruff check .` stay repo-wide, and ruff's own config is hierarchical, so a
+nested `pyproject.toml` still applies to the files under it.
+
 ## What a repo gets with no config at all
 
 | Command | Runs |

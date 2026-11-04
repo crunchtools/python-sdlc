@@ -6,6 +6,35 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-11-04
+
+### Added
+
+- **`[tool.sdlc] project`, for a repo whose Python lives in a subdirectory.**
+  The launcher resolved every check against the mount root, so a repo holding a
+  Python project one level down could not be gated at all: `need_project` saw
+  the root `pyproject.toml`, `uv sync` ran where there was no lockfile, and the
+  gate exited 2 while the real code sat untouched below.
+
+  `project = "image-server"` in the ROOT `pyproject.toml` moves the uv-driven
+  checks -- mypy, pytest, pip-audit and the sync they share -- into that
+  directory. Everything repo-wide stays at the root: the constitution
+  validator, Gourmand, Gatehouse, CodeQL and `ruff check .`, whose config is
+  hierarchical and already picks up a nested `pyproject.toml` for files under
+  it. The venv cache key includes the subdirectory, so two projects in one repo
+  do not fight over one environment.
+
+  It lives in the root pyproject and nowhere else, because the pre-commit hook,
+  the pre-push hook and the CI job all read that file and must agree; an env
+  var or a CI argument would have to be told to three entry points separately.
+  Validated at config time -- relative, inside the repo, and holding a
+  `pyproject.toml` -- so a bad value is caught on the next commit rather than
+  in CI. Default `"."`, so nothing changes for the 26 repos already converted.
+
+  Prompted by crunchtools/rotv: a Node.js repo whose `image-server/` is a
+  deployed Python service with 19 modules, `strict = true` on paper and six
+  test files that no workflow had ever run.
+
 ## [0.3.6] - 2026-11-04
 
 ### Fixed
