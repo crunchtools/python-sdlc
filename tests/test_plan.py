@@ -105,9 +105,51 @@ def config_error(pyproject: str) -> str | None:
 
 
 msg = config_error("[tool.sdlc.post]\n")
-check("a block that is not a command is refused", msg is not None and "only blocks are" in msg)
+check("a block that is not a command is refused", msg is not None and "only keys are" in msg)
 msg = config_error('[tool.sdlc.ci]\nchecks = ["typo"]\n')
 check("a typo in ci is found on commit", msg is not None and "typo" in msg, str(msg))
+
+# --------------------------------------------------- project in a subdirectory
+#
+# The uv-driven checks can live one directory down. The value is validated when
+# the config is read, so a bad path is caught on the next commit, not in CI.
+
+msg = config_error('[tool.sdlc]\nproject = "nope"\n')
+check(
+    "a project directory with no pyproject.toml is refused",
+    msg is not None and "no pyproject.toml" in msg,
+    str(msg),
+)
+msg = config_error('[tool.sdlc]\nproject = "/etc"\n')
+check("an absolute project path is refused", msg is not None and "relative path" in msg, str(msg))
+msg = config_error('[tool.sdlc]\nproject = "../elsewhere"\n')
+check(
+    "a project path leaving the repo is refused",
+    msg is not None and "relative path" in msg,
+    str(msg),
+)
+msg = config_error("[tool.sdlc]\nproject = 3\n")
+check("a non-string project is refused", msg is not None and "must be a string" in msg, str(msg))
+msg = config_error("[tool.ruff]\n")
+check("no project key is fine, and means the repo root", msg is None, str(msg))
+
+
+def project_of(pyproject: str, sub: str | None = None) -> str:
+    """Where project_dir() resolves to, relative to the repo root."""
+    with tempfile.TemporaryDirectory() as root:
+        Path(root, "pyproject.toml").write_text(pyproject)
+        if sub:
+            Path(root, sub).mkdir(parents=True)
+            Path(root, sub, "pyproject.toml").write_text("[project]\nname='x'\nversion='0'\n")
+        S.REPO = Path(root)
+        return str(S.project_dir().relative_to(Path(root).resolve()))
+
+
+check("the default project is the repo root", project_of("[tool.ruff]\n") == ".")
+check(
+    "a named project resolves to that directory",
+    project_of('[tool.sdlc]\nproject = "image-server"\n', "image-server") == "image-server",
+)
 
 # ----------------------------------------------------------- codeql baseline
 
