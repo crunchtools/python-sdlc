@@ -6,6 +6,23 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-04
+
+### Fixed
+
+- **Every command hung inside a container.** The CPU budget walks the cgroup
+  tree up to `/sys/fs/cgroup` with `dirname`, and stopped only on an exact
+  match. Inside a container with its own cgroup namespace -- podman's default,
+  and the self-hosted GitHub runner -- `/proc/self/cgroup` says `0::/`, so the
+  walk started at `/sys/fs/cgroup/`, passed it, reached `/` and dirname'd `/`
+  forever, before printing a line. trentina's first `sdlc ci` on that runner sat
+  for 30 minutes. The walk now ends at the root or anywhere outside it.
+- **A container's CPU quota was never read.** The walk skipped the namespace
+  root, which is exactly where a container's own `cpu.max` lives; it now reads
+  it, so a run in a 4-CPU container budgets 2 rather than half the host.
+- `tests/contract.sh` runs the launcher inside a container and fails if it does
+  not finish in 20 seconds.
+
 ## [0.2.1] - 2026-11-04
 
 ### Fixed
@@ -165,7 +182,8 @@ cached tag was never refreshed — that gate had been running a two-week-old
 reviewer while CI pulled fresh. Local and CI were different reviewers on the
 same diff.
 
-[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.2
 [0.2.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.1
 [0.2.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.0
 [0.1.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.1.0

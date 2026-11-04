@@ -275,6 +275,29 @@ else
   ok "semgrep fails on code its rule forbids"
 fi
 
+# ---------------------------------- the launcher runs inside a container
+#
+# bin/sdlc's CPU budget walks the cgroup tree, and inside a container with its
+# own cgroup namespace -- podman's default, and the self-hosted GitHub runner --
+# /proc/self/cgroup says "0::/". The walk once never terminated there, so every
+# command hung before printing a line; a CI job sat for 30 minutes. Run it in a
+# container, with shims for the two programs it checks for, and give it 20
+# seconds.
+LSHIM=$(mktemp -d)
+printf '#!/bin/sh\ncase "$*" in *show-toplevel*) pwd ;; esac\nexit 0\n' > "$LSHIM/git"
+printf '#!/bin/sh\nexit 0\n' > "$LSHIM/podman"
+chmod +x "$LSHIM/git" "$LSHIM/podman"
+rc=0
+podman run --rm -v "$PWD:/s:ro,z" -v "$LSHIM:/shim:ro,z" -w /s \
+  -e PATH=/shim:/usr/bin:/bin registry.fedoraproject.org/fedora:43 \
+  timeout 20 sh bin/sdlc --help >/dev/null 2>&1 || rc=$?
+rm -rf "$LSHIM"
+if [ "$rc" -eq 0 ]; then
+  ok "bin/sdlc runs inside a container (cgroup namespace root)"
+else
+  bad "bin/sdlc inside a container exited $rc (124 means it hung)"
+fi
+
 # --------------------------------------- `sdlc versions` matches the build pins
 #
 # The version table is the image's central promise: a consuming repo pins this
