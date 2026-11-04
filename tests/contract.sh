@@ -255,6 +255,59 @@ case "$plan" in
   *) ok "sdlc plan ci leaves out the two reviewers" ;;
 esac
 
+# A repo with no image chain gets ONE lane, which is the launcher's sequential
+# path: the same run it had before lanes existed.
+lanes=$(podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
+          "$IMAGE" sdlc plan ci 2>&1 | cut -f2 | sort -u | tr '\n' ' ')
+if [ "$lanes" = "main " ]; then
+  ok "a repo with no image build plans one lane"
+else
+  bad "a repo with no image build planned lanes '$lanes', want 'main '"
+fi
+
+# And a repo with one gets two: the build and the tests that run what it built
+# in their own lane, every uv sync in the other. This is the seam between the
+# TOML the image reads and the parallel executor in the shell, so it is checked
+# on the real image rather than only in the unit test.
+CHAIN=$(mktemp -d)
+mkdir -p "$CHAIN/tests"
+printf 'FROM scratch\n' > "$CHAIN/Containerfile"
+cat > "$CHAIN/pyproject.toml" <<'TOML'
+[project]
+name = "chain"
+version = "0.0.0"
+
+[tool.sdlc.ci]
+checks = ["image", "image-tests"]
+
+[tool.sdlc.ci.image]
+kind = "image-build"
+
+[tool.sdlc.ci.image-tests]
+kind = "pytest-in-image"
+tests = ["tests/"]
+TOML
+
+chain_plan=$(podman run --rm -v "$CHAIN:/repo:ro,z" -w /repo --entrypoint="" \
+               -e SDLC_HOST_REPO="$CHAIN" -e SDLC_CACHE_VOLUME=contract-test \
+               "$IMAGE" sdlc plan ci 2>&1)
+rm -rf "$CHAIN"
+nlanes=$(printf '%s\n' "$chain_plan" | cut -f2 | sort -u | grep -c .)
+off_main=$(printf '%s\n' "$chain_plan" | awk -F'\t' '$2 != "main" {print $1}' | sort -u | tr '\n' ' ')
+syncers=$(printf '%s\n' "$chain_plan" | awk -F'\t' '
+  $1 == "mypy" || $1 == "pytest" || $1 == "pip-audit" {print $2}' | sort -u | grep -c .)
+if [ "$nlanes" = 2 ] && [ "$off_main" = "image image-tests " ]; then
+  ok "an image chain plans a second lane, and only the chain is in it"
+else
+  bad "an image chain planned $nlanes lane(s), off-main: '$off_main'"
+  printf '%s\n' "$chain_plan" | sed 's/^/       /'
+fi
+if [ "$syncers" = 1 ]; then
+  ok "mypy, pytest and pip-audit share a lane, so two uv syncs cannot race"
+else
+  bad "the checks that run uv sync were spread across $syncers lanes"
+fi
+
 # And it must still FAIL on something broken -- a gate that passes everything is
 # the other way to be useless.
 cat > "$FIXTURE/src/broken.py" <<'PY'

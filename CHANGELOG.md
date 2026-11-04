@@ -6,6 +6,73 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-04
+
+### Changed
+
+- **A command's checks run in lanes, at the same time.** `sdlc ci` used to run
+  every check one after another, so trentina's image build -- which depends on
+  none of mypy, pytest, semgrep or pip-audit -- waited for all four. The job
+  took the sum of its checks instead of the length of its longest chain:
+  5m09s on the self-hosted runner, 16m05s on a GitHub-hosted one, of which the
+  image chain was 2m34s and 11m21s.
+
+  Each plan line now carries a lane as its second field,
+  `check TAB lane TAB mode TAB payload`. Steps of one lane run in sequence, in
+  plan order; lanes run at the same time. The image assigns them, by two rules
+  that name no repo:
+
+  - an `image-build` check and every `pytest-in-image` check that runs the
+    image it tags are one lane, because the build has to finish before the
+    tests start and two builds writing one tag must not race;
+  - everything else is the `main` lane, in plan order, which is where `uv sync`
+    happens -- mypy, pytest and pip-audit each sync the project venv in the
+    shared cache volume, and one lane makes those sequential. uv does lock the
+    target environment, but a gate should not bet its venv on a lock it did not
+    take.
+
+  And one refusal: a command that rewrites the tree gets no lanes at all. ruff
+  rewrites your source and gourmand writes its cache, and a build context or an
+  in-image mount reading those files while they change is a check judging a
+  tree that no longer exists. `sdlc commit` is ruff, so commit stays
+  sequential, which is what "seconds, offline, free" wanted anyway.
+
+  A repo with no image-build check gets one lane, and one lane is the
+  launcher's sequential path: the same run, the same output, as before. `sdlc
+  push` has no image chain, so push is unchanged too.
+
+- **The CPU budget is for the whole gate, not for each container.** It is
+  divided between the lanes, floor of one CPU each, so two lanes take the same
+  share of the machine that one lane took when the checks were sequential.
+  `sdlc ci` on a laptop is no busier than it was.
+
+- **Each lane's output is buffered and printed whole, in plan order**, as each
+  check finishes -- a log that cuts two lanes into each other is a log nobody
+  can read. Buffering collapses the timestamps people were reading the
+  `== <step>` markers for, so every block now ends with `== <check> passed in
+  Ns`, or with how long it ran before it failed.
+
+- `sdlc tiers` prints each check's lane when a command has more than one.
+
+### Added
+
+- `SDLC_LANE_STALL` (default 3600 seconds): how long the printer waits with no
+  check finishing before it stops waiting on the order. What it measures is
+  silence, and two things cause it -- a lane killed outright (SIGKILL, the OOM
+  killer, a cancelled CI job), which runs no cleanup and so never reports at
+  all, or one check that honestly takes longer than the threshold. The first is
+  the one worth guarding, because without the guard the printer polls for a
+  report that is never coming. Tripping it is cosmetic: the launcher says so,
+  waits for every lane to stop and prints what is left, possibly out of plan
+  order, and every lane's real exit status is still collected.
+
+### Fixed
+
+- Two lanes starting on a machine with no cache volume could both try to create
+  it, and the one that lost the race called it a gate that could not run.
+- A `__pycache__/*.pyc` was committed, and nothing ignored it. Running
+  `python3 sdlc` or the unit tests left a modified tracked file behind.
+
 ## [0.2.2] - 2026-11-04
 
 ### Fixed
@@ -182,7 +249,8 @@ cached tag was never refreshed — that gate had been running a two-week-old
 reviewer while CI pulled fresh. Local and CI were different reviewers on the
 same diff.
 
-[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.0
 [0.2.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.2
 [0.2.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.1
 [0.2.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.0

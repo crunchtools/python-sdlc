@@ -5,3 +5,8 @@
 # gourmand refuses to cache without this entry and then writes the directory,
 # which is also why its hook mounts the tree read-write.
 .gourmand-cache/
+
+# `python3 sdlc` and the unit tests import this repo's own `sdlc` module, which
+# leaves bytecode beside it. A committed .pyc was tracked until v0.3.0.
+__pycache__/
+*.pyc

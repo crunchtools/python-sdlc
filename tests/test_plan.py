@@ -10,6 +10,9 @@ rules are pinned case by case:
   - a check that is not built in must name a kind, and only real kinds exist
   - the whole config is checked whichever command runs
   - CodeQL fails only on findings that are not in the committed baseline
+  - an image chain is one lane and every `uv sync` is in another, so the
+    launcher can run them at the same time without testing an image that was
+    never built or syncing one venv twice at once
 
 Run inside the image, which has the interpreter and PyYAML the runner needs:
   podman run --rm -v .:/src:ro,z -w /src --entrypoint /opt/constitution-venv/bin/python3 \
@@ -18,9 +21,12 @@ Run inside the image, which has the interpreter and PyYAML the runner needs:
 
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -175,6 +181,197 @@ for bad in ("a\nevil\thost\tsh", "a\tb", "a\x1fb"):
 check(
     "a host step is its argv joined by the unit separator",
     S.host_step("x", ["podman", "run", "a b"]) == ("x", "host", "podman\x1frun\x1fa b"),
+)
+
+# ------------------------------------------------------------------- the lanes
+#
+# Steps of one lane run in sequence; lanes run at the same time. Getting this
+# wrong is not a slow job, it is a check that ran against an image that had not
+# been built yet, or two `uv sync`es in one venv. So every rule is pinned.
+
+no_image = S.lane_of(empty, S.resolve(empty, "ci"))
+check(
+    "a repo with no image-build gets one lane",
+    set(no_image.values()) == {S.MAIN_LANE},
+    str(no_image),
+)
+
+chain = {
+    "ci": {
+        "checks": ["image", "image-tests"],
+        "image": {"kind": "image-build"},
+        "image-tests": {"kind": "pytest-in-image", "tests": ["tests/"]},
+    }
+}
+lanes = S.lane_of(chain, S.resolve(chain, "ci"))
+check(
+    "an image chain is one lane, so the tests follow the build",
+    lanes["image"] == lanes["image-tests"],
+    str(lanes),
+)
+check("the image chain is not the main lane", lanes["image"] != S.MAIN_LANE, str(lanes))
+check(
+    "the other checks stay in the main lane",
+    all(lanes[c] == S.MAIN_LANE for c in S.resolve(chain, "ci") if not c.startswith("image")),
+    str(lanes),
+)
+check(
+    "every uv sync is in one lane, so two cannot race in one venv",
+    len({lanes[c] for c in ("mypy", "pytest", "pip-audit")}) == 1,
+    str(lanes),
+)
+
+# A pytest-in-image listed BEFORE its build still joins that build's lane: the
+# chain is keyed by the image reference, not by the order the repo wrote.
+reordered = {
+    "ci": {
+        "checks": ["image-tests", "image"],
+        "image": {"kind": "image-build"},
+        "image-tests": {"kind": "pytest-in-image", "tests": ["tests/"]},
+    }
+}
+lanes = S.lane_of(reordered, S.resolve(reordered, "ci"))
+check("a chain written backwards is still one lane", lanes["image"] == lanes["image-tests"])
+
+# Two builds writing ONE tag share a lane: concurrent builds of the same tag
+# would race to leave the last one standing.
+same_tag = {
+    "ci": {
+        "checks": ["a", "b"],
+        "a": {"kind": "image-build"},
+        "b": {"kind": "image-build"},
+    }
+}
+lanes = S.lane_of(same_tag, S.resolve(same_tag, "ci"))
+check("two builds of one tag share a lane", lanes["a"] == lanes["b"], str(lanes))
+
+two_tags = {
+    "ci": {
+        "checks": ["a", "b"],
+        "a": {"kind": "image-build", "tag": "localhost/a:sdlc"},
+        "b": {"kind": "image-build", "tag": "localhost/b:sdlc"},
+    }
+}
+lanes = S.lane_of(two_tags, S.resolve(two_tags, "ci"))
+check("two builds of two tags get two lanes", lanes["a"] != lanes["b"], str(lanes))
+
+# Tests against an image nothing in this command builds owe no lane anything.
+prebuilt = {
+    "ci": {
+        "checks": ["image-tests"],
+        "image-tests": {
+            "kind": "pytest-in-image",
+            "tests": ["tests/"],
+            "image": "quay.io/x/y:1",
+        },
+    }
+}
+lanes = S.lane_of(prebuilt, S.resolve(prebuilt, "ci"))
+check(
+    "tests on a prebuilt image get their own lane",
+    lanes["image-tests"] not in (S.MAIN_LANE, None) and lanes["image-tests"] == "image-tests",
+    str(lanes),
+)
+
+# A check that rewrites the tree takes the whole command sequential. A build
+# context or an in-image mount reading those files while ruff rewrites them is
+# a check judging a tree that no longer exists.
+rewrites = {
+    "ci": {
+        "checks": ["ruff-format", "image", "image-tests"],
+        "image": {"kind": "image-build"},
+        "image-tests": {"kind": "pytest-in-image", "tests": ["tests/"]},
+    }
+}
+lanes = S.lane_of(rewrites, S.resolve(rewrites, "ci"))
+check(
+    "a check that rewrites the tree gets no lanes beside it",
+    set(lanes.values()) == {S.MAIN_LANE},
+    str(lanes),
+)
+commit = S.lane_of(empty, S.resolve(empty, "commit"))
+check("commit is always one lane", set(commit.values()) == {S.MAIN_LANE}, str(commit))
+
+# ------------------------------------------------- the plan the launcher reads
+#
+# Four tab-separated fields now, and the launcher splits on exactly that. A
+# plan line that does not have them is a step the shell mis-reads.
+
+
+def plan_of(target: str, pyproject: str, **env) -> list[list[str]]:
+    with tempfile.TemporaryDirectory() as root:
+        Path(root, "pyproject.toml").write_text(pyproject)
+        Path(root, "tests").mkdir()
+        Path(root, "Containerfile").write_text("FROM scratch\n")
+        S.REPO = Path(root)
+        saved = dict(os.environ)
+        os.environ.update(
+            {"SDLC_HOST_REPO": root, "SDLC_CACHE_VOLUME": "testvol", "SDLC_PROJECT": "fx", **env}
+        )
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                S.t_plan(target)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+    return [line.split("\t") for line in buf.getvalue().splitlines()]
+
+
+TRENTINA = """
+[project]
+name = "fx"
+version = "0.0.0"
+
+[tool.sdlc.ci]
+checks = ["image", "image-tests"]
+skip = ["codeql"]
+
+[tool.sdlc.ci.image]
+kind = "image-build"
+
+[tool.sdlc.ci.image-tests]
+kind = "pytest-in-image"
+tests = ["tests/"]
+"""
+
+PLAN_FIELDS = 4  # check, lane, mode, payload -- what bin/sdlc splits on
+CHAIN_LANES = 2  # the main lane, and the image chain's
+
+rows = plan_of("ci", TRENTINA)
+check(
+    "every plan line has four fields",
+    all(len(r) == PLAN_FIELDS for r in rows),
+    str(rows),
+)
+check(
+    "the modes are still the third field",
+    {r[2] for r in rows} <= {"image-ro", "image-rw", "local", "host"},
+    str({r[2] for r in rows}),
+)
+lanes_seen = [r[1] for r in rows]
+check(
+    "the plan has exactly two lanes",
+    len(set(lanes_seen)) == CHAIN_LANES,
+    str(set(lanes_seen)),
+)
+check(
+    "the build and its tests are the only steps off the main lane",
+    {r[0] for r in rows if r[1] != S.MAIN_LANE} == {"image", "image-tests"},
+    str(lanes_seen),
+)
+# The launcher groups a lane's steps by check and prints blocks in plan order,
+# which both assume a check's steps are contiguous within its lane.
+for lane in set(lanes_seen):
+    seq = [r[0] for r in rows if r[1] == lane]
+    runs = [c for i, c in enumerate(seq) if i == 0 or seq[i - 1] != c]
+    check(f"lane {lane}: each check's steps are contiguous", len(runs) == len(set(runs)), str(seq))
+
+single = plan_of("push", '[project]\nname = "fx"\nversion = "0.0.0"\n')
+check(
+    "push is one lane, so it runs exactly as it did before",
+    {r[1] for r in single} == {S.MAIN_LANE},
+    str({r[1] for r in single}),
 )
 
 

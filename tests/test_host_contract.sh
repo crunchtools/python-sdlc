@@ -46,30 +46,75 @@ done
 
 # POSIX utilities. The rule is about language toolchains and linters, not about
 # rebuilding coreutils -- every machine with a shell has these.
-for prog in sh awk sed tr grep basename dirname nproc cat mktemp rm ln head id; do
+POSIX_UTILS="sh awk sed tr grep basename dirname nproc cat mktemp rm ln head id
+             cut sleep date wc"
+for prog in $POSIX_UTILS; do
   if full=$(command -v "$prog" 2>/dev/null); then ln -sf "$full" "$SHIM/$prog"; fi
 done
 
 # A fake podman that records what it was asked to do and succeeds. Every target
 # that needs a container must reach THIS and nothing else. Asked for a plan, it
 # answers with one step of each mode, so the launcher's whole executor runs.
+#
+# A plan line is `check TAB lane TAB mode TAB payload`. The plans whose names
+# begin `lanes-` exercise the parallel executor: their steps print markers,
+# sleep and exit on command, so a test can pin what the launcher does with a
+# lane that fails, a lane that is slow, and two lanes writing one terminal.
 TAB=$(printf '\t')
 US=$(printf '\037')
 cat > "$SHIM/podman" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$LOG"
+for _last in "\$@"; do :; done
 case " \$* " in
   *" plan gatehouse-direct "*)
-    printf 'gatehouse${TAB}local${TAB}gatehouse\n' ;;
+    printf 'gatehouse${TAB}main${TAB}local${TAB}gatehouse\n' ;;
   *" plan evil "*)
-    printf 'evil${TAB}host${TAB}sh${US}-c${US}touch $SHIM/pwned\n' ;;
+    printf 'evil${TAB}main${TAB}host${TAB}sh${US}-c${US}touch $SHIM/pwned\n' ;;
   *" plan subst "*)
-    printf 'subst${TAB}host${TAB}podman${US}run${US}\\\$(touch $SHIM/pwned)\n' ;;
+    printf 'subst${TAB}main${TAB}host${TAB}podman${US}run${US}\\\$(touch $SHIM/pwned)\n' ;;
+  *" plan lanes-interleave "*)
+    printf 'a1${TAB}one${TAB}image-ro${TAB}tick-a1\n'
+    printf 'a2${TAB}one${TAB}image-ro${TAB}tick-a2\n'
+    printf 'b1${TAB}two${TAB}image-ro${TAB}tick-b1\n'
+    printf 'b2${TAB}two${TAB}image-ro${TAB}tick-b2\n' ;;
+  *" plan lanes-two-first "*)
+    printf 'x${TAB}one${TAB}image-ro${TAB}rc-two\n'
+    printf 'y${TAB}two${TAB}image-ro${TAB}slow-rc-one\n' ;;
+  *" plan lanes-one-first "*)
+    printf 'x${TAB}one${TAB}image-ro${TAB}rc-one\n'
+    printf 'y${TAB}two${TAB}image-ro${TAB}slow-rc-two\n' ;;
+  *" plan lanes-keeps-going "*)
+    printf 'x${TAB}one${TAB}image-ro${TAB}rc-one\n'
+    printf 'x${TAB}one${TAB}image-ro${TAB}must-not-run\n'
+    printf 'w${TAB}one${TAB}image-ro${TAB}after-the-failure\n'
+    printf 'y${TAB}two${TAB}image-ro${TAB}other-lane-first\n'
+    printf 'z${TAB}two${TAB}image-ro${TAB}other-lane-second\n' ;;
+  *" plan lanes-stall "*)
+    printf 'f${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
+    printf 's${TAB}two${TAB}image-ro${TAB}very-slow-rc-one\n' ;;
+  *" plan lanes-budget "*)
+    printf 'p${TAB}one${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
+    printf 'q${TAB}two${TAB}image-ro${TAB}quiet-ok\n' ;;
   *" plan "*)
-    printf 'mypy${TAB}image-ro${TAB}mypy\n'
-    printf 'ruff-check${TAB}image-rw${TAB}ruff-check\n'
-    printf 'image${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
-    printf 'image-tests${TAB}host${TAB}podman${US}run${US}--rm${US}localhost/x:sdlc${US}-m${US}pytest\n' ;;
+    printf 'mypy${TAB}main${TAB}image-ro${TAB}mypy\n'
+    printf 'ruff-check${TAB}main${TAB}image-rw${TAB}ruff-check\n'
+    printf 'image${TAB}main${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
+    printf 'image-tests${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}localhost/x:sdlc${US}-m${US}pytest\n' ;;
+esac
+case "\$_last" in
+  tick-*)
+    printf 'START %s\n' "\$_last" >> "$SHIM/race.log"
+    printf 'BEGIN %s\n' "\$_last"; sleep 1; printf 'END %s\n' "\$_last"
+    printf 'DONE %s\n' "\$_last" >> "$SHIM/race.log" ;;
+  rc-one)      printf 'RAN rc-one\n'; exit 1 ;;
+  rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
+  slow-rc-one) printf 'RAN slow-rc-one\n'; sleep 2; exit 1 ;;
+  very-slow-rc-one) printf 'RAN very-slow-rc-one\n'; sleep 6; printf 'LAST LINE\n'; exit 1 ;;
+  slow-rc-two) printf 'RAN slow-rc-two\n'; sleep 2; exit 2 ;;
+  must-not-run) printf 'RAN must-not-run\n'; touch "$SHIM/must-not-run" ;;
+  after-the-failure|other-lane-first|other-lane-second)
+    printf 'RAN %s\n' "\$_last" ;;
 esac
 exit 0
 EOF
@@ -113,6 +158,155 @@ else
   bad "a host step's word was evaluated as shell"
 fi
 
+printf '\n== the lanes\n\n'
+
+# Steps of one lane run in sequence; lanes run at the same time. What has to
+# hold is not the speed -- it is that the answer and the log do not depend on
+# which lane happened to finish first.
+
+RUN=$(mktemp -d)
+trap 'rm -rf "$SHIM" "$RUN"' EXIT 0
+
+lanes() {              # target [stall-seconds] -> exit status, output in $RUN/out
+  rm -f "$SHIM/must-not-run"
+  _rc=0
+  PATH="$SHIM" SDLC_CPUS=4 SDLC_LANE_STALL=${2:-3600} \
+    sh bin/sdlc "$1" > "$RUN/out" 2>&1 || _rc=$?
+  return "$_rc"
+}
+
+# A single-lane plan takes the sequential path: no lane banner, and the log is
+# the one a repo without an image chain has always had.
+lanes ci && rc=0 || rc=$?
+if ! grep -q 'lanes at the same time' "$RUN/out"; then
+  ok "a single-lane plan does not go through the lane executor"
+else
+  bad "a single-lane plan was split into lanes"
+fi
+
+# Two lanes, four checks, each step printing BEGIN and END a second apart. Run
+# unbuffered the two lanes would alternate; what must come out is each check's
+# block whole, in PLAN order -- a1 a2 b1 b2 -- however the lanes ran.
+rm -f "$SHIM/race.log"
+lanes lanes-interleave && rc=0 || rc=$?
+
+# First: the lanes really did overlap, so the ordering assertion below is
+# testing the buffering and not a sequential run that could not interleave if
+# it tried. Each step records when it started and finished in one shared file;
+# both lanes' first steps must have started before either had finished.
+if [ "$(head -2 "$SHIM/race.log" | grep -c '^START ')" -eq 2 ]; then
+  ok "both lanes were running at the same time"
+else
+  bad "the lanes ran one after another: $(tr '\n' ' ' < "$SHIM/race.log")"
+fi
+
+got=$(grep -E '^(BEGIN|END) ' "$RUN/out" | tr '\n' ' ')
+want="BEGIN tick-a1 END tick-a1 BEGIN tick-a2 END tick-a2 BEGIN tick-b1 END tick-b1 BEGIN tick-b2 END tick-b2 "
+if [ "$got" = "$want" ]; then
+  ok "each check's block is printed whole, in plan order, never interleaved"
+else
+  bad "lane output interleaved or reordered: $got"
+fi
+if [ "$rc" -eq 0 ]; then
+  ok "two passing lanes exit 0"
+else
+  bad "two passing lanes exited $rc"
+fi
+# And the blocks must carry a duration, because buffering collapses the
+# timestamps people were reading the `== <step>` markers for.
+if grep -q '^== a1 passed in [0-9]*s' "$RUN/out"; then
+  ok "a block ends with how long its check took"
+else
+  bad "a block does not report its check's duration"
+fi
+if ! grep -q 'no check has finished for' "$RUN/out"; then
+  ok "a healthy run never claims nothing is finishing"
+else
+  bad "a healthy run claimed no check had finished"
+fi
+
+# Nothing finishing for STALL_MAX seconds. The case worth guarding is a lane
+# killed outright, which runs no EXIT trap and so never reports at all, leaving
+# the printer polling for a marker that is never coming. At the threshold it
+# gives up the ORDER -- and must still reap every lane for its real status, and
+# still print the late block WHOLE rather than reading a file another process
+# is writing. Reached here with a one-second threshold and a check that takes
+# six, which is the OTHER way in and the cheaper one to arrange.
+lanes lanes-stall 1 && rc=0 || rc=$?
+if grep -q 'no check has finished for 1s' "$RUN/out"; then
+  ok "the printer gives up the order and says what it measured"
+else
+  bad "the stall threshold was never reached"
+fi
+if [ "$rc" -eq 1 ]; then
+  ok "a lane's status is still collected after the order is given up"
+else
+  bad "giving up on the order lost the lane's status (exit $rc)"
+fi
+if grep -q '^== f passed in [0-9]*s' "$RUN/out"; then
+  ok "the block that did finish in time is still printed"
+else
+  bad "the finished block was dropped when the order was given up"
+fi
+# LAST LINE is written six seconds in, after the printer gave up at one. It can
+# only be here if the block was printed after the lane was reaped.
+if grep -q '^LAST LINE$' "$RUN/out" && grep -q 'sdlc: s FAILED after' "$RUN/out"; then
+  ok "the late block is printed whole, after its lane was reaped"
+else
+  bad "the late block was read while its lane was still writing it"
+  sed 's/^/       /' "$RUN/out"
+fi
+
+# A 2 anywhere wins over a 1, in either finishing order. Fast-2/slow-1 and
+# fast-1/slow-2 are two different code paths through the aggregation, and the
+# second is the one a naive "last writer wins" gets wrong.
+lanes lanes-two-first && rc=0 || rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "a 2 that finishes first beats a 1 that finishes last"
+else
+  bad "fast 2 + slow 1 exited $rc, should be 2"
+fi
+lanes lanes-one-first && rc=0 || rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "a 2 that finishes last beats a 1 that finished first"
+else
+  bad "fast 1 + slow 2 exited $rc, should be 2"
+fi
+
+# A failed step ends its OWN check. The next check in that lane still runs, and
+# so does everything in every other lane -- that rule is older than the lanes
+# and the lanes must not quietly narrow it.
+lanes lanes-keeps-going && rc=0 || rc=$?
+if [ "$rc" -eq 1 ]; then
+  ok "a lane that finds something exits 1 when nothing could not run"
+else
+  bad "a found-something run exited $rc, should be 1"
+fi
+if [ -e "$SHIM/must-not-run" ]; then
+  bad "a failed check's remaining steps still ran"
+else
+  ok "a failed step ends its own check"
+fi
+for marker in after-the-failure other-lane-first other-lane-second; do
+  if grep -q "RAN $marker" "$RUN/out"; then
+    ok "$marker ran despite the failure in lane one"
+  else
+    bad "$marker was skipped because another check failed"
+  fi
+done
+
+# The CPU budget is for the whole gate, not for each container: two lanes out
+# of a budget of 4 get 2 each, so a laptop running `sdlc ci` is no worse off
+# than it was when the checks were sequential.
+: > "$LOG"
+lanes lanes-budget || true
+if grep -q -- '--cpus 2 ' "$LOG" && grep -q -- '--cpu-quota 200000' "$LOG"; then
+  ok "a budget of 4 is split 2 and 2 between two lanes"
+else
+  bad "the lanes did not divide the CPU budget"
+  grep -o -- '--cpus [0-9]*\|--cpu-quota [0-9]*' "$LOG" | sort -u | sed 's/^/       /'
+fi
+
 # A container that succeeds must report success, whatever the caller's last
 # exit status was. Gatehouse runs right after `git diff --quiet`, which exits 1
 # whenever there IS a diff to review; that 1 leaked through a shared variable
@@ -122,7 +316,7 @@ GITSHIM=$(mktemp -d)
 for prog in pre-commit gh; do
   [ -e "$SHIM/$prog" ] && ln -s "$SHIM/$prog" "$GITSHIM/$prog"
 done
-for prog in sh awk sed tr grep basename dirname nproc cat mktemp rm ln head id podman; do
+for prog in $POSIX_UTILS podman; do
   [ -e "$SHIM/$prog" ] && ln -s "$(readlink -f "$SHIM/$prog")" "$GITSHIM/$prog"
 done
 cat > "$GITSHIM/git" <<EOF

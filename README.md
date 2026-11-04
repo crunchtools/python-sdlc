@@ -36,7 +36,7 @@ default_install_hook_types: [pre-commit, pre-push]
 
 repos:
   - repo: https://github.com/crunchtools/python-sdlc
-    rev: v0.2.2
+    rev: v0.3.0
     hooks:
       - id: sdlc-commit
       - id: sdlc-push
@@ -69,7 +69,47 @@ laptop and CI both. One pin.
 | `push` | mypy, pytest, gourmand, gatehouse, semgrep, pip-audit, constitution, codeql |
 | `ci` | mypy, pytest, semgrep, pip-audit, constitution, codeql |
 
-`sdlc tiers` prints what each command runs in the repo you are in.
+`sdlc tiers` prints what each command runs in the repo you are in, and which
+lane each check runs in.
+
+## Lanes
+
+A command's checks run in lanes. Steps of one lane run in sequence; lanes run
+at the same time, so a command takes about as long as its longest chain rather
+than the sum of everything in it.
+
+The image decides the lanes, by two rules:
+
+- An `image-build` check and every `pytest-in-image` check that runs the image
+  it tags are **one lane** — the build has to finish before the tests start.
+- Everything else is the `main` lane, in the order `tiers` prints. That is
+  where `uv sync` happens, and one lane keeps two syncs out of one venv.
+
+A command that rewrites the tree — anything running `ruff-check`,
+`ruff-format` or `gourmand` — gets no lanes at all, because a build context
+reading those files while they change is judging a tree that no longer exists.
+That makes `sdlc commit` sequential by definition.
+
+A repo with no `image-build` check has one lane and runs exactly as it did
+before lanes existed. So does `sdlc push`, which never builds a container.
+
+The CPU budget is for the whole gate, not for each container: it is divided
+between the lanes, floor of one CPU each. Two lanes are no busier on your
+laptop than one was.
+
+Each lane's output is buffered and printed whole, in the order `tiers` lists
+the checks, so two lanes never cut into each other's log. Each block ends with
+how long its check took, because buffering is what the `== <step>` timestamps
+used to tell you.
+
+If no check finishes for `SDLC_LANE_STALL` seconds (default 3600) the printer
+stops waiting on the order, says so, waits for every lane to stop and then
+prints what is left. That guards against a lane killed outright — SIGKILL, the
+OOM killer, a cancelled CI job — which runs no cleanup and so never reports at
+all, leaving the printer waiting for a report that is never coming. One check
+honestly taking longer than the threshold reaches it too; raise the variable if
+that is your repo. Either way only the order is given up, never the verdict:
+every lane's real exit status is still collected.
 
 ## Configuring it
 
@@ -192,7 +232,10 @@ then runs the reviewer CI runs.
 A developer machine needs `git`, `podman`, `pre-commit` and `gh`. `bin/sdlc` is
 POSIX shell, runs only `git` and `podman`, and refuses any step that is not a
 `podman build` or `podman run`. `tests/test_host_contract.sh` proves it with a
-restricted `PATH`.
+restricted `PATH`, and proves the lane executor there too: that the lanes
+really overlap, that a `2` in one beats a `1` in another whichever finishes
+first, that a failure in one lane does not stop the other, and that no two
+lanes' output interleaves.
 
 ## Licence
 

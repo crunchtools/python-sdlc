@@ -134,8 +134,12 @@ esac
 CACHE_VOLUME=${SDLC_CACHE_VOLUME:-crunchtools-hook-cache}
 
 need_volume() {
-  podman volume exists "$1" 2>/dev/null || podman volume create "$1" >/dev/null \
-    || die "cannot create the podman volume $1"
+  podman volume exists "$1" 2>/dev/null && return 0
+  podman volume create "$1" >/dev/null 2>&1 && return 0
+  # Two lanes reach this at the same moment on a cold machine and one of them
+  # loses the create. Losing that race is not a failure; not having the volume
+  # afterwards is.
+  podman volume exists "$1" 2>/dev/null || die "cannot create the podman volume $1"
 }
 
 # ------------------------------------------------------------------ podman run
@@ -249,8 +253,8 @@ t_gatehouse() {
 #
 # Which checks run is decided by the repo's [tool.sdlc.commit], [tool.sdlc.push]
 # and [tool.sdlc.ci] blocks, and this shell cannot read TOML. So it asks the
-# image for a plan -- one line per step, `check TAB mode TAB payload` -- and
-# carries it out. The modes:
+# image for a plan -- one line per step, `check TAB lane TAB mode TAB payload` --
+# and carries it out. The lane is handled under "the lanes" below. The modes:
 #
 #   image-ro | image-rw   `sdlc <payload>` in the image, the tree ro or rw
 #   local                 a check this file answers itself
@@ -310,21 +314,18 @@ run_step() {           # mode payload -> the step's exit status
   esac
 }
 
-run_plan() {           # commit | push | ci | <check>
-  _plan=$(run_in_image ro nostdin "$IMAGE" plan "$1") \
-    || die "the image could not plan '$1'; nothing was checked"
-  [ -n "$_plan" ] || die "the image planned nothing for '$1'"
-
+run_serial() {         # the plan -> its worst step status
   _worst=0
   _failed=
   _ifs=$IFS
   set -f
   IFS='
 '
-  for _line in $_plan; do
+  for _line in $1; do
     IFS=$_ifs
     _check=${_line%%"$TAB"*}
     _rest=${_line#*"$TAB"}
+    _rest=${_rest#*"$TAB"}          # the lane; one lane, so nothing to decide
     _mode=${_rest%%"$TAB"*}
     _payload=${_rest#*"$TAB"}
     # One failed step ends that check; the next check still runs.
@@ -342,6 +343,219 @@ run_plan() {           # commit | push | ci | <check>
   IFS=$_ifs
   set +f
   return "$_worst"
+}
+
+# ------------------------------------------------------------------- the lanes
+#
+# The plan's second field is a lane. Steps of one lane run in sequence, in plan
+# order; lanes run at the same time. Which steps share a lane is the image's
+# decision (see "the lanes" in `sdlc`), so no check name appears in this file --
+# a repo with one lane never reaches any of this and runs through run_serial
+# exactly as it did before lanes existed.
+#
+# Two things change when there is more than one lane:
+#
+#   - The CPU budget is DIVIDED between them. The budget is for the whole gate,
+#     not for each container: two lanes at half the budget take the same share
+#     of the machine that one lane at the whole budget took, so a laptop running
+#     `sdlc ci` is no worse off than before.
+#   - Every lane's output is buffered to a file per CHECK and printed whole, in
+#     plan order, as each check finishes. Two lanes writing to one terminal
+#     produce a log nobody can read. The cost is that the `== <step>` markers
+#     inside a block all arrive at once, so each block ends with how long its
+#     check took -- which is the number people were reading off those markers.
+
+OUT=                   # the lane scratch directory, while lanes are running
+
+# How long the printer waits with NO CHECK FINISHING before it stops waiting on
+# the order. What it measures is silence, not death, and two things cause it:
+# a lane killed outright -- SIGKILL, the OOM killer, a cancelled CI job -- which
+# runs no EXIT trap and so never reports at all; or a single check that honestly
+# takes longer than this. The first is the one worth guarding, because without
+# the guard the printer polls for a marker that is never coming. The second is
+# why the default is an hour and why tripping it is cosmetic: the order is
+# abandoned, the exit status is not, because the reap below is the authority.
+# Settable so the test can reach the boundary without waiting an hour for it.
+STALL_MAX=${SDLC_LANE_STALL:-3600}
+case "$STALL_MAX" in ''|*[!0-9]*) die "SDLC_LANE_STALL must be a whole number" ;; esac
+
+now_s() { date +%s 2>/dev/null || printf 0; }
+
+_lanes_running() {     # 0 while any lane has not yet written its done marker
+  _j=0
+  while [ "$_j" -lt "$NLANES" ]; do
+    _j=$((_j + 1))
+    if [ ! -f "$OUT/lane-done.$_j" ]; then return 0; fi
+  done
+  return 1
+}
+
+_close_check() {       # the open check's block is complete
+  if [ -n "${_cur:-}" ]; then
+    printf '%s\n' "$_cur_rc" > "$OUT/rc.$_cur"
+    _cur=
+  fi
+}
+
+run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
+  _k=$1
+  GATE_CPUS=$3
+  _worst=0
+  _failed=
+  _cur=
+  _cur_rc=0
+  # However this subshell ends -- a step's `die` exits it where it stands -- the
+  # check it was on must get a verdict file and the lane must get its done
+  # marker, or the printer waits for a block that is never coming.
+  trap 'printf "2\n" > "$OUT/rc.${_cur:-0}"; printf "2\n" > "$OUT/lane-done.$_k"' EXIT
+
+  # `index TAB check TAB mode TAB payload`: the lane is gone, this file is one,
+  # and the index into the print order was resolved when the file was written
+  # rather than by an awk per step.
+  while IFS= read -r _line; do
+    _i=${_line%%"$TAB"*}
+    _rest=${_line#*"$TAB"}
+    _check=${_rest%%"$TAB"*}
+    _rest=${_rest#*"$TAB"}
+    _mode=${_rest%%"$TAB"*}
+    _payload=${_rest#*"$TAB"}
+    case " $_failed " in *" $_check "*) continue ;; esac
+    # A check's steps are contiguous within its lane, so a different index means
+    # the previous block is finished and can be printed.
+    if [ "$_i" != "${_cur:-}" ]; then _close_check; _cur=$_i; _cur_rc=0; fi
+    _t0=$(now_s)
+    _rc=0
+    run_step "$_mode" "$_payload" >> "$OUT/out.$_i" 2>&1 || _rc=$?
+    _took=$(( $(now_s) - _t0 ))
+    if [ "$_rc" -ne 0 ]; then
+      _failed="$_failed $_check"
+      _cur_rc=$_rc
+      printf '\n%s: %s %s after %ss\n' "$ME" "$_check" \
+        "$([ "$_rc" -eq 2 ] && echo 'COULD NOT RUN' || echo 'FAILED')" "$_took" \
+        >> "$OUT/out.$_i"
+      # A later 1 must not mask an earlier 2, in this lane or any other.
+      if [ "$_rc" -eq 2 ] || [ "$_worst" -eq 2 ]; then _worst=2; else _worst=1; fi
+    else
+      printf '\n== %s passed in %ss\n' "$_check" "$_took" >> "$OUT/out.$_i"
+    fi
+  done < "$2"
+
+  _close_check
+  # The trap stays armed through this: it writes the same marker, and its only
+  # reader asks whether the file exists. Clearing it first would leave a window
+  # where a failed write means no marker at all, and the printer waiting on one.
+  printf '%s\n' "$_worst" > "$OUT/lane-done.$_k"
+  return "$_worst"
+}
+
+run_lanes() {          # the plan -> the worst status of every lane
+  OUT=$(mktemp -d) || die "cannot create a scratch directory for the lane logs"
+  trap 'rm -rf "$OUT"' EXIT HUP INT TERM
+
+  # The checks in plan order, first appearance: the order blocks are printed in.
+  printf '%s\n' "$1" | cut -f1 | awk '!seen[$0]++' > "$OUT/order"
+  printf '%s\n' "$1" | cut -f2 | awk '!seen[$0]++' > "$OUT/lanes"
+  NCHECKS=$(awk 'END {print NR}' "$OUT/order")
+  NLANES=$(awk 'END {print NR}' "$OUT/lanes")
+
+  # Floor of one, so a budget smaller than the lane count does overshoot it by
+  # a CPU or two. The alternative is running the lanes one after another on a
+  # single-CPU budget, which is the thing this exists to stop doing.
+  _lane_cpus=$(( GATE_CPUS / NLANES ))
+  [ "$_lane_cpus" -lt 1 ] && _lane_cpus=1
+
+  # Once, here, rather than from whichever lane gets there first.
+  need_volume "$CACHE_VOLUME"
+
+  printf '%s: %s lanes at the same time, %s CPU(s) each\n' "$ME" "$NLANES" "$_lane_cpus"
+  _k=0
+  _pids=
+  while IFS= read -r _lane; do
+    _k=$((_k + 1))
+    # Number each check by first appearance in the WHOLE plan -- the order the
+    # blocks print in -- and keep this lane's steps, index first.
+    printf '%s\n' "$1" | awk -F"$TAB" -v OFS="$TAB" -v l="$_lane" '
+      !($1 in idx) { idx[$1] = ++n }
+      $2 == l      { print idx[$1], $1, $3, $4 }' > "$OUT/steps.$_k"
+    printf '%s:   lane %s: %s\n' "$ME" "$_lane" \
+      "$(cut -f2 "$OUT/steps.$_k" | awk '!seen[$0]++' | tr '\n' ' ')"
+    run_lane "$_k" "$OUT/steps.$_k" "$_lane_cpus" &
+    _pids="$_pids $!"
+  done < "$OUT/lanes"
+
+  # Print each block whole, in plan order, as soon as it is finished. A lane
+  # that finishes early is HELD BACK, never dropped and never cut into another
+  # lane's output; the lanes themselves keep running while this waits.
+  _i=1
+  _stall=0
+  while [ "$_i" -le "$NCHECKS" ]; do
+    if [ -f "$OUT/rc.$_i" ]; then
+      if [ -f "$OUT/out.$_i" ]; then cat "$OUT/out.$_i"; fi
+      _i=$((_i + 1))
+      _stall=0
+      continue
+    fi
+    _lanes_running || break
+    # Nothing has finished for STALL_MAX seconds. Either a lane was killed and
+    # will never report, or a check is honestly taking that long. Either way,
+    # stop waiting on the order and fall through to the reap.
+    if [ "$_stall" -ge "$STALL_MAX" ]; then
+      printf '%s: no check has finished for %ss.\n' "$ME" "$STALL_MAX"
+      printf '%s: waiting for every lane to stop, then printing what is left,\n' "$ME"
+      printf '%s: which may not be in plan order. Raise SDLC_LANE_STALL if a\n' "$ME"
+      printf '%s: check here really does take that long.\n' "$ME"
+      break
+    fi
+    _stall=$((_stall + 1))
+    sleep 1
+  done
+
+  # Reaped BEFORE the remaining blocks are printed, for two reasons: the status
+  # is the answer and is never guessed from what a file happened to contain,
+  # and once every lane has stopped nothing is still writing, so the blocks
+  # below are whole and still in plan order.
+  _worst=0
+  for _p in $_pids; do
+    _rc=0
+    wait "$_p" || _rc=$?
+    case "$_rc" in
+      0) ;;
+      2) _worst=2 ;;
+      *) [ "$_worst" -eq 2 ] || _worst=1 ;;
+    esac
+  done
+
+  # Whatever the loop above did not reach: a lane that stopped where it stood
+  # leaves the checks behind it with no block at all. Say so rather than print
+  # nothing, which reads exactly like a check that passed.
+  while [ "$_i" -le "$NCHECKS" ]; do
+    if [ -f "$OUT/out.$_i" ]; then
+      cat "$OUT/out.$_i"
+    else
+      printf '\n%s: %s NEVER RAN: its lane stopped before reaching it\n' "$ME" \
+        "$(awk -v n="$_i" 'NR == n {print; exit}' "$OUT/order")" >&2
+    fi
+    _i=$((_i + 1))
+  done
+
+  rm -rf "$OUT"
+  trap - EXIT HUP INT TERM
+  return "$_worst"
+}
+
+run_plan() {           # commit | push | ci | <check>
+  _plan=$(run_in_image ro nostdin "$IMAGE" plan "$1") \
+    || die "the image could not plan '$1'; nothing was checked"
+  [ -n "$_plan" ] || die "the image planned nothing for '$1'"
+
+  _n=$(printf '%s\n' "$_plan" | awk -F"$TAB" '!seen[$2]++ {n++} END {print n + 0}')
+  _rc=0
+  if [ "${_n:-1}" -le 1 ]; then
+    run_serial "$_plan" || _rc=$?
+  else
+    run_lanes "$_plan" || _rc=$?
+  fi
+  return "$_rc"
 }
 
 # ---------------------------------------------------------------------- dispatch
