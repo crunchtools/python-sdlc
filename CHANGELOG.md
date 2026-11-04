@@ -6,6 +6,18 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-04
+
+### Fixed
+
+- **A passing Gatehouse review failed the push whenever there was a diff to
+  review.** `run_in_image` never reset its exit-status variable, and shell
+  function variables are global, so `git diff --quiet` -- which exits 1
+  whenever there IS a diff -- left a 1 that the container's success never
+  overwrote. Every push with a branch to review printed "No issues found" and
+  then failed. Present since v0.1.0; found on trentina's first push through
+  v0.2.0. `tests/test_host_contract.sh` now holds it.
+
 ## [0.2.0] - 2026-11-04
 
 ### Changed
@@ -153,6 +165,7 @@ cached tag was never refreshed — that gate had been running a two-week-old
 reviewer while CI pulled fresh. Local and CI were different reviewers on the
 same diff.
 
-[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.1
 [0.2.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.0
 [0.1.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.1.0
