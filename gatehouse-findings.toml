@@ -31,3 +31,25 @@ rebuild is meant to move. The exact-pin rule is about the TOOLS whose verdicts \
 this image produces, and all of those are pinned exactly -- the contract test \
 asserts each reported version equals the version pinned at build time.
 """
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "Containerfile"
+evidence = "RUN dnf install -y git-core tar zstd which jq \\"
+status = "not-a-bug"
+reason = """
+Same reasoning as the base-image finding above, and the same four unpinned \
+neighbours: git-core, tar, zstd and which have never carried exact RPM \
+versions on this line. The Container Image profile requires a weekly rebuild \
+(`0 6 * * 1`) whose entire purpose is to pick up OS security updates; pinning \
+an OS package to an exact version is how you build an image that stops \
+receiving them, which is the opposite of what the cron is for. What the \
+constitution pins to exact versions is the CHECK tools -- ruff, mypy, semgrep, \
+pip-audit, CodeQL, Gourmand, Gatehouse -- because a verdict that changes under \
+you is not a verdict; those are pinned by ARG and reported by `sdlc versions`. \
+jq is not a check, it is part of the shell test toolbox, and its filter \
+language is stable across every version the fleet ships. Pinning it would \
+freeze a CVE-bearing RPM into the gate image for no gain in reproducibility \
+that the digest-addressed release does not already provide.
+"""

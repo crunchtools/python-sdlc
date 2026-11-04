@@ -43,7 +43,10 @@ for probe in \
   "gourmand:gourmand --version" \
   "codeql:codeql version --format=terse" \
   "uv:uv --version" \
-  "git:git --version"
+  "git:git --version" \
+  "jq:jq --version" \
+  "curl:curl --version" \
+  "bash:bash --version"
 do
   name=${probe%%:*}
   cmd=${probe#*:}

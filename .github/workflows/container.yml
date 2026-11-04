@@ -25,8 +25,23 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
+# Keyed on the COMMIT, not the run, so the push-to-main run and the tag run of
+# the same commit SERIALIZE instead of racing. `github.run_id` is unique per
+# run, so the old group put every run in a group of its own and controlled
+# nothing: both builds pushed the same `:<sha>` tag, the second replaced the
+# first's manifest, and the loser's "Verify the pushed digest" step then failed
+# with `manifest unknown` on a digest that no longer existed.
+#
+# That is not theoretical. It cost v0.3.5 its image: the main run won, `latest`
+# moved, the tag run lost, and the `0.3.5` tag was never created -- a GitHub
+# release with no image behind it, which is the one state a pinned fleet cannot
+# survive. v0.3.4 hit the same race and happened to win it. Serialized, the
+# second run pushes and then verifies its own digest, which is the current one.
+#
+# cancel-in-progress stays false off pull requests: cancelling the main run
+# when its tag arrives would abandon a push half-done.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
