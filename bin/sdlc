@@ -392,6 +392,16 @@ _lanes_running() {     # 0 while any lane has not yet written its done marker
 
 _close_check() {       # the open check's block is complete
   if [ -n "${_cur:-}" ]; then
+    # One footer per CHECK, carrying the time every one of its steps took. It
+    # used to be written per STEP, so `pytest-in-image` -- a `pytest-deps` step
+    # and then the run -- ended with two, the first of them "passed in 0s".
+    if [ "$_cur_rc" -eq 0 ]; then
+      printf '\n== %s passed in %ss\n' "$_cur_name" "$_cur_took" >> "$OUT/out.$_cur"
+    else
+      printf '\n%s: %s %s after %ss\n' "$ME" "$_cur_name" \
+        "$([ "$_cur_rc" -eq 2 ] && echo 'COULD NOT RUN' || echo 'FAILED')" \
+        "$_cur_took" >> "$OUT/out.$_cur"
+    fi
     printf '%s\n' "$_cur_rc" > "$OUT/rc.$_cur"
     _cur=
   fi
@@ -404,6 +414,8 @@ run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
   _failed=
   _cur=
   _cur_rc=0
+  _cur_took=0
+  _cur_name=
   # However this subshell ends -- a step's `die` exits it where it stands -- the
   # check it was on must get a verdict file and the lane must get its done
   # marker, or the printer waits for a block that is never coming.
@@ -422,21 +434,22 @@ run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
     case " $_failed " in *" $_check "*) continue ;; esac
     # A check's steps are contiguous within its lane, so a different index means
     # the previous block is finished and can be printed.
-    if [ "$_i" != "${_cur:-}" ]; then _close_check; _cur=$_i; _cur_rc=0; fi
+    if [ "$_i" != "${_cur:-}" ]; then
+      _close_check
+      _cur=$_i
+      _cur_rc=0
+      _cur_took=0
+      _cur_name=$_check
+    fi
     _t0=$(now_s)
     _rc=0
     run_step "$_mode" "$_payload" >> "$OUT/out.$_i" 2>&1 || _rc=$?
-    _took=$(( $(now_s) - _t0 ))
+    _cur_took=$(( _cur_took + $(now_s) - _t0 ))
     if [ "$_rc" -ne 0 ]; then
       _failed="$_failed $_check"
       _cur_rc=$_rc
-      printf '\n%s: %s %s after %ss\n' "$ME" "$_check" \
-        "$([ "$_rc" -eq 2 ] && echo 'COULD NOT RUN' || echo 'FAILED')" "$_took" \
-        >> "$OUT/out.$_i"
       # A later 1 must not mask an earlier 2, in this lane or any other.
       if [ "$_rc" -eq 2 ] || [ "$_worst" -eq 2 ]; then _worst=2; else _worst=1; fi
-    else
-      printf '\n== %s passed in %ss\n' "$_check" "$_took" >> "$OUT/out.$_i"
     fi
   done < "$2"
 
