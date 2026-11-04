@@ -86,11 +86,12 @@ _bundle=$(inside sh -c 'printf %s "$SDLC_CODEQL_BUNDLE"')
 check_version codeql "${_bundle#codeql-bundle-v}" \
                      "$(inside sh -c 'codeql version --format=terse' 2>&1)"
 
-# Gourmand is EXEMPT from this check on purpose: its image tag and its binary
-# disagree upstream (tag 1.0.0 ships a binary reporting 0.16.5). `sdlc versions`
-# shows both columns so the gap is visible; asserting they match here would fail
-# the build for someone else's version mismatch.
-note "gourmand tag/binary mismatch is reported by 'sdlc versions', not asserted here"
+# Gourmand is EXEMPT from this check, and not because of a defect: its image is
+# a WRAPPER. `crunchtools/gourmand:1.0.0` is that packaging repo's own first
+# release and the binary inside is upstream mattdm/gourmand v0.16.5, so the two
+# numbers are both correct and asserting they match would be asserting something
+# untrue. `sdlc versions` prints both columns instead.
+note "gourmand's image tag is a packaging version, not the binary's -- both shown by 'sdlc versions'"
 
 # ------------------------------------------------------- the script's own shape
 

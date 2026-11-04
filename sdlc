@@ -69,10 +69,15 @@ VERSION_PROBE = {
 def self_reported(name: str) -> str:
     """What the installed binary calls itself.
 
-    Worth printing next to the pinned tag because the two can disagree: the
-    gourmand image tagged 1.0.0 ships a binary that reports 0.16.5. A consuming
-    repo pins the image tag, so a silent gap between tag and build is exactly
-    the thing that makes a 'pinned' tool not pinned.
+    Printed beside the pinned tag because they answer different questions and a
+    consuming repo needs both. The pin is what CI must name; the self-reported
+    version is what the tool actually is.
+
+    They legitimately differ for a wrapper image: `crunchtools/gourmand:1.0.0`
+    is that packaging repo's own first release, and the binary inside it is
+    upstream mattdm/gourmand v0.16.5. Neither number is wrong -- but knowing
+    only the tag tells you nothing about which upstream you are running, and
+    knowing only the binary version tells you nothing you can pin.
     """
     probe = VERSION_PROBE.get(name)
     if probe is None:
@@ -693,10 +698,10 @@ def main() -> int:
             print(f"{name:12} {pinned:24} {self_reported(name)}")
         print(
             "\nPin the 'pinned' column in CI so a local finding is the CI finding.\n"
-            "Where the two columns disagree, the image tag and the binary "
-            "disagree -- that is the upstream's to fix, and it is shown here "
-            "rather than hidden because a version nobody can see is a version "
-            "nobody can pin."
+            "The two columns answer different questions and need not match: a\n"
+            "wrapper image carries its own version (gourmand 1.0.0 is the\n"
+            "packaging release) around an upstream build (0.16.5). Both are\n"
+            "shown because the tag is what you pin and the binary is what runs."
         )
         return 0
 
