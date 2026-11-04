@@ -219,20 +219,22 @@ if grep -q '^== a1 passed in [0-9]*s' "$RUN/out"; then
 else
   bad "a block does not report its check's duration"
 fi
-if ! grep -q 'has not reported for' "$RUN/out"; then
-  ok "a healthy run never says a lane stopped answering"
+if ! grep -q 'no check has finished for' "$RUN/out"; then
+  ok "a healthy run never claims nothing is finishing"
 else
-  bad "a healthy run claimed a lane had stopped answering"
+  bad "a healthy run claimed no check had finished"
 fi
 
-# A lane killed outright runs no EXIT trap, so it never says it is done and the
-# printer would poll for it forever. At the threshold it stops waiting on the
-# ORDER -- and must still reap every lane for its real status, and still print
-# the late block WHOLE rather than reading a file another process is writing.
-# Reached here with a one-second threshold and a lane that takes six.
+# Nothing finishing for STALL_MAX seconds. The case worth guarding is a lane
+# killed outright, which runs no EXIT trap and so never reports at all, leaving
+# the printer polling for a marker that is never coming. At the threshold it
+# gives up the ORDER -- and must still reap every lane for its real status, and
+# still print the late block WHOLE rather than reading a file another process
+# is writing. Reached here with a one-second threshold and a check that takes
+# six, which is the OTHER way in and the cheaper one to arrange.
 lanes lanes-stall 1 && rc=0 || rc=$?
-if grep -q 'has not reported for 1s' "$RUN/out"; then
-  ok "the printer stops waiting on the order and says so"
+if grep -q 'no check has finished for 1s' "$RUN/out"; then
+  ok "the printer gives up the order and says what it measured"
 else
   bad "the stall threshold was never reached"
 fi

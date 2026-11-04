@@ -102,11 +102,14 @@ the checks, so two lanes never cut into each other's log. Each block ends with
 how long its check took, because buffering is what the `== <step>` timestamps
 used to tell you.
 
-A lane killed outright — SIGKILL, the OOM killer, a cancelled CI job — runs no
-cleanup and never reports, so the printer stops waiting on the order after
-`SDLC_LANE_STALL` seconds (default 3600), says so, waits for every lane to
-stop and then prints what is left. Each lane's real exit status is still
-collected either way.
+If no check finishes for `SDLC_LANE_STALL` seconds (default 3600) the printer
+stops waiting on the order, says so, waits for every lane to stop and then
+prints what is left. That guards against a lane killed outright — SIGKILL, the
+OOM killer, a cancelled CI job — which runs no cleanup and so never reports at
+all, leaving the printer waiting for a report that is never coming. One check
+honestly taking longer than the threshold reaches it too; raise the variable if
+that is your repo. Either way only the order is given up, never the verdict:
+every lane's real exit status is still collected.
 
 ## Configuring it
 

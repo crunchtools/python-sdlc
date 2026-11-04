@@ -367,11 +367,15 @@ run_serial() {         # the plan -> its worst step status
 
 OUT=                   # the lane scratch directory, while lanes are running
 
-# How long the printer waits for a lane that has stopped answering before it
-# stops waiting on the order. Only a lane killed outright -- SIGKILL, the OOM
-# killer, a cancelled CI job -- gets here, because every other ending runs the
-# lane's EXIT trap. Settable so the test can reach the boundary without
-# waiting an hour for it.
+# How long the printer waits with NO CHECK FINISHING before it stops waiting on
+# the order. What it measures is silence, not death, and two things cause it:
+# a lane killed outright -- SIGKILL, the OOM killer, a cancelled CI job -- which
+# runs no EXIT trap and so never reports at all; or a single check that honestly
+# takes longer than this. The first is the one worth guarding, because without
+# the guard the printer polls for a marker that is never coming. The second is
+# why the default is an hour and why tripping it is cosmetic: the order is
+# abandoned, the exit status is not, because the reap below is the authority.
+# Settable so the test can reach the boundary without waiting an hour for it.
 STALL_MAX=${SDLC_LANE_STALL:-3600}
 case "$STALL_MAX" in ''|*[!0-9]*) die "SDLC_LANE_STALL must be a whole number" ;; esac
 
@@ -492,13 +496,14 @@ run_lanes() {          # the plan -> the worst status of every lane
       continue
     fi
     _lanes_running || break
-    # A lane SIGKILLed outright runs no EXIT trap, so it never says it is done
-    # and this would poll for it forever. After STALL_MAX seconds with no block
-    # finishing, stop waiting on the order and fall through to the reap.
+    # Nothing has finished for STALL_MAX seconds. Either a lane was killed and
+    # will never report, or a check is honestly taking that long. Either way,
+    # stop waiting on the order and fall through to the reap.
     if [ "$_stall" -ge "$STALL_MAX" ]; then
-      printf '%s: a lane has not reported for %ss, so it is not going to.\n' \
-        "$ME" "$STALL_MAX"
-      printf '%s: waiting for every lane to stop, then printing what is left.\n' "$ME"
+      printf '%s: no check has finished for %ss.\n' "$ME" "$STALL_MAX"
+      printf '%s: waiting for every lane to stop, then printing what is left,\n' "$ME"
+      printf '%s: which may not be in plan order. Raise SDLC_LANE_STALL if a\n' "$ME"
+      printf '%s: check here really does take that long.\n' "$ME"
       break
     fi
     _stall=$((_stall + 1))
