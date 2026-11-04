@@ -280,12 +280,13 @@ def kind_of(cfg: dict, name: str) -> str | None:
 # -------------------------------------------------------------------- the plan
 #
 # The host half (bin/sdlc) is POSIX shell and cannot read TOML, so it asks this
-# script what to do and then does it. One line per step, three fields split by a
+# script what to do and then does it. One line per step, four fields split by a
 # tab:
 #
-#     <check> TAB <mode> TAB <payload>
+#     <check> TAB <lane> TAB <mode> TAB <payload>
 #
-# where mode is:
+# where lane is the group the step runs in -- see "the lanes" below -- and mode
+# is:
 #     image-ro / image-rw   run `sdlc <payload>` in this image, tree ro or rw
 #     local                 bin/sdlc's own check named <payload>
 #     host                  <payload> is a podman argv, its words joined by
@@ -321,27 +322,93 @@ def plan_lines(cfg: dict, check: str) -> list[tuple[str, str, str]]:
     return [(check, "image-rw" if check in WRITES_TREE else "image-ro", check)]
 
 
+# ------------------------------------------------------------------- the lanes
+#
+# `sdlc ci` used to run every check one after another, so trentina's image build
+# -- which depends on none of mypy, pytest, semgrep or pip-audit -- waited for
+# all four. The job took the sum of its checks instead of the length of its
+# longest chain: 5m09s on a self-hosted runner, 16m05s on a GitHub-hosted one.
+#
+# So each plan line carries a lane. Steps of one lane run in sequence, in plan
+# order; lanes run at the same time. The decision is made HERE, in the image,
+# because this is the half that knows what each check does -- bin/sdlc only
+# carries it out, and no check name appears in that file.
+#
+# Two rules, and neither names a repo:
+#
+#   - An `image-build` check and every `pytest-in-image` check that runs the
+#     image it tags are ONE lane. The build has to finish before the tests
+#     start, and two builds writing one tag must not race, so a shared tag is a
+#     shared lane.
+#   - Everything else goes in MAIN_LANE, in plan order. That is where `uv sync`
+#     happens: mypy, pytest and pip-audit each sync the project venv in the
+#     shared cache volume, and one lane makes those sequential. uv does lock the
+#     target environment (uv 0.13, "Cache safety"), but a gate should not bet
+#     its venv on a lock it did not take.
+#
+# A repo with no image-build check therefore gets one lane, and one lane is the
+# launcher's sequential path -- the same run, the same output, as before lanes
+# existed. `sdlc push` has no image chain either, so push is unchanged too.
+
+MAIN_LANE = "main"
+
+
+def lane_of(cfg: dict, checks: list[str]) -> dict[str, str]:
+    """check -> lane, for one command's resolved check list.
+
+    An image chain is keyed by the image reference, not by position: a
+    `pytest-in-image` may be listed before the `image-build` that makes what it
+    runs, and two builds may legitimately produce two different tags.
+    """
+    lanes: dict[str, str] = {}
+    by_tag: dict[str, str] = {}
+    for check in checks:
+        if kind_of(cfg, check) != "image-build":
+            continue
+        tag = str(check_settings(cfg, check).get("tag", default_image_tag()))
+        lanes[check] = by_tag.setdefault(tag, check)
+    for check in checks:
+        if kind_of(cfg, check) != "pytest-in-image":
+            continue
+        image = str(check_settings(cfg, check).get("image", default_image_tag()))
+        # No build of that image in this command: the repo is testing something
+        # already built, so it owes nothing to another lane and gets its own.
+        lanes[check] = by_tag.get(image, check)
+    return {check: lanes.get(check, MAIN_LANE) for check in checks}
+
+
 def t_plan(target: str) -> int:
     cfg = sdlc_config()
     checks = resolve(cfg, target) if target in COMMANDS else [target]
     for check in checks:
         if check not in BUILTINS and kind_of(cfg, check) is None:
             cannot(f"unknown check: {check}")
+    lanes = lane_of(cfg, checks)
+    for check in checks:
+        lane = plain(lanes[check], "a lane name")
         for name, mode, payload in plan_lines(cfg, check):
             plain(name, "a check name")
             if mode != "host":
                 plain(payload, name)
-            print(f"{name}\t{mode}\t{payload}")
+            print(f"{name}\t{lane}\t{mode}\t{payload}")
     return CLEAN
 
 
 def t_tiers() -> int:
     cfg = sdlc_config()
     for command in COMMANDS:
+        checks = resolve(cfg, command)
+        lanes = lane_of(cfg, checks)
+        parallel = len(set(lanes.values())) > 1
         print(f"sdlc {command}:")
-        for check in resolve(cfg, command):
+        for check in checks:
             kind = kind_of(cfg, check)
-            print(f"  {check}" + (f"  ({kind})" if kind else ""))
+            note = f"  ({kind})" if kind else ""
+            if parallel:
+                note += f"  [lane {lanes[check]}]"
+            print(f"  {check}{note}")
+        if parallel:
+            print(f"  {len(set(lanes.values()))} lanes, run at the same time")
     if skipped():
         print(f"\nSDLC_SKIP is skipping: {', '.join(sorted(skipped()))}")
     return CLEAN

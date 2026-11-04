@@ -10,7 +10,7 @@
 
 [project]
 name = "python-sdlc"
-version = "0.2.2"
+version = "0.3.0"
 description = "One container image and one script for every CrunchTools Python SDLC check"
 requires-python = ">=3.14"
 license = "AGPL-3.0-or-later"
