@@ -36,7 +36,8 @@ esac
 
 SHIM=$(mktemp -d)
 LOG="$SHIM/podman.log"
-trap 'rm -rf "$SHIM"' EXIT 0
+RUN=$(mktemp -d)
+trap 'rm -rf "$SHIM" "$RUN"' EXIT 0
 
 # The four tools the contract allows. git is real: bin/sdlc genuinely asks git
 # where the repo root and the hooks are, and that is allowed.
@@ -164,14 +165,64 @@ else
   bad "a host step's word was evaluated as shell"
 fi
 
+printf '\n== the CPU budget\n\n'
+
+# Halving the machine protects the person at the keyboard. Two cases have no
+# such person, and halving them throws away half a machine -- which is what
+# made lanes a REGRESSION on a 4-vCPU GitHub runner: budget 2, two lanes at 1
+# each, and trentina's `sdlc ci` went from 15m27s to 24m38s.
+BUDGET="$RUN/budget.sh"
+# shellcheck disable=SC2016
+#   Deliberate throughout this block: the sed patterns match literal `$_best`
+#   in bin/sdlc, and the echoed line must reach the generated script as source
+#   rather than be expanded here.
+{
+  echo 'set -eu'
+  echo 'die() { echo "$*" >&2; exit 2; }'
+  sed -n '/^_cpus_in_list()/,/^}$/p' bin/sdlc
+  sed -n '/^_cgroup_cpu_ceiling()/,/^  printf .%s. "$_best"$/p' bin/sdlc
+  echo '}'
+  sed -n '/^budget()/,/^}$/p' bin/sdlc
+  echo 'printf "%s" "$(budget)"'
+} > "$BUDGET"
+
+machine=$(nproc --all 2>/dev/null || nproc)
+half=$((machine / 2))
+[ "$half" -lt 1 ] && half=1
+
+got=$(env -u CI sh "$BUDGET")
+if [ "$got" = "$half" ]; then
+  ok "a developer machine still gets half of it ($got of $machine)"
+else
+  bad "an unconstrained machine budgeted $got, want $half of $machine"
+fi
+
+got=$(CI=true sh "$BUDGET")
+if [ "$got" = "$machine" ]; then
+  ok "CI gets the whole machine, having no desktop to protect ($got)"
+else
+  bad "CI budgeted $got, want all $machine"
+fi
+
+# A cpuset is the case the first version of this missed: `nproc` is already
+# narrowed by it, so comparing the allowance against nproc found nothing.
+if command -v taskset >/dev/null 2>&1 && [ "$machine" -ge 2 ]; then
+  got=$(env -u CI taskset -c 0-1 sh "$BUDGET")
+  if [ "$got" = 2 ]; then
+    ok "a cpuset is someone else's decision, so it is taken whole ($got)"
+  else
+    bad "a 2-CPU cpuset budgeted $got, want 2"
+  fi
+else
+  printf 'skip taskset unavailable or too few CPUs\n'
+fi
+
 printf '\n== the lanes\n\n'
 
 # Steps of one lane run in sequence; lanes run at the same time. What has to
 # hold is not the speed -- it is that the answer and the log do not depend on
 # which lane happened to finish first.
 
-RUN=$(mktemp -d)
-trap 'rm -rf "$SHIM" "$RUN"' EXIT 0
 
 lanes() {              # target [stall-seconds] -> exit status, output in $RUN/out
   rm -f "$SHIM/must-not-run"

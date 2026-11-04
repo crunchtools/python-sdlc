@@ -108,12 +108,42 @@ _cgroup_cpu_ceiling() {         # cpu.max from leaf to root, smallest quota wins
 }
 
 budget() {
+  # The INSTALLED count, which no cpuset or quota changes -- `nproc` alone is
+  # already narrowed by our affinity, so comparing the allowance against it can
+  # never detect a cpuset. That was the first version of this and it silently
+  # found nothing.
+  _machine=$(nproc --all 2>/dev/null || getconf _NPROCESSORS_CONF 2>/dev/null \
+             || nproc 2>/dev/null || printf 1)
   _all=$(nproc 2>/dev/null || printf 1)
   _allowed=$(_cpus_in_list "$(awk -F': *' '/^Cpus_allowed_list/{print $2}' /proc/self/status 2>/dev/null)")
   [ "${_allowed:-0}" -gt 0 ] 2>/dev/null && [ "$_allowed" -lt "$_all" ] && _all=$_allowed
   _ceil=$(_cgroup_cpu_ceiling)
   [ "${_ceil:-0}" -gt 0 ] 2>/dev/null && [ "$_ceil" -lt "$_all" ] && _all=$_ceil
-  # Half the machine, floor of one: the desktop is not in the gate's cgroup.
+
+  # Has something already decided this process's share? One comparison catches
+  # a cpuset, a CPU affinity and a cgroup quota alike.
+  _capped=no
+  [ "${_machine:-0}" -gt 0 ] 2>/dev/null && [ "$_all" -lt "$_machine" ] && _capped=yes
+
+  # Halving is there to keep a gate from taking the machine away from the person
+  # running it -- the desktop is not in the gate's cgroup. Two cases have no
+  # such person, and halving them is just throwing away half a machine:
+  #
+  #   - CI. A runner is dedicated to the job; there is no desktop to protect.
+  #   - A cpuset or a cgroup quota narrower than the machine. Something has
+  #     ALREADY decided this process's share, and halving that again
+  #     double-counts the same protection.
+  #
+  # This is not a tuning preference, it is what made lanes a regression. On a
+  # 4-vCPU GitHub runner the budget was 2, two lanes got 1 each, and trentina's
+  # `sdlc ci` went from 15m27s to 24m38s: both lanes are CPU-bound, so each took
+  # twice as long, and the image chain alone (1457s) came out longer than the
+  # whole sequential job had been (927s). Overlap cannot win from there.
+  if [ -n "${CI:-}" ] || [ "$_capped" = yes ]; then
+    [ "$_all" -lt 1 ] && _all=1
+    printf '%s' "$_all"
+    return
+  fi
   _half=$(( _all / 2 ))
   [ "$_half" -lt 1 ] && _half=1
   printf '%s' "$_half"
