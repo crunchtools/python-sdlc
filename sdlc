@@ -346,6 +346,12 @@ def plan_lines(cfg: dict, check: str) -> list[tuple[str, str, str]]:
 #     target environment (uv 0.13, "Cache safety"), but a gate should not bet
 #     its venv on a lock it did not take.
 #
+# And one refusal: a command that REWRITES THE TREE gets no lanes at all. ruff
+# rewrites your source and gourmand writes its cache, and a build context or an
+# in-image mount reading those files while they change is a check judging a tree
+# that no longer exists. `sdlc commit` is ruff, so commit is always sequential,
+# which is what "seconds, offline, free" wanted anyway.
+#
 # A repo with no image-build check therefore gets one lane, and one lane is the
 # launcher's sequential path -- the same run, the same output, as before lanes
 # existed. `sdlc push` has no image chain either, so push is unchanged too.
@@ -360,6 +366,9 @@ def lane_of(cfg: dict, checks: list[str]) -> dict[str, str]:
     `pytest-in-image` may be listed before the `image-build` that makes what it
     runs, and two builds may legitimately produce two different tags.
     """
+    # Nothing runs beside a check that rewrites the tree: one lane, in order.
+    if any(check in WRITES_TREE for check in checks):
+        return dict.fromkeys(checks, MAIN_LANE)
     lanes: dict[str, str] = {}
     by_tag: dict[str, str] = {}
     for check in checks:

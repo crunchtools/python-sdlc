@@ -31,6 +31,12 @@ All notable changes to this project are documented here, following
     target environment, but a gate should not bet its venv on a lock it did not
     take.
 
+  And one refusal: a command that rewrites the tree gets no lanes at all. ruff
+  rewrites your source and gourmand writes its cache, and a build context or an
+  in-image mount reading those files while they change is a check judging a
+  tree that no longer exists. `sdlc commit` is ruff, so commit stays
+  sequential, which is what "seconds, offline, free" wanted anyway.
+
   A repo with no image-build check gets one lane, and one lane is the
   launcher's sequential path: the same run, the same output, as before. `sdlc
   push` has no image chain, so push is unchanged too.

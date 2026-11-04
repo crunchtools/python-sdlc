@@ -85,6 +85,11 @@ The image decides the lanes, by two rules:
 - Everything else is the `main` lane, in the order `tiers` prints. That is
   where `uv sync` happens, and one lane keeps two syncs out of one venv.
 
+A command that rewrites the tree — anything running `ruff-check`,
+`ruff-format` or `gourmand` — gets no lanes at all, because a build context
+reading those files while they change is judging a tree that no longer exists.
+That makes `sdlc commit` sequential by definition.
+
 A repo with no `image-build` check has one lane and runs exactly as it did
 before lanes existed. So does `sdlc push`, which never builds a container.
 

@@ -397,15 +397,17 @@ run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
   # marker, or the printer waits for a block that is never coming.
   trap 'printf "2\n" > "$OUT/rc.${_cur:-0}"; printf "2\n" > "$OUT/lane-done.$_k"' EXIT
 
+  # `index TAB check TAB mode TAB payload`: the lane is gone, this file is one,
+  # and the index into the print order was resolved when the file was written
+  # rather than by an awk per step.
   while IFS= read -r _line; do
-    _check=${_line%%"$TAB"*}
+    _i=${_line%%"$TAB"*}
     _rest=${_line#*"$TAB"}
-    _rest=${_rest#*"$TAB"}          # drop the lane: this whole file is one
+    _check=${_rest%%"$TAB"*}
+    _rest=${_rest#*"$TAB"}
     _mode=${_rest%%"$TAB"*}
     _payload=${_rest#*"$TAB"}
     case " $_failed " in *" $_check "*) continue ;; esac
-    _i=$(awk -v c="$_check" '$0==c {print NR; exit}' "$OUT/order") || _i=
-    [ -n "$_i" ] || die "the image planned a step for a check its own plan does not list: $_check"
     # A check's steps are contiguous within its lane, so a different index means
     # the previous block is finished and can be printed.
     if [ "$_i" != "${_cur:-}" ]; then _close_check; _cur=$_i; _cur_rc=0; fi
@@ -456,9 +458,13 @@ run_lanes() {          # the plan -> the worst status of every lane
   _pids=
   while IFS= read -r _lane; do
     _k=$((_k + 1))
-    printf '%s\n' "$1" | awk -F"$TAB" -v l="$_lane" '$2 == l' > "$OUT/steps.$_k"
+    # Number each check by first appearance in the WHOLE plan -- the order the
+    # blocks print in -- and keep this lane's steps, index first.
+    printf '%s\n' "$1" | awk -F"$TAB" -v OFS="$TAB" -v l="$_lane" '
+      !($1 in idx) { idx[$1] = ++n }
+      $2 == l      { print idx[$1], $1, $3, $4 }' > "$OUT/steps.$_k"
     printf '%s:   lane %s: %s\n' "$ME" "$_lane" \
-      "$(cut -f1 "$OUT/steps.$_k" | awk '!seen[$0]++' | tr '\n' ' ')"
+      "$(cut -f2 "$OUT/steps.$_k" | awk '!seen[$0]++' | tr '\n' ' ')"
     run_lane "$_k" "$OUT/steps.$_k" "$_lane_cpus" &
     _pids="$_pids $!"
   done < "$OUT/lanes"

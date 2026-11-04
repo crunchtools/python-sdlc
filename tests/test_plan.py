@@ -273,6 +273,25 @@ check(
     str(lanes),
 )
 
+# A check that rewrites the tree takes the whole command sequential. A build
+# context or an in-image mount reading those files while ruff rewrites them is
+# a check judging a tree that no longer exists.
+rewrites = {
+    "ci": {
+        "checks": ["ruff-format", "image", "image-tests"],
+        "image": {"kind": "image-build"},
+        "image-tests": {"kind": "pytest-in-image", "tests": ["tests/"]},
+    }
+}
+lanes = S.lane_of(rewrites, S.resolve(rewrites, "ci"))
+check(
+    "a check that rewrites the tree gets no lanes beside it",
+    set(lanes.values()) == {S.MAIN_LANE},
+    str(lanes),
+)
+commit = S.lane_of(empty, S.resolve(empty, "commit"))
+check("commit is always one lane", set(commit.values()) == {S.MAIN_LANE}, str(commit))
+
 # ------------------------------------------------- the plan the launcher reads
 #
 # Four tab-separated fields now, and the launcher splits on exactly that. A
