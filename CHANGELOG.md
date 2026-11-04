@@ -8,6 +8,27 @@ All notable changes to this project are documented here, following
 
 ## [0.3.6] - 2026-11-04
 
+### Fixed
+
+- **Two builds of the same commit raced and one of them lost its image.**
+  `container.yml`'s concurrency group was keyed on `github.run_id`, which is
+  unique per run -- so every run sat in a group of its own and the group
+  controlled nothing. A merge to main and the tag that `release.yml` then
+  creates are two pushes of the SAME commit, so both built it and both pushed
+  the same `:<sha>` tag; the second replaced the first's manifest, and the
+  loser's "Verify the pushed digest" step failed with `manifest unknown` on a
+  digest that no longer existed.
+
+  v0.3.4 won that race. **v0.3.5 lost it**: the main run moved `latest`, the tag
+  run failed, and the `0.3.5` tag was never created -- a GitHub release and a
+  git tag with no image behind them, which is the one state a fleet pinning this
+  image cannot survive. Nothing had pinned it yet only because the promote job
+  that opens the bump pull requests is in the run that failed.
+
+  The group is keyed on `github.sha` now, so the two serialize and the second
+  verifies the digest it just pushed. v0.3.5 is superseded by this release
+  rather than backfilled.
+
 ### Added
 
 - **jq, and a stated boundary for the shell test toolbox.** Claude Code hands a
