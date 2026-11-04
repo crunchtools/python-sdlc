@@ -44,7 +44,7 @@ LABEL description="Every CrunchTools Python SDLC check in one image: ruff, mypy,
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/python-sdlc"
 LABEL org.opencontainers.image.description="Every CrunchTools Python SDLC check in one image."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
-LABEL version="0.3.5"
+LABEL version="0.3.6"
 
 # What the image carries, readable without starting anything. `sdlc versions`
 # prints these and a consuming repo's CI pins them.
