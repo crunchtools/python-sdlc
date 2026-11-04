@@ -1,0 +1,68 @@
+# A merge that changes the version IS the release. When main's pyproject.toml
+# names a version with a CHANGELOG heading and no tag yet, this tags it, and the
+# tag push runs container.yml, which promotes the image to that version and then
+# opens a bump PR in every repo that pins python-sdlc.
+#
+# Without this, a tool update that merged itself would sit untagged until a
+# person noticed, and no repo would receive it.
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release:
+    name: Tag a new version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Is there an untagged version?
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -1)
+          [ -n "$v" ] || { echo "pyproject.toml names no version" >&2; exit 1; }
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "v$v is already released"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          elif grep -q "^## \[$v\]" CHANGELOG.md; then
+            echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$v has no CHANGELOG heading; not releasing" >&2
+            exit 1
+          fi
+
+      # The App's token, because a tag created with GITHUB_TOKEN does not start
+      # container.yml, and the release would never be promoted.
+      - name: Mint CI token
+        if: steps.version.outputs.tag != ''
+        id: ci-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CRUNCHTOOLS_CI_APP_ID || secrets.CRUNCHTOOLS_CI_APP_ID }}
+          private-key: ${{ secrets.CRUNCHTOOLS_CI_APP_KEY }}
+          owner: crunchtools
+
+      - name: Release
+        if: steps.version.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ steps.ci-token.outputs.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          v=${TAG#v}
+          notes=$(awk -v h="## [$v]" 'index($0, h) == 1 {f=1; next} f && /^## \[/ {exit} f' CHANGELOG.md)
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "$TAG" --notes "$notes"

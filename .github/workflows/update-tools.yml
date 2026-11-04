@@ -1,0 +1,71 @@
+# A Gourmand or Gatehouse release reaches every Python repo in three steps, and
+# this is the first: move the pin and bump this image's patch version, as a pull
+# request that merges itself when CI is green.
+#
+#   1. this workflow      new tool release -> PR moving the pin here
+#   2. release.yml        that PR merges -> python-sdlc vX.Y.Z is released
+#   3. container.yml      the release is promoted -> a bump PR in every repo
+#                         that pins python-sdlc (scripts/bump_consumers.py)
+#
+# Gourmand and Gatehouse send `parent-image-updated` when they release. The
+# weekly run catches a dispatch that was lost.
+
+name: Update baked tools
+
+on:
+  repository_dispatch:
+    types: [parent-image-updated]
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: update-tools
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  update:
+    name: Move the Gourmand and Gatehouse pins
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # The crunchtools-ci App's token, not GITHUB_TOKEN: a pull request opened
+      # with GITHUB_TOKEN does not trigger CI, so it could never turn green and
+      # merge itself.
+      - name: Mint CI token
+        id: ci-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CRUNCHTOOLS_CI_APP_ID || secrets.CRUNCHTOOLS_CI_APP_ID }}
+          private-key: ${{ secrets.CRUNCHTOOLS_CI_APP_KEY }}
+          owner: crunchtools
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.ci-token.outputs.token }}
+
+      - name: Compare the pins to the latest releases
+        id: update
+        env:
+          GH_TOKEN: ${{ steps.ci-token.outputs.token }}
+        run: python3 scripts/update_tools.py
+
+      - name: Open the pull request and let it merge itself
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.ci-token.outputs.token }}
+          VERSION: ${{ steps.update.outputs.version }}
+          SUMMARY: ${{ steps.update.outputs.summary }}
+        run: |
+          set -eu
+          branch="chore/tools-$VERSION"
+          git switch -c "$branch"
+          git -c user.name=crunchtools-ci -c user.email=ci@crunchtools.com \
+            commit -qam "chore: python-sdlc $VERSION ($SUMMARY)"
+          git push -q -u origin "$branch"
+          url=$(gh pr create --head "$branch" --title "chore: python-sdlc $VERSION" \
+            --body "Moves the baked tool pins: $SUMMARY. Merging releases python-sdlc $VERSION, which opens a bump PR in every repo that pins it.")
+          gh pr merge "$url" --auto --merge

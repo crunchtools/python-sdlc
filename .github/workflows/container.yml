@@ -24,11 +24,6 @@ on:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
-  # Gourmand and Gatehouse dispatch this when they release, because this image
-  # bakes them. That is what keeps a consuming repo's one pin honest without
-  # anyone remembering to bump something.
-  repository_dispatch:
-    types: [parent-image-updated]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
@@ -192,3 +187,34 @@ jobs:
               echo "promoted $version"
               ;;
           esac
+
+  # Step 3 of a release (update-tools.yml describes all three): once a version
+  # tag's image is promoted -- so the tag a consumer will pull exists -- open a
+  # bump PR in every repo that pins python-sdlc. Each repo's own CI decides
+  # whether its bump lands.
+  bump-consumers:
+    name: Bump every repo that pins python-sdlc
+    needs: promote
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Mint CI token
+        id: ci-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CRUNCHTOOLS_CI_APP_ID || secrets.CRUNCHTOOLS_CI_APP_ID }}
+          private-key: ${{ secrets.CRUNCHTOOLS_CI_APP_KEY }}
+          owner: crunchtools
+
+      - name: Open the bump pull requests
+        env:
+          GH_TOKEN: ${{ steps.ci-token.outputs.token }}
+        run: |
+          gh auth setup-git
+          python3 scripts/bump_consumers.py "$GITHUB_REF_NAME"

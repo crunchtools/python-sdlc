@@ -45,6 +45,13 @@ All notable changes to this project are documented here, following
   repo's config. `tests/test_host_contract.sh` proves it.
 - `tests/test_plan.py`; it and `tests/test_codeql_globs.py`, which CI never ran
   before, now run in the built image on every build.
+- **A new Gourmand or Gatehouse reaches every Python repo on its own.** Their
+  releases trigger `update-tools.yml`, which moves the pin and bumps this
+  image's patch version in a pull request that merges itself when green;
+  `release.yml` tags the merged version; and after the tag's image is promoted,
+  `container.yml` opens an auto-merging bump PR in every repo that pins
+  python-sdlc (`scripts/bump_consumers.py`). Rebuilding on a tool release, which
+  is what v0.1.0 did, changed nothing: the Containerfile pins exact versions.
 
 ### Removed
 
