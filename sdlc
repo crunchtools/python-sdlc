@@ -29,7 +29,6 @@ import argparse
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -289,10 +288,28 @@ def kind_of(cfg: dict, name: str) -> str | None:
 # where mode is:
 #     image-ro / image-rw   run `sdlc <payload>` in this image, tree ro or rw
 #     local                 bin/sdlc's own check named <payload>
-#     host                  <payload> is a shell-quoted podman command line
+#     host                  <payload> is a podman argv, its words joined by
+#                           the ASCII unit separator (0x1f)
 #
 # bin/sdlc refuses a host line that does not start with `podman`, so the host
-# contract is held by the launcher rather than trusted to the config.
+# contract is held by the launcher rather than trusted to the config. It splits
+# the argv on the separator and never `eval`s it, and no field may contain a
+# tab, a newline or the separator: a config value carrying one could otherwise
+# forge a second plan line, which is how a repo's TOML would reach the host's
+# shell.
+
+UNIT_SEPARATOR = "\x1f"
+FORBIDDEN_IN_PLAN = ("\t", "\n", "\r", UNIT_SEPARATOR)
+
+
+def plain(value: str, where: str) -> str:
+    if any(c in value for c in FORBIDDEN_IN_PLAN):
+        cannot(f"{where} contains a tab, a newline or a control separator, which is refused")
+    return value
+
+
+def host_step(name: str, argv: list[str]) -> tuple[str, str, str]:
+    return (name, "host", UNIT_SEPARATOR.join(plain(a, name) for a in argv))
 
 
 def plan_lines(cfg: dict, check: str) -> list[tuple[str, str, str]]:
@@ -311,6 +328,9 @@ def t_plan(target: str) -> int:
         if check not in BUILTINS and kind_of(cfg, check) is None:
             cannot(f"unknown check: {check}")
         for name, mode, payload in plan_lines(cfg, check):
+            plain(name, "a check name")
+            if mode != "host":
+                plain(payload, name)
             print(f"{name}\t{mode}\t{payload}")
     return CLEAN
 
@@ -409,7 +429,7 @@ def kind_image_build(name: str, settings: dict) -> list[tuple[str, str, str]]:
     for key, value in table(settings, "labels").items():
         argv += ["--label", f"{key}={token(value)}"]
     argv += ["-t", str(settings.get("tag", default_image_tag())), context]
-    return [(name, "host", shlex.join(argv))]
+    return [host_step(name, argv)]
 
 
 def kind_pytest_in_image(name: str, settings: dict) -> list[tuple[str, str, str]]:
@@ -459,7 +479,7 @@ def kind_pytest_in_image(name: str, settings: dict) -> list[tuple[str, str, str]
     argv += ["-m", "pytest", "-p", "no:cacheprovider"]
     argv += names(settings.get("args", ["-q", "-rfE"]), f"{name}.args")
     argv += tests
-    return [(name, "image-ro", "pytest-deps"), (name, "host", shlex.join(argv))]
+    return [(name, "image-ro", "pytest-deps"), host_step(name, argv)]
 
 
 KINDS = {

@@ -42,7 +42,10 @@ All notable changes to this project are documented here, following
   cannot reach inside a single hook.
 - `bin/sdlc` refuses any planned host step that is not `podman build` or
   `podman run`, so the host contract is held by the launcher, not trusted to a
-  repo's config. `tests/test_host_contract.sh` proves it.
+  repo's config. A host step is an argv split on the ASCII unit separator and
+  never `eval`ed, and the plan refuses any value with a tab, a newline or that
+  separator in it, so a config value cannot forge a second plan line or be read
+  as shell. `tests/test_host_contract.sh` proves both.
 - `tests/test_plan.py`; it and `tests/test_codeql_globs.py`, which CI never ran
   before, now run in the built image on every build.
 - **A new Gourmand or Gatehouse reaches every Python repo on its own.** Their

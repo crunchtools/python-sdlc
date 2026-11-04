@@ -237,16 +237,24 @@ t_gatehouse() {
 #
 #   image-ro | image-rw   `sdlc <payload>` in the image, the tree ro or rw
 #   local                 a check this file answers itself
-#   host                  a shell-quoted podman command line
+#   host                  a podman argv, words joined by the unit separator
 #
-# A host line that does not start with `podman` is refused: the host contract
-# is held here, by the launcher, not trusted to anything a repo's config says.
+# A host line that does not start with `podman build` or `podman run` is
+# refused: the host contract is held here, by the launcher, not trusted to
+# anything a repo's config says. The argv is SPLIT on the separator, never
+# `eval`ed, so nothing in it is ever read as shell -- no expansion, no command
+# substitution -- before or after that check.
 
 TAB=$(printf '\t')
+US=$(printf '\037')
 
 run_host() {
-  eval "set -- $1"
-  [ "${1:-}" = podman ] || die "a host step may only run podman; refused: $1"
+  _ifs=$IFS
+  IFS=$US
+  # shellcheck disable=SC2086  # splitting on the separator is the point
+  set -- $1
+  IFS=$_ifs
+  [ "${1:-}" = podman ] || die "a host step may only run podman; refused: ${1:-<empty>}"
   _sub=${2:-}
   shift 2
   # The budget is applied here so it is defined once, whatever the step.

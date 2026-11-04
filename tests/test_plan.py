@@ -164,6 +164,20 @@ with tempfile.TemporaryDirectory() as root:
     check("a kind that is not a name is refused", msg is not None and "must be a name" in msg)
 
 
+# ------------------------------------------------- the plan cannot be forged
+#
+# A config value with a newline or a tab in it would split into a second plan
+# line the launcher then obeys, so the plan refuses them at the source.
+
+for bad in ("a\nevil\thost\tsh", "a\tb", "a\x1fb"):
+    msg = cannot_run(S.host_step, "image", ["podman", "build", "--build-arg", f"V={bad}"])
+    check(f"{bad!r} cannot reach the plan", msg is not None and "refused" in msg, str(msg))
+check(
+    "a host step is its argv joined by the unit separator",
+    S.host_step("x", ["podman", "run", "a b"]) == ("x", "host", "podman\x1frun\x1fa b"),
+)
+
+
 def main() -> int:
     print()
     if FAILED:
