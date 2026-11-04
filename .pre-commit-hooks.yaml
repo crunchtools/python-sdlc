@@ -1,0 +1,135 @@
+# The hooks a consuming repo gets from ONE `repo:` block.
+#
+# This file is the single authority for tier membership. `bin/sdlc` parses the
+# `stages:` lines below to answer `sdlc commit` and `sdlc push`, and
+# tests/test_tiers.sh asserts that parse still agrees with this file. Two copies
+# of the tier table is how trentina's mypy hook drifted from its own script's
+# resource budget the moment that budget stopped being a constant.
+#
+# THE TIER RULE (constitution XII):
+#
+#   pre-commit  what REWRITES your code in under a second, offline, free
+#   pre-push    what renders a VERDICT, once, over origin/main...HEAD --
+#               the same set and the same diff CI reviews
+#
+# That last clause is the one with teeth. If the push tier is green, CI is
+# green, because they are the same checks on the same bytes.
+#
+# `language: script` because pre-commit resolves a script entry against this
+# cloned repo (`unsupported_script.py` -> `prefix.path(cmd[0])`) and chdirs to
+# the consumer's toplevel first, so `bin/sdlc` runs with the repo as $PWD.
+# NOT `language: docker_image`: that shells out to `docker`, and the host
+# contract gives us podman.
+
+# ---------------------------------------------------------------- commit tier
+
+- id: sdlc-ruff-check
+  name: ruff check (--fix)
+  description: Lint and auto-fix. Sub-second, offline, and it fixes rather than complains.
+  entry: bin/sdlc ruff-check
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit, pre-merge-commit]
+
+- id: sdlc-ruff-format
+  name: ruff format
+  description: Format. Same reasoning as ruff check -- free at commit, annoying at push.
+  entry: bin/sdlc ruff-format
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit, pre-merge-commit]
+
+# Cheap, offline, and the one thing that proves the push tier will actually run.
+# `pre-commit install` in an existing clone does not add stages it did not
+# already wire, so `default_install_hook_types` can silently do nothing -- and
+# with every verdict now at pre-push, that failure costs you EVERY gate rather
+# than one. This is the hook that notices.
+- id: sdlc-hooks-installed
+  name: pre-push hooks are installed
+  description: Fails if the pre-push hook is missing, which would make the whole push tier a no-op.
+  entry: bin/sdlc hooks-installed
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit, pre-merge-commit]
+
+# ------------------------------------------------------------------ push tier
+
+- id: sdlc-mypy
+  name: mypy
+  description: Type check. Needs the project's locked deps, so it cannot be sub-second.
+  entry: bin/sdlc mypy
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]
+
+- id: sdlc-pytest
+  name: pytest (full suite, containerised)
+  entry: bin/sdlc pytest
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]
+
+- id: sdlc-gourmand
+  name: Gourmand (AI slop detection)
+  entry: bin/sdlc gourmand
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]
+
+# One Gatehouse hook, not two. The old pair existed because of a spelling
+# problem: at pre-commit time `origin/main...HEAD` is the already-committed work
+# and EXCLUDES the change being made, so a staged-diff hook was the workaround.
+# At pre-push HEAD already holds every commit, so the range is exactly the diff
+# the PR will show and exactly what CI reviews.
+- id: sdlc-gatehouse
+  name: Gatehouse (AI code review, branch diff)
+  description: Reviews origin/main...HEAD -- the same diff CI's Gatehouse reviews.
+  entry: bin/sdlc gatehouse
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]
+
+- id: sdlc-semgrep
+  name: Semgrep (rule tests + scan)
+  entry: bin/sdlc semgrep
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]
+
+# Gates, unlike the 17 repos in the fleet running `pip-audit … || true`, where
+# the scan cannot fail and never has.
+- id: sdlc-pip-audit
+  name: Dependency CVE scan (pip-audit)
+  entry: bin/sdlc pip-audit
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]
+
+- id: sdlc-constitution
+  name: Constitution validator
+  description: Validates the manifest against the constitution version the repo itself pins.
+  entry: bin/sdlc constitution
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]
+
+# Minutes, and a database build. Local because Scott asked for it, at pre-push
+# because it is not a linter. Affordable at all only because the Python-only
+# CodeQL bundle is 110 MB against the full bundle's 1.75 GB.
+- id: sdlc-codeql
+  name: CodeQL (python-security-extended + repo queries)
+  entry: bin/sdlc codeql
+  language: script
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]

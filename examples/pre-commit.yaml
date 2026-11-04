@@ -1,0 +1,29 @@
+# Drop in as .pre-commit-config.yaml. This is the whole file.
+#
+# `default_install_hook_types` must stay in the CONSUMER: a hooks repo cannot
+# set it, and without it `pre-commit install` wires only pre-commit -- so the
+# pre-push tier silently never runs. With every verdict now at pre-push, that
+# costs you EVERY gate rather than one, which is why `sdlc-hooks-installed` is
+# in the commit tier to notice.
+
+default_install_hook_types: [pre-commit, pre-merge-commit, pre-push]
+
+repos:
+  - repo: https://github.com/crunchtools/python-sdlc
+    rev: v0.1.0
+    hooks:
+      # Commit tier: sub-second, offline, free, and auto-fixing.
+      - id: sdlc-ruff-check
+      - id: sdlc-ruff-format
+      - id: sdlc-hooks-installed
+
+      # Push tier: everything that renders a verdict, once, over
+      # origin/main...HEAD -- the same set and the same diff CI reviews.
+      - id: sdlc-mypy
+      - id: sdlc-pytest
+      - id: sdlc-gourmand
+      - id: sdlc-gatehouse
+      - id: sdlc-semgrep
+      - id: sdlc-pip-audit
+      - id: sdlc-constitution
+      - id: sdlc-codeql

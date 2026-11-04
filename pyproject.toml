@@ -1,0 +1,58 @@
+# This repo ships no Python package: `sdlc` and `validate` are standalone
+# scripts run by path inside the image, the same arrangement
+# crunchtools/constitution uses for its validators. This file exists to
+# CONFIGURE the linters, which Gourmand's IF001 requires and which was a fair
+# finding -- the repo had Python files and no ruff configuration, so they were
+# being linted by hand with the image rather than by a gate.
+#
+# `version` must equal the newest released CHANGELOG heading: the constitution's
+# version-sync rule checks this file.
+
+[project]
+name = "python-sdlc"
+version = "0.1.0"
+description = "One container image and one script for every CrunchTools Python SDLC check"
+requires-python = ">=3.14"
+license = "AGPL-3.0-or-later"
+
+[tool.ruff]
+line-length = 100
+# The version the image bakes. Kept equal to the ruff hook's rev below and to
+# RUFF_VERSION in the Containerfile -- a repo whose formatter disagrees with its
+# own gate is the drift this project exists to delete.
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "S", "B", "C4", "C901", "DTZ", "PIE", "PT",
+          "RET", "SIM", "TID", "ARG", "PLC", "PLE", "PLR", "PLW", "TRY", "RUF"]
+ignore = [
+    "TRY003",  # exception messages are built at the raise site, as in trentina
+    "S603",    # subprocess without shell=True is the whole point of this tool
+    "S607",    # tools are invoked by name, resolved from the image's PATH
+]
+
+# Gourmand's IF001 requires explicit thresholds rather than ruff's implicit
+# defaults, so that raising one is a visible decision. Matched to trentina's.
+[tool.ruff.lint.pylint]
+max-branches = 10
+max-statements = 50
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+# Starting tools IS this script's job, and `/tmp` is a tmpfs the launcher mounts
+# explicitly (sized, exec, mode 1777) rather than a guess at a writable path.
+# ARG001: every target takes `cfg` so TARGETS can dispatch them uniformly; three
+# of them have no settings to read, and a signature that varies per target would
+# be worse than an unused parameter.
+"sdlc" = ["S404", "S108", "ARG001"]
+"validate" = ["S404"]
+# A test asserts. That is what it is for.
+"tests/*" = ["S101", "PT018"]
+
+# Dogfooding: once the XII amendment lands and this repo's hooks switch to
+# python-sdlc's own, these are the seams it will read.
+[tool.sdlc]
+lint_paths = ["sdlc", "validate", "tests"]
+type_paths = ["sdlc", "validate"]

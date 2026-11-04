@@ -1,0 +1,33 @@
+# Gatehouse findings this repo has judged, per Gatehouse 0.22.0's ledger.
+#
+# An entry applies only while the quote it names is still in the file, so a
+# judgement dies with the code it covered rather than going on hiding the next
+# defect in the same place. Gatehouse never writes this file; it prints entries
+# ready to paste and a person supplies the reason.
+#
+# Everything else Gatehouse found on this repo's first review was fixed, not
+# judged: the floating shellcheck/gourmand/gatehouse tags are now exact, `uv`
+# joined the version report, the stale /src docstring says /repo,
+# `paths-ignore` now honours globs (tests/test_codeql_globs.py), and the
+# contract test's dispatch check now asserts something.
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "Containerfile"
+evidence = "FROM quay.io/hummingbird/python:3.14-builder"
+status = "not-a-bug"
+reason = """
+Pinning the base by digest would break the weekly rebuild the Container Image \
+profile requires. That profile mandates a `0 6 * * 1` cron whose whole purpose \
+is picking up base-image errata, and mandates it bypass the layer cache, \
+because a cached `dnf install` layer ships the same packages and no errata -- \
+the ubi10-httpd-php incident of 2026-10-22, which shipped php 8.3.33 after the \
+8.3.36 fix was available. A digest-pinned base makes that rebuild a no-op and \
+freezes this image's OS packages at build time, which is strictly worse for a \
+tooling image 35 repos pin. `3.14-builder` is a minor-version tag, not \
+`latest`: it tracks 3.14 patches, which is exactly the surface the weekly \
+rebuild is meant to move. The exact-pin rule is about the TOOLS whose verdicts \
+this image produces, and all of those are pinned exactly -- the contract test \
+asserts each reported version equals the version pinned at build time.
+"""

@@ -1,0 +1,28 @@
+# Gourmand — AI slop detection as a CI gate (reusable workflow).
+#
+# Drop this in as .github/workflows/gourmand.yml. Requires no secrets — just a
+# reference to gatehouse's reusable workflow (.github/workflows/gourmand.yml).
+# Fails the check if any violations are found that aren't excepted in
+# gourmand-exceptions.toml. Required check: `Code Quality (Gourmand) / Code
+# Quality (Gourmand)`.
+#
+# DO NOT copy-paste the job body itself (container/steps/run) — that was the
+# fleet-wide bug this fixed (RT #1468): every adopter froze its own snapshot
+# of the job, so a fix in gatehouse never reached repos that had already
+# copied it. Reference the reusable workflow with `uses:` instead, so a fix
+# or image bump here reaches every adopter on their next CI run.
+
+name: Gourmand
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  gourmand:
+    name: Code Quality (Gourmand)
+    uses: crunchtools/gatehouse/.github/workflows/gourmand.yml@v0

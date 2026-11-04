@@ -1,0 +1,203 @@
+# Build, test and publish quay.io/crunchtools/python-sdlc.
+#
+# The shape is the Container Image profile's, and it is the same shape trentina
+# arrived at the hard way in #689: the build pushes ONLY the commit SHA tag, the
+# gates address the image by the DIGEST the build reported, and `latest` plus the
+# semver tags move in a separate promote job that copies that tested digest
+# without rebuilding.
+#
+# Why that matters more here than anywhere else: 35 repos will pin this image.
+# A published tag that was never the thing the contract test ran against is a
+# tool version nobody can actually verify.
+
+name: Container
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  # Weekly, to pick up base-image errata. MANDATORY for this profile, and so is
+  # bypassing the layer cache on it -- a cached `dnf install` layer is reused
+  # while the Containerfile and base digest are unchanged, so a cached rebuild
+  # ships the same packages and no errata at all.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  # Gourmand and Gatehouse dispatch this when they release, because this image
+  # bakes them. That is what keeps a consuming repo's one pin honest without
+  # anyone remembering to bump something.
+  repository_dispatch:
+    types: [parent-image-updated]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+env:
+  QUAY: quay.io/crunchtools/python-sdlc
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      ref: ${{ steps.push.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Shell and host-contract checks
+        run: |
+          set -eu
+          podman run --rm -v "$PWD:/mnt:ro" -w /mnt \
+            docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh \
+            tests/test_host_contract.sh tests/test_tiers.sh
+          tests/test_tiers.sh
+          tests/test_host_contract.sh
+
+      - name: Build
+        env:
+          # A commit-driven build uses the cache; a rebuild that no commit
+          # triggered must not, or it ships nothing new.
+          NO_CACHE: ${{ github.event_name != 'push' && github.event_name != 'pull_request' }}
+        run: |
+          set -eu
+          args=""
+          if [ "$NO_CACHE" = "true" ]; then args="--no-cache"; fi
+          # The revision label is what promote reads to refuse a backwards
+          # move; without it the label is "unknown" and the guard is blind.
+          # shellcheck disable=SC2086
+          podman build $args -f Containerfile \
+            --build-arg "REVISION=$GITHUB_SHA" \
+            --build-arg "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t "localhost/python-sdlc:$GITHUB_SHA" .
+
+      # The central test for THIS image: its whole purpose is "these
+      # executables exist at these versions". Run before anything is published.
+      - name: Contract test
+        run: tests/contract.sh "localhost/python-sdlc:$GITHUB_SHA"
+
+      # The Container Image profile recommends a CVE scan, and this is the one
+      # place Trivy belongs: it reads the OS packages in the image layers
+      # (glibc, openssl, zlib), which pip-audit never sees because pip-audit
+      # reads a Python lockfile. Scott's call is that Trivy is CI-only, and a
+      # container-image repo's CI is exactly where the image exists.
+      #
+      # `continue-on-error` per the profile: a base-image CVE with no fix
+      # available must not block a tooling release, but it must be visible.
+      - name: Trivy
+        continue-on-error: true
+        run: |
+          set -eu
+          podman save --format docker-archive \
+            "localhost/python-sdlc:$GITHUB_SHA" -o /tmp/image.tar
+          podman run --rm -v /tmp:/tmp:z \
+            docker.io/aquasec/trivy:0.58.1 image \
+              --input /tmp/image.tar --scanners vuln \
+              --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
+
+      - name: Log in to Quay
+        if: github.event_name != 'pull_request'
+        env:
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+        run: podman login -u "$QUAY_USERNAME" -p "$QUAY_PASSWORD" quay.io
+
+      - name: Push the SHA tag only
+        id: push
+        if: github.event_name != 'pull_request'
+        run: |
+          set -eu
+          podman push "localhost/python-sdlc:$GITHUB_SHA" "$QUAY:$GITHUB_SHA"
+          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$QUAY:$GITHUB_SHA")
+          [ -n "$digest" ] || { echo "the registry reported no digest" >&2; exit 1; }
+          echo "digest=$digest"            >> "$GITHUB_OUTPUT"
+          echo "ref=$QUAY@$digest"         >> "$GITHUB_OUTPUT"
+          echo "pushed $QUAY@$digest"
+
+  # Re-runs the contract test against what is ACTUALLY on the registry, not
+  # against the local build. The profile requires this on every trigger: a
+  # rebuild changes packages without a commit, and a digest nobody tested is a
+  # digest nobody should pin.
+  verify-digest:
+    name: Verify the pushed digest
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Contract test against the pushed digest
+        run: tests/contract.sh "${{ needs.build.outputs.ref }}"
+
+  promote:
+    name: Promote
+    needs: [build, verify-digest]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # A FIXED group, unlike the workflow-level one, and never cancelled.
+    # The backwards-move guard below reads the currently published revision and
+    # then copies, which is check-then-act: two promotions in flight can both
+    # read the same `latest`, both pass, and the older one can land second and
+    # demote the registry. Serializing the job is what makes the guard sound.
+    # Not cancel-in-progress, because cancelling a half-finished promotion is
+    # the other way to leave the tags inconsistent.
+    concurrency:
+      group: promote-python-sdlc
+      cancel-in-progress: false
+    steps:
+      # Full history: the backwards-move guard below asks git whether the
+      # currently published commit already contains this one.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Log in to Quay
+        env:
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+        run: skopeo login -u "$QUAY_USERNAME" -p "$QUAY_PASSWORD" quay.io
+
+      # Copies the tested digest. No rebuild, so the bytes that were verified
+      # are the bytes that get the tag.
+      - name: Move latest, and the version tags on a release tag
+        env:
+          REF: ${{ needs.build.outputs.ref }}
+        run: |
+          set -eu
+          # The profile: promotion MUST NOT move `latest` back to an older
+          # commit when a newer one has landed. A scheduled rebuild or a
+          # re-dispatch of an old commit would otherwise quietly demote the
+          # registry, and 35 repos pin this image.
+          current=$(skopeo inspect --format \
+            '{{ index .Labels "org.opencontainers.image.revision" }}' \
+            "docker://$QUAY:latest" 2>/dev/null || true)
+          if [ -n "${current:-}" ] && [ "$current" != "$GITHUB_SHA" ]; then
+            if git merge-base --is-ancestor "$GITHUB_SHA" "$current" 2>/dev/null; then
+              echo "refusing: :latest is $current, which already contains $GITHUB_SHA" >&2
+              exit 1
+            fi
+          fi
+          skopeo copy "docker://$REF" "docker://$QUAY:latest"
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              version=${GITHUB_REF#refs/tags/v}
+              skopeo copy "docker://$REF" "docker://$QUAY:$version"
+              # The minor tag so a consumer MAY track patches if it chooses to.
+              skopeo copy "docker://$REF" "docker://$QUAY:${version%.*}"
+              echo "promoted $version"
+              ;;
+          esac

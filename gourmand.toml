@@ -1,0 +1,6 @@
+# Gourmand finds `gourmand-exceptions.toml` relative to this file, so without a
+# config the justified exceptions beside it are not loaded at all and every one
+# of them reports as an unexcepted violation.
+[output]
+format = "text"
+color = true

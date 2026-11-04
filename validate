@@ -1,0 +1,108 @@
+#!/opt/constitution-venv/bin/python3
+"""Run the constitution validator against a repo, at the tag THAT repo pins.
+
+Why this is a separate script and not three lines inside `sdlc`: getting the
+version right is the whole job, and it has two traps in it.
+
+Trap one -- the tag must come from the repo, not from here. The fleet spans
+`Inherits:` v1.0.0 to v1.29.0. A validator baked at one version would judge most
+repos by rules they have not adopted, and `--pinned` would then fail every one
+of them for a mismatch this image created. So the tag is READ from the repo's own
+manifest, exactly as `trentina/scripts/gates.sh` reads it, and the clone is made
+at that tag. `--pinned` is then correct rather than wrong, because the
+validator's own version equals what the repo inherits.
+
+Trap two -- a partial checkout degrades silently. The validator resolves
+`constitution.md` and `profiles/requirements.toml` from its own directory, and
+when they are absent it does not fail: `own_version()` returns None and the pin
+check returns an empty list, `load_requirements()` returns empty and every file,
+dependabot, host-contract and version-sync check quietly disappears. A shallow
+clone that fetched only the script would report a clean pass having checked
+almost nothing. So this asserts both are present before running anything.
+
+The clone is cached per tag in the cache volume, never in the worktree.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+# The exit-code contract, matching sdlc's.
+CANNOT_RUN = 2
+# argv position of the manifest path.
+MANIFEST_ARG = 1
+
+CACHE = Path("/cache")
+REMOTE = "https://github.com/crunchtools/constitution"
+INHERITS = re.compile(r"^>\s*\*\*Inherits:\*\*.*?(v\d+\.\d+\.\d+)", re.MULTILINE)
+
+
+def die(msg: str) -> None:
+    print(f"GATE CANNOT RUN: {msg}", file=sys.stderr)
+    sys.exit(CANNOT_RUN)
+
+
+def git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], check=False, capture_output=True, text=True)
+
+
+def main() -> int:
+    if len(sys.argv) <= MANIFEST_ARG:
+        die("usage: sdlc-validate <path-to-manifest-constitution.md>")
+    manifest = Path(sys.argv[MANIFEST_ARG])
+    if not manifest.is_file():
+        die(f"{manifest} does not exist")
+
+    text = manifest.read_text(encoding="utf-8")
+    match = INHERITS.search(text)
+    if not match:
+        die(
+            f"{manifest} names no inherited constitution version "
+            f"(expected a '> **Inherits:** ... vX.Y.Z' line)"
+        )
+    tag = match.group(1)
+
+    checkout = CACHE / "constitution" / tag
+    if not (checkout / ".git").is_dir():
+        # An unwritable cache is a 'could not run', not a traceback. The first
+        # run of this hit exactly that: a rootless podman volume the container's
+        # user could not write, which surfaced as a PermissionError stack trace
+        # and an exit status that said "found something".
+        try:
+            checkout.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            die(f"cannot create {checkout.parent}: {exc}")
+        proc = git("clone", "--quiet", "--depth", "1", "--branch", tag, REMOTE, str(checkout))
+        if proc.returncode != 0:
+            die(f"cannot clone the constitution at {tag}: {proc.stderr.strip()}")
+
+    validator = checkout / "validate-constitution.py"
+    # The two files whose absence makes the validator pass without looking.
+    for required in (
+        validator,
+        checkout / "constitution.md",
+        checkout / "profiles" / "requirements.toml",
+    ):
+        if not required.exists():
+            die(
+                f"the constitution checkout at {tag} is missing {required.name}; "
+                f"its checks would silently do nothing"
+            )
+
+    print(f"== constitution validator ({tag})", flush=True)
+    # --freshness is deliberately omitted: it is the only network call left and
+    # it only ever warns, so a local gate does not need a token for it.
+    proc = subprocess.run(
+        [sys.executable, str(validator), str(manifest), "--pinned", "--verbose"],
+        check=False,
+    )
+    # The validator's own contract: 0 pass, 1 violations, 2 usage error. A usage
+    # error is ours to fix, not a finding, so it stays a 2.
+    return proc.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())

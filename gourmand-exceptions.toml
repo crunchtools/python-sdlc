@@ -1,0 +1,40 @@
+# Justified exceptions to Gourmand's checks, in the fleet's format.
+#
+# NOTE: gourmand.toml beside this file is REQUIRED. Gourmand locates this file
+# relative to its config, so without a gourmand.toml every exception here is
+# silently not loaded and reports as an unexcepted violation. That cost an
+# afternoon to find, because nothing says the file was ignored.
+
+# Manifest lint suppression. Gourmand treats every ruff `ignore` and
+# `per-file-ignores` entry as a suppression, and is right to: it is a policy
+# decision that should be argued once rather than repeated quietly. One entry
+# covering the file, as trentina does, because the argument is one argument.
+[[exceptions]]
+check = "manifest_lint_suppression"
+path = "pyproject.toml"
+justification = """
+  Every entry was checked by emptying the list and reading the real hits, and \
+  what could be fixed in the code was fixed rather than ignored: CannotRun \
+  became CannotRunError (N818), the exit codes became named constants instead \
+  of literal 2s (PLR2004), path_ignored was split so neither half is over the \
+  complexity threshold (C901), two function-level imports moved to the top \
+  (PLC0415), and an exec(compile(...)) in the glob test became an importlib \
+  load, which removed a dangerous API and the lint suppression that had been \
+  hiding it. What remains is three package-wide and six scoped, and each one \
+  is a rule this tool's job makes inapplicable rather than a rule being \
+  dodged. Package-wide: S603 and S607, because starting pinned tools without a \
+  shell IS the function -- every argv list is literals plus a path git \
+  reported, and shell=True is never used; TRY003, because each message names \
+  the specific file, lockfile entry or config path that could not be read, and \
+  the exit-2 contract depends on those being specific enough to act on \
+  (trentina made the same call). Scoped: S404 on the two scripts that must \
+  import subprocess; S108 on sdlc, where /tmp is not a guess at a writable \
+  path but an explicit tmpfs bin/sdlc mounts (sized, exec, mode 1777) because \
+  the repo is read-only for most targets; ARG001 on sdlc, where every target \
+  takes cfg so one dispatch table can call them uniformly and three have no \
+  settings to read; S101 and PT018 under tests/, because a test asserts. No \
+  threshold is raised anywhere and no check is disabled -- \
+  [tool.ruff.lint.pylint] and [tool.ruff.lint.mccabe] are set to the fleet's \
+  values explicitly so that raising one would be a visible change.
+"""
+classification = "by_design"

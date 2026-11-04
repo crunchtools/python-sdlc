@@ -1,0 +1,7 @@
+# The constitution checkout the validator target uses lives in the cache
+# volume, never the worktree -- this entry is a backstop for a hand run.
+.sdlc/
+
+# gourmand refuses to cache without this entry and then writes the directory,
+# which is also why its hook mounts the tree read-write.
+.gourmand-cache/

@@ -1,0 +1,305 @@
+#!/bin/sh
+# The host half of the CrunchTools Python SDLC gate.
+#
+# POSIX shell on purpose. Constitution XII's host contract says a developer
+# machine has git, podman, pre-commit and gh and NOTHING else may be assumed --
+# so this cannot be Python, even though the image it starts is full of it. The
+# only two programs this file runs are `git` and `podman`.
+#
+# What lives here rather than in the image:
+#   - anything needing the developer's git identity, credentials or network
+#     (fetching origin, computing the branch diff)
+#   - `hooks-installed`, which is a question about this clone's .git
+#   - the resource budget, because a pre-commit `entry:` is a static string and
+#     cannot read one
+#
+# Everything else is one `podman run` into quay.io/crunchtools/python-sdlc.
+#
+# EXIT CODES, and they are the contract:
+#   0  ran, found nothing
+#   1  ran, found something
+#   2  COULD NOT RUN -- never to be worked around
+#
+# Podman's own 125/126/127 mean the container never started, so they map to 2.
+# trentina's gates.sh maps them to 1 via `|| fail`, which reports "found
+# something" for "could not invoke". That is the one behaviour here that
+# deliberately differs from the script this replaces.
+
+set -eu
+
+ME=$(basename "$0")
+HOOKS_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+die()  { printf '%s: GATE CANNOT RUN: %s\n' "$ME" "$*" >&2; exit 2; }
+fail() { printf '%s: GATE FAILED: %s\n'     "$ME" "$*" >&2; exit 1; }
+step() { printf '\n== %s\n' "$*"; }
+
+# ------------------------------------------------------------------ the image
+
+[ -f "$HOOKS_DIR/IMAGE_TAG" ] || die "$HOOKS_DIR/IMAGE_TAG is missing"
+IMAGE_TAG=$(tr -d ' \t\n\r' < "$HOOKS_DIR/IMAGE_TAG")
+[ -n "$IMAGE_TAG" ] || die "IMAGE_TAG is empty"
+# Read from the cloned hooks repo, so the `rev:` a repo pins fixes the launcher
+# and the image together and they cannot disagree. Overridable for development
+# of this repo itself, not for consumers.
+IMAGE=${SDLC_IMAGE:-quay.io/crunchtools/python-sdlc:$IMAGE_TAG}
+
+# --------------------------------------------------------------- preconditions
+
+command -v podman >/dev/null 2>&1 || die "podman is not on PATH"
+command -v git    >/dev/null 2>&1 || die "git is not on PATH"
+
+# A hook entry that calls a tier would re-enter this script forever.
+[ "${SDLC_DEPTH:-0}" -eq 0 ] || die "$ME re-entered itself; a hook entry calls a tier"
+SDLC_DEPTH=1
+export SDLC_DEPTH
+
+# pre-commit chdirs to the consumer's toplevel, but a human or an agent in the
+# inner loop will call this from a subdirectory. Ask git rather than guess.
+REPO=$(git rev-parse --show-toplevel 2>/dev/null) \
+  || die "not inside a git repository"
+cd "$REPO"
+PROJECT=$(basename "$REPO")
+
+# ---------------------------------------------------------- the resource budget
+#
+# Ported from gates.sh:55-80. A gate must not take the machine away from the
+# person running it, and nproc alone is wrong twice: it ignores a cpuset and it
+# ignores a cgroup quota, both of which are how this ends up on a CI runner.
+
+_cpus_in_list() {               # "0-3,7,10-11" -> 7
+  printf '%s' "$1" | tr ',' '\n' | awk -F- '
+    NF==1 && $1!="" { n += 1 }
+    NF==2           { n += ($2 - $1) + 1 }
+    END { print (n ? n : 0) }'
+}
+
+_cgroup_cpu_ceiling() {         # cpu.max from leaf to root, smallest quota wins
+  _dir=$(awk -F: '$2=="" {print $3; exit}' /proc/self/cgroup 2>/dev/null) || _dir=
+  [ -n "${_dir:-}" ] || { printf '0'; return; }
+  _best=0
+  _path="/sys/fs/cgroup$_dir"
+  while [ -n "$_path" ] && [ "$_path" != "/sys/fs/cgroup" ]; do
+    if [ -r "$_path/cpu.max" ]; then
+      _q=$(awk '{print $1}' "$_path/cpu.max" 2>/dev/null) || _q=max
+      _p=$(awk '{print $2}' "$_path/cpu.max" 2>/dev/null) || _p=100000
+      if [ "$_q" != "max" ] && [ -n "$_p" ] && [ "$_p" -gt 0 ] 2>/dev/null; then
+        _n=$(( (_q + _p - 1) / _p ))
+        [ "$_n" -lt 1 ] && _n=1
+        if [ "$_best" -eq 0 ] || [ "$_n" -lt "$_best" ]; then _best=$_n; fi
+      fi
+    fi
+    _path=$(dirname "$_path")
+  done
+  printf '%s' "$_best"
+}
+
+budget() {
+  _all=$(nproc 2>/dev/null || printf 1)
+  _allowed=$(_cpus_in_list "$(awk -F': *' '/^Cpus_allowed_list/{print $2}' /proc/self/status 2>/dev/null)")
+  [ "${_allowed:-0}" -gt 0 ] 2>/dev/null && [ "$_allowed" -lt "$_all" ] && _all=$_allowed
+  _ceil=$(_cgroup_cpu_ceiling)
+  [ "${_ceil:-0}" -gt 0 ] 2>/dev/null && [ "$_ceil" -lt "$_all" ] && _all=$_ceil
+  # Half the machine, floor of one: the desktop is not in the gate's cgroup.
+  _half=$(( _all / 2 ))
+  [ "$_half" -lt 1 ] && _half=1
+  printf '%s' "$_half"
+}
+
+GATE_CPUS=${SDLC_CPUS:-$(budget)}
+GATE_MEMORY=${SDLC_MEMORY:-8g}
+
+# Validated BEFORE any arithmetic uses them, because `$(( ))` on a non-number
+# aborts the script with a shell error rather than our exit 2 (gates.sh:122-134).
+case "$GATE_CPUS" in ''|*[!0-9]*) die "SDLC_CPUS must be a whole number" ;; esac
+{ [ "$GATE_CPUS" -ge 1 ] && [ "$GATE_CPUS" -le 1024 ]; } \
+  || die "SDLC_CPUS must be between 1 and 1024"
+case "$GATE_MEMORY" in
+  '' | *[!0-9kKmMgG]* | [!0-9]*) die "SDLC_MEMORY must be a size like 8g or 4096m" ;;
+esac
+
+CACHE_VOLUME=${SDLC_CACHE_VOLUME:-crunchtools-hook-cache}
+
+need_volume() {
+  podman volume exists "$1" 2>/dev/null || podman volume create "$1" >/dev/null \
+    || die "cannot create the podman volume $1"
+}
+
+# ------------------------------------------------------------------ podman run
+#
+# `z`, not `Z`: more than one of these can mount the same tree at once, and `Z`
+# relabels it exclusively, taking it out from under whichever started first
+# (gates.sh:157-161). `--events-backend=none --log-driver=none` keeps a gate out
+# of the journal.
+
+run_in_image() {
+  _mode=$1; shift          # ro | rw
+  _stdin=$1; shift         # stdin | nostdin
+  need_volume "$CACHE_VOLUME"
+
+  # The mount convention is Gourmand's and Gatehouse's, unchanged:
+  #   -v <repo>:/repo:<mode>,Z -w /repo
+  # and the container runs as its own root. Rootless podman maps that to the
+  # invoking user, so a file ruff writes is the developer's and the cache volume
+  # is writable, with no --user and no --userns=keep-id. Two bugs came from
+  # trying to be cleverer than this.
+  #
+  # ONE deliberate difference: `z`, not `Z`. A tier runs several of these and
+  # `Z` relabels the tree EXCLUSIVELY, taking it out from under whichever
+  # container started first (gates.sh:157-161). Those two run one at a time and
+  # never hit it.
+  set -- \
+    --events-backend=none run --rm --log-driver=none \
+    --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
+    -v "$REPO:/repo:$_mode,z" -w /repo \
+    -v "$CACHE_VOLUME:/cache" \
+    --tmpfs /tmp:rw,exec,size=4g,mode=1777 \
+    -e HOME=/tmp \
+    -e SEMGREP_SETTINGS_FILE=/tmp/semgrep.yml \
+    -e "SDLC_PROJECT=$PROJECT" \
+    -e "SDLC_JOBS=$GATE_CPUS" \
+    ${SDLC_GATEHOUSE_SAMPLES:+-e SDLC_GATEHOUSE_SAMPLES} \
+    "$@"
+
+  if [ "$_stdin" = stdin ]; then
+    podman "$@" || _rc=$?
+  else
+    podman "$@" </dev/null || _rc=$?
+  fi
+  _rc=${_rc:-0}
+  # 125 podman itself failed, 126 not executable, 127 not found. The container
+  # never ran, so this is not a finding.
+  case "$_rc" in
+    125|126|127) die "podman could not run $IMAGE (exit $_rc); nothing was checked" ;;
+  esac
+  return "$_rc"
+}
+
+# --------------------------------------------------------------- host-only work
+
+t_hooks_installed() {
+  # Asked of git, not assembled: in a linked worktree `.git` is a file, and
+  # core.hooksPath moves the directory somewhere else entirely (gates.sh:178-188).
+  _hook=$(git config --get core.hooksPath 2>/dev/null) && _hook="$_hook/pre-push" \
+    || _hook=$(git rev-parse --git-path hooks/pre-push) \
+    || die "cannot ask git where its hooks live"
+  [ -f "$_hook" ] || fail "$_hook is missing -- run: pre-commit install --install-hooks"
+  grep -q "pre-commit" "$_hook" 2>/dev/null \
+    || fail "$_hook is not pre-commit's -- run: pre-commit install"
+  printf 'pre-push hook is installed\n'
+}
+
+default_branch() {
+  # gates.sh hard-codes origin/main. 10 of the 69 checkouts in this fleet
+  # default to master, so ask the remote instead of assuming.
+  _ref=$(git symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null) \
+    && { printf '%s' "${_ref#refs/remotes/}"; return; }
+  for _c in origin/main origin/master; do
+    git rev-parse --verify --quiet "$_c" >/dev/null 2>&1 && { printf '%s' "$_c"; return; }
+  done
+  die "cannot determine the default branch; no origin/HEAD, origin/main or origin/master"
+}
+
+t_gatehouse() {
+  _env=${GATEHOUSE_ENV:-$HOME/.config/mcp-env/gatehouse.env}
+  [ -f "$_env" ] || die "$_env is missing; Gatehouse has no API key"
+
+  _base=$(default_branch)
+  git fetch --quiet origin "${_base#origin/}" \
+    || die "cannot reach origin to read ${_base#origin/}; the branch diff is unknown"
+
+  # 0 is no differences, 1 is differences, anything above is git failing -- which
+  # is a gate that could not run, not a gate that found something.
+  _rc=0
+  git diff --quiet "$_base...HEAD" || _rc=$?
+  case "$_rc" in
+    0) printf 'nothing to review: HEAD matches %s\n' "$_base"; return 0 ;;
+    1) ;;
+    *) die "git could not compute $_base...HEAD" ;;
+  esac
+
+  step "gatehouse over $_base...HEAD"
+  # The diff goes in on stdin so the container needs no git credentials and no
+  # network to origin.
+  git diff "$_base...HEAD" | run_in_image ro stdin \
+    --env-file "$_env" -i "$IMAGE" gatehouse
+}
+
+# -------------------------------------------------------------- tier membership
+#
+# Parsed from .pre-commit-hooks.yaml, which is the single authority.
+# tests/test_tiers.sh asserts this parse still agrees with that file.
+
+targets_in_stage() {
+  awk -v want="$1" '
+    /^- id:/            { entry=""; stages="" }
+    /^  entry: bin\/sdlc/ { entry=$NF }
+    /^  stages:/        { stages=$0 }
+    stages != "" && entry != "" {
+      if (index(stages, want)) print entry
+      entry=""; stages=""
+    }
+  ' "$HOOKS_DIR/.pre-commit-hooks.yaml"
+}
+
+run_tier() {
+  _stage=$1
+  _targets=$(targets_in_stage "$_stage")
+  [ -n "$_targets" ] || die "no targets found for stage $_stage in .pre-commit-hooks.yaml"
+  _worst=0
+  for _t in $_targets; do
+    _rc=0
+    "$0" "$_t" || _rc=$?
+    # A later 1 must not mask an earlier 2.
+    if [ "$_rc" -eq 2 ] || [ "$_worst" -eq 2 ]; then _worst=2
+    elif [ "$_rc" -ne 0 ]; then _worst=1
+    fi
+  done
+  return "$_worst"
+}
+
+# ---------------------------------------------------------------------- dispatch
+
+case "${1:-list}" in
+  # Host-only.
+  hooks-installed) t_hooks_installed ;;
+  gatehouse)       SDLC_DEPTH=0 t_gatehouse ;;
+
+  # Batches. Named by stage so there is one vocabulary, not two.
+  commit)          SDLC_DEPTH=0 run_tier pre-commit ;;
+  push)            SDLC_DEPTH=0 run_tier pre-push ;;
+
+  # These write the tree, so they are the only rw mounts.
+  #   ruff-check --fix / ruff-format  rewrite your source, which is the point
+  #   gourmand                        writes .gourmand-cache/ (which is why the
+  #                                   fleet's own hook mounts `-v .:/src:Z`
+  #                                   read-write while gatehouse's is ro)
+  #
+  # Gourmand was on `ro` here at first and appeared to pass, because the repo it
+  # was tested against already had a .gourmand-cache/ directory from an earlier
+  # run. A clean checkout gave "Read-only file system (os error 30)" and exit 3.
+  ruff-check|ruff-format|gourmand)
+                   run_in_image rw nostdin "$IMAGE" "$1" ;;
+
+  list|versions|mypy|pytest|semgrep|pip-audit|constitution|codeql)
+                   run_in_image ro nostdin "$IMAGE" "$1" ;;
+
+  tiers)           printf 'pre-commit:\n'; targets_in_stage pre-commit | sed 's/^/  /'
+                   printf 'pre-push:\n';   targets_in_stage pre-push   | sed 's/^/  /' ;;
+
+  -h|--help|help)
+    cat <<EOF
+usage: $ME <target>... | commit | push | list | versions | tiers
+
+  commit | push     run every target in that tier (the hooks do this)
+  <target>          run one target -- the inner loop
+  list              targets the image provides
+  versions          the exact tool versions the image carries
+  tiers             which targets run in which tier
+
+Exit 2 means a check COULD NOT RUN and is never to be worked around.
+Image: $IMAGE
+EOF
+    ;;
+  *) printf '%s: unknown target: %s (try --help)\n' "$ME" "$1" >&2; exit 2 ;;
+esac

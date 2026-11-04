@@ -1,0 +1,109 @@
+# This repo's own gates.
+#
+# Deliberately the CLASSIC fleet shape, not python-sdlc's own hooks, for two
+# reasons:
+#
+#   1. Constitution XII currently REQUIRES a hook with `id: gourmand` running
+#      `quay.io/crunchtools/gourmand` and one with `id: gatehouse` running
+#      `quay.io/crunchtools/gatehouse`, and `validate-constitution.py` greps
+#      this file for those strings. Until the XII amendment lands, a repo using
+#      python-sdlc's hooks fails `Constitution / Validate constitution`.
+#   2. Bootstrapping. This repo builds the image, so gating it on the image it
+#      has not built yet is circular on a first clone.
+#
+# This file switches to the one-block form once the amendment is tagged. That
+# is the point at which python-sdlc gates itself.
+
+default_install_hook_types: [pre-commit, pre-merge-commit, pre-push]
+
+repos:
+  # ruff from its own pre-commit environment, at the SAME version the image
+  # bakes (Containerfile RUFF_VERSION and pyproject.toml target-version). The
+  # repo had Python files and no ruff gate until Gourmand's IF001 said so.
+  #
+  # `args` and `pass_filenames: false` because `sdlc` and `validate` have no
+  # .py extension, so ruff's default file selection does not see them.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff-check
+        args: [--fix, sdlc, validate, tests]
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+      - id: ruff-format
+        args: [sdlc, validate, tests]
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+
+  - repo: local
+    hooks:
+      - id: shellcheck
+        name: shellcheck (bin/sdlc and the tests)
+        entry: podman --events-backend=none run --rm --log-driver=none -v .:/mnt:ro,Z -w /mnt docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh tests/test_host_contract.sh tests/test_tiers.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+
+      # The two tests that keep this repo's own promises. Both are pure host
+      # work -- no image needed -- so they belong at commit, where they are free.
+      - id: tiers
+        name: tier membership agrees with .pre-commit-hooks.yaml
+        entry: tests/test_tiers.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+
+      - id: host-contract
+        name: bin/sdlc needs only git, podman, pre-commit and gh
+        entry: tests/test_host_contract.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+
+  # Fleet-owned wiring from crunchtools/gatehouse/examples/pre-commit.yaml per
+  # constitution XII, with ONE change: the tags are exact, not `:latest`.
+  #
+  # XII says to copy that file unchanged, and this deviates on purpose, because
+  # `:latest` there is the bug this whole repo exists to delete. podman's
+  # default pull policy is `missing`, so a cached `:latest` is never refreshed:
+  # trentina's local Gatehouse had been a two-week-old reviewer while CI pulled
+  # fresh. Gatehouse's own constitution agent flags the floating tags here, and
+  # it is right. The validator matches the image NAME, so exact tags still pass
+  # `Constitution / Validate constitution`.
+  #
+  # The fleet example should change the same way; raised separately.
+  # `--events-backend=none --log-driver=none` keeps a gate out of the journal.
+  - repo: local
+    hooks:
+      - id: gourmand
+        name: Gourmand (AI slop detection)
+        entry: podman --events-backend=none run --rm --log-driver=none -v .:/src:Z -w /src quay.io/crunchtools/gourmand:1.0.0 check --full
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+
+      - id: gatehouse
+        name: Gatehouse (AI code review, staged diff)
+        entry: bash -c 'git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,Z -w /src quay.io/crunchtools/gatehouse:0.22.0 --stdin'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+
+  # The contract test needs a built image, so it runs at pre-push rather than
+  # on every commit.
+  - repo: local
+    hooks:
+      - id: contract
+        name: contract test (builds the image)
+        entry: sh -c 'podman build -q -f Containerfile -t localhost/python-sdlc:precommit . && tests/contract.sh localhost/python-sdlc:precommit'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

@@ -1,0 +1,729 @@
+#!/opt/constitution-venv/bin/python3
+"""The in-image half of the CrunchTools Python SDLC gate.
+
+Runs inside quay.io/crunchtools/python-sdlc with the repo mounted at /repo.
+`bin/sdlc` on the host is what starts it; everything that needs the host's git
+or network identity stays there, and everything that needs a tool stays here.
+
+THE EXIT CODE CONTRACT, which is the whole point of this file:
+
+    0   the check ran and found nothing
+    1   the check ran and found something
+    2   the check COULD NOT RUN
+
+2 is never to be worked around. A gate that cannot run and reports 0 is worse
+than no gate, because the pipeline goes green and nobody looks again. The
+failure this encodes is real: constitution XII was written after a repo's test
+runner "skipped three gates with a warning and printed the other results as if
+that were a pass".
+
+`gates.sh` gets one case of this wrong and we deliberately differ: its
+`|| fail` maps podman's own 125-127 onto exit 1, so "could not invoke the
+container" reported as "the check found something". Here, anything that is not
+the tool's own verdict is a 2.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+import yaml
+
+REPO = Path(os.environ.get("SDLC_REPO", "/repo"))
+CACHE = Path(os.environ.get("SDLC_CACHE", "/cache"))
+
+# Baked tool versions, read from the image rather than restated here. The
+# Containerfile sets them as both ARGs and OCI labels; these env vars are how
+# the running container sees them.
+BAKED = {
+    "gourmand": os.environ.get("SDLC_GOURMAND_VERSION", "unknown"),
+    "gatehouse": os.environ.get("SDLC_GATEHOUSE_VERSION", "unknown"),
+    "ruff": os.environ.get("SDLC_RUFF_VERSION", "unknown"),
+    "semgrep": os.environ.get("SDLC_SEMGREP_VERSION", "unknown"),
+    "pip-audit": os.environ.get("SDLC_PIP_AUDIT_VERSION", "unknown"),
+    "codeql": os.environ.get("SDLC_CODEQL_BUNDLE", "unknown"),
+    "uv": os.environ.get("SDLC_UV_VERSION", "unknown"),
+}
+
+
+VERSION_PROBE = {
+    "gourmand": ["gourmand", "--version"],
+    "ruff": ["ruff", "--version"],
+    "semgrep": ["semgrep", "--version"],
+    "pip-audit": ["pip-audit", "--version"],
+    "codeql": ["codeql", "version", "--format=terse"],
+    "uv": ["uv", "--version"],
+    # gatehouse has no --version flag; its usage line is all it offers.
+    "gatehouse": None,
+}
+
+
+def self_reported(name: str) -> str:
+    """What the installed binary calls itself.
+
+    Worth printing next to the pinned tag because the two can disagree: the
+    gourmand image tagged 1.0.0 ships a binary that reports 0.16.5. A consuming
+    repo pins the image tag, so a silent gap between tag and build is exactly
+    the thing that makes a 'pinned' tool not pinned.
+    """
+    probe = VERSION_PROBE.get(name)
+    if probe is None:
+        return "-"
+    try:
+        proc = subprocess.run(probe, check=False, capture_output=True, text=True, timeout=30)
+    except OSError, subprocess.SubprocessError:
+        return "(cannot probe)"
+    out = (proc.stdout or proc.stderr or "").strip().splitlines()
+    return out[0] if out else "(no output)"
+
+
+# The exit-code contract, named rather than written as literals at each site.
+CLEAN = 0
+FOUND = 1
+CANNOT_RUN = 2
+
+
+class CannotRunError(Exception):
+    """Raised for anything that is not the tool's own verdict. Becomes exit CANNOT_RUN."""
+
+
+def cannot(msg: str) -> None:
+    raise CannotRunError(msg)
+
+
+def step(msg: str) -> None:
+    print(f"\n== {msg}", flush=True)
+
+
+# --------------------------------------------------------------- repo settings
+
+
+def settings() -> dict:
+    """The `[tool.sdlc]` table, which is the ONE declared seam per repo.
+
+    gates.sh hard-codes trentina's policy in three places -- `GEMINI_API_KEY`
+    for the suite, `src/` as the scan path, `.semgrep/run-tests.sh` as the rule
+    tests. None of that is Python-generic, so a fleet-wide script has to read it
+    rather than assume it. Everything here has a default that is right for a
+    repo laid out the way the fleet lays repos out.
+
+    A repo with NO pyproject.toml is not an error here. Three targets --
+    `constitution`, `gourmand` and `gatehouse` -- are language-agnostic, and
+    this image's own repo is a Container Image profile repo with no
+    pyproject.toml that still wants all three. Demanding one made the tool
+    unable to check itself, which is how this was found.
+
+    The Python-specific targets assert the project separately, through
+    `need_project()`.
+    """
+    path = REPO / "pyproject.toml"
+    if not path.is_file():
+        return {}
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        cannot(f"cannot read {path}: {exc}")
+    return data.get("tool", {}).get("sdlc", {}) or {}
+
+
+def need_project() -> None:
+    """Assert this is a Python project, for the targets that require one."""
+    if not (REPO / "pyproject.toml").is_file():
+        cannot(
+            "pyproject.toml does not exist, so this target has no project to "
+            "check. constitution, gourmand and gatehouse work on any repo; "
+            "ruff, mypy, pytest, semgrep and pip-audit need a Python project."
+        )
+
+
+def paths_for(cfg: dict, key: str, default: list[str]) -> list[str]:
+    """A path list from `[tool.sdlc]`, keeping only what exists.
+
+    Filtering matters: ruff and semgrep both exit non-zero on a path that is not
+    there, which would read as "the check found something".
+    """
+    wanted = cfg.get(key, default)
+    if isinstance(wanted, str):
+        wanted = [wanted]
+    present = [p for p in wanted if (REPO / p).exists()]
+    if not present:
+        cannot(f"none of the {key} paths exist in the repo: {wanted}")
+    return present
+
+
+def project_env() -> dict[str, str]:
+    """Environment for the uv-managed project venv.
+
+    The venv lives in the cache volume, keyed by project AND Python version.
+    gates.sh records why the key needs both: two gates sharing one
+    UV_PROJECT_ENVIRONMENT across different Python versions make uv rebuild the
+    venv on every invocation, in both directions, forever.
+    """
+    name = os.environ.get("SDLC_PROJECT", REPO.name)
+    pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    env = dict(os.environ)
+    env.update(
+        {
+            "UV_CACHE_DIR": str(CACHE / "uv"),
+            "UV_PROJECT_ENVIRONMENT": str(CACHE / "venv" / f"{name}-py{pyver.replace('.', '')}"),
+            "UV_PYTHON_DOWNLOADS": "never",
+            # The worktree is mounted read-only for most targets and HOME is
+            # where uv, pytest and semgrep want to write their state.
+            "HOME": "/tmp",
+        }
+    )
+    return env
+
+
+def run(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    stdin: bytes | None = None,
+    tee: bool = False,
+) -> tuple[int, str]:
+    """Run a tool and return (ITS exit status, captured output).
+
+    Anything that is not the tool's own verdict raises CannotRun.
+
+    `tee=True` captures stderr+stdout AND prints it, for the one caller that has
+    to read what the tool said as well as show it.
+    """
+    try:
+        if tee:
+            proc = subprocess.run(
+                cmd,
+                cwd=REPO,
+                env=env if env is not None else dict(os.environ),
+                input=stdin,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            sys.stdout.write(proc.stdout or "")
+            sys.stdout.flush()
+            captured = proc.stdout or ""
+        else:
+            proc = subprocess.run(
+                cmd,
+                cwd=REPO,
+                env=env if env is not None else dict(os.environ),
+                input=stdin,
+                check=False,
+            )
+            captured = ""
+    except FileNotFoundError:
+        cannot(f"{cmd[0]} is not in this image")
+    except PermissionError:
+        cannot(f"{cmd[0]} is not executable")
+    except OSError as exc:
+        cannot(f"cannot start {cmd[0]}: {exc}")
+    # 126/127 from a shell layer mean the same as the exceptions above: the tool
+    # never ran. Never report those as a finding.
+    if proc.returncode in (126, 127):
+        cannot(f"{cmd[0]} could not be invoked (exit {proc.returncode})")
+    return proc.returncode, captured
+
+
+def need_lock_dep(name: str) -> None:
+    """Refuse to claim a pass for a tool the project does not pin.
+
+    mypy and pytest are the two checks whose version comes from the project's
+    own uv.lock rather than from this image -- they load the project's plugins
+    inside their own interpreter, so they cannot come from a tool venv. That
+    makes "the repo forgot to depend on mypy" a real case, and the honest answer
+    to it is 2, not 0.
+    """
+    lock = REPO / "uv.lock"
+    if not lock.is_file():
+        cannot("uv.lock is missing; mypy and pytest resolve from the project lock")
+    try:
+        text = lock.read_text(encoding="utf-8")
+    except OSError as exc:
+        cannot(f"cannot read uv.lock: {exc}")
+    if f'name = "{name}"' not in text:
+        cannot(
+            f"{name} is not in uv.lock, so this check cannot run. "
+            f"Add it to the project's dev dependencies -- it must come from the "
+            f"project environment, not from this image, because it loads the "
+            f"project's own plugins."
+        )
+
+
+def sync_project(env: dict[str, str]) -> None:
+    """Build the project venv, or fail as 'could not run'."""
+    step("uv sync --locked --all-extras")
+    rc, _ = run(["uv", "sync", "--locked", "--all-extras"], env=env)
+    if rc != 0:
+        cannot(
+            "uv sync --locked failed. The lockfile is out of date with "
+            "pyproject.toml, or a dependency is unavailable. Nothing was checked."
+        )
+
+
+# ---------------------------------------------------------------------- targets
+
+
+def t_ruff_check(cfg: dict) -> int:
+    need_project()
+    paths = paths_for(cfg, "lint_paths", ["src", "tests"])
+    step(f"ruff check --fix {' '.join(paths)}")
+    return run(["ruff", "check", "--fix", *paths])[0]
+
+
+def t_ruff_format(cfg: dict) -> int:
+    need_project()
+    paths = paths_for(cfg, "lint_paths", ["src", "tests"])
+    step(f"ruff format {' '.join(paths)}")
+    return run(["ruff", "format", *paths])[0]
+
+
+def t_mypy(cfg: dict) -> int:
+    need_project()
+    need_lock_dep("mypy")
+    env = project_env()
+    sync_project(env)
+    paths = paths_for(cfg, "type_paths", ["src"])
+    name = os.environ.get("SDLC_PROJECT", REPO.name)
+    step(f"mypy {' '.join(paths)}")
+    return run(
+        [
+            "uv",
+            "run",
+            "--locked",
+            "--all-extras",
+            "mypy",
+            "--cache-dir",
+            str(CACHE / "mypy" / name),
+            *paths,
+        ],
+        env=env,
+    )[0]
+
+
+def t_pytest(cfg: dict) -> int:
+    need_project()
+    need_lock_dep("pytest")
+    env = project_env()
+    # Per-repo test environment: the one trentina seam that cannot be guessed.
+    for key, value in (cfg.get("test_env") or {}).items():
+        env[str(key)] = str(value)
+    sync_project(env)
+    jobs = os.environ.get("SDLC_JOBS", "0")
+    args = cfg.get("pytest_args", ["-q", "-rfE"])
+    step("pytest")
+    cmd = [
+        "uv",
+        "run",
+        "--locked",
+        "--all-extras",
+        "pytest",
+        # The worktree is read-only and cacheprovider writes into the rootdir.
+        "-p",
+        "no:cacheprovider",
+        *args,
+    ]
+    if jobs != "0" and "pytest-xdist" in (REPO / "uv.lock").read_text(encoding="utf-8"):
+        cmd += ["-n", jobs]
+    return run(cmd, env=env)[0]
+
+
+def t_gourmand(cfg: dict) -> int:
+    step("gourmand check --full")
+    return run(["gourmand", "check", "--full", "."])[0]
+
+
+def t_gatehouse(cfg: dict) -> int:
+    """Review the branch. The diff arrives on stdin, computed by the host.
+
+    It is the host's job because the diff needs origin fetched, which needs the
+    developer's git credentials and network -- neither of which belongs in this
+    container.
+    """
+    diff = sys.stdin.buffer.read()
+    if not diff.strip():
+        print("nothing to review: the diff is empty")
+        return 0
+    samples = os.environ.get("SDLC_GATEHOUSE_SAMPLES")
+    cmd = ["gatehouse", "--stdin"]
+    if samples:
+        cmd += ["--samples", samples]
+    step(f"gatehouse --stdin ({len(diff)} bytes)")
+    return run(cmd, stdin=diff)[0]
+
+
+def t_semgrep(cfg: dict) -> int:
+    need_project()
+    config = cfg.get("semgrep_config", ".semgrep")
+    if not (REPO / config).exists():
+        cannot(f"semgrep config {config} does not exist; set tool.sdlc.semgrep_config")
+    tests = cfg.get("semgrep_tests", ".semgrep/run-tests.sh")
+    if (REPO / tests).is_file():
+        step(f"semgrep rule tests ({tests})")
+        rc, _ = run(["sh", tests], env=project_env())
+        if rc != 0:
+            return rc
+    paths = paths_for(cfg, "scan_paths", ["src"])
+    step(f"semgrep scan --config {config}")
+    return run(
+        ["semgrep", "scan", "--config", config, "--error", "--metrics=off", *paths],
+        env=project_env(),
+    )[0]
+
+
+def t_pip_audit(cfg: dict) -> int:
+    """Audit the project's locked dependencies, and GATE on it.
+
+    17 repos in the fleet run this as `pip-audit … || true`, which means the
+    scan cannot fail and has never once blocked anything. This one returns the
+    tool's verdict.
+    """
+    need_project()
+    env = project_env()
+    sync_project(env)
+    step("pip-audit")
+    # NOT --strict. A local path dependency is legitimately absent from PyPI --
+    # trentina vendors `petit-plus` from tests/fixtures -- and --strict turns
+    # "could not audit this one" into a failed gate. The fleet's own
+    # dependency-audit.yml runs without it, and a local gate that is stricter
+    # than CI trains people to skip the local gate.
+    #
+    # The cost is that an unauditable package passes quietly, so it is reported
+    # explicitly below rather than left in the log for nobody.
+    rc, out = run(
+        ["uv", "run", "--locked", "--all-extras", "--with", "pip-audit", "pip-audit"],
+        env=env,
+        tee=True,
+    )
+    unaudited = [
+        line.split("could not be audited:")[-1].strip()
+        for line in out.splitlines()
+        if "could not be audited" in line
+    ]
+    if unaudited:
+        print(
+            "\nNOT AUDITED -- no PyPI record, so these were skipped rather than "
+            "cleared:\n  "
+            + "\n  ".join(sorted(set(unaudited)))
+            + "\nA local path or vendored dependency is expected here. Anything "
+            "else in this list is a real gap in the scan."
+        )
+    return rc
+
+
+def t_constitution(cfg: dict) -> int:
+    """Validate the repo's manifest against the constitution IT pins.
+
+    The constitution is cloned at the tag the repo's own manifest names, never
+    baked into this image. Two reasons, and both matter: the fleet spans v1.0.0
+    to v1.29.0 so a baked copy would judge most repos by rules they have not
+    adopted; and the validator resolves `constitution.md` and `profiles/` from
+    its own directory, so a partial copy makes its pin, file and version checks
+    silently vanish rather than fail.
+    """
+    manifest = Path(cfg.get("constitution", ".specify/memory/constitution.md"))
+    if not (REPO / manifest).is_file():
+        cannot(f"{manifest} does not exist")
+    return run(["sdlc-validate", str(manifest)], env=project_env())[0]
+
+
+def t_codeql(cfg: dict) -> int:
+    default_config = ".github/codeql/codeql-config.yml"
+    config = cfg.get("codeql_config", default_config)
+    # A config the repo NAMED and that is not there is a missing config path,
+    # which the contract says is a 2 -- silently falling back to a default query
+    # suite would run a different analysis than the repo asked for and call it a
+    # pass. A repo that simply has no config, and named none, gets the default
+    # suite; that is not a missing path.
+    if config != default_config and not (REPO / config).is_file():
+        cannot(f"tool.sdlc.codeql_config names {config}, which does not exist")
+    db = CACHE / "codeql" / os.environ.get("SDLC_PROJECT", REPO.name)
+    sarif = Path("/tmp/codeql-results.sarif")
+    shutil.rmtree(db, ignore_errors=True)
+    # An unwritable cache is a 2, not a traceback and not a 1. The same bug in
+    # `validate` surfaced as a PermissionError stack trace with an exit status
+    # that claimed a finding.
+    try:
+        db.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        cannot(f"cannot create the CodeQL database directory {db.parent}: {exc}")
+
+    create = [
+        "codeql",
+        "database",
+        "create",
+        str(db),
+        "--language=python",
+        "--source-root=.",
+        "--overwrite",
+    ]
+    analyze = [
+        "codeql",
+        "database",
+        "analyze",
+        str(db),
+        "--format=sarif-latest",
+        f"--output={sarif}",
+        f"--threads={os.environ.get('SDLC_JOBS', '0')}",
+    ]
+
+    # `--codescanning-config` is NOT a CLI flag in 2.27.4, on either subcommand.
+    # `database analyze --help` describes it ("if a Code Scanning configuration
+    # file was specified at database creation time using --codescanning-config")
+    # but that is the Action's internal flow; `create` does not list it and
+    # `analyze` rejects it outright with "Unknown option". Both were tried.
+    #
+    # So the config is read HERE and applied in two parts: the query list goes
+    # to `analyze`, and `paths-ignore` filters the SARIF afterwards.
+    #
+    # Honouring paths-ignore is not a nicety. trentina's config excludes
+    # `tests/fixtures/boundary-review`, which holds DELIBERATELY vulnerable code
+    # used to grade a reviewer. Analyse without it and the local gate reports a
+    # pile of findings CI does not, which teaches people to ignore the gate.
+    queries, ignores = read_codeql_config(REPO / config)
+    analyze += queries or ["python-security-extended.qls"]
+    return run_codeql(create, analyze, sarif, ignores, gate=bool(cfg.get("codeql_gate", False)))
+
+
+def path_ignored(artifact: str, ignores: list[str]) -> bool:
+    """Does a SARIF artifact URI fall under a `paths-ignore` entry?
+
+    This is the local stand-in for the config the CodeQL CLI will not read, so
+    it has to match CodeQL's own semantics, and those include GLOBS -- `tests/**`
+    and `**/vendor/*` are both legal in a code-scanning config. Matching only
+    literal paths and directory prefixes would silently fail to suppress them,
+    and the local gate would then report findings CI ignores. With
+    `codeql_gate = true` it would fail on them.
+
+    Three forms, because CodeQL accepts all three:
+      - an exact path
+      - a directory, suppressing everything beneath it
+      - a glob, where `**` crosses separators and `*` does not
+    """
+    for entry in ignores:
+        item = entry.strip().rstrip("/")
+        if not item:
+            continue
+        if artifact == item or artifact.startswith(item + "/"):
+            return True
+        if not any(c in item for c in "*?["):
+            continue
+        pattern = _glob_to_regex(item)
+        if re.fullmatch(pattern, artifact) or re.fullmatch(pattern + r"/.*", artifact):
+            return True
+    return False
+
+
+def _glob_to_regex(glob: str) -> str:
+    """Translate a code-scanning path glob to a regex.
+
+    Hand-built rather than handed to `fnmatch`, because fnmatch's `*` crosses
+    `/` -- which is what `**` means and what `*` must not do.
+    """
+    out = ""
+    for part in re.split(r"(\*\*/?|\*|\?)", glob):
+        if part == "**/":
+            out += r"(?:.*/)?"
+        elif part == "**":
+            out += r".*"
+        elif part == "*":
+            out += r"[^/]*"
+        elif part == "?":
+            out += r"[^/]"
+        else:
+            out += re.escape(part)
+    return out
+
+
+def read_codeql_config(path: Path) -> tuple[list[str], list[str]]:
+    """Read `queries:` and `paths-ignore:` out of the Action's config format.
+
+    Parsed here rather than trusted entirely to the CLI flag so that the query
+    set is explicit and the ignore list is available as a backstop filter. The
+    one mapping that matters: a bare suite name like `security-extended` is the
+    Action's shorthand for this language's `.qls`.
+    """
+    if not path.is_file():
+        return [], []
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        cannot(f"cannot read {path}: {exc}")
+    queries: list[str] = []
+    for entry in data.get("queries") or []:
+        uses = (entry or {}).get("uses") if isinstance(entry, dict) else entry
+        if not uses:
+            continue
+        if str(uses).startswith("."):
+            queries.append(str(uses))
+        else:
+            queries.append(f"python-{uses}.qls")
+    ignores = [str(p) for p in (data.get("paths-ignore") or [])]
+    return queries, ignores
+
+
+def run_codeql(
+    create: list[str],
+    analyze: list[str],
+    sarif: Path,
+    ignores: list[str],
+    gate: bool = False,
+) -> int:
+
+    step("codeql database create")
+    rc, _ = run(create, env=project_env())
+    if rc != 0:
+        cannot("codeql could not build a database; nothing was analysed")
+    step("codeql database analyze")
+    rc, _ = run(analyze, env=project_env())
+    if rc != 0:
+        # Analysis failing is not the tool's verdict ON the code -- it means no
+        # verdict was reached. Returning its status would report "found
+        # something" for "could not look", which is the one thing the exit-code
+        # contract forbids.
+        cannot(f"codeql database analyze failed (exit {rc}); nothing was judged")
+    return report_sarif(sarif, ignores, gate)
+
+
+def report_sarif(sarif: Path, ignores: list[str], gate: bool = False) -> int:
+    """Turn a SARIF file into the exit-code contract.
+
+    `database analyze` exits 0 whether or not it found anything, so the verdict
+    has to be computed from the results.
+
+    WHETHER findings block is `[tool.sdlc] codeql_gate`, and it defaults to
+    FALSE, because that is what CI does. GitHub's CodeQL Action uploads SARIF to
+    code scanning: the `CodeQL Analysis` check passes regardless of findings,
+    and each finding becomes an alert that is triaged -- and often dismissed --
+    in the Security tab. Measured on trentina's main: 19 findings on a commit
+    whose CodeQL check is green.
+
+    So blocking locally on any finding would make this hook STRICTER than CI and
+    block every push until all 19 were fixed, which inverts the promise that a
+    green push tier means a green CI. A gate nobody can pass is a gate everybody
+    skips.
+
+    The honest gap: without GitHub's dismissal state this cannot tell a known,
+    accepted finding from a new one, so it reports rather than judges. The fix
+    is a committed baseline so only NEW findings block; that is the next piece
+    of work on this target, not something today's default pretends to do.
+    """
+    try:
+        data = json.loads(sarif.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        cannot(f"codeql wrote no readable SARIF: {exc}")
+    found = 0
+    skipped = 0
+    for run_ in data.get("runs", []):
+        for result in run_.get("results", []):
+            rule = result.get("ruleId", "?")
+            msg = (result.get("message") or {}).get("text", "")
+            locs = result.get("locations") or [{}]
+            phys = locs[0].get("physicalLocation") or {}
+            art = (phys.get("artifactLocation") or {}).get("uri", "?")
+            line = (phys.get("region") or {}).get("startLine", "?")
+            if path_ignored(art, ignores):
+                skipped += 1
+                continue
+            print(f"  {art}:{line} [{rule}] {msg}")
+            found += 1
+    if skipped:
+        print(f"  ({skipped} result(s) in paths-ignore entries, not counted)")
+    if not found:
+        print("codeql: no results")
+        return 0
+    print(f"\ncodeql: {found} result(s)")
+    if gate:
+        return 1
+    print(
+        "NOT blocking: CI's CodeQL check passes with findings too -- they become\n"
+        "code-scanning alerts to triage, not a failed build. Set\n"
+        "[tool.sdlc] codeql_gate = true to block on them here."
+    )
+    return 0
+
+
+TARGETS = {
+    "ruff-check": t_ruff_check,
+    "ruff-format": t_ruff_format,
+    "mypy": t_mypy,
+    "pytest": t_pytest,
+    "gourmand": t_gourmand,
+    "gatehouse": t_gatehouse,
+    "semgrep": t_semgrep,
+    "pip-audit": t_pip_audit,
+    "constitution": t_constitution,
+    "codeql": t_codeql,
+}
+
+# Tier membership is NOT stated here. `.pre-commit-hooks.yaml` in the hooks repo
+# is the single authority, and `bin/sdlc` reads it. Two copies of the tier table
+# is how gates.sh's mypy hook drifted from the script's own resource budget the
+# moment that budget stopped being a constant.
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="sdlc",
+        description="Run CrunchTools Python SDLC checks. Exit 2 means a check "
+        "COULD NOT RUN and is never to be worked around.",
+    )
+    ap.add_argument("targets", nargs="*", help="one or more target names, or 'list'/'versions'")
+    args = ap.parse_args()
+
+    if not args.targets or args.targets == ["list"]:
+        print("targets:")
+        for name in TARGETS:
+            print(f"  {name}")
+        print("\nTiers come from .pre-commit-hooks.yaml, not from this script.")
+        return 0
+
+    if args.targets == ["versions"]:
+        print(f"{'tool':12} {'pinned':24} self-reported")
+        for name, pinned in BAKED.items():
+            print(f"{name:12} {pinned:24} {self_reported(name)}")
+        print(
+            "\nPin the 'pinned' column in CI so a local finding is the CI finding.\n"
+            "Where the two columns disagree, the image tag and the binary "
+            "disagree -- that is the upstream's to fix, and it is shown here "
+            "rather than hidden because a version nobody can see is a version "
+            "nobody can pin."
+        )
+        return 0
+
+    unknown = [t for t in args.targets if t not in TARGETS]
+    if unknown:
+        print(f"sdlc: unknown target(s): {', '.join(unknown)}", file=sys.stderr)
+        print(f"known: {', '.join(TARGETS)}", file=sys.stderr)
+        return CANNOT_RUN
+
+    cfg = settings()
+    worst = 0
+    for name in args.targets:
+        rc = TARGETS[name](cfg)
+        if rc == 0:
+            continue
+        print(f"\nGATE FAILED: {name}", file=sys.stderr)
+        # A later 1 must not mask an earlier 2: "could not run" outranks
+        # "found something", because it is the one a person has to act on.
+        worst = CANNOT_RUN if CANNOT_RUN in (rc, worst) else FOUND
+    return worst
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except CannotRunError as exc:
+        print(f"GATE CANNOT RUN: {exc}", file=sys.stderr)
+        sys.exit(CANNOT_RUN)
+    except KeyboardInterrupt:
+        sys.exit(CANNOT_RUN)
