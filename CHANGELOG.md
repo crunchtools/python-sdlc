@@ -6,6 +6,32 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-11-04
+
+### Added
+
+- **jq, and a stated boundary for the shell test toolbox.** Claude Code hands a
+  hook its event as JSON on stdin, hooks are shell scripts, and jq is the
+  smallest correct way to read JSON from bash. So a repo that ships such a hook
+  has unit tests that run the script as a subprocess -- and those failed here
+  with `jq: command not found`, which is not a verdict about the code. Two
+  repos hit it within a day of the fleet conversion (crunchtools/josui's
+  entrypoint tests; 4 of crunchtools/claude-agent's 103 shell-hook tests), and
+  both declare `Requires: jq` in their own package manifests.
+
+  The alternative was to run those tests inside each repo's own image. That is
+  right for a per-repo runtime dependency and wrong here: claude-agent's
+  reference Containerfile installs the PUBLISHED package, so building it in the
+  gate would test the last release rather than the pull request.
+
+  The boundary now lives as a comment above the `dnf install` where it is read:
+  beyond the checks, this image carries bash, coreutils, git, curl, python3 and
+  jq, and nothing else. A test that reaches for socat, nc, node or a repo's own
+  runtime is an integration test and belongs in `pytest-in-image` against that
+  repo's image, or in a new kind. `tests/contract.sh` now asserts jq, curl and
+  bash execute, so the toolbox is a tested property rather than an accident of
+  the base image.
+
 ## [0.3.5] - 2026-11-04
 
 ### Changed

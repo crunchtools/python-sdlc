@@ -87,7 +87,23 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
 # Hummingbird does not ship it. Without it `codeql database create` fails with
 # "Could not find a valid Python distribution" on an image that obviously has
 # one.
-RUN dnf install -y git-core tar zstd which \
+#
+# THE SHELL TEST TOOLBOX, and its boundary. Beyond the checks themselves this
+# image carries exactly: bash, coreutils, git, curl, python3 and jq. Nothing
+# else. jq is here because Claude Code hands hooks their event as JSON on
+# stdin, hooks are shell scripts, and jq is the smallest correct way to read
+# JSON from bash -- so a repo that ships such a hook has unit tests that run
+# the script as a subprocess, and two of them (crunchtools/josui,
+# crunchtools/claude-agent) declare `Requires: jq` in their own packages. That
+# is a shared protocol, not one repo's quirk.
+#
+# A test that reaches for socat, nc, node, or a repo's own runtime is an
+# integration test: it runs through the `pytest-in-image` kind against the
+# repo's OWN built image, or it gets a new kind. It does not get a package
+# here. Without that line this list becomes a host-tools grab bag, one repo at
+# a time. tests/contract.sh asserts the toolbox, so it is a tested property
+# rather than an accident of the base image.
+RUN dnf install -y git-core tar zstd which jq \
  && dnf clean all \
  && rm -rf /var/cache/dnf
 
