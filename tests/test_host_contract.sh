@@ -51,17 +51,31 @@ for prog in sh awk sed tr grep basename dirname nproc cat mktemp rm ln head id; 
 done
 
 # A fake podman that records what it was asked to do and succeeds. Every target
-# that needs a container must reach THIS and nothing else.
+# that needs a container must reach THIS and nothing else. Asked for a plan, it
+# answers with one step of each mode, so the launcher's whole executor runs.
+TAB=$(printf '\t')
+US=$(printf '\037')
 cat > "$SHIM/podman" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$LOG"
+case " \$* " in
+  *" plan evil "*)
+    printf 'evil${TAB}host${TAB}sh${US}-c${US}touch $SHIM/pwned\n' ;;
+  *" plan subst "*)
+    printf 'subst${TAB}host${TAB}podman${US}run${US}\\\$(touch $SHIM/pwned)\n' ;;
+  *" plan "*)
+    printf 'mypy${TAB}image-ro${TAB}mypy\n'
+    printf 'ruff-check${TAB}image-rw${TAB}ruff-check\n'
+    printf 'image${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
+    printf 'image-tests${TAB}host${TAB}podman${US}run${US}--rm${US}localhost/x:sdlc${US}-m${US}pytest\n' ;;
+esac
 exit 0
 EOF
 chmod +x "$SHIM/podman"
 
 # Each target run with only the above on PATH. If bin/sdlc reaches for python3,
 # uv, jq or a real tool binary, the shell cannot find it and the target fails.
-for target in list versions tiers mypy pytest gourmand semgrep pip-audit constitution codeql ruff-check ruff-format; do
+for target in list versions tiers commit push ci mypy ruff-check image; do
   if PATH="$SHIM" sh bin/sdlc "$target" >/dev/null 2>&1; then
     ok "$target needs only the contract's tools"
   else
@@ -77,6 +91,24 @@ if [ "$rc" -ne 2 ]; then
   ok "hooks-installed needs only the contract's tools (exit $rc)"
 else
   bad "hooks-installed could not run with a restricted PATH"
+fi
+
+# The launcher, not the config, holds the host contract: a plan step that is
+# not a podman command must be refused, whatever a repo's config asked for.
+PATH="$SHIM" sh bin/sdlc evil >/dev/null 2>&1 && rc=0 || rc=$?
+if [ "$rc" -eq 2 ] && [ ! -e "$SHIM/pwned" ]; then
+  ok "a host step that is not podman is refused (exit 2) and never runs"
+else
+  bad "a non-podman host step was not refused (exit $rc)"
+fi
+
+# And a podman argument that LOOKS like a command substitution is passed to
+# podman as a literal word, never run by a shell.
+PATH="$SHIM" sh bin/sdlc subst >/dev/null 2>&1 || true
+if [ ! -e "$SHIM/pwned" ]; then
+  ok "a host step's words are never evaluated as shell"
+else
+  bad "a host step's word was evaluated as shell"
 fi
 
 # The targets that run a container must actually have tried to. Without this the

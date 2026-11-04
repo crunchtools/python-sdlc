@@ -24,11 +24,6 @@ on:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
-  # Gourmand and Gatehouse dispatch this when they release, because this image
-  # bakes them. That is what keeps a consuming repo's one pin honest without
-  # anyone remembering to bump something.
-  repository_dispatch:
-    types: [parent-image-updated]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
@@ -58,8 +53,7 @@ jobs:
           set -eu
           podman run --rm -v "$PWD:/mnt:ro" -w /mnt \
             docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh \
-            tests/test_host_contract.sh tests/test_tiers.sh
-          tests/test_tiers.sh
+            tests/test_host_contract.sh
           tests/test_host_contract.sh
 
       - name: Build
@@ -84,24 +78,16 @@ jobs:
       - name: Contract test
         run: tests/contract.sh "localhost/python-sdlc:$GITHUB_SHA"
 
-      # The Container Image profile recommends a CVE scan, and this is the one
-      # place Trivy belongs: it reads the OS packages in the image layers
-      # (glibc, openssl, zlib), which pip-audit never sees because pip-audit
-      # reads a Python lockfile. Scott's call is that Trivy is CI-only, and a
-      # container-image repo's CI is exactly where the image exists.
-      #
-      # `continue-on-error` per the profile: a base-image CVE with no fix
-      # available must not block a tooling release, but it must be visible.
-      - name: Trivy
-        continue-on-error: true
+      # The planner and the CodeQL path matching, run in the image because
+      # they need its interpreter and PyYAML.
+      - name: Unit tests
         run: |
           set -eu
-          podman save --format docker-archive \
-            "localhost/python-sdlc:$GITHUB_SHA" -o /tmp/image.tar
-          podman run --rm -v /tmp:/tmp:z \
-            docker.io/aquasec/trivy:0.58.1 image \
-              --input /tmp/image.tar --scanners vuln \
-              --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
+          for t in tests/test_plan.py tests/test_codeql_globs.py; do
+            podman run --rm -v "$PWD:/src:ro,z" -w /src \
+              --entrypoint /opt/constitution-venv/bin/python3 \
+              "localhost/python-sdlc:$GITHUB_SHA" "$t"
+          done
 
       - name: Log in to Quay
         if: github.event_name != 'pull_request'
@@ -201,3 +187,34 @@ jobs:
               echo "promoted $version"
               ;;
           esac
+
+  # Step 3 of a release (update-tools.yml describes all three): once a version
+  # tag's image is promoted -- so the tag a consumer will pull exists -- open a
+  # bump PR in every repo that pins python-sdlc. Each repo's own CI decides
+  # whether its bump lands.
+  bump-consumers:
+    name: Bump every repo that pins python-sdlc
+    needs: promote
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Mint CI token
+        id: ci-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CRUNCHTOOLS_CI_APP_ID || secrets.CRUNCHTOOLS_CI_APP_ID }}
+          private-key: ${{ secrets.CRUNCHTOOLS_CI_APP_KEY }}
+          owner: crunchtools
+
+      - name: Open the bump pull requests
+        env:
+          GH_TOKEN: ${{ steps.ci-token.outputs.token }}
+        run: |
+          gh auth setup-git
+          python3 scripts/bump_consumers.py "$GITHUB_REF_NAME"

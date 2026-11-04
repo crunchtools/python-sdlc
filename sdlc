@@ -33,7 +33,9 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import NoReturn
 
 import yaml
 
@@ -100,7 +102,7 @@ class CannotRunError(Exception):
     """Raised for anything that is not the tool's own verdict. Becomes exit CANNOT_RUN."""
 
 
-def cannot(msg: str) -> None:
+def cannot(msg: str) -> NoReturn:
     raise CannotRunError(msg)
 
 
@@ -111,32 +113,405 @@ def step(msg: str) -> None:
 # --------------------------------------------------------------- repo settings
 
 
-def settings() -> dict:
-    """The `[tool.sdlc]` table, which is the ONE declared seam per repo.
+def pyproject() -> dict:
+    """The repo's pyproject.toml, or {} when it has none.
 
-    gates.sh hard-codes trentina's policy in three places -- `GEMINI_API_KEY`
-    for the suite, `src/` as the scan path, `.semgrep/run-tests.sh` as the rule
-    tests. None of that is Python-generic, so a fleet-wide script has to read it
-    rather than assume it. Everything here has a default that is right for a
-    repo laid out the way the fleet lays repos out.
-
-    A repo with NO pyproject.toml is not an error here. Three targets --
-    `constitution`, `gourmand` and `gatehouse` -- are language-agnostic, and
-    this image's own repo is a Container Image profile repo with no
-    pyproject.toml that still wants all three. Demanding one made the tool
-    unable to check itself, which is how this was found.
-
-    The Python-specific targets assert the project separately, through
-    `need_project()`.
+    A repo with NO pyproject.toml is not an error here. `constitution`,
+    `gourmand` and `gatehouse` are language-agnostic, and this image's own repo
+    has none of its own policy to state. The Python-specific checks assert the
+    project separately, through `need_project()`.
     """
     path = REPO / "pyproject.toml"
     if not path.is_file():
         return {}
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        return tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         cannot(f"cannot read {path}: {exc}")
-    return data.get("tool", {}).get("sdlc", {}) or {}
+
+
+# ------------------------------------------------------------ the three commands
+#
+# One rule for all three config blocks, so what you read is what runs:
+#
+#   [tool.sdlc.commit]   `sdlc commit`, the pre-commit hook
+#   [tool.sdlc.push]     `sdlc push`, the pre-push hook
+#   [tool.sdlc.ci]       `sdlc ci`, the CI job named `sdlc ci`
+#
+# Each command runs its defaults. A block's `checks` ADDS to them and its `skip`
+# removes from them. A check that needs settings has its own table,
+# `[tool.sdlc.<command>.<check>]`, and a check the image does not have built in
+# must say what `kind` it is. `sdlc tiers` prints exactly what will run.
+
+COMMANDS = ("commit", "push", "ci")
+
+DEFAULTS = {
+    # Seconds, offline, free: what rewrites your code, plus the one check that
+    # notices the push hook was never installed.
+    "commit": ["ruff-check", "ruff-format", "hooks-installed"],
+    # Everything that renders a verdict, once, over origin/<default>...HEAD.
+    # Never a container build: that is minutes, and a push you wait minutes for
+    # is a push people stop making.
+    "push": [
+        "mypy",
+        "pytest",
+        "gourmand",
+        "gatehouse",
+        "semgrep",
+        "pip-audit",
+        "constitution",
+        "codeql",
+    ],
+}
+
+# CI runs push's checks except these two, which it gets from their own
+# workflows: Gatehouse's posts PR comments and must never be a blocking check,
+# and the constitution requires Gourmand's CI job to be the shared reusable one.
+# Running them again here would pay twice and make the reviewer blocking.
+CI_EXCLUDES = ("gourmand", "gatehouse")
+
+# Built-in checks that are a question about the developer's clone or need its
+# git credentials, so bin/sdlc answers them on the host.
+LOCAL_CHECKS = ("hooks-installed", "gatehouse")
+
+# Built-in checks that write the tree. ruff rewrites your source, which is the
+# point; gourmand writes .gourmand-cache/ and fails on a read-only mount.
+WRITES_TREE = ("ruff-check", "ruff-format", "gourmand")
+
+# Words that are commands of this script, so no check may be named one.
+RESERVED = (*COMMANDS, "plan", "tiers", "list", "versions", "pytest-deps", "codeql-baseline")
+
+
+def sdlc_config() -> dict:
+    """`[tool.sdlc]`, checked for shape before anything trusts it."""
+    cfg = pyproject().get("tool", {}).get("sdlc", {}) or {}
+    stray = sorted(set(cfg) - set(COMMANDS))
+    if stray:
+        cannot(
+            f"[tool.sdlc] has {', '.join(stray)}; the only blocks are "
+            f"[tool.sdlc.commit], [tool.sdlc.push] and [tool.sdlc.ci]"
+        )
+    # The WHOLE config is checked whichever command runs, so a typo in the ci
+    # block is found on the next commit rather than in CI.
+    for command in COMMANDS:
+        for check in resolve(cfg, command):
+            kind_of(cfg, check)
+    return cfg
+
+
+def block(cfg: dict, command: str) -> dict:
+    value = cfg.get(command, {})
+    if not isinstance(value, dict):
+        cannot(f"[tool.sdlc.{command}] must be a table")
+    return value
+
+
+def names(value: object, where: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        cannot(f"{where} must be a list of check names")
+    return list(value)
+
+
+def skipped() -> set[str]:
+    """`SDLC_SKIP=gatehouse,codeql` -- the escape hatch for one false positive.
+
+    The push tier is one pre-commit hook now, so pre-commit's own `SKIP=` would
+    skip all of it or none of it. A finding skipped here still has to be
+    answered on the pull request.
+    """
+    return {s.strip() for s in os.environ.get("SDLC_SKIP", "").split(",") if s.strip()}
+
+
+def resolve(cfg: dict, command: str) -> list[str]:
+    """The checks `command` runs in this repo, in order."""
+    if command == "ci":
+        base = [c for c in resolve(cfg, "push") if c not in CI_EXCLUDES]
+    else:
+        base = list(DEFAULTS[command])
+    own = block(cfg, command)
+    drop = set(names(own.get("skip"), f"[tool.sdlc.{command}] skip"))
+    if command != "ci":
+        drop |= skipped()
+    out = [c for c in base if c not in drop]
+    for name in names(own.get("checks"), f"[tool.sdlc.{command}] checks"):
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def check_settings(cfg: dict, name: str) -> dict:
+    """A check's own table, wherever it is written. Names are unique."""
+    found = [
+        (command, tbl)
+        for command in COMMANDS
+        for key, tbl in block(cfg, command).items()
+        if key == name and isinstance(tbl, dict)
+    ]
+    if len(found) > 1:
+        cannot(f"{name} has a settings table in more than one block; check names are unique")
+    return found[0][1] if found else {}
+
+
+def kind_of(cfg: dict, name: str) -> str | None:
+    """None for a built-in check; the kind for a repo's own."""
+    settings = check_settings(cfg, name)
+    if name in BUILTINS:
+        if "kind" in settings:
+            cannot(f"{name} is built in; its table cannot set a kind")
+        return None
+    if name in RESERVED:
+        cannot(f"{name} is a command of this tool and cannot be a check name")
+    kind = settings.get("kind")
+    if kind is not None and not isinstance(kind, str):
+        cannot(f"{name}: kind must be a name, one of {', '.join(KINDS)}")
+    if kind is None:
+        cannot(
+            f"{name} is not a built-in check, so it needs a table "
+            f"[tool.sdlc.<command>.{name}] that says what kind it is "
+            f"(one of: {', '.join(KINDS)})"
+        )
+    if kind not in KINDS:
+        cannot(f"{name} has kind {kind!r}; the kinds are {', '.join(KINDS)}")
+    return kind
+
+
+# -------------------------------------------------------------------- the plan
+#
+# The host half (bin/sdlc) is POSIX shell and cannot read TOML, so it asks this
+# script what to do and then does it. One line per step, three fields split by a
+# tab:
+#
+#     <check> TAB <mode> TAB <payload>
+#
+# where mode is:
+#     image-ro / image-rw   run `sdlc <payload>` in this image, tree ro or rw
+#     local                 bin/sdlc's own check named <payload>
+#     host                  <payload> is a podman argv, its words joined by
+#                           the ASCII unit separator (0x1f)
+#
+# bin/sdlc refuses a host line that does not start with `podman`, so the host
+# contract is held by the launcher rather than trusted to the config. It splits
+# the argv on the separator and never `eval`s it, and no field may contain a
+# tab, a newline or the separator: a config value carrying one could otherwise
+# forge a second plan line, which is how a repo's TOML would reach the host's
+# shell.
+
+UNIT_SEPARATOR = "\x1f"
+FORBIDDEN_IN_PLAN = ("\t", "\n", "\r", UNIT_SEPARATOR)
+
+
+def plain(value: str, where: str) -> str:
+    if any(c in value for c in FORBIDDEN_IN_PLAN):
+        cannot(f"{where} contains a tab, a newline or a control separator, which is refused")
+    return value
+
+
+def host_step(name: str, argv: list[str]) -> tuple[str, str, str]:
+    return (name, "host", UNIT_SEPARATOR.join(plain(a, name) for a in argv))
+
+
+def plan_lines(cfg: dict, check: str) -> list[tuple[str, str, str]]:
+    kind = kind_of(cfg, check)
+    if kind is not None:
+        return KINDS[kind](check, check_settings(cfg, check))
+    if check in LOCAL_CHECKS:
+        return [(check, "local", check)]
+    return [(check, "image-rw" if check in WRITES_TREE else "image-ro", check)]
+
+
+def t_plan(target: str) -> int:
+    cfg = sdlc_config()
+    checks = resolve(cfg, target) if target in COMMANDS else [target]
+    for check in checks:
+        if check not in BUILTINS and kind_of(cfg, check) is None:
+            cannot(f"unknown check: {check}")
+        for name, mode, payload in plan_lines(cfg, check):
+            plain(name, "a check name")
+            if mode != "host":
+                plain(payload, name)
+            print(f"{name}\t{mode}\t{payload}")
+    return CLEAN
+
+
+def t_tiers() -> int:
+    cfg = sdlc_config()
+    for command in COMMANDS:
+        print(f"sdlc {command}:")
+        for check in resolve(cfg, command):
+            kind = kind_of(cfg, check)
+            print(f"  {check}" + (f"  ({kind})" if kind else ""))
+    if skipped():
+        print(f"\nSDLC_SKIP is skipping: {', '.join(sorted(skipped()))}")
+    return CLEAN
+
+
+# ------------------------------------------------------------------- the kinds
+#
+# A repo's own checks are named kinds with parameters, never shell. A repo that
+# needs something these cannot express gets a new kind HERE, so the config
+# stays something a person can read.
+
+
+def project_name() -> str:
+    return os.environ.get("SDLC_PROJECT", REPO.name)
+
+
+def default_image_tag() -> str:
+    return f"localhost/{project_name()}:sdlc"
+
+
+def token(value: object) -> str:
+    """Resolve `@project.version`, `@git.sha` and `@now`; pass anything else."""
+    text = str(value)
+    if not text.startswith("@"):
+        return text
+    if text == "@project.version":
+        version = pyproject().get("project", {}).get("version")
+        if not version:
+            cannot("@project.version: pyproject.toml has no [project] version")
+        return str(version)
+    if text == "@git.sha":
+        try:
+            proc = subprocess.run(
+                ["git", "-c", "safe.directory=*", "rev-parse", "HEAD"],
+                cwd=REPO,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            cannot(f"@git.sha: cannot run git: {exc}")
+        if proc.returncode != 0 or not proc.stdout.strip():
+            cannot("@git.sha: git could not read HEAD")
+        return proc.stdout.strip()
+    if text == "@now":
+        return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cannot(f"unknown value {text}; known: @project.version, @git.sha, @now")
+
+
+def in_repo(name: str, key: str, value: object) -> str:
+    """A repo-relative path that stays inside the repo, or a refusal.
+
+    A setting that names a path is repo-controlled, and these paths reach a
+    host bind mount or a build context. `../../.config` or `/` would hand the
+    host's files to the repo's own code, so anything absolute or outside the
+    tree is refused.
+    """
+    text = str(value)
+    target = (REPO / text).resolve()
+    if Path(text).is_absolute() or not target.is_relative_to(REPO.resolve()):
+        cannot(f"{name}: {key} {text!r} is outside the repository")
+    if not target.exists():
+        cannot(f"{name}: {key} {text!r} does not exist")
+    return str(target.relative_to(REPO.resolve())) or "."
+
+
+def table(settings: dict, key: str) -> dict:
+    value = settings.get(key, {})
+    if not isinstance(value, dict):
+        cannot(f"{key} must be a table")
+    return value
+
+
+def kind_image_build(name: str, settings: dict) -> list[tuple[str, str, str]]:
+    """Build the repo's image and leave it at a known tag.
+
+    The tag is what `pytest-in-image` runs and what a CI publish step picks up,
+    so the image that is published is the image that was tested.
+    """
+    containerfile = in_repo(name, "containerfile", settings.get("containerfile", "Containerfile"))
+    context = in_repo(name, "context", settings.get("context", "."))
+    argv = ["podman", "build", "-f", containerfile]
+    for key, value in table(settings, "build_args").items():
+        argv += ["--build-arg", f"{key}={token(value)}"]
+    for key, value in table(settings, "labels").items():
+        argv += ["--label", f"{key}={token(value)}"]
+    argv += ["-t", str(settings.get("tag", default_image_tag())), context]
+    return [host_step(name, argv)]
+
+
+def kind_pytest_in_image(name: str, settings: dict) -> list[tuple[str, str, str]]:
+    """Run tests INSIDE the built image, locked down the way production runs it.
+
+    For tests that only mean something there: that a native library loads in a
+    slim runtime, that the server starts and answers. pytest is not added to the
+    image -- it is installed once into the cache volume, at the versions the
+    repo's own uv.lock pins, and put on PYTHONPATH.
+    """
+    tests = names(settings.get("tests"), f"{name}.tests")
+    if not tests:
+        cannot(f"{name}: tests is required -- the paths to run inside the image")
+    host = os.environ.get("SDLC_HOST_REPO")
+    volume = os.environ.get("SDLC_CACHE_VOLUME")
+    if not host or not volume:
+        cannot(f"{name}: run through bin/sdlc, which supplies the host paths")
+    argv = [
+        "podman",
+        "run",
+        "--rm",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,exec,size=2g,mode=1777",
+        "--cap-drop=all",
+        "--security-opt",
+        "no-new-privileges",
+        "-v",
+        f"{volume}:/sdlc-cache:ro",
+        "-e",
+        f"PYTHONPATH=/sdlc-cache/pytest/{project_name()}",
+        "-e",
+        "HOME=/tmp",
+        "-w",
+        "/repo",
+        "--entrypoint",
+        "python",
+    ]
+    if not settings.get("network", False):
+        argv += ["--network", "none"]
+    for mount in names(settings.get("mounts", ["tests"]), f"{name}.mounts"):
+        rel = in_repo(name, "mount", mount)
+        argv += ["-v", f"{host}/{rel}:/repo/{rel}:ro,z"]
+    for key, value in table(settings, "env").items():
+        argv += ["-e", f"{key}={token(value)}"]
+    argv += [str(settings.get("image", default_image_tag()))]
+    argv += ["-m", "pytest", "-p", "no:cacheprovider"]
+    argv += names(settings.get("args", ["-q", "-rfE"]), f"{name}.args")
+    argv += tests
+    return [(name, "image-ro", "pytest-deps"), host_step(name, argv)]
+
+
+KINDS = {
+    "image-build": kind_image_build,
+    "pytest-in-image": kind_pytest_in_image,
+}
+
+# pytest and the plugins an in-image run needs. Pure Python, so one install
+# serves a target image on any Python the lock admits.
+PYTEST_PACKAGES = ("pytest", "pytest-asyncio", "pytest-xdist", "pytest-timeout")
+
+
+def t_pytest_deps() -> int:
+    """Install the lock's pytest into the cache volume for `pytest-in-image`."""
+    need_lock_dep("pytest")
+    lock = tomllib.loads((REPO / "uv.lock").read_text(encoding="utf-8"))
+    pins = sorted(
+        f"{pkg['name']}=={pkg['version']}"
+        for pkg in lock.get("package", [])
+        if pkg.get("name") in PYTEST_PACKAGES and pkg.get("version")
+    )
+    target = CACHE / "pytest" / project_name()
+    stamp = target / ".sdlc-pins"
+    if stamp.is_file() and stamp.read_text(encoding="utf-8") == "\n".join(pins):
+        return CLEAN
+    shutil.rmtree(target, ignore_errors=True)
+    step(f"install {', '.join(pins)} for the in-image run")
+    rc, _ = run(["uv", "pip", "install", "--target", str(target), *pins], env=project_env())
+    if rc != 0:
+        cannot("could not install pytest for the in-image run")
+    stamp.write_text("\n".join(pins), encoding="utf-8")
+    return CLEAN
 
 
 def need_project() -> None:
@@ -147,21 +522,6 @@ def need_project() -> None:
             "check. constitution, gourmand and gatehouse work on any repo; "
             "ruff, mypy, pytest, semgrep and pip-audit need a Python project."
         )
-
-
-def paths_for(cfg: dict, key: str, default: list[str]) -> list[str]:
-    """A path list from `[tool.sdlc]`, keeping only what exists.
-
-    Filtering matters: ruff and semgrep both exit non-zero on a path that is not
-    there, which would read as "the check found something".
-    """
-    wanted = cfg.get(key, default)
-    if isinstance(wanted, str):
-        wanted = [wanted]
-    present = [p for p in wanted if (REPO / p).exists()]
-    if not present:
-        cannot(f"none of the {key} paths exist in the repo: {wanted}")
-    return present
 
 
 def project_env() -> dict[str, str]:
@@ -278,28 +638,31 @@ def sync_project(env: dict[str, str]) -> None:
 # ---------------------------------------------------------------------- targets
 
 
-def t_ruff_check(cfg: dict) -> int:
+# Every check takes its own settings table, `[tool.sdlc.<command>.<check>]`,
+# empty when the repo wrote none. Paths are NOT settings here: each tool reads
+# its own config (`[tool.ruff]` excludes, `[tool.mypy] files`,
+# `[tool.pytest] testpaths`), so there is one place to say what gets checked.
+
+
+def t_ruff_check(s: dict) -> int:
     need_project()
-    paths = paths_for(cfg, "lint_paths", ["src", "tests"])
-    step(f"ruff check --fix {' '.join(paths)}")
-    return run(["ruff", "check", "--fix", *paths])[0]
+    step("ruff check --fix .")
+    return run(["ruff", "check", "--fix", "."])[0]
 
 
-def t_ruff_format(cfg: dict) -> int:
+def t_ruff_format(s: dict) -> int:
     need_project()
-    paths = paths_for(cfg, "lint_paths", ["src", "tests"])
-    step(f"ruff format {' '.join(paths)}")
-    return run(["ruff", "format", *paths])[0]
+    step("ruff format .")
+    return run(["ruff", "format", "."])[0]
 
 
-def t_mypy(cfg: dict) -> int:
+def t_mypy(s: dict) -> int:
+    """Type check what `[tool.mypy] files` names. mypy's own exit 2 is ours too."""
     need_project()
     need_lock_dep("mypy")
     env = project_env()
     sync_project(env)
-    paths = paths_for(cfg, "type_paths", ["src"])
-    name = os.environ.get("SDLC_PROJECT", REPO.name)
-    step(f"mypy {' '.join(paths)}")
+    step("mypy")
     return run(
         [
             "uv",
@@ -308,23 +671,21 @@ def t_mypy(cfg: dict) -> int:
             "--all-extras",
             "mypy",
             "--cache-dir",
-            str(CACHE / "mypy" / name),
-            *paths,
+            str(CACHE / "mypy" / project_name()),
         ],
         env=env,
     )[0]
 
 
-def t_pytest(cfg: dict) -> int:
+def t_pytest(s: dict) -> int:
     need_project()
     need_lock_dep("pytest")
     env = project_env()
-    # Per-repo test environment: the one trentina seam that cannot be guessed.
-    for key, value in (cfg.get("test_env") or {}).items():
-        env[str(key)] = str(value)
+    for key, value in table(s, "env").items():
+        env[str(key)] = token(value)
     sync_project(env)
     jobs = os.environ.get("SDLC_JOBS", "0")
-    args = cfg.get("pytest_args", ["-q", "-rfE"])
+    args = names(s.get("args", ["-q", "-rfE"]), "pytest.args")
     step("pytest")
     cmd = [
         "uv",
@@ -342,12 +703,12 @@ def t_pytest(cfg: dict) -> int:
     return run(cmd, env=env)[0]
 
 
-def t_gourmand(cfg: dict) -> int:
+def t_gourmand(s: dict) -> int:
     step("gourmand check --full")
     return run(["gourmand", "check", "--full", "."])[0]
 
 
-def t_gatehouse(cfg: dict) -> int:
+def t_gatehouse(s: dict) -> int:
     """Review the branch. The diff arrives on stdin, computed by the host.
 
     It is the host's job because the diff needs origin fetched, which needs the
@@ -366,18 +727,23 @@ def t_gatehouse(cfg: dict) -> int:
     return run(cmd, stdin=diff)[0]
 
 
-def t_semgrep(cfg: dict) -> int:
+def t_semgrep(s: dict) -> int:
+    """The repo's own rules. Semgrep has no file-based scan list, so `paths`
+    is the one path setting here; `.semgrepignore` narrows it further."""
     need_project()
-    config = cfg.get("semgrep_config", ".semgrep")
+    config = str(s.get("config", ".semgrep"))
     if not (REPO / config).exists():
-        cannot(f"semgrep config {config} does not exist; set tool.sdlc.semgrep_config")
-    tests = cfg.get("semgrep_tests", ".semgrep/run-tests.sh")
+        cannot(f"semgrep config {config} does not exist; set config in its table, or skip it")
+    tests = str(s.get("tests", ".semgrep/run-tests.sh"))
     if (REPO / tests).is_file():
         step(f"semgrep rule tests ({tests})")
         rc, _ = run(["sh", tests], env=project_env())
         if rc != 0:
             return rc
-    paths = paths_for(cfg, "scan_paths", ["src"])
+    paths = names(s.get("paths", ["."]), "semgrep.paths")
+    missing = [p for p in paths if not (REPO / p).exists()]
+    if missing:
+        cannot(f"semgrep paths do not exist: {', '.join(missing)}")
     step(f"semgrep scan --config {config}")
     return run(
         ["semgrep", "scan", "--config", config, "--error", "--metrics=off", *paths],
@@ -385,7 +751,7 @@ def t_semgrep(cfg: dict) -> int:
     )[0]
 
 
-def t_pip_audit(cfg: dict) -> int:
+def t_pip_audit(s: dict) -> int:
     """Audit the project's locked dependencies, and GATE on it.
 
     17 repos in the fleet run this as `pip-audit … || true`, which means the
@@ -425,7 +791,7 @@ def t_pip_audit(cfg: dict) -> int:
     return rc
 
 
-def t_constitution(cfg: dict) -> int:
+def t_constitution(s: dict) -> int:
     """Validate the repo's manifest against the constitution IT pins.
 
     The constitution is cloned at the tag the repo's own manifest names, never
@@ -435,23 +801,23 @@ def t_constitution(cfg: dict) -> int:
     its own directory, so a partial copy makes its pin, file and version checks
     silently vanish rather than fail.
     """
-    manifest = Path(cfg.get("constitution", ".specify/memory/constitution.md"))
+    manifest = Path(str(s.get("manifest", ".specify/memory/constitution.md")))
     if not (REPO / manifest).is_file():
         cannot(f"{manifest} does not exist")
     return run(["sdlc-validate", str(manifest)], env=project_env())[0]
 
 
-def t_codeql(cfg: dict) -> int:
+def t_codeql(s: dict) -> int:
     default_config = ".github/codeql/codeql-config.yml"
-    config = cfg.get("codeql_config", default_config)
+    config = str(s.get("config", default_config))
     # A config the repo NAMED and that is not there is a missing config path,
     # which the contract says is a 2 -- silently falling back to a default query
     # suite would run a different analysis than the repo asked for and call it a
     # pass. A repo that simply has no config, and named none, gets the default
     # suite; that is not a missing path.
     if config != default_config and not (REPO / config).is_file():
-        cannot(f"tool.sdlc.codeql_config names {config}, which does not exist")
-    db = CACHE / "codeql" / os.environ.get("SDLC_PROJECT", REPO.name)
+        cannot(f"codeql config {config} does not exist")
+    db = CACHE / "codeql" / project_name()
     sarif = Path("/tmp/codeql-results.sarif")
     shutil.rmtree(db, ignore_errors=True)
     # An unwritable cache is a 2, not a traceback and not a 1. The same bug in
@@ -496,7 +862,8 @@ def t_codeql(cfg: dict) -> int:
     # pile of findings CI does not, which teaches people to ignore the gate.
     queries, ignores = read_codeql_config(REPO / config)
     analyze += queries or ["python-security-extended.qls"]
-    return run_codeql(create, analyze, sarif, ignores, gate=bool(cfg.get("codeql_gate", False)))
+    run_codeql(create, analyze, sarif)
+    return report_sarif(sarif, ignores, baseline_path(s))
 
 
 def path_ignored(artifact: str, ignores: list[str]) -> bool:
@@ -506,8 +873,8 @@ def path_ignored(artifact: str, ignores: list[str]) -> bool:
     it has to match CodeQL's own semantics, and those include GLOBS -- `tests/**`
     and `**/vendor/*` are both legal in a code-scanning config. Matching only
     literal paths and directory prefixes would silently fail to suppress them,
-    and the local gate would then report findings CI ignores. With
-    `codeql_gate = true` it would fail on them.
+    and the local gate would then report -- and fail on -- findings CI
+    ignores.
 
     Three forms, because CodeQL accepts all three:
       - an exact path
@@ -576,14 +943,8 @@ def read_codeql_config(path: Path) -> tuple[list[str], list[str]]:
     return queries, ignores
 
 
-def run_codeql(
-    create: list[str],
-    analyze: list[str],
-    sarif: Path,
-    ignores: list[str],
-    gate: bool = False,
-) -> int:
-
+def run_codeql(create: list[str], analyze: list[str], sarif: Path) -> None:
+    """Build the database and analyse it, or fail as 'could not run'."""
     step("codeql database create")
     rc, _ = run(create, env=project_env())
     if rc != 0:
@@ -592,72 +953,99 @@ def run_codeql(
     rc, _ = run(analyze, env=project_env())
     if rc != 0:
         # Analysis failing is not the tool's verdict ON the code -- it means no
-        # verdict was reached. Returning its status would report "found
-        # something" for "could not look", which is the one thing the exit-code
-        # contract forbids.
+        # verdict was reached, which the exit-code contract makes a 2.
         cannot(f"codeql database analyze failed (exit {rc}); nothing was judged")
-    return report_sarif(sarif, ignores, gate)
 
 
-def report_sarif(sarif: Path, ignores: list[str], gate: bool = False) -> int:
-    """Turn a SARIF file into the exit-code contract.
+def baseline_path(s: dict) -> Path:
+    return REPO / str(s.get("baseline", ".sdlc/codeql-baseline.json"))
 
-    `database analyze` exits 0 whether or not it found anything, so the verdict
-    has to be computed from the results.
 
-    WHETHER findings block is `[tool.sdlc] codeql_gate`, and it defaults to
-    FALSE, because that is what CI does. GitHub's CodeQL Action uploads SARIF to
-    code scanning: the `CodeQL Analysis` check passes regardless of findings,
-    and each finding becomes an alert that is triaged -- and often dismissed --
-    in the Security tab. Measured on trentina's main: 19 findings on a commit
-    whose CodeQL check is green.
-
-    So blocking locally on any finding would make this hook STRICTER than CI and
-    block every push until all 19 were fixed, which inverts the promise that a
-    green push tier means a green CI. A gate nobody can pass is a gate everybody
-    skips.
-
-    The honest gap: without GitHub's dismissal state this cannot tell a known,
-    accepted finding from a new one, so it reports rather than judges. The fix
-    is a committed baseline so only NEW findings block; that is the next piece
-    of work on this target, not something today's default pretends to do.
-    """
+def sarif_findings(sarif: Path, ignores: list[str]) -> list[dict]:
+    """Every result outside `paths-ignore`, with the key a baseline matches on."""
     try:
         data = json.loads(sarif.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         cannot(f"codeql wrote no readable SARIF: {exc}")
-    found = 0
-    skipped = 0
+    out = []
     for run_ in data.get("runs", []):
         for result in run_.get("results", []):
-            rule = result.get("ruleId", "?")
-            msg = (result.get("message") or {}).get("text", "")
-            locs = result.get("locations") or [{}]
-            phys = locs[0].get("physicalLocation") or {}
-            art = (phys.get("artifactLocation") or {}).get("uri", "?")
-            line = (phys.get("region") or {}).get("startLine", "?")
-            if path_ignored(art, ignores):
-                skipped += 1
+            phys = ((result.get("locations") or [{}])[0]).get("physicalLocation") or {}
+            uri = (phys.get("artifactLocation") or {}).get("uri", "?")
+            if path_ignored(uri, ignores):
                 continue
-            print(f"  {art}:{line} [{rule}] {msg}")
-            found += 1
-    if skipped:
-        print(f"  ({skipped} result(s) in paths-ignore entries, not counted)")
-    if not found:
-        print("codeql: no results")
-        return 0
-    print(f"\ncodeql: {found} result(s)")
-    if gate:
-        return 1
-    print(
-        "NOT blocking: CI's CodeQL check passes with findings too -- they become\n"
-        "code-scanning alerts to triage, not a failed build. Set\n"
-        "[tool.sdlc] codeql_gate = true to block on them here."
-    )
-    return 0
+            line = (phys.get("region") or {}).get("startLine", "?")
+            # The line HASH, not the line number, so a finding that moves
+            # because code was added above it is still the same finding.
+            fingerprint = (result.get("partialFingerprints") or {}).get(
+                "primaryLocationLineHash", f"line:{line}"
+            )
+            out.append(
+                {
+                    "rule": result.get("ruleId", "?"),
+                    "path": uri,
+                    "fingerprint": fingerprint,
+                    "line": line,
+                    "message": (result.get("message") or {}).get("text", ""),
+                }
+            )
+    return out
 
 
-TARGETS = {
+def finding_key(f: dict) -> tuple[str, str, str]:
+    return (f["rule"], f["path"], f["fingerprint"])
+
+
+def report_sarif(sarif: Path, ignores: list[str], baseline: Path) -> int:
+    """Fail on any finding that is not in the committed baseline.
+
+    CodeQL in the push tier has to be able to fail, or it is a check that cannot
+    fail sitting next to ones that can. But trentina's green main carries 19
+    findings that were triaged and accepted in GitHub's Security tab, which this
+    cannot see. The baseline is that acceptance, committed: the findings a
+    person has looked at. Anything not in it is new, and new blocks.
+
+    `sdlc codeql-baseline` writes it. With no baseline file, every finding is
+    new.
+    """
+    accepted: set[tuple[str, str, str]] = set()
+    if baseline.is_file():
+        try:
+            for entry in json.loads(baseline.read_text(encoding="utf-8")):
+                accepted.add((entry["rule"], entry["path"], entry["fingerprint"]))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            cannot(f"cannot read the CodeQL baseline {baseline.relative_to(REPO)}: {exc}")
+    findings = sarif_findings(sarif, ignores)
+    new = [f for f in findings if finding_key(f) not in accepted]
+    known = len(findings) - len(new)
+    for f in new:
+        print(f"  NEW {f['path']}:{f['line']} [{f['rule']}] {f['message']}")
+    print(f"codeql: {len(new)} new, {known} in the baseline")
+    return FOUND if new else CLEAN
+
+
+def t_codeql_baseline() -> int:
+    """Accept every current finding: write them to the baseline file.
+
+    The one deliberate way to make a finding stop failing besides fixing it, and
+    it lands in a commit someone reviews.
+    """
+    settings = check_settings(sdlc_config(), "codeql")
+    config = str(settings.get("config", ".github/codeql/codeql-config.yml"))
+    _, ignores = read_codeql_config(REPO / config)
+    # Its verdict does not matter here: findings are what is being accepted.
+    t_codeql(settings)
+    sarif = Path("/tmp/codeql-results.sarif")
+    findings = sorted(sarif_findings(sarif, ignores), key=finding_key)
+    path = baseline_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entries = [{k: f[k] for k in ("rule", "path", "fingerprint")} for f in findings]
+    path.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {len(entries)} finding(s) to {path.relative_to(REPO)}")
+    return CLEAN
+
+
+BUILTINS = {
     "ruff-check": t_ruff_check,
     "ruff-format": t_ruff_format,
     "mypy": t_mypy,
@@ -668,60 +1056,54 @@ TARGETS = {
     "pip-audit": t_pip_audit,
     "constitution": t_constitution,
     "codeql": t_codeql,
+    # Answered by bin/sdlc on the host; listed so the name is known here.
+    "hooks-installed": None,
 }
 
-# Tier membership is NOT stated here. `.pre-commit-hooks.yaml` in the hooks repo
-# is the single authority, and `bin/sdlc` reads it. Two copies of the tier table
-# is how gates.sh's mypy hook drifted from the script's own resource budget the
-# moment that budget stopped being a constant.
+
+def t_list() -> int:
+    print("built-in checks:\n  " + "\n  ".join(BUILTINS))
+    print("kinds for a repo's own checks:\n  " + "\n  ".join(KINDS))
+    return CLEAN
+
+
+def t_versions() -> int:
+    print(f"{'tool':12} {'pinned':24} self-reported")
+    for name, pinned in BAKED.items():
+        print(f"{name:12} {pinned:24} {self_reported(name)}")
+    return CLEAN
+
+
+TOOL_COMMANDS = {
+    "tiers": t_tiers,
+    "list": t_list,
+    "versions": t_versions,
+    "pytest-deps": t_pytest_deps,
+    "codeql-baseline": t_codeql_baseline,
+}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="sdlc",
-        description="Run CrunchTools Python SDLC checks. Exit 2 means a check "
-        "COULD NOT RUN and is never to be worked around.",
+        description="The in-image half of `sdlc`. Exit 2 means a check COULD NOT RUN "
+        "and is never to be worked around.",
     )
-    ap.add_argument("targets", nargs="*", help="one or more target names, or 'list'/'versions'")
+    ap.add_argument("what", help="a check name, or plan/tiers/list/versions")
+    ap.add_argument("arg", nargs="?", help="for plan: commit, push, ci or a check name")
     args = ap.parse_args()
 
-    if not args.targets or args.targets == ["list"]:
-        print("targets:")
-        for name in TARGETS:
-            print(f"  {name}")
-        print("\nTiers come from .pre-commit-hooks.yaml, not from this script.")
-        return 0
-
-    if args.targets == ["versions"]:
-        print(f"{'tool':12} {'pinned':24} self-reported")
-        for name, pinned in BAKED.items():
-            print(f"{name:12} {pinned:24} {self_reported(name)}")
-        print(
-            "\nPin the 'pinned' column in CI so a local finding is the CI finding.\n"
-            "The two columns answer different questions and need not match: a\n"
-            "wrapper image carries its own version (gourmand 1.0.0 is the\n"
-            "packaging release) around an upstream build (0.16.5). Both are\n"
-            "shown because the tag is what you pin and the binary is what runs."
-        )
-        return 0
-
-    unknown = [t for t in args.targets if t not in TARGETS]
-    if unknown:
-        print(f"sdlc: unknown target(s): {', '.join(unknown)}", file=sys.stderr)
-        print(f"known: {', '.join(TARGETS)}", file=sys.stderr)
-        return CANNOT_RUN
-
-    cfg = settings()
-    worst = 0
-    for name in args.targets:
-        rc = TARGETS[name](cfg)
-        if rc == 0:
-            continue
-        print(f"\nGATE FAILED: {name}", file=sys.stderr)
-        # A later 1 must not mask an earlier 2: "could not run" outranks
-        # "found something", because it is the one a person has to act on.
-        worst = CANNOT_RUN if CANNOT_RUN in (rc, worst) else FOUND
-    return worst
+    if args.what == "plan":
+        if not args.arg:
+            cannot("plan needs commit, push, ci or a check name")
+        return t_plan(args.arg)
+    tool = TOOL_COMMANDS.get(args.what)
+    if tool is not None:
+        return tool()
+    fn = BUILTINS.get(args.what)
+    if fn is None:
+        cannot(f"{args.what} is not a check this image runs itself")
+    return fn(check_settings(sdlc_config(), args.what))
 
 
 if __name__ == "__main__":

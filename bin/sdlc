@@ -158,6 +158,9 @@ run_in_image() {
     -e SEMGREP_SETTINGS_FILE=/tmp/semgrep.yml \
     -e "SDLC_PROJECT=$PROJECT" \
     -e "SDLC_JOBS=$GATE_CPUS" \
+    -e "SDLC_HOST_REPO=$REPO" \
+    -e "SDLC_CACHE_VOLUME=$CACHE_VOLUME" \
+    ${SDLC_SKIP:+-e SDLC_SKIP} \
     ${SDLC_GATEHOUSE_SAMPLES:+-e SDLC_GATEHOUSE_SAMPLES} \
     "$@"
 
@@ -225,81 +228,129 @@ t_gatehouse() {
     --env-file "$_env" -i "$IMAGE" gatehouse
 }
 
-# -------------------------------------------------------------- tier membership
+# --------------------------------------------------------------------- the plan
 #
-# Parsed from .pre-commit-hooks.yaml, which is the single authority.
-# tests/test_tiers.sh asserts this parse still agrees with that file.
+# Which checks run is decided by the repo's [tool.sdlc.commit], [tool.sdlc.push]
+# and [tool.sdlc.ci] blocks, and this shell cannot read TOML. So it asks the
+# image for a plan -- one line per step, `check TAB mode TAB payload` -- and
+# carries it out. The modes:
+#
+#   image-ro | image-rw   `sdlc <payload>` in the image, the tree ro or rw
+#   local                 a check this file answers itself
+#   host                  a podman argv, words joined by the unit separator
+#
+# A host line that does not start with `podman build` or `podman run` is
+# refused: the host contract is held here, by the launcher, not trusted to
+# anything a repo's config says. The argv is SPLIT on the separator, never
+# `eval`ed, so nothing in it is ever read as shell -- no expansion, no command
+# substitution -- before or after that check.
 
-targets_in_stage() {
-  awk -v want="$1" '
-    /^- id:/            { entry=""; stages="" }
-    /^  entry: bin\/sdlc/ { entry=$NF }
-    /^  stages:/        { stages=$0 }
-    stages != "" && entry != "" {
-      if (index(stages, want)) print entry
-      entry=""; stages=""
-    }
-  ' "$HOOKS_DIR/.pre-commit-hooks.yaml"
+TAB=$(printf '\t')
+US=$(printf '\037')
+
+run_host() {
+  _ifs=$IFS
+  IFS=$US
+  # shellcheck disable=SC2086  # splitting on the separator is the point
+  set -- $1
+  IFS=$_ifs
+  [ "${1:-}" = podman ] || die "a host step may only run podman; refused: ${1:-<empty>}"
+  _sub=${2:-}
+  shift 2
+  # The budget is applied here so it is defined once, whatever the step.
+  case "$_sub" in
+    build) set -- build --cpu-period 100000 --cpu-quota "$(( GATE_CPUS * 100000 ))" \
+                        --memory "$GATE_MEMORY" "$@" ;;
+    run)   set -- --events-backend=none run --log-driver=none \
+                        --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 "$@" ;;
+    *)     die "a host step may only build or run; refused: podman $_sub" ;;
+  esac
+  _rc=0
+  podman "$@" </dev/null || _rc=$?
+  # A failed build is a finding: the code does not produce an image. A run
+  # that podman could not start (125-127) never ran, so it is a 2, and so is a
+  # pytest status above 1 (interrupted, usage error, internal error, no tests).
+  case "$_sub:$_rc" in
+    *:0) return 0 ;;
+    build:*) return 1 ;;
+    run:1) return 1 ;;
+    *) printf '%s: podman %s exited %s; nothing was judged\n' "$ME" "$_sub" "$_rc" >&2; return 2 ;;
+  esac
 }
 
-run_tier() {
-  _stage=$1
-  _targets=$(targets_in_stage "$_stage")
-  [ -n "$_targets" ] || die "no targets found for stage $_stage in .pre-commit-hooks.yaml"
+run_step() {           # mode payload -> the step's exit status
+  case "$1" in
+    image-ro) run_in_image ro nostdin "$IMAGE" "$2" ;;
+    image-rw) run_in_image rw nostdin "$IMAGE" "$2" ;;
+    local)
+      case "$2" in
+        hooks-installed) ( t_hooks_installed ) ;;
+        gatehouse)       ( t_gatehouse ) ;;
+        *) die "the image asked for an unknown local check: $2" ;;
+      esac ;;
+    host) run_host "$2" ;;
+    *) die "the image asked for an unknown step mode: $1" ;;
+  esac
+}
+
+run_plan() {           # commit | push | ci | <check>
+  _plan=$(run_in_image ro nostdin "$IMAGE" plan "$1") \
+    || die "the image could not plan '$1'; nothing was checked"
+  [ -n "$_plan" ] || die "the image planned nothing for '$1'"
+
   _worst=0
-  for _t in $_targets; do
+  _failed=
+  _ifs=$IFS
+  set -f
+  IFS='
+'
+  for _line in $_plan; do
+    IFS=$_ifs
+    _check=${_line%%"$TAB"*}
+    _rest=${_line#*"$TAB"}
+    _mode=${_rest%%"$TAB"*}
+    _payload=${_rest#*"$TAB"}
+    # One failed step ends that check; the next check still runs.
+    case " $_failed " in *" $_check "*) continue ;; esac
     _rc=0
-    "$0" "$_t" || _rc=$?
-    # A later 1 must not mask an earlier 2.
-    if [ "$_rc" -eq 2 ] || [ "$_worst" -eq 2 ]; then _worst=2
-    elif [ "$_rc" -ne 0 ]; then _worst=1
+    run_step "$_mode" "$_payload" || _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+      _failed="$_failed $_check"
+      printf '\n%s: %s %s\n' "$ME" "$_check" \
+        "$([ "$_rc" -eq 2 ] && echo 'COULD NOT RUN' || echo 'FAILED')" >&2
+      # A later 1 must not mask an earlier 2.
+      if [ "$_rc" -eq 2 ] || [ "$_worst" -eq 2 ]; then _worst=2; else _worst=1; fi
     fi
   done
+  IFS=$_ifs
+  set +f
   return "$_worst"
 }
 
 # ---------------------------------------------------------------------- dispatch
 
-case "${1:-list}" in
-  # Host-only.
-  hooks-installed) t_hooks_installed ;;
-  gatehouse)       SDLC_DEPTH=0 t_gatehouse ;;
-
-  # Batches. Named by stage so there is one vocabulary, not two.
-  commit)          SDLC_DEPTH=0 run_tier pre-commit ;;
-  push)            SDLC_DEPTH=0 run_tier pre-push ;;
-
-  # These write the tree, so they are the only rw mounts.
-  #   ruff-check --fix / ruff-format  rewrite your source, which is the point
-  #   gourmand                        writes .gourmand-cache/ (which is why the
-  #                                   fleet's own hook mounts `-v .:/src:Z`
-  #                                   read-write while gatehouse's is ro)
-  #
-  # Gourmand was on `ro` here at first and appeared to pass, because the repo it
-  # was tested against already had a .gourmand-cache/ directory from an earlier
-  # run. A clean checkout gave "Read-only file system (os error 30)" and exit 3.
-  ruff-check|ruff-format|gourmand)
-                   run_in_image rw nostdin "$IMAGE" "$1" ;;
-
-  list|versions|mypy|pytest|semgrep|pip-audit|constitution|codeql)
-                   run_in_image ro nostdin "$IMAGE" "$1" ;;
-
-  tiers)           printf 'pre-commit:\n'; targets_in_stage pre-commit | sed 's/^/  /'
-                   printf 'pre-push:\n';   targets_in_stage pre-push   | sed 's/^/  /' ;;
-
+case "${1:---help}" in
   -h|--help|help)
     cat <<EOF
-usage: $ME <target>... | commit | push | list | versions | tiers
+usage: $ME commit | push | ci | <check> | tiers | list | versions | codeql-baseline
 
-  commit | push     run every target in that tier (the hooks do this)
-  <target>          run one target -- the inner loop
-  list              targets the image provides
+  commit            the pre-commit hook: seconds, offline, free
+  push              the pre-push hook: every verdict, no container builds
+  ci                what CI runs: push's checks except the two reviewers,
+                    plus the repo's own
+  <check>           one check by name -- the inner loop
+  tiers             what each command runs in this repo
+  list              the built-in checks and the kinds
   versions          the exact tool versions the image carries
-  tiers             which targets run in which tier
+  codeql-baseline   accept every current CodeQL finding into the baseline
 
+Configure each command in pyproject.toml: [tool.sdlc.commit],
+[tool.sdlc.push], [tool.sdlc.ci]. Skip one check once: SDLC_SKIP=name.
 Exit 2 means a check COULD NOT RUN and is never to be worked around.
 Image: $IMAGE
 EOF
     ;;
-  *) printf '%s: unknown target: %s (try --help)\n' "$ME" "$1" >&2; exit 2 ;;
+  tiers|list|versions) run_in_image ro nostdin "$IMAGE" "$1" ;;
+  codeql-baseline)     run_in_image rw nostdin "$IMAGE" "$1" ;;
+  *)                   SDLC_DEPTH=0 run_plan "$1" ;;
 esac

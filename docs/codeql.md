@@ -13,31 +13,24 @@ It builds a database. On trentina that is 747 modules in ~42 s, then ~55 query
 evaluations, for a few minutes end to end. That is not a linter and cannot run
 on every commit.
 
-## Why findings do not block by default
+## It fails only on new findings
 
-`[tool.sdlc] codeql_gate` defaults to **false**, and this is parity with CI
-rather than laxness.
+A check in the push tier that cannot fail is a check that lies about what it
+did, so `codeql` fails. But on trentina's `main` it reports 19 findings that
+were triaged and accepted in GitHub's Security tab, which a local run cannot
+see. Failing on all of them would block every push until a backlog was cleared,
+and people would learn `SDLC_SKIP=codeql` instead.
 
-GitHub's CodeQL Action uploads SARIF to code scanning. The `CodeQL Analysis`
-check **passes whether or not there are findings** — each finding becomes an
-alert in the Security tab, where it is triaged and often dismissed. Measured on
-trentina's `main` at `c32a1dc9`, a commit whose CodeQL check is green: **19
-findings**, including `py/clear-text-logging-sensitive-data` and trentina's own
-`trentina/tool-arg-to-log`.
+So the acceptance is committed: `.sdlc/codeql-baseline.json` lists the findings
+someone has looked at, and only a finding NOT in it fails. Each entry is the
+rule, the file and CodeQL's own line hash — the hash, not the line number, so a
+finding that moves because code was added above it is still the same finding.
 
-So a local gate that blocked on any finding would be strictly stricter than CI.
-On trentina it would block every push until all 19 were fixed or suppressed,
-which inverts the promise this whole image is built on — that a green push tier
-means a green CI. A gate nobody can pass is a gate everybody skips, and
-`SKIP=sdlc-codeql` becomes muscle memory.
+    sdlc codeql-baseline     # accept every current finding
 
-**The honest gap:** without GitHub's dismissal state, the local run cannot tell
-a known, accepted finding from a new one. So it reports rather than judges.
-
-**The fix, which is the next piece of work here:** a committed baseline of
-accepted findings, so only *new* ones block. That is how a repo gets a CodeQL
-gate with teeth without first clearing a backlog. Until then,
-`codeql_gate = true` is available for a repo whose findings are already at zero.
+That command is the one way to make a finding stop failing without fixing it,
+and it lands in a commit a reviewer reads. With no baseline file, every finding
+fails.
 
 ## The config file
 
