@@ -6,6 +6,17 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-04
+
+### Fixed
+
+- **CodeQL keeps its compiled queries between runs.** Its cache defaulted to
+  `~/.codeql`, which is `/tmp` in the image and discarded with the container,
+  so every run compiled the whole query suite again. `--common-caches` now
+  points at `/cache/codeql-common` on the cache volume. Measured on trentina
+  (same image, same limits as the hook): analysis 132s cold, 46s warm; the
+  whole check 166s to 92s. Compiling had been 1m32s to 3m13s of every push.
+
 ## [0.3.2] - 2026-11-04
 
 ### Fixed

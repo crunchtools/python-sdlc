@@ -894,6 +894,14 @@ def t_codeql(s: dict) -> int:
     if config != default_config and not (REPO / config).is_file():
         cannot(f"codeql config {config} does not exist")
     db = CACHE / "codeql" / project_name()
+    # Compiled query plans, kept between runs. CodeQL's default is ~/.codeql,
+    # which is /tmp in this image and gone when the container exits, so every
+    # run compiled all of security-extended again: 1m32s-3m13s of trentina's
+    # analysis, against 46s for the whole analysis on a warm cache. Shared by
+    # every repo on the volume, which is the point -- the standard packs are the
+    # same bytes everywhere -- and keyed by CodeQL on each query's own hash, so
+    # a changed query recompiles and nothing stale is reused.
+    caches = CACHE / "codeql-common"
     sarif = Path("/tmp/codeql-results.sarif")
     shutil.rmtree(db, ignore_errors=True)
     # An unwritable cache is a 2, not a traceback and not a 1. The same bug in
@@ -901,6 +909,7 @@ def t_codeql(s: dict) -> int:
     # that claimed a finding.
     try:
         db.parent.mkdir(parents=True, exist_ok=True)
+        caches.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         cannot(f"cannot create the CodeQL database directory {db.parent}: {exc}")
 
@@ -912,6 +921,7 @@ def t_codeql(s: dict) -> int:
         "--language=python",
         "--source-root=.",
         "--overwrite",
+        f"--common-caches={caches}",
     ]
     analyze = [
         "codeql",
@@ -921,6 +931,7 @@ def t_codeql(s: dict) -> int:
         "--format=sarif-latest",
         f"--output={sarif}",
         f"--threads={os.environ.get('SDLC_JOBS', '0')}",
+        f"--common-caches={caches}",
     ]
 
     # `--codescanning-config` is NOT a CLI flag in 2.27.4, on either subcommand.
