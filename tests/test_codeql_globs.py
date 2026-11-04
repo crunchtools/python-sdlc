@@ -3,7 +3,7 @@
 
 This is the local stand-in for a config the CodeQL CLI will not read (see
 docs/codeql.md), so an entry CodeQL honours and this does not means the local
-gate reports findings CI ignores -- and with `codeql_gate = true`, fails on
+gate reports findings CI ignores -- and, since CodeQL fails on new findings, fails on
 them. trentina's config excludes `tests/fixtures/boundary-review`, which holds
 deliberately vulnerable code used to grade a reviewer, so getting this wrong is
 not hypothetical.

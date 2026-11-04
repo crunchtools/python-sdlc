@@ -196,10 +196,8 @@ version = "0.0.0"
 [tool.ruff]
 line-length = 100
 
-[tool.sdlc]
-lint_paths = ["src"]
-scan_paths = ["src"]
-semgrep_config = ".semgrep"
+[tool.sdlc.push.semgrep]
+paths = ["src"]
 TOML
 
 # Clean, formatted, lint-free, and not slop: every offline target must pass it.
@@ -238,6 +236,24 @@ for target in ruff-check ruff-format semgrep; do
     printf '%s\n' "$out" | sed 's/^/       /' | tail -8
   fi
 done
+
+# The plan the launcher reads must name every default check, in order, and
+# resolve a repo's own setting. This is the seam between the TOML the image
+# reads and the shell that acts on it, so it is checked on the real image.
+plan=$(podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
+         "$IMAGE" sdlc plan push 2>&1 | cut -f1 | tr '\n' ' ')
+want="mypy pytest gourmand gatehouse semgrep pip-audit constitution codeql "
+if [ "$plan" = "$want" ]; then
+  ok "sdlc plan push lists the push defaults in order"
+else
+  bad "sdlc plan push gave '$plan', want '$want'"
+fi
+plan=$(podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
+         "$IMAGE" sdlc plan ci 2>&1 | cut -f1 | tr '\n' ' ')
+case "$plan" in
+  *gourmand*|*gatehouse*) bad "sdlc plan ci runs a reviewer CI already runs: $plan" ;;
+  *) ok "sdlc plan ci leaves out the two reviewers" ;;
+esac
 
 # And it must still FAIL on something broken -- a gate that passes everything is
 # the other way to be useless.

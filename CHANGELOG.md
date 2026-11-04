@@ -6,6 +6,55 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-04
+
+### Changed
+
+- **Three commands, three config blocks.** `sdlc commit` (the pre-commit hook),
+  `sdlc push` (the pre-push hook) and `sdlc ci` (the CI job) are configured by
+  `[tool.sdlc.commit]`, `[tool.sdlc.push]` and `[tool.sdlc.ci]`. Each runs its
+  defaults; a block's `checks` adds and `skip` removes; a check's settings live
+  in its own `[tool.sdlc.<command>.<check>]` table. `sdlc tiers` prints what
+  each command runs. Constitution XII v1.30.0 requires this shape.
+- **ci = push minus the two reviewers, plus the repo's own checks.** CI runs
+  Gourmand and Gatehouse through their own workflows; running them again here
+  would pay twice and make the reviewer blocking.
+- **The hooks file exports two hooks**, `sdlc-commit` and `sdlc-push`, instead
+  of eleven. Which checks run is decided by the config alone, so there is no
+  second list to keep in sync.
+- **Paths come from each tool's own config.** `ruff check .`, `ruff format .`
+  and bare `mypy` read `[tool.ruff]` and `[tool.mypy] files`. `lint_paths`,
+  `type_paths`, `scan_paths`, `test_env`, `pytest_args`, `semgrep_config`,
+  `codeql_config` and `codeql_gate` are gone; a stray key in `[tool.sdlc]` is
+  refused rather than ignored.
+- **CodeQL fails on new findings.** Any finding not in
+  `.sdlc/codeql-baseline.json` fails; `sdlc codeql-baseline` writes the file.
+  It used to report and pass, which made it a push-tier check that could not
+  fail.
+
+### Added
+
+- **Kinds for a repo's own checks:** `image-build` and `pytest-in-image`. The
+  second runs tests inside the built image with no network, a read-only root
+  and no capabilities, with pytest installed into the cache volume at the
+  versions the repo's `uv.lock` pins. There is no shell kind.
+- `SDLC_SKIP=<check>[,<check>]` skips a check once. pre-commit's own `SKIP=`
+  cannot reach inside a single hook.
+- `bin/sdlc` refuses any planned host step that is not `podman build` or
+  `podman run`, so the host contract is held by the launcher, not trusted to a
+  repo's config. `tests/test_host_contract.sh` proves it.
+- `tests/test_plan.py`; it and `tests/test_codeql_globs.py`, which CI never ran
+  before, now run in the built image on every build.
+
+### Removed
+
+- Trivy, from this image's own build. pip-audit covers dependencies; fleet
+  image scanning moves to a scheduled job (RT #1551).
+- `tests/test_tiers.sh` and `examples/pre-commit.yaml`; the README holds the
+  one block a repo copies.
+- The contract test at this repo's own pre-push, which built the image: a push
+  never waits on a container build. CI runs it against the pushed digest.
+
 ## [0.1.0] - 2026-11-04
 
 First release. One container image and one script holding every CrunchTools
@@ -94,5 +143,6 @@ cached tag was never refreshed — that gate had been running a two-week-old
 reviewer while CI pulled fresh. Local and CI were different reviewers on the
 same diff.
 
-[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.0
 [0.1.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.1.0

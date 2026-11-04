@@ -58,8 +58,7 @@ jobs:
           set -eu
           podman run --rm -v "$PWD:/mnt:ro" -w /mnt \
             docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh \
-            tests/test_host_contract.sh tests/test_tiers.sh
-          tests/test_tiers.sh
+            tests/test_host_contract.sh
           tests/test_host_contract.sh
 
       - name: Build
@@ -84,24 +83,16 @@ jobs:
       - name: Contract test
         run: tests/contract.sh "localhost/python-sdlc:$GITHUB_SHA"
 
-      # The Container Image profile recommends a CVE scan, and this is the one
-      # place Trivy belongs: it reads the OS packages in the image layers
-      # (glibc, openssl, zlib), which pip-audit never sees because pip-audit
-      # reads a Python lockfile. Scott's call is that Trivy is CI-only, and a
-      # container-image repo's CI is exactly where the image exists.
-      #
-      # `continue-on-error` per the profile: a base-image CVE with no fix
-      # available must not block a tooling release, but it must be visible.
-      - name: Trivy
-        continue-on-error: true
+      # The planner and the CodeQL path matching, run in the image because
+      # they need its interpreter and PyYAML.
+      - name: Unit tests
         run: |
           set -eu
-          podman save --format docker-archive \
-            "localhost/python-sdlc:$GITHUB_SHA" -o /tmp/image.tar
-          podman run --rm -v /tmp:/tmp:z \
-            docker.io/aquasec/trivy:0.58.1 image \
-              --input /tmp/image.tar --scanners vuln \
-              --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1
+          for t in tests/test_plan.py tests/test_codeql_globs.py; do
+            podman run --rm -v "$PWD:/src:ro,z" -w /src \
+              --entrypoint /opt/constitution-venv/bin/python3 \
+              "localhost/python-sdlc:$GITHUB_SHA" "$t"
+          done
 
       - name: Log in to Quay
         if: github.event_name != 'pull_request'

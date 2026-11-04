@@ -1,18 +1,12 @@
 # This repo's own gates.
 #
-# Deliberately the CLASSIC fleet shape, not python-sdlc's own hooks, for two
-# reasons:
+# The classic fleet shape, not python-sdlc's own two hooks: this repo builds the
+# image, so gating it on that image is circular on a first clone. Constitution
+# XII (v1.30.0) exempts it by name (`sdlc_exempt`), with gourmand and gatehouse.
 #
-#   1. Constitution XII currently REQUIRES a hook with `id: gourmand` running
-#      `quay.io/crunchtools/gourmand` and one with `id: gatehouse` running
-#      `quay.io/crunchtools/gatehouse`, and `validate-constitution.py` greps
-#      this file for those strings. Until the XII amendment lands, a repo using
-#      python-sdlc's hooks fails `Constitution / Validate constitution`.
-#   2. Bootstrapping. This repo builds the image, so gating it on the image it
-#      has not built yet is circular on a first clone.
-#
-# This file switches to the one-block form once the amendment is tagged. That
-# is the point at which python-sdlc gates itself.
+# No container build at pre-push: that is minutes, and Scott's rule is that a
+# push never waits on one. CI builds the image and runs the contract test
+# against the pushed digest.
 
 default_install_hook_types: [pre-commit, pre-merge-commit, pre-push]
 
@@ -41,22 +35,13 @@ repos:
     hooks:
       - id: shellcheck
         name: shellcheck (bin/sdlc and the tests)
-        entry: podman --events-backend=none run --rm --log-driver=none -v .:/mnt:ro,Z -w /mnt docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh tests/test_host_contract.sh tests/test_tiers.sh
+        entry: podman --events-backend=none run --rm --log-driver=none -v .:/mnt:ro,Z -w /mnt docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh tests/test_host_contract.sh
         language: system
         pass_filenames: false
         always_run: true
         stages: [pre-commit, pre-merge-commit]
 
-      # The two tests that keep this repo's own promises. Both are pure host
-      # work -- no image needed -- so they belong at commit, where they are free.
-      - id: tiers
-        name: tier membership agrees with .pre-commit-hooks.yaml
-        entry: tests/test_tiers.sh
-        language: script
-        pass_filenames: false
-        always_run: true
-        stages: [pre-commit, pre-merge-commit]
-
+      # Pure host work, no image needed, so it belongs at commit.
       - id: host-contract
         name: bin/sdlc needs only git, podman, pre-commit and gh
         entry: tests/test_host_contract.sh
@@ -95,15 +80,3 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-commit, pre-merge-commit]
-
-  # The contract test needs a built image, so it runs at pre-push rather than
-  # on every commit.
-  - repo: local
-    hooks:
-      - id: contract
-        name: contract test (builds the image)
-        entry: sh -c 'podman build -q -f Containerfile -t localhost/python-sdlc:precommit . && tests/contract.sh localhost/python-sdlc:precommit'
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-push]
