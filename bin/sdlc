@@ -367,6 +367,14 @@ run_serial() {         # the plan -> its worst step status
 
 OUT=                   # the lane scratch directory, while lanes are running
 
+# How long the printer waits for a lane that has stopped answering before it
+# stops waiting on the order. Only a lane killed outright -- SIGKILL, the OOM
+# killer, a cancelled CI job -- gets here, because every other ending runs the
+# lane's EXIT trap. Settable so the test can reach the boundary without
+# waiting an hour for it.
+STALL_MAX=${SDLC_LANE_STALL:-3600}
+case "$STALL_MAX" in ''|*[!0-9]*) die "SDLC_LANE_STALL must be a whole number" ;; esac
+
 now_s() { date +%s 2>/dev/null || printf 0; }
 
 _lanes_running() {     # 0 while any lane has not yet written its done marker
@@ -484,28 +492,23 @@ run_lanes() {          # the plan -> the worst status of every lane
       continue
     fi
     _lanes_running || break
-    # An hour with no block finishing is not a slow check, it is a lane that
-    # cannot say it is done. Give up ORDERING and print what there is; `wait`
-    # below still blocks for each lane's real status, so nothing is guessed.
-    [ "$_stall" -ge 3600 ] && break
+    # A lane SIGKILLed outright runs no EXIT trap, so it never says it is done
+    # and this would poll for it forever. After STALL_MAX seconds with no block
+    # finishing, stop waiting on the order and fall through to the reap.
+    if [ "$_stall" -ge "$STALL_MAX" ]; then
+      printf '%s: a lane has not reported for %ss, so it is not going to.\n' \
+        "$ME" "$STALL_MAX"
+      printf '%s: waiting for every lane to stop, then printing what is left.\n' "$ME"
+      break
+    fi
     _stall=$((_stall + 1))
     sleep 1
   done
-  # Whatever the loop above left: a lane that `die`d stopped where it stood, so
-  # the checks behind it in that lane have no block at all. Say so rather than
-  # print nothing, which reads exactly like a check that passed.
-  while [ "$_i" -le "$NCHECKS" ]; do
-    if [ -f "$OUT/out.$_i" ]; then
-      cat "$OUT/out.$_i"
-    else
-      printf '\n%s: %s NEVER RAN: its lane stopped before reaching it\n' "$ME" \
-        "$(awk -v n="$_i" 'NR == n {print; exit}' "$OUT/order")" >&2
-    fi
-    _i=$((_i + 1))
-  done
 
-  # Collected after every lane has been reaped, so which lane finished first
-  # cannot decide the answer: a 2 anywhere is a 2.
+  # Reaped BEFORE the remaining blocks are printed, for two reasons: the status
+  # is the answer and is never guessed from what a file happened to contain,
+  # and once every lane has stopped nothing is still writing, so the blocks
+  # below are whole and still in plan order.
   _worst=0
   for _p in $_pids; do
     _rc=0
@@ -515,6 +518,19 @@ run_lanes() {          # the plan -> the worst status of every lane
       2) _worst=2 ;;
       *) [ "$_worst" -eq 2 ] || _worst=1 ;;
     esac
+  done
+
+  # Whatever the loop above did not reach: a lane that stopped where it stood
+  # leaves the checks behind it with no block at all. Say so rather than print
+  # nothing, which reads exactly like a check that passed.
+  while [ "$_i" -le "$NCHECKS" ]; do
+    if [ -f "$OUT/out.$_i" ]; then
+      cat "$OUT/out.$_i"
+    else
+      printf '\n%s: %s NEVER RAN: its lane stopped before reaching it\n' "$ME" \
+        "$(awk -v n="$_i" 'NR == n {print; exit}' "$OUT/order")" >&2
+    fi
+    _i=$((_i + 1))
   done
 
   rm -rf "$OUT"

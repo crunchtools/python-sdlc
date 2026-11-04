@@ -54,6 +54,15 @@ All notable changes to this project are documented here, following
 
 - `sdlc tiers` prints each check's lane when a command has more than one.
 
+### Added
+
+- `SDLC_LANE_STALL` (default 3600 seconds): how long the printer waits for a
+  lane that has stopped answering. Only a lane killed outright -- SIGKILL, the
+  OOM killer, a cancelled CI job -- gets there, because every other ending runs
+  the lane's cleanup. At the threshold the launcher says so, waits for every
+  lane to stop and prints what is left; each lane's real exit status is
+  collected either way.
+
 ### Fixed
 
 - Two lanes starting on a machine with no cache volume could both try to create

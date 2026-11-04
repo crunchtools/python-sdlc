@@ -102,6 +102,12 @@ the checks, so two lanes never cut into each other's log. Each block ends with
 how long its check took, because buffering is what the `== <step>` timestamps
 used to tell you.
 
+A lane killed outright — SIGKILL, the OOM killer, a cancelled CI job — runs no
+cleanup and never reports, so the printer stops waiting on the order after
+`SDLC_LANE_STALL` seconds (default 3600), says so, waits for every lane to
+stop and then prints what is left. Each lane's real exit status is still
+collected either way.
+
 ## Configuring it
 
 One rule for all three blocks:

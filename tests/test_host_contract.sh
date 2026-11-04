@@ -90,6 +90,9 @@ case " \$* " in
     printf 'w${TAB}one${TAB}image-ro${TAB}after-the-failure\n'
     printf 'y${TAB}two${TAB}image-ro${TAB}other-lane-first\n'
     printf 'z${TAB}two${TAB}image-ro${TAB}other-lane-second\n' ;;
+  *" plan lanes-stall "*)
+    printf 'f${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
+    printf 's${TAB}two${TAB}image-ro${TAB}very-slow-rc-one\n' ;;
   *" plan lanes-budget "*)
     printf 'p${TAB}one${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
     printf 'q${TAB}two${TAB}image-ro${TAB}quiet-ok\n' ;;
@@ -107,6 +110,7 @@ case "\$_last" in
   rc-one)      printf 'RAN rc-one\n'; exit 1 ;;
   rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
   slow-rc-one) printf 'RAN slow-rc-one\n'; sleep 2; exit 1 ;;
+  very-slow-rc-one) printf 'RAN very-slow-rc-one\n'; sleep 6; printf 'LAST LINE\n'; exit 1 ;;
   slow-rc-two) printf 'RAN slow-rc-two\n'; sleep 2; exit 2 ;;
   must-not-run) printf 'RAN must-not-run\n'; touch "$SHIM/must-not-run" ;;
   after-the-failure|other-lane-first|other-lane-second)
@@ -163,10 +167,11 @@ printf '\n== the lanes\n\n'
 RUN=$(mktemp -d)
 trap 'rm -rf "$SHIM" "$RUN"' EXIT 0
 
-lanes() {              # target -> exit status, output in $RUN/out
+lanes() {              # target [stall-seconds] -> exit status, output in $RUN/out
   rm -f "$SHIM/must-not-run"
   _rc=0
-  PATH="$SHIM" SDLC_CPUS=4 sh bin/sdlc "$1" > "$RUN/out" 2>&1 || _rc=$?
+  PATH="$SHIM" SDLC_CPUS=4 SDLC_LANE_STALL=${2:-3600} \
+    sh bin/sdlc "$1" > "$RUN/out" 2>&1 || _rc=$?
   return "$_rc"
 }
 
@@ -213,6 +218,41 @@ if grep -q '^== a1 passed in [0-9]*s' "$RUN/out"; then
   ok "a block ends with how long its check took"
 else
   bad "a block does not report its check's duration"
+fi
+if ! grep -q 'has not reported for' "$RUN/out"; then
+  ok "a healthy run never says a lane stopped answering"
+else
+  bad "a healthy run claimed a lane had stopped answering"
+fi
+
+# A lane killed outright runs no EXIT trap, so it never says it is done and the
+# printer would poll for it forever. At the threshold it stops waiting on the
+# ORDER -- and must still reap every lane for its real status, and still print
+# the late block WHOLE rather than reading a file another process is writing.
+# Reached here with a one-second threshold and a lane that takes six.
+lanes lanes-stall 1 && rc=0 || rc=$?
+if grep -q 'has not reported for 1s' "$RUN/out"; then
+  ok "the printer stops waiting on the order and says so"
+else
+  bad "the stall threshold was never reached"
+fi
+if [ "$rc" -eq 1 ]; then
+  ok "a lane's status is still collected after the order is given up"
+else
+  bad "giving up on the order lost the lane's status (exit $rc)"
+fi
+if grep -q '^== f passed in [0-9]*s' "$RUN/out"; then
+  ok "the block that did finish in time is still printed"
+else
+  bad "the finished block was dropped when the order was given up"
+fi
+# LAST LINE is written six seconds in, after the printer gave up at one. It can
+# only be here if the block was printed after the lane was reaped.
+if grep -q '^LAST LINE$' "$RUN/out" && grep -q 'sdlc: s FAILED after' "$RUN/out"; then
+  ok "the late block is printed whole, after its lane was reaped"
+else
+  bad "the late block was read while its lane was still writing it"
+  sed 's/^/       /' "$RUN/out"
 fi
 
 # A 2 anywhere wins over a 1, in either finishing order. Fast-2/slow-1 and
