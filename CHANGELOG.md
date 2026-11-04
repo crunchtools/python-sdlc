@@ -6,6 +6,19 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-04
+
+### Fixed
+
+- **A check with more than one step ended with two footers, the first reading
+  "passed in 0s".** The per-check footer v0.3.0 added was written per STEP, and
+  `pytest-in-image` is two: install the lock's pytest into the cache volume,
+  then run the tests in the image. trentina's first lane run printed
+  `== image-tests passed in 0s` and then `== image-tests passed in 56s`, so the
+  one number people now read timings from was wrong for exactly the check that
+  takes the longest. There is one footer per check now, carrying the time all
+  of its steps took, and `tests/test_host_contract.sh` holds a two-step check.
+
 ## [0.3.0] - 2026-11-04
 
 ### Changed
@@ -249,7 +262,8 @@ cached tag was never refreshed — that gate had been running a two-week-old
 reviewer while CI pulled fresh. Local and CI were different reviewers on the
 same diff.
 
-[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.1
 [0.3.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.0
 [0.2.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.2
 [0.2.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.1

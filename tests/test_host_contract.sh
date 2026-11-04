@@ -90,6 +90,10 @@ case " \$* " in
     printf 'w${TAB}one${TAB}image-ro${TAB}after-the-failure\n'
     printf 'y${TAB}two${TAB}image-ro${TAB}other-lane-first\n'
     printf 'z${TAB}two${TAB}image-ro${TAB}other-lane-second\n' ;;
+  *" plan lanes-two-step "*)
+    printf 'solo${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
+    printf 'pair${TAB}two${TAB}image-ro${TAB}step-one\n'
+    printf 'pair${TAB}two${TAB}image-ro${TAB}step-two\n' ;;
   *" plan lanes-stall "*)
     printf 'f${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
     printf 's${TAB}two${TAB}image-ro${TAB}very-slow-rc-one\n' ;;
@@ -111,6 +115,8 @@ case "\$_last" in
   rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
   slow-rc-one) printf 'RAN slow-rc-one\n'; sleep 2; exit 1 ;;
   very-slow-rc-one) printf 'RAN very-slow-rc-one\n'; sleep 6; printf 'LAST LINE\n'; exit 1 ;;
+  step-one) printf 'RAN step-one\n'; sleep 1 ;;
+  step-two) printf 'RAN step-two\n'; sleep 1 ;;
   slow-rc-two) printf 'RAN slow-rc-two\n'; sleep 2; exit 2 ;;
   must-not-run) printf 'RAN must-not-run\n'; touch "$SHIM/must-not-run" ;;
   after-the-failure|other-lane-first|other-lane-second)
@@ -223,6 +229,33 @@ if ! grep -q 'no check has finished for' "$RUN/out"; then
   ok "a healthy run never claims nothing is finishing"
 else
   bad "a healthy run claimed no check had finished"
+fi
+
+# A check with MORE THAN ONE step gets ONE footer, carrying the time all of its
+# steps took. `pytest-in-image` is two steps -- install the lock's pytest into
+# the cache volume, then run the tests in the image -- and v0.3.0 gave it two
+# footers, the first reading "passed in 0s", because the footer was written per
+# step. trentina's first lane run is what showed it.
+lanes lanes-two-step && rc=0 || rc=$?
+footers=$(grep -c '^== pair passed in' "$RUN/out" || true)
+if [ "$footers" = 1 ]; then
+  ok "a two-step check gets exactly one footer"
+else
+  bad "a two-step check printed $footers footers, want 1"
+  grep '^== ' "$RUN/out" | sed 's/^/       /'
+fi
+# Both steps took a second, so the one footer must report their sum, not the
+# last step alone -- and never 0s.
+if grep -qE '^== pair passed in [2-9][0-9]*s' "$RUN/out"; then
+  ok "the footer reports the time every step took"
+else
+  bad "the footer does not sum the check's steps"
+  grep '^== pair' "$RUN/out" | sed 's/^/       /'
+fi
+if grep -q 'RAN step-one' "$RUN/out" && grep -q 'RAN step-two' "$RUN/out"; then
+  ok "both steps of the check ran"
+else
+  bad "a step of the two-step check did not run"
 fi
 
 # Nothing finishing for STALL_MAX seconds. The case worth guarding is a lane
