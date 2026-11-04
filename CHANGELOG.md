@@ -26,7 +26,25 @@ All notable changes to this project are documented here, following
   share, so halving it again double-counts the same protection. A developer's
   laptop is unchanged: still half, and still divided between the lanes.
 
-  Measured on trentina, `sdlc ci` step: 15m27s at v0.2.2, 24m38s at v0.3.0.
+  Measured on trentina's `sdlc ci` step, GitHub-hosted 4-vCPU. Those runners
+  are fresh VMs with no layer cache, so the three are directly comparable:
+
+  | | step | vs sequential |
+  |---|---|---|
+  | v0.2.2 sequential, 2 CPUs | 927s (15m27s) | -- |
+  | v0.3.0 lanes, 1 CPU each | 1478s (24m38s) | +59% |
+  | v0.3.2 lanes, 2 CPUs each | 704s (11m44s) | -24% |
+
+  Per check, the same three: image build 500s / 1103s / 535s, in-image tests
+  181s / 354s / 155s, and the `main` lane 216s / 416s / 254s. `main` ends up
+  38s worse than it was sequentially, because the two lanes now jointly ask for
+  all four vCPUs where the sequential job asked for two -- and that is the
+  trade working as intended, since `main` was never the critical path.
+
+  On a self-hosted runner that keeps its layer cache, absolute step times swing
+  40s between runs of the same commit, so the saving there is quoted from
+  inside a single run: 169s of work across two lanes against a 101s longest
+  lane, about 65s, repeatable across three runs.
 
 - The cap detection compared the allowance against `nproc`, which a cpuset has
   already narrowed, so it could never see one. It compares against the installed
