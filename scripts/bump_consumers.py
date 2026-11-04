@@ -144,14 +144,15 @@ def main() -> int:
     repos = args.only.split(",") if args.only else org_repos()
     current, stale, failed = survey(repos, args.version)
     opened = []
-    for repo in [] if args.dry_run else stale:
-        try:
-            print(f"  {bump(repo, args.version)}")
-            opened.append(repo)
-        except (subprocess.CalledProcessError, RuntimeError) as bump_error:
-            detail = getattr(bump_error, "stderr", "") or ""
-            print(f"  FAILED: {bump_error}: {detail}".rstrip(": "), file=sys.stderr)
-            failed.append(repo)
+    if not args.dry_run:
+        for repo in stale:
+            try:
+                print(f"  {bump(repo, args.version)}")
+                opened.append(repo)
+            except (subprocess.CalledProcessError, RuntimeError) as bump_error:
+                detail = getattr(bump_error, "stderr", "") or ""
+                print(f"  FAILED: {bump_error}: {detail}".rstrip(": "), file=sys.stderr)
+                failed.append(repo)
 
     # Always say what happened. A run with nothing to do and a run that could
     # not open a pull request both used to print nothing at all, which is how
@@ -162,7 +163,7 @@ def main() -> int:
         f"{len(current) + len(stale)} repo(s) pin python-sdlc: "
         f"{did} to {args.version}, {len(current)} already there, {len(failed)} failed"
     )
-    if not current and not stale:
+    if not current and not stale and not failed:
         print("no repo pins python-sdlc; nothing was bumped", file=sys.stderr)
     if failed:
         print(f"rerun with --only {','.join(failed)}", file=sys.stderr)
