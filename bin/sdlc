@@ -164,12 +164,16 @@ run_in_image() {
     ${SDLC_GATEHOUSE_SAMPLES:+-e SDLC_GATEHOUSE_SAMPLES} \
     "$@"
 
+  # Reset HERE, not inherited. A shell function's variables are global, so a
+  # caller's earlier `|| _rc=$?` -- t_gatehouse's `git diff --quiet`, which is 1
+  # whenever there IS a diff -- survived into this function, and a container
+  # that succeeded reported the caller's 1 as its own failure.
+  _rc=0
   if [ "$_stdin" = stdin ]; then
     podman "$@" || _rc=$?
   else
     podman "$@" </dev/null || _rc=$?
   fi
-  _rc=${_rc:-0}
   # 125 podman itself failed, 126 not executable, 127 not found. The container
   # never ran, so this is not a finding.
   case "$_rc" in

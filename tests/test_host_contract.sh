@@ -59,6 +59,8 @@ cat > "$SHIM/podman" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$LOG"
 case " \$* " in
+  *" plan gatehouse-direct "*)
+    printf 'gatehouse${TAB}local${TAB}gatehouse\n' ;;
   *" plan evil "*)
     printf 'evil${TAB}host${TAB}sh${US}-c${US}touch $SHIM/pwned\n' ;;
   *" plan subst "*)
@@ -109,6 +111,39 @@ if [ ! -e "$SHIM/pwned" ]; then
   ok "a host step's words are never evaluated as shell"
 else
   bad "a host step's word was evaluated as shell"
+fi
+
+# A container that succeeds must report success, whatever the caller's last
+# exit status was. Gatehouse runs right after `git diff --quiet`, which exits 1
+# whenever there IS a diff to review; that 1 leaked through a shared variable
+# and failed every push with a branch to review, after printing "No issues
+# found". Checked here with a git shim that has a diff and a podman that passes.
+GITSHIM=$(mktemp -d)
+for prog in pre-commit gh; do
+  [ -e "$SHIM/$prog" ] && ln -s "$SHIM/$prog" "$GITSHIM/$prog"
+done
+for prog in sh awk sed tr grep basename dirname nproc cat mktemp rm ln head id podman; do
+  [ -e "$SHIM/$prog" ] && ln -s "$(readlink -f "$SHIM/$prog")" "$GITSHIM/$prog"
+done
+cat > "$GITSHIM/git" <<EOF
+#!/bin/sh
+case "\$*" in
+  *--show-toplevel*) pwd ;;
+  *symbolic-ref*) echo refs/remotes/origin/main ;;
+  *"diff --quiet"*) exit 1 ;;
+  *diff*) echo "+a change" ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$GITSHIM/git"
+ENVFILE="$GITSHIM/gatehouse.env"
+: > "$ENVFILE"
+PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 && rc=0 || rc=$?
+rm -rf "$GITSHIM"
+if [ "$rc" -eq 0 ]; then
+  ok "a passing review after a non-empty diff reports success"
+else
+  bad "a passing review after a non-empty diff exited $rc"
 fi
 
 # The targets that run a container must actually have tried to. Without this the
