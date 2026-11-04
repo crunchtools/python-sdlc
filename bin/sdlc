@@ -429,7 +429,9 @@ run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
   done < "$2"
 
   _close_check
-  trap - EXIT
+  # The trap stays armed through this: it writes the same marker, and its only
+  # reader asks whether the file exists. Clearing it first would leave a window
+  # where a failed write means no marker at all, and the printer waiting on one.
   printf '%s\n' "$_worst" > "$OUT/lane-done.$_k"
   return "$_worst"
 }
@@ -473,13 +475,20 @@ run_lanes() {          # the plan -> the worst status of every lane
   # that finishes early is HELD BACK, never dropped and never cut into another
   # lane's output; the lanes themselves keep running while this waits.
   _i=1
+  _stall=0
   while [ "$_i" -le "$NCHECKS" ]; do
     if [ -f "$OUT/rc.$_i" ]; then
       if [ -f "$OUT/out.$_i" ]; then cat "$OUT/out.$_i"; fi
       _i=$((_i + 1))
+      _stall=0
       continue
     fi
     _lanes_running || break
+    # An hour with no block finishing is not a slow check, it is a lane that
+    # cannot say it is done. Give up ORDERING and print what there is; `wait`
+    # below still blocks for each lane's real status, so nothing is guessed.
+    [ "$_stall" -ge 3600 ] && break
+    _stall=$((_stall + 1))
     sleep 1
   done
   # Whatever the loop above left: a lane that `die`d stopped where it stood, so
