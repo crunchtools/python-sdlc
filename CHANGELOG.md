@@ -6,6 +6,32 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-04
+
+### Fixed
+
+- **Lanes were a 59% REGRESSION on a GitHub-hosted runner, and this is the fix.**
+  v0.3.0 divided the CPU budget between the lanes, which was right -- the budget
+  is for the whole gate. What was wrong is the budget. `budget()` halves the
+  machine so a gate cannot take the desktop away from the person running it, and
+  it did that on CI too, where there is no desktop. On a 4-vCPU runner that left
+  a budget of 2, two lanes at 1 CPU each, and trentina's `sdlc ci` went from
+  15m27s to 24m38s: both lanes are CPU-bound, so each took about twice as long,
+  and the image chain alone (1457s) came out longer than the entire sequential
+  job had been (927s). No amount of overlap wins from there.
+
+  The budget is no longer halved in two cases that have nobody at a keyboard to
+  protect: `CI` is set, or a cpuset, a CPU affinity or a cgroup quota already
+  narrows the machine -- which is someone having already decided this process's
+  share, so halving it again double-counts the same protection. A developer's
+  laptop is unchanged: still half, and still divided between the lanes.
+
+  Measured on trentina, `sdlc ci` step: 15m27s at v0.2.2, 24m38s at v0.3.0.
+
+- The cap detection compared the allowance against `nproc`, which a cpuset has
+  already narrowed, so it could never see one. It compares against the installed
+  CPU count now.
+
 ## [0.3.1] - 2026-11-04
 
 ### Fixed
@@ -262,7 +288,8 @@ cached tag was never refreshed — that gate had been running a two-week-old
 reviewer while CI pulled fresh. Local and CI were different reviewers on the
 same diff.
 
-[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.2
 [0.3.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.1
 [0.3.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.0
 [0.2.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.2.2

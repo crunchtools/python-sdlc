@@ -36,7 +36,7 @@ default_install_hook_types: [pre-commit, pre-push]
 
 repos:
   - repo: https://github.com/crunchtools/python-sdlc
-    rev: v0.3.1
+    rev: v0.3.2
     hooks:
       - id: sdlc-commit
       - id: sdlc-push
@@ -96,6 +96,14 @@ before lanes existed. So does `sdlc push`, which never builds a container.
 The CPU budget is for the whole gate, not for each container: it is divided
 between the lanes, floor of one CPU each. Two lanes are no busier on your
 laptop than one was.
+
+The budget itself is half the machine, so a gate cannot take the desktop away
+from the person running it — except where there is no such person. In CI, or
+where a cpuset, a CPU affinity or a cgroup quota already narrows the machine,
+the whole allowance is used: something has already decided this process's
+share, and halving it again double-counts the same protection. Halving CI is
+what made lanes slower than no lanes on a 4-vCPU runner; see the v0.3.2
+changelog entry.
 
 Each lane's output is buffered and printed whole, in the order `tiers` lists
 the checks, so two lanes never cut into each other's log. Each block ends with
