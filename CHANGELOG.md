@@ -46,7 +46,11 @@ versions.
   only git, podman, pre-commit, gh and POSIX utilities, plus a recording podman
   shim. Earns the host-contract exemption rather than relying on the
   constitution validator not inspecting `language: script` hooks.
-- `sdlc versions`, reporting what is installed beside what was pinned.
+- `sdlc versions`, reporting what is installed beside what was pinned. The two
+  columns answer different questions and need not match: a wrapper image carries
+  its own version (`crunchtools/gourmand:1.0.0` is that packaging repo's first
+  release) around an upstream build (`mattdm/gourmand` v0.16.5). The tag is what
+  CI pins; the self-reported version is which upstream actually runs.
 
 ### Verified against trentina
 

@@ -146,10 +146,12 @@ The constitution validator is cloned rather than baked for a different reason:
 the fleet spans `Inherits:` v1.0.0 to v1.29.0, so a baked copy would judge most
 repos by rules they have not adopted.
 
-`sdlc versions` prints what is installed next to what was pinned. Where the two
-disagree — the Gourmand image tagged `1.0.0` ships a binary reporting `0.16.5` —
-that is shown rather than hidden, because a version nobody can see is a version
-nobody can pin.
+`sdlc versions` prints what is installed next to what was pinned, because the
+two answer different questions. They need not match: `crunchtools/gourmand:1.0.0`
+is that packaging repo's own first release and the binary inside it is upstream
+`mattdm/gourmand` v0.16.5. Both are correct. The tag is what CI pins; the
+self-reported version is which upstream you are actually running, and a tag
+alone does not tell you that.
 
 ## Trivy is not here
 
