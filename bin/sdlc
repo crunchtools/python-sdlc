@@ -80,7 +80,8 @@ _cgroup_cpu_ceiling() {         # cpu.max from leaf to root, smallest quota wins
   # the GitHub runner on gloval -- the path is "/" or climbs with "..". Both
   # mean "the namespace root", which is /sys/fs/cgroup itself, and the root is
   # exactly where a container's quota lives, so it is read, not skipped.
-  case "$_dir" in /|*..*) _dir= ;; esac
+  # A ".." COMPONENT, not any two dots: `job..scope` is a legal cgroup name.
+  case "$_dir" in /|/..|/../*|*/../*|*/..) _dir= ;; esac
   _path="/sys/fs/cgroup${_dir%/}"
   _best=0
   # The walk ends AT /sys/fs/cgroup or anywhere outside it, never by hoping
