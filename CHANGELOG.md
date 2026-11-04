@@ -6,6 +6,19 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-04
+
+### Fixed
+
+- **`bump-consumers` says what it did.** The job printed nothing when it had
+  nothing to bump and nothing when it could not open a pull request, so the two
+  looked identical from the outside. That is how RT#1553 survived two releases:
+  the `crunchtools-ci` App had no `pull_requests: write`, every `gh pr create`
+  was refused, and the job still read as green and quiet. It now always ends
+  with a count -- how many repos pin python-sdlc, how many were bumped, how
+  many were already there, how many failed -- and says so loudly if no repo
+  pins it at all.
+
 ## [0.3.3] - 2026-11-04
 
 ### Fixed
