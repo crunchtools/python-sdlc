@@ -858,6 +858,10 @@ run_plan() {           # commit | push | ci | <check>
 
 case "${1:---help}" in
   -h|--help|help)
+    # Asked of git rather than written as `.git/sdlc`: in a linked worktree the
+    # git directory is somewhere else entirely.
+    STATE_HINT=$(git rev-parse --git-path sdlc 2>/dev/null) || STATE_HINT=
+    [ -n "$STATE_HINT" ] || STATE_HINT='<git-dir>/sdlc'
     cat <<EOF
 usage: $ME commit | push | ci | <check> | tiers | list | versions | codeql-baseline
 
@@ -876,6 +880,20 @@ usage: $ME commit | push | ci | <check> | tiers | list | versions | codeql-basel
 Configure each command in pyproject.toml: [tool.sdlc.commit],
 [tool.sdlc.push], [tool.sdlc.ci]. Skip one check once: SDLC_SKIP=name.
 Exit 2 means a check COULD NOT RUN and is never to be worked around.
+
+Working a change, in the order that costs least:
+
+  $ME commit && $ME push    every verdict, before spending a CI cycle on
+                              a finding you could have read in two minutes
+  $ME <check> -- <args>      reproduce one failure without rerunning the tier
+  $STATE_HINT/last-push.json
+                              what the last run cost, per check, and where
+                              each buffered check's output went
+
+Two things mislead people here. The Python running your tests is the image's,
+not this machine's, so a result from a host 'pytest' says nothing about this
+gate. And on a review finding CI triage is the authority, not this record,
+which is only what happened on this machine last time.
 Image: $IMAGE
 EOF
     ;;

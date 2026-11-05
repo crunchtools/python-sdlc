@@ -30,6 +30,23 @@ the image contains.
 Because the laptop and CI run the same image and the same commands, a green
 push predicts a green CI.
 
+## Working a change
+
+In the order that costs least:
+
+```
+sdlc commit && sdlc push          every verdict, before a CI cycle
+sdlc pytest -- tests/x.py::test_y -n0    reproduce one failure, just that one
+jq . .git/sdlc/last-push.json     what the last run cost, per check
+```
+
+Two things mislead people here. The Python running your tests is the image's,
+not your machine's, so a result from a host `pytest` says nothing about this
+gate — and bytecode your machine compiled is kept out of the container
+deliberately, so it cannot say anything either. And on a review finding, CI
+triage is the authority, not the local record: push predicts CI, it does not
+replace it.
+
 ## Wiring a repo
 
 `.pre-commit-config.yaml`, the whole file:

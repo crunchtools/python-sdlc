@@ -79,7 +79,7 @@ jobs:
         if: env.IS_TAG != 'true'
         run: |
           set -eu
-          podman run --rm -v "$PWD:/mnt:ro" -w /mnt \
+          podman run --rm -v "$PWD:/mnt:ro,z" -w /mnt \
             docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh \
             tests/test_host_contract.sh
           tests/test_host_contract.sh
