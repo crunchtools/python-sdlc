@@ -197,6 +197,14 @@ One rule for all three blocks:
 
 - `checks` **adds** to that command's defaults; `skip` removes from them.
   What push skips, ci skips too.
+- **`[tool.sdlc.ci] skip` may not name a push verdict** — mypy, pytest,
+  semgrep, pip-audit, constitution or codeql. Constitution XII says CI runs
+  push's checks except Gourmand and Gatehouse, and this tool decides which two
+  those are. Skipping a verdict in ci alone leaves it on pre-push, which is a
+  developer's machine and one `--no-verify`, while the required `sdlc ci`
+  reports green. If a check should not run, take it out of
+  `[tool.sdlc.push]` — then the choice is in one place. A check the repo added
+  itself may be skipped in ci freely.
 - A check that needs settings gets its own table:
   `[tool.sdlc.<command>.<check>]`.
 - A check that is not built in must say what `kind` it is.

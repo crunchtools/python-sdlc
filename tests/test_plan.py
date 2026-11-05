@@ -6,7 +6,9 @@ tells it. A wrong answer here is a check that silently does not run, so the
 rules are pinned case by case:
 
   - each command runs its defaults; a block's `checks` adds, `skip` removes
-  - ci runs push's checks except the two reviewers CI already runs elsewhere
+  - ci runs push's checks except the two reviewers CI already runs elsewhere,
+    and a repo may not skip any of the rest: that would leave a verdict on
+    pre-push alone, which is a developer's machine and one `--no-verify`
   - a check that is not built in must name a kind, and only real kinds exist
   - the whole config is checked whichever command runs
   - CodeQL fails only on findings that are not in the committed baseline
@@ -81,6 +83,22 @@ check("ci checks adds after the defaults", S.resolve(cfg, "ci")[-1] == "image")
 check("a repo check has its kind", S.kind_of(cfg, "image") == "image-build")
 check("a built-in has no kind", S.kind_of(cfg, "mypy") is None)
 
+# XII: CI runs push's verdicts. A ci-only skip would leave a check on pre-push
+# alone -- a developer's machine, one `--no-verify` from gone -- while the
+# required `sdlc ci` reported green. It is refused, whichever verdict it names.
+for verdict in sorted(set(S.DEFAULTS["push"]) - set(S.CI_EXCLUDES)):
+    msg = cannot_run(S.resolve, {"ci": {"skip": [verdict]}}, "ci")
+    check(
+        f"ci may not skip {verdict}",
+        msg is not None and "CI may not skip a verdict" in msg,
+        str(msg),
+    )
+msg = cannot_run(S.resolve, {"ci": {"skip": list(S.CI_EXCLUDES)}}, "ci")
+check("ci may still name the two it never runs", msg is None, str(msg))
+# The repo's own checks are its own business: it added them, it may skip them.
+own = {"push": {"checks": ["img"], "img": {"kind": "image-build"}}, "ci": {"skip": ["img"]}}
+check("ci may skip a check the repo added", "img" not in S.resolve(own, "ci"))
+
 # ----------------------------------------------------------------- refusals
 
 msg = cannot_run(S.kind_of, {"commit": {"checks": ["mystery"]}}, "mystery")
@@ -108,6 +126,11 @@ msg = config_error("[tool.sdlc.post]\n")
 check("a block that is not a command is refused", msg is not None and "only keys are" in msg)
 msg = config_error('[tool.sdlc.ci]\nchecks = ["typo"]\n')
 check("a typo in ci is found on commit", msg is not None and "typo" in msg, str(msg))
+# The whole config is checked whichever command runs, so a ci-only skip of a
+# verdict is caught on the next commit rather than in CI, where the skip is
+# precisely what would have made CI read green.
+msg = config_error('[tool.sdlc.ci]\nskip = ["mypy"]\n')
+check("a ci skip of a verdict is found on commit", msg is not None and "mypy" in msg, str(msg))
 
 # --------------------------------------------------- project in a subdirectory
 #
@@ -377,7 +400,6 @@ version = "0.0.0"
 
 [tool.sdlc.ci]
 checks = ["image", "image-tests"]
-skip = ["codeql"]
 
 [tool.sdlc.ci.image]
 kind = "image-build"
