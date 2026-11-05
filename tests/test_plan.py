@@ -64,7 +64,7 @@ def cannot_run(fn, *args) -> str | None:
 empty: dict = {}
 check(
     "commit defaults",
-    S.resolve(empty, "commit") == ["ruff-check", "ruff-format", "hooks-installed"],
+    S.resolve(empty, "commit") == ["ruff-check", "ruff-format", "gourmand", "hooks-installed"],
 )
 check("push defaults", S.resolve(empty, "push") == S.DEFAULTS["push"])
 ci = S.resolve(empty, "ci")
@@ -331,6 +331,16 @@ check(
     set(lanes.values()) == {S.MAIN_LANE},
     str(lanes),
 )
+# Gourmand judges what ruff leaves behind, so it must come after both ruff
+# steps. A commit tier that reviewed the unformatted tree would report findings
+# that the same commit had already fixed.
+order = S.resolve(empty, "commit")
+check(
+    "gourmand runs after the two ruff steps",
+    order.index("gourmand") > max(order.index("ruff-check"), order.index("ruff-format")),
+    str(order),
+)
+
 commit = S.lane_of(empty, S.resolve(empty, "commit"))
 check("commit is always one lane", set(commit.values()) == {S.MAIN_LANE}, str(commit))
 

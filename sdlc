@@ -146,9 +146,19 @@ def pyproject() -> dict:
 COMMANDS = ("commit", "push", "ci")
 
 DEFAULTS = {
-    # Seconds, offline, free: what rewrites your code, plus the one check that
-    # notices the push hook was never installed.
-    "commit": ["ruff-check", "ruff-format", "hooks-installed"],
+    # Seconds, offline, free: what rewrites your code, the structural review
+    # that is cheap enough to sit beside it, plus the one check that notices the
+    # push hook was never installed.
+    #
+    # Gourmand runs AFTER the two ruff steps, so it judges the formatted tree
+    # rather than the one you typed. It is here because its findings are
+    # deterministic -- the same tree gives the same answer, with no model and no
+    # network -- so paying for them at push, where each rejection costs a
+    # six-to-eight minute cycle, was paying the wrong price. Measured at 1.7s on
+    # this repo and 3.2s on trentina, warm, in full mode. It stays in push too:
+    # a commit can be made with --no-verify, and push is the tier that renders
+    # the verdicts.
+    "commit": ["ruff-check", "ruff-format", "gourmand", "hooks-installed"],
     # Everything that renders a verdict, once, over origin/<default>...HEAD.
     # Never a container build: that is minutes, and a push you wait minutes for
     # is a push people stop making.

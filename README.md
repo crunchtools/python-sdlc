@@ -15,8 +15,11 @@ the image contains.
 | `sdlc push` | the pre-push hook | `[tool.sdlc.push]` |
 | `sdlc ci` | the CI job named `sdlc ci` | `[tool.sdlc.ci]` |
 
-- **commit** takes seconds, works offline and costs nothing: formatting and
-  lint fixes.
+- **commit** takes seconds, works offline and costs nothing: formatting, lint
+  fixes, and Gourmand's structural review. Everything here is deterministic —
+  the same tree gives the same answer, with no model and no network — so there
+  is no reason to find it at push, where each rejection costs a six-to-eight
+  minute cycle.
 - **push** renders every verdict, once, over `origin/<default-branch>...HEAD`.
   It never builds a container — that is minutes, and a push you wait minutes
   for is a push people stop making.
@@ -80,7 +83,7 @@ nested `pyproject.toml` still applies to the files under it.
 
 | Command | Runs |
 |---|---|
-| `commit` | ruff-check, ruff-format, hooks-installed |
+| `commit` | ruff-check, ruff-format, gourmand, hooks-installed |
 | `push` | mypy, pytest, gourmand, gatehouse, semgrep, pip-audit, constitution, codeql |
 | `ci` | mypy, pytest, semgrep, pip-audit, constitution, codeql |
 
