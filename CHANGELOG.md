@@ -6,6 +6,31 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-05
+
+### Changed
+
+- **`[tool.sdlc.ci] skip` may no longer name a push verdict.** Constitution XII
+  says CI runs push's checks except Gourmand and Gatehouse. Those two are
+  `CI_EXCLUDES`, decided by this tool. A repo that skipped any of the rest in
+  the `ci` block alone kept the check on pre-push -- a developer's machine, one
+  `--no-verify` from gone -- while the required `sdlc ci` reported green.
+
+  This was not hypothetical. 24 of the 33 repos converted under RT#1552 carried
+  `[tool.sdlc.ci] skip = ["codeql"]`, each with a comment saying the CodeQL
+  Action covered it. Checked against the rulesets: the Action's check was
+  required in 1 of them, advisory in 21, and in 2 (`ashigaru`, `rotv`) it never
+  ran on a pull request at all -- `ashigaru` has no CodeQL workflow, and
+  `rotv`'s `upload-sarif` step is gated on `github.event_name != 'pull_request'`.
+  So in 23 repos the only place CodeQL could block was the pre-push hook.
+
+  `resolve()` now refuses the config, with the names it objects to. Because
+  `sdlc_config()` validates every block whichever command runs, a repo that
+  adds the skip back finds out on its next `sdlc commit`, not in CI -- which
+  matters, because in CI the skip is exactly what would have made it read
+  green. A check the repo added itself may still be skipped in `ci` freely, and
+  a check that should not run anywhere belongs out of `[tool.sdlc.push]`, where
+  the decision is visible in one place.
 ## [0.4.0] - 2026-11-04
 
 Fewer push cycles, and a gate you can see into. Every change here comes from

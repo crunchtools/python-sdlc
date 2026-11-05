@@ -243,7 +243,30 @@ def resolve(cfg: dict, command: str) -> list[str]:
         base = list(DEFAULTS[command])
     own = block(cfg, command)
     drop = set(names(own.get("skip"), f"[tool.sdlc.{command}] skip"))
-    if command != "ci":
+    if command == "ci":
+        # XII: "CI runs push's checks except Gourmand and Gatehouse". Those two
+        # are CI_EXCLUDES, decided by this image and not by a repo. Skipping any
+        # other verdict HERE leaves it on the one tier nothing enforces: pre-push
+        # runs on a developer's machine and `--no-verify` is one flag, while the
+        # required `sdlc ci` still reports green. 24 of the 33 converted repos
+        # skipped `codeql` exactly this way, each with a comment claiming the
+        # CodeQL Action covered it; the Action was a required check in one of
+        # them, advisory in 21, and absent from pull requests entirely in two.
+        #
+        # A check the repo does not want in CI at all belongs out of
+        # [tool.sdlc.push] too, where the choice is visible in one place instead
+        # of being a difference between two tiers nobody reads side by side.
+        verdicts = sorted(drop & (set(DEFAULTS["push"]) - set(CI_EXCLUDES)))
+        if verdicts:
+            cannot(
+                f"[tool.sdlc.ci] skip names {', '.join(verdicts)}, which the push "
+                f"tier renders a verdict with. CI may not skip a verdict "
+                f"(constitution XII): only {' and '.join(CI_EXCLUDES)} run through "
+                f"their own workflows, and this image decides that, not a repo. "
+                f"Skip a check the repo added itself, or take it out of "
+                f"[tool.sdlc.push] as well."
+            )
+    else:
         drop |= skipped()
     out = [c for c in base if c not in drop]
     for name in names(own.get("checks"), f"[tool.sdlc.{command}] checks"):
