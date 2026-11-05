@@ -114,7 +114,8 @@ jobs:
         if: env.IS_TAG != 'true'
         run: |
           set -eu
-          for t in tests/test_plan.py tests/test_codeql_globs.py; do
+          for t in tests/test_plan.py tests/test_codeql_globs.py \
+                   tests/test_pycache_prefix.py; do
             podman run --rm -v "$PWD:/src:ro,z" -w /src \
               --entrypoint /opt/constitution-venv/bin/python3 \
               "localhost/python-sdlc:$GITHUB_SHA" "$t"

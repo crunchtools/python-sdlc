@@ -441,6 +441,21 @@ else
   bad "podman was called but never asked to run the image"
 fi
 
+printf '\n== what the containers are given\n\n'
+
+# The worktree is the developer's, so its __pycache__ is the laptop's. Every
+# container that mounts it must keep its bytecode somewhere else, or a module
+# compiled on the host decides a verdict in here -- four of the five pushes on
+# trentina#706. tests/test_pycache_prefix.py tests the property; this asserts
+# the env var reaches every such container.
+mounts=$(grep -c ':/repo:' "$LOG" 2>/dev/null || true)
+prefixed=$(grep ':/repo:' "$LOG" 2>/dev/null | grep -c 'PYTHONPYCACHEPREFIX=/tmp/pycache' || true)
+if [ "${mounts:-0}" -gt 0 ] && [ "$prefixed" = "$mounts" ]; then
+  ok "all $mounts container(s) mounting the worktree got their own bytecode cache"
+else
+  bad "$prefixed of ${mounts:-0} containers mounting the worktree set PYTHONPYCACHEPREFIX"
+fi
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
   printf 'host contract PASSED\n'; exit 0

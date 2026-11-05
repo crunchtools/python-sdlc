@@ -409,6 +409,17 @@ for lane in set(lanes_seen):
     runs = [c for i, c in enumerate(seq) if i == 0 or seq[i - 1] != c]
     check(f"lane {lane}: each check's steps are contiguous", len(runs) == len(set(runs)), str(seq))
 
+# The in-image pytest run mounts the repo's test files, so it has the same
+# exposure to the host's bytecode that bin/sdlc's own containers have: pytest's
+# rewriter reads its cached code as marshalled and cannot correct the path it
+# was compiled from. See tests/test_pycache_prefix.py.
+argv = next(r[3].split(S.UNIT_SEPARATOR) for r in rows if r[0] == "image-tests" and r[2] == "host")
+check(
+    "the in-image pytest run keeps its bytecode out of the tree",
+    "PYTHONPYCACHEPREFIX=/tmp/pycache" in argv,
+    str(argv),
+)
+
 single = plan_of("push", '[project]\nname = "fx"\nversion = "0.0.0"\n')
 check(
     "push is one lane, so it runs exactly as it did before",

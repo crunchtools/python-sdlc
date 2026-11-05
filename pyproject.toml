@@ -49,4 +49,9 @@ max-complexity = 10
 "sdlc" = ["S404", "S108", "ARG001"]
 "validate" = ["S404"]
 # A test asserts. That is what it is for.
-"tests/*" = ["S101", "PT018"]
+# S302: test_pycache_prefix.py unmarshals bytecode to show what pytest's
+# assertion rewriter sees. The input is a .pyc that test compiled itself,
+# seconds earlier, into its own temporary directory -- there is no untrusted
+# bytecode anywhere near it, and reading it any other way would not be a copy
+# of the behaviour under test.
+"tests/*" = ["S101", "PT018", "S302"]

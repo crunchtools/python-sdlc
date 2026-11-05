@@ -540,6 +540,11 @@ def kind_pytest_in_image(name: str, settings: dict) -> list[tuple[str, str, str]
         f"PYTHONPATH=/sdlc-cache/pytest/{project_name()}",
         "-e",
         "HOME=/tmp",
+        # The same reason as bin/sdlc's run_in_image: this mounts the repo's
+        # test files, so without a prefix pytest reads bytecode the host
+        # compiled and judges paths that do not exist in here.
+        "-e",
+        "PYTHONPYCACHEPREFIX=/tmp/pycache",
         "-w",
         "/repo",
         "--entrypoint",

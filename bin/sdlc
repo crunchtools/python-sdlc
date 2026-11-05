@@ -191,6 +191,17 @@ run_in_image() {
   # is writable, with no --user and no --userns=keep-id. Two bugs came from
   # trying to be cleverer than this.
   #
+  # PYTHONPYCACHEPREFIX is what keeps the shared tree from deciding a verdict.
+  # /repo is the developer's worktree, so its `__pycache__` is the laptop's, and
+  # bytecode carries the path it was compiled from. pytest's assertion rewriter
+  # reads its cached code back as marshalled and cannot fix that path -- the
+  # whole point of its cache is the REWRITTEN code -- so a module compiled on
+  # the host keeps `/home/<user>/.../x.py` while `__file__` is `/repo/.../x.py`,
+  # and any test comparing the two fails here and nowhere else. That was four of
+  # the five pushes on trentina#706. /tmp is the tmpfs below, so with the prefix
+  # set the container neither reads the tree's bytecode nor writes any back into
+  # it -- which matters at commit, where the mount is read-write.
+  #
   # ONE deliberate difference: `z`, not `Z`. A tier runs several of these and
   # `Z` relabels the tree EXCLUSIVELY, taking it out from under whichever
   # container started first (gates.sh:157-161). Those two run one at a time and
@@ -202,6 +213,7 @@ run_in_image() {
     -v "$CACHE_VOLUME:/cache" \
     --tmpfs /tmp:rw,exec,size=4g,mode=1777 \
     -e HOME=/tmp \
+    -e PYTHONPYCACHEPREFIX=/tmp/pycache \
     -e SEMGREP_SETTINGS_FILE=/tmp/semgrep.yml \
     -e "SDLC_PROJECT=$PROJECT" \
     -e "SDLC_JOBS=$GATE_CPUS" \
