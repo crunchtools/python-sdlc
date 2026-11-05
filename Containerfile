@@ -150,6 +150,23 @@ RUN ln -s /app/venv/bin/gatehouse /usr/local/bin/gatehouse
 # 110 MB, which is the whole reason CodeQL can be in a pre-push gate at all.
 # Fetched by exact release and checksum-verified: a tool that decides whether
 # code ships is not downloaded from a moving target.
+#
+# The ownership and modes are NORMALIZED after extraction, and that is load
+# bearing rather than tidiness. The bundle carries 25 precompiled `.qlx` files
+# under `.codeql/precompiled/` at mode 0600, owned by the uid that built it
+# (1001). The container runs as root, so root read them only by holding
+# CAP_DAC_OVERRIDE -- and the gate now drops every capability. Without the
+# chmod, `codeql database analyze` cannot read its own precompiled queries,
+# recompiles all 55 of them, and then dies with an internal StringPool error:
+#
+#   WARNING: Not using precompiled UseofInput.qlx: ...
+#     java.nio.file.AccessDeniedException: /opt/codeql/.../*.bytes.qlx
+#   Oops! A fatal internal error occurred.
+#   codeql database analyze failed (exit 100)
+#
+# Found by running trentina's `sdlc push` against this image: 355 seconds and
+# an exit 2 instead of a verdict. `a+rX` rather than `a+rx`, so execute is
+# added to directories and to files that already had it, and nothing else.
 RUN set -eu; \
     base="https://github.com/github/codeql-action/releases/download/${CODEQL_BUNDLE}"; \
     curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 -o /tmp/codeql.tar.zst "${base}/codeql-bundle-python-linux64.tar.zst"; \
@@ -157,6 +174,8 @@ RUN set -eu; \
     mkdir -p /opt; \
     tar --use-compress-program=unzstd -xf /tmp/codeql.tar.zst -C /opt; \
     rm -f /tmp/codeql.tar.zst /tmp/codeql.sha; \
+    chown -R root:root /opt/codeql; \
+    chmod -R a+rX /opt/codeql; \
     ln -s /opt/codeql/codeql /usr/local/bin/codeql; \
     codeql --version | head -1
 

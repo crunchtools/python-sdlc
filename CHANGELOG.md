@@ -151,9 +151,16 @@ was something the developer could have seen before pushing.
   `--cap-drop=all --security-opt=no-new-privileges` on both. Not
   `--network none`, which `uv sync`, `pip-audit` and Gatehouse need, and not
   `--read-only`, because rewriting the tree is the point of the commit tier.
-  Checked rather than assumed: all seven tool binaries probe, `ruff-check`
-  rewrites the tree, and trentina's `mypy` runs a full `uv sync` into the
-  shared cache volume and type-checks 235 files.
+  Normalizing `/opt/codeql`'s ownership and modes is part of this, not
+  housekeeping. The bundle extracts 25 precompiled `.qlx` files at mode 0600
+  owned by uid 1001, and the container's root had been reading them purely on
+  `CAP_DAC_OVERRIDE`; without it `codeql database analyze` recompiled all 55
+  queries and then died with an internal error -- 355 seconds and an exit 2
+  instead of a verdict. Found by running trentina's whole `sdlc push` against
+  the image, which is the only place it shows: a bare `podman run` still holds
+  the capability, so a tool broken this way passes every hand-test.
+  `tests/contract.sh` now asserts that no file under `/opt` needs that
+  capability.
 
 ### Not done, and why
 
