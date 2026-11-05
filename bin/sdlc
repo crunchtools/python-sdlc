@@ -230,6 +230,7 @@ run_in_image() {
     -e "SDLC_HOST_REPO=$REPO" \
     -e "SDLC_CACHE_VOLUME=$CACHE_VOLUME" \
     ${SDLC_SKIP:+-e SDLC_SKIP} \
+    ${SDLC_ARGS:+-e SDLC_ARGS} \
     ${SDLC_GATEHOUSE_SAMPLES:+-e SDLC_GATEHOUSE_SAMPLES} \
     "$@"
 
@@ -865,6 +866,8 @@ usage: $ME commit | push | ci | <check> | tiers | list | versions | codeql-basel
   ci                what CI runs: push's checks except the two reviewers,
                     plus the repo's own
   <check>           one check by name -- the inner loop
+  <check> -- <args> one check, with arguments for the tool itself, as:
+                      $ME pytest -- tests/test_x.py::test_y -n0
   tiers             what each command runs in this repo
   list              the built-in checks and the kinds
   versions          the exact tool versions the image carries
@@ -878,5 +881,44 @@ EOF
     ;;
   tiers|list|versions) run_in_image ro nostdin "$IMAGE" "$1" ;;
   codeql-baseline)     run_in_image rw nostdin "$IMAGE" "$1" ;;
-  *)                   SDLC_DEPTH=0 run_plan "$1" ;;
+  *)
+    _target=$1
+    shift
+    # Arguments for the check itself, after `--`. Without this, `sdlc pytest
+    # tests/x.py` ran the WHOLE suite: the dispatcher passed "$1" to run_plan
+    # and dropped everything after it, silently, so the one thing an agent
+    # reaches for after a rejected push -- rerun just that test -- quietly did
+    # the most expensive possible thing instead.
+    #
+    # Joined with the unit separator and handed over in the environment, like
+    # SDLC_SKIP. It is NOT a plan field: the plan is the image telling this
+    # script what to run, and `plain()` guards it so a repo's config can never
+    # forge a line into this shell's argv. This goes the other way and lands in
+    # a Python argv list, with no shell between here and the tool.
+    case "$_target" in
+      commit|push|ci)
+        # A tier is several checks; arguments for "the check" have no meaning.
+        # Cleared rather than refused when it merely arrives in the
+        # environment, so an exported SDLC_ARGS cannot reach a tier's pytest.
+        [ $# -eq 0 ] || die "$_target runs several checks; '--' arguments belong to a single check"
+        SDLC_ARGS=
+        ;;
+      *)
+        if [ $# -gt 0 ]; then
+          [ "$1" = -- ] || die "unexpected argument '$1'; arguments for a check go after '--', as: $ME $_target -- <args>"
+          shift
+          [ $# -gt 0 ] || die "'--' with nothing after it; give the check's arguments, or drop it"
+          SDLC_ARGS=
+          for _a in "$@"; do
+            # The one character that could not survive the round trip, refused
+            # for the same reason the plan refuses it.
+            case $_a in *"$US"*) die "an argument contains a control separator, which is refused" ;; esac
+            SDLC_ARGS="${SDLC_ARGS:+$SDLC_ARGS$US}$_a"
+          done
+          export SDLC_ARGS
+        fi
+        ;;
+    esac
+    SDLC_DEPTH=0 run_plan "$_target"
+    ;;
 esac

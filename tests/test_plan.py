@@ -454,6 +454,35 @@ check(
 )
 
 
+# ------------------------------------------------ arguments for a single check
+#
+# bin/sdlc joins the words after `--` with the unit separator and exports
+# SDLC_ARGS. It is not a plan field: the plan is this script telling the host
+# what to run, and `plain()` guards it. This goes the other way and ends up in
+# an argv list, so there is no shell between the caller and the tool.
+
+PASSTHROUGH = [
+    (None, []),
+    ("", []),
+    ("-q", ["-q"]),
+    (f"-k{S.UNIT_SEPARATOR}", ["-k", ""]),  # `-k ''` is a legitimate argument
+    (f"tests/x.py::test_y{S.UNIT_SEPARATOR}-n0", ["tests/x.py::test_y", "-n0"]),
+    # A word with spaces survives as ONE word, which is the whole reason the
+    # separator is used instead of splitting on whitespace.
+    (f"-k{S.UNIT_SEPARATOR}not slow", ["-k", "not slow"]),
+]
+for raw, want in PASSTHROUGH:
+    saved = os.environ.pop("SDLC_ARGS", None)
+    if raw is not None:
+        os.environ["SDLC_ARGS"] = raw
+    try:
+        check(f"passthrough {raw!r}", S.passthrough() == want, str(S.passthrough()))
+    finally:
+        os.environ.pop("SDLC_ARGS", None)
+        if saved is not None:
+            os.environ["SDLC_ARGS"] = saved
+
+
 def main() -> int:
     print()
     if FAILED:

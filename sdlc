@@ -795,6 +795,28 @@ def sync_project(env: dict[str, str]) -> None:
 # `[tool.pytest] testpaths`), so there is one place to say what gets checked.
 
 
+def passthrough() -> list[str]:
+    """What the caller put after `--` on a single-check run.
+
+    `bin/sdlc` joins those words with the unit separator and exports
+    SDLC_ARGS. It is deliberately not a plan field: the plan is this script
+    telling the host what to run, and `plain()` guards it so that a repo's
+    config can never forge a line into the host's shell. This travels the other
+    way and ends up in an argv list, so there is no shell between the caller
+    and the tool.
+
+    Only a check that is a tool invocation reads this, and only `pytest` does
+    today. A tier never sees it -- `bin/sdlc` clears the variable for
+    commit/push/ci rather than refusing it, so an exported SDLC_ARGS cannot
+    reach a tier's pytest -- and no `host` step argv is built from it.
+    """
+    raw = os.environ.get("SDLC_ARGS")
+    if not raw:
+        return []
+    # Not filtered: `-k ''` is a legitimate empty argument.
+    return raw.split(UNIT_SEPARATOR)
+
+
 def t_ruff_check(s: dict) -> int:
     need_project()
     step("ruff check --fix .")
@@ -838,7 +860,8 @@ def t_pytest(s: dict) -> int:
     sync_project(env)
     jobs = os.environ.get("SDLC_JOBS", "0")
     args = names(s.get("args", ["-q", "-rfE"]), "pytest.args")
-    step("pytest")
+    extra = passthrough()
+    step("pytest" + ("".join(f" {a}" for a in extra) if extra else ""))
     cmd = [
         "uv",
         "run",
@@ -852,6 +875,10 @@ def t_pytest(s: dict) -> int:
     ]
     if jobs != "0" and "pytest-xdist" in (project_dir() / "uv.lock").read_text(encoding="utf-8"):
         cmd += ["-n", jobs]
+    # LAST, after the config's args and after `-n`, so what the caller asked
+    # for on the command line wins: `-- -n0` turns off the parallelism this
+    # just added, which is how you read a traceback.
+    cmd += extra
     return run(cmd, env=env, cwd=project_dir())[0]
 
 

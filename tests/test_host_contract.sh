@@ -27,6 +27,16 @@ FAILED=0
 ok()  { printf 'ok   %s\n' "$*"; }
 bad() { printf 'FAIL %s\n' "$*"; FAILED=$((FAILED + 1)); }
 
+# The fake podman appends every call to one cumulative log, which the argv
+# assertions at the end of this file read whole. A block that wants only its own
+# calls marks the position and reads from there, rather than truncating it.
+LOG_AT=0
+log_mark()  { LOG_AT=$(wc -l < "$LOG" 2>/dev/null || printf 0); }
+log_since() {
+  tail -n "+$((LOG_AT + 1))" "$LOG" > "$RUN/podman.log" 2>/dev/null \
+    || : > "$RUN/podman.log"
+}
+
 printf '== host contract: bin/sdlc\n\n'
 
 case "$(head -1 bin/sdlc)" in
@@ -388,13 +398,16 @@ done
 # The CPU budget is for the whole gate, not for each container: two lanes out
 # of a budget of 4 get 2 each, so a laptop running `sdlc ci` is no worse off
 # than it was when the checks were sequential.
-: > "$LOG"
+log_mark
 lanes lanes-budget || true
-if grep -q -- '--cpus 2 ' "$LOG" && grep -q -- '--cpu-quota 200000' "$LOG"; then
+log_since
+if grep -q -- '--cpus 2 ' "$RUN/podman.log" \
+   && grep -q -- '--cpu-quota 200000' "$RUN/podman.log"; then
   ok "a budget of 4 is split 2 and 2 between two lanes"
 else
   bad "the lanes did not divide the CPU budget"
-  grep -o -- '--cpus [0-9]*\|--cpu-quota [0-9]*' "$LOG" | sort -u | sed 's/^/       /'
+  grep -o -- '--cpus [0-9]*\|--cpu-quota [0-9]*' "$RUN/podman.log" | sort -u \
+    | sed 's/^/       /'
 fi
 
 # A container that succeeds must report success, whatever the caller's last
@@ -440,11 +453,11 @@ review() {             # [fails] -> exit status, output in $RUN/out
   [ "${1:-}" = fails ] && touch "$SHIM/review-fails"
   # Not truncated: the argv assertions at the end of this file read the whole
   # log, so this run's lines are taken from where it was instead.
-  _was=$(wc -l < "$LOG" 2>/dev/null || printf 0)
+  log_mark
   _rc=0
   PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" SDLC_CPUS=4 \
     sh bin/sdlc lanes-review > "$RUN/out" 2>&1 || _rc=$?
-  tail -n "+$((_was + 1))" "$LOG" > "$RUN/podman.log" 2>/dev/null || : > "$RUN/podman.log"
+  log_since
   rm -f "$SHIM/review-fails"
   return "$_rc"
 }
@@ -512,6 +525,55 @@ if grep -q 'python-sdlc\|run --rm' "$LOG" 2>/dev/null; then
   ok "podman was asked to run the image"
 else
   bad "podman was called but never asked to run the image"
+fi
+
+printf '\n== arguments for one check\n\n'
+
+# `sdlc pytest tests/x.py` used to run the whole suite: the dispatcher read
+# "$1" and dropped the rest without a word. Silently doing the most expensive
+# possible thing is worse than refusing, so an argument that is not behind `--`
+# is now an exit 2, and `--` on a tier is too.
+args_case() {          # expect-rc target [args...]
+  _want=$1; shift
+  _what="$*"
+  _got=0
+  PATH="$SHIM" sh bin/sdlc "$@" >/dev/null 2>&1 || _got=$?
+  if [ "$_got" -eq "$_want" ]; then
+    ok "'$_what' exits $_got"
+  else
+    bad "'$_what' exits $_got, want $_want"
+  fi
+}
+
+args_case 2 mypy tests/x.py
+args_case 2 mypy --
+args_case 2 push -- -x
+args_case 2 commit -- -x
+args_case 0 mypy -- -q
+
+# Handed over in the ENVIRONMENT, not built into the argv: podman is told the
+# variable's name and the kernel carries the value, so no word of it is ever a
+# word of a command line here.
+log_mark
+PATH="$SHIM" sh bin/sdlc mypy -- --tb=short -n0 >/dev/null 2>&1 || true
+log_since
+if grep -q -- '-e SDLC_ARGS' "$RUN/podman.log" && ! grep -q -- '--tb=short' "$RUN/podman.log"
+then
+  ok "the check's arguments reach the container by name, not as argv words"
+else
+  bad "SDLC_ARGS was not passed, or its value leaked into the podman argv"
+  grep -o -- '-e SDLC_[A-Z]*\|--tb=short' "$RUN/podman.log" | sort -u | sed 's/^/       /'
+fi
+
+# A tier clears it rather than refusing it, so an exported one cannot reach a
+# tier's pytest by the back door.
+log_mark
+PATH="$SHIM" SDLC_ARGS="--lf" sh bin/sdlc push >/dev/null 2>&1 || true
+log_since
+if ! grep -q -- '-e SDLC_ARGS' "$RUN/podman.log"; then
+  ok "an inherited SDLC_ARGS does not reach a tier"
+else
+  bad "a tier forwarded SDLC_ARGS from the environment"
 fi
 
 printf '\n== what the containers are given\n\n'
