@@ -31,6 +31,28 @@ inside() { podman run --rm --entrypoint="" "$IMAGE" "$@"; }
 
 printf '== contract test: %s\n\n' "$IMAGE"
 
+# ------------------------------------------------- every tool's files are its own
+#
+# The gate runs its containers with `--cap-drop=all`, so the container's root
+# has no CAP_DAC_OVERRIDE and cannot read a file it does not own whose mode says
+# no. An image that ships such a file under /opt has a tool that works in
+# testing -- where a bare `podman run` still has the capability -- and fails in
+# the gate.
+#
+# This is not hypothetical. The CodeQL bundle extracts 25 precompiled `.qlx`
+# files at mode 0600 owned by uid 1001, and with them unreadable
+# `codeql database analyze` recompiled all 55 queries and then died with an
+# internal error: 355 seconds and an exit 2 instead of a verdict, on trentina.
+# The Containerfile normalizes them; this is what keeps the next bundle, or the
+# next tool, from reintroducing it silently.
+unreadable=$(inside sh -c 'find /opt -xdev -type f ! -perm -o=r 2>/dev/null | head -20')
+if [ -z "$unreadable" ]; then
+  ok "every file under /opt is readable without CAP_DAC_OVERRIDE"
+else
+  bad "files under /opt need a capability the gate drops:"
+  printf '%s\n' "$unreadable" | sed 's/^/       /'
+fi
+
 # ---------------------------------------------------------- every tool executes
 #
 # `command -v` is not enough: a COPY --from can land a binary that is present

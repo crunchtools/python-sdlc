@@ -146,9 +146,19 @@ def pyproject() -> dict:
 COMMANDS = ("commit", "push", "ci")
 
 DEFAULTS = {
-    # Seconds, offline, free: what rewrites your code, plus the one check that
-    # notices the push hook was never installed.
-    "commit": ["ruff-check", "ruff-format", "hooks-installed"],
+    # Seconds, offline, free: what rewrites your code, the structural review
+    # that is cheap enough to sit beside it, plus the one check that notices the
+    # push hook was never installed.
+    #
+    # Gourmand runs AFTER the two ruff steps, so it judges the formatted tree
+    # rather than the one you typed. It is here because its findings are
+    # deterministic -- the same tree gives the same answer, with no model and no
+    # network -- so paying for them at push, where each rejection costs a
+    # six-to-eight minute cycle, was paying the wrong price. Measured at 1.7s on
+    # this repo and 3.2s on trentina, warm, in full mode. It stays in push too:
+    # a commit can be made with --no-verify, and push is the tier that renders
+    # the verdicts.
+    "commit": ["ruff-check", "ruff-format", "gourmand", "hooks-installed"],
     # Everything that renders a verdict, once, over origin/<default>...HEAD.
     # Never a container build: that is minutes, and a push you wait minutes for
     # is a push people stop making.
@@ -358,6 +368,24 @@ def plan_lines(cfg: dict, check: str) -> list[tuple[str, str, str]]:
 # existed. `sdlc push` has no image chain either, so push is unchanged too.
 
 MAIN_LANE = "main"
+REVIEW_LANE = "review"
+
+# Checks that run beside anything, including a command that rewrites the tree.
+#
+# The one-lane rule above protects readers of the TREE. Gatehouse does not read
+# the tree: its input is `git diff origin/<default>...HEAD`, committed objects
+# that bin/sdlc computes on the host before the container starts and pipes in on
+# stdin. So ruff can be rewriting your source while Gatehouse reviews the diff
+# and neither notices the other.
+#
+# It is also the only check whose time is not CPU -- it is one API call and then
+# waiting -- which is why it is worth moving. On push it was 35 seconds of a
+# six-to-eight minute tier spent with the CPUs idle. The launcher gives a lane
+# with no containers in it a single CPU and divides the budget between the rest,
+# so the main lane keeps the whole budget it had and this costs nothing to
+# overlap. That is the difference from the lanes that were measured as a
+# regression: those were two CPU-bound lanes splitting one budget.
+TREE_INDEPENDENT = ("gatehouse",)
 
 
 def lane_of(cfg: dict, checks: list[str]) -> dict[str, str]:
@@ -367,9 +395,10 @@ def lane_of(cfg: dict, checks: list[str]) -> dict[str, str]:
     `pytest-in-image` may be listed before the `image-build` that makes what it
     runs, and two builds may legitimately produce two different tags.
     """
-    # Nothing runs beside a check that rewrites the tree: one lane, in order.
+    # Nothing runs beside a check that rewrites the tree -- except the ones that
+    # do not read it.
     if any(check in WRITES_TREE for check in checks):
-        return dict.fromkeys(checks, MAIN_LANE)
+        return {c: REVIEW_LANE if c in TREE_INDEPENDENT else MAIN_LANE for c in checks}
     lanes: dict[str, str] = {}
     by_tag: dict[str, str] = {}
     for check in checks:
@@ -384,6 +413,9 @@ def lane_of(cfg: dict, checks: list[str]) -> dict[str, str]:
         # No build of that image in this command: the repo is testing something
         # already built, so it owes nothing to another lane and gets its own.
         lanes[check] = by_tag.get(image, check)
+    for check in checks:
+        if check in TREE_INDEPENDENT:
+            lanes[check] = REVIEW_LANE
     return {check: lanes.get(check, MAIN_LANE) for check in checks}
 
 
@@ -540,6 +572,11 @@ def kind_pytest_in_image(name: str, settings: dict) -> list[tuple[str, str, str]
         f"PYTHONPATH=/sdlc-cache/pytest/{project_name()}",
         "-e",
         "HOME=/tmp",
+        # The same reason as bin/sdlc's run_in_image: this mounts the repo's
+        # test files, so without a prefix pytest reads bytecode the host
+        # compiled and judges paths that do not exist in here.
+        "-e",
+        "PYTHONPYCACHEPREFIX=/tmp/pycache",
         "-w",
         "/repo",
         "--entrypoint",
@@ -758,6 +795,28 @@ def sync_project(env: dict[str, str]) -> None:
 # `[tool.pytest] testpaths`), so there is one place to say what gets checked.
 
 
+def passthrough() -> list[str]:
+    """What the caller put after `--` on a single-check run.
+
+    `bin/sdlc` joins those words with the unit separator and exports
+    SDLC_ARGS. It is deliberately not a plan field: the plan is this script
+    telling the host what to run, and `plain()` guards it so that a repo's
+    config can never forge a line into the host's shell. This travels the other
+    way and ends up in an argv list, so there is no shell between the caller
+    and the tool.
+
+    Only a check that is a tool invocation reads this, and only `pytest` does
+    today. A tier never sees it -- `bin/sdlc` clears the variable for
+    commit/push/ci rather than refusing it, so an exported SDLC_ARGS cannot
+    reach a tier's pytest -- and no `host` step argv is built from it.
+    """
+    raw = os.environ.get("SDLC_ARGS")
+    if not raw:
+        return []
+    # Not filtered: `-k ''` is a legitimate empty argument.
+    return raw.split(UNIT_SEPARATOR)
+
+
 def t_ruff_check(s: dict) -> int:
     need_project()
     step("ruff check --fix .")
@@ -801,7 +860,8 @@ def t_pytest(s: dict) -> int:
     sync_project(env)
     jobs = os.environ.get("SDLC_JOBS", "0")
     args = names(s.get("args", ["-q", "-rfE"]), "pytest.args")
-    step("pytest")
+    extra = passthrough()
+    step("pytest" + ("".join(f" {a}" for a in extra) if extra else ""))
     cmd = [
         "uv",
         "run",
@@ -815,6 +875,10 @@ def t_pytest(s: dict) -> int:
     ]
     if jobs != "0" and "pytest-xdist" in (project_dir() / "uv.lock").read_text(encoding="utf-8"):
         cmd += ["-n", jobs]
+    # LAST, after the config's args and after `-n`, so what the caller asked
+    # for on the command line wins: `-- -n0` turns off the parallelism this
+    # just added, which is how you read a traceback.
+    cmd += extra
     return run(cmd, env=env, cwd=project_dir())[0]
 
 

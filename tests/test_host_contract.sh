@@ -27,6 +27,16 @@ FAILED=0
 ok()  { printf 'ok   %s\n' "$*"; }
 bad() { printf 'FAIL %s\n' "$*"; FAILED=$((FAILED + 1)); }
 
+# The fake podman appends every call to one cumulative log, which the argv
+# assertions at the end of this file read whole. A block that wants only its own
+# calls marks the position and reads from there, rather than truncating it.
+LOG_AT=0
+log_mark()  { LOG_AT=$(wc -l < "$LOG" 2>/dev/null || printf 0); }
+log_since() {
+  tail -n "+$((LOG_AT + 1))" "$LOG" > "$RUN/podman.log" 2>/dev/null \
+    || : > "$RUN/podman.log"
+}
+
 printf '== host contract: bin/sdlc\n\n'
 
 case "$(head -1 bin/sdlc)" in
@@ -48,7 +58,7 @@ done
 # POSIX utilities. The rule is about language toolchains and linters, not about
 # rebuilding coreutils -- every machine with a shell has these.
 POSIX_UTILS="sh awk sed tr grep basename dirname nproc cat mktemp rm ln head id
-             cut sleep date wc"
+             cut sleep date wc mkdir tail"
 for prog in $POSIX_UTILS; do
   if full=$(command -v "$prog" 2>/dev/null); then ln -sf "$full" "$SHIM/$prog"; fi
 done
@@ -98,6 +108,9 @@ case " \$* " in
   *" plan lanes-stall "*)
     printf 'f${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
     printf 's${TAB}two${TAB}image-ro${TAB}very-slow-rc-one\n' ;;
+  *" plan lanes-review "*)
+    printf 'x${TAB}main${TAB}image-ro${TAB}tick-x\n'
+    printf 'rev${TAB}review${TAB}local${TAB}gatehouse\n' ;;
   *" plan lanes-budget "*)
     printf 'p${TAB}one${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
     printf 'q${TAB}two${TAB}image-ro${TAB}quiet-ok\n' ;;
@@ -119,6 +132,9 @@ case "\$_last" in
   step-one) printf 'RAN step-one\n'; sleep 1 ;;
   step-two) printf 'RAN step-two\n'; sleep 1 ;;
   slow-rc-two) printf 'RAN slow-rc-two\n'; sleep 2; exit 2 ;;
+  gatehouse)
+    if [ -f "$SHIM/review-fails" ]; then printf 'REVIEW FOUND SOMETHING\n'; exit 1; fi
+    printf 'REVIEW CLEAN\n' ;;
   must-not-run) printf 'RAN must-not-run\n'; touch "$SHIM/must-not-run" ;;
   after-the-failure|other-lane-first|other-lane-second)
     printf 'RAN %s\n' "\$_last" ;;
@@ -382,13 +398,16 @@ done
 # The CPU budget is for the whole gate, not for each container: two lanes out
 # of a budget of 4 get 2 each, so a laptop running `sdlc ci` is no worse off
 # than it was when the checks were sequential.
-: > "$LOG"
+log_mark
 lanes lanes-budget || true
-if grep -q -- '--cpus 2 ' "$LOG" && grep -q -- '--cpu-quota 200000' "$LOG"; then
+log_since
+if grep -q -- '--cpus 2 ' "$RUN/podman.log" \
+   && grep -q -- '--cpu-quota 200000' "$RUN/podman.log"; then
   ok "a budget of 4 is split 2 and 2 between two lanes"
 else
   bad "the lanes did not divide the CPU budget"
-  grep -o -- '--cpus [0-9]*\|--cpu-quota [0-9]*' "$LOG" | sort -u | sed 's/^/       /'
+  grep -o -- '--cpus [0-9]*\|--cpu-quota [0-9]*' "$RUN/podman.log" | sort -u \
+    | sed 's/^/       /'
 fi
 
 # A container that succeeds must report success, whatever the caller's last
@@ -417,12 +436,79 @@ chmod +x "$GITSHIM/git"
 ENVFILE="$GITSHIM/gatehouse.env"
 : > "$ENVFILE"
 PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 && rc=0 || rc=$?
-rm -rf "$GITSHIM"
 if [ "$rc" -eq 0 ]; then
   ok "a passing review after a non-empty diff reports success"
 else
   bad "a passing review after a non-empty diff exited $rc"
 fi
+
+printf '\n== a lane that is not on a CPU\n\n'
+
+# A reviewer waiting on an API is not competing for the machine, so it runs
+# BESIDE the lane that is -- and the lane that is keeps the whole budget and
+# keeps the terminal. Buffering the working lane too, as run_lanes does, would
+# mean a push shows nothing for the length of the test suite.
+review() {             # [fails] -> exit status, output in $RUN/out
+  rm -f "$SHIM/review-fails"
+  [ "${1:-}" = fails ] && touch "$SHIM/review-fails"
+  # Not truncated: the argv assertions at the end of this file read the whole
+  # log, so this run's lines are taken from where it was instead.
+  log_mark
+  _rc=0
+  PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" SDLC_CPUS=4 \
+    sh bin/sdlc lanes-review > "$RUN/out" 2>&1 || _rc=$?
+  log_since
+  rm -f "$SHIM/review-fails"
+  return "$_rc"
+}
+
+review && rc=0 || rc=$?
+if [ "$rc" -eq 0 ]; then
+  ok "two lanes, one of them off the CPU, pass together"
+else
+  bad "a passing split run exited $rc"
+  sed 's/^/       /' "$RUN/out"
+fi
+
+# The working lane streamed: its output is there, and the buffered lane's block
+# comes after all of it rather than interleaved into it.
+fg_end=$(grep -n 'END tick-x' "$RUN/out" | cut -d: -f1)
+rev_at=$(grep -n 'REVIEW CLEAN' "$RUN/out" | cut -d: -f1)
+if [ -n "$fg_end" ] && [ -n "$rev_at" ] && [ "$rev_at" -gt "$fg_end" ]; then
+  ok "the lane off the CPU is printed whole, after the one that streamed"
+else
+  bad "the two lanes' output was not separated (fg=$fg_end review=$rev_at)"
+  sed 's/^/       /' "$RUN/out"
+fi
+
+# Said up front, before the streaming starts, so nobody wonders what else is
+# running. The check's name comes from the plan: no check is named in bin/sdlc.
+if grep -q 'beside the rest: rev' "$RUN/out"; then
+  ok "the run says what is going on beside it, and names it from the plan"
+else
+  bad "the split run did not say what was running beside the main lane"
+fi
+
+# The regression guard. Dividing the budget by the LANE count would have given
+# the working lane 2 of 4 to make room for a lane that wants no CPU at all --
+# which is how lanes were measured as a regression in the first place.
+if grep -q -- '--cpus 4 ' "$RUN/podman.log" && grep -q -- '--cpus 1 ' "$RUN/podman.log"; then
+  ok "the working lane kept the whole budget; the other took one CPU"
+else
+  bad "the budget was divided with a lane that runs no container"
+  grep -o -- '--cpus [0-9]*' "$RUN/podman.log" | sort -u | sed 's/^/       /'
+fi
+
+# And the verdict is the worst of the two, whichever lane it came from.
+review fails && rc=0 || rc=$?
+if [ "$rc" -eq 1 ]; then
+  ok "a finding in the lane off the CPU fails the command"
+else
+  bad "a failing review in a split run exited $rc, want 1"
+  sed 's/^/       /' "$RUN/out"
+fi
+
+rm -rf "$GITSHIM"
 
 # The targets that run a container must actually have tried to. Without this the
 # loop above would also pass if every target silently did nothing.
@@ -439,6 +525,82 @@ if grep -q 'python-sdlc\|run --rm' "$LOG" 2>/dev/null; then
   ok "podman was asked to run the image"
 else
   bad "podman was called but never asked to run the image"
+fi
+
+printf '\n== arguments for one check\n\n'
+
+# `sdlc pytest tests/x.py` used to run the whole suite: the dispatcher read
+# "$1" and dropped the rest without a word. Silently doing the most expensive
+# possible thing is worse than refusing, so an argument that is not behind `--`
+# is now an exit 2, and `--` on a tier is too.
+args_case() {          # expect-rc target [args...]
+  _want=$1; shift
+  _what="$*"
+  _got=0
+  PATH="$SHIM" sh bin/sdlc "$@" >/dev/null 2>&1 || _got=$?
+  if [ "$_got" -eq "$_want" ]; then
+    ok "'$_what' exits $_got"
+  else
+    bad "'$_what' exits $_got, want $_want"
+  fi
+}
+
+args_case 2 mypy tests/x.py
+args_case 2 mypy --
+args_case 2 push -- -x
+args_case 2 commit -- -x
+args_case 0 mypy -- -q
+
+# Handed over in the ENVIRONMENT, not built into the argv: podman is told the
+# variable's name and the kernel carries the value, so no word of it is ever a
+# word of a command line here.
+log_mark
+PATH="$SHIM" sh bin/sdlc mypy -- --tb=short -n0 >/dev/null 2>&1 || true
+log_since
+if grep -q -- '-e SDLC_ARGS' "$RUN/podman.log" && ! grep -q -- '--tb=short' "$RUN/podman.log"
+then
+  ok "the check's arguments reach the container by name, not as argv words"
+else
+  bad "SDLC_ARGS was not passed, or its value leaked into the podman argv"
+  grep -o -- '-e SDLC_[A-Z]*\|--tb=short' "$RUN/podman.log" | sort -u | sed 's/^/       /'
+fi
+
+# A tier clears it rather than refusing it, so an exported one cannot reach a
+# tier's pytest by the back door.
+log_mark
+PATH="$SHIM" SDLC_ARGS="--lf" sh bin/sdlc push >/dev/null 2>&1 || true
+log_since
+if ! grep -q -- '-e SDLC_ARGS' "$RUN/podman.log"; then
+  ok "an inherited SDLC_ARGS does not reach a tier"
+else
+  bad "a tier forwarded SDLC_ARGS from the environment"
+fi
+
+printf '\n== what the containers are given\n\n'
+
+# The worktree is the developer's, so its __pycache__ is the laptop's. Every
+# container that mounts it must keep its bytecode somewhere else, or a module
+# compiled on the host decides a verdict in here -- four of the five pushes on
+# trentina#706. tests/test_pycache_prefix.py tests the property; this asserts
+# the env var reaches every such container.
+mounts=$(grep -c ':/repo:' "$LOG" 2>/dev/null || true)
+prefixed=$(grep ':/repo:' "$LOG" 2>/dev/null | grep -c 'PYTHONPYCACHEPREFIX=/tmp/pycache' || true)
+if [ "${mounts:-0}" -gt 0 ] && [ "$prefixed" = "$mounts" ]; then
+  ok "all $mounts container(s) mounting the worktree got their own bytecode cache"
+else
+  bad "$prefixed of ${mounts:-0} containers mounting the worktree set PYTHONPYCACHEPREFIX"
+fi
+
+# A gate runs the repo's own code, so its containers get no capabilities and no
+# way to acquire one. Asserted over every `run` the launcher itself builds --
+# `podman volume` lines and a repo's own host steps are not it.
+runs=$(grep -c 'run --rm' "$LOG" 2>/dev/null || true)
+locked=$(grep 'run --rm' "$LOG" 2>/dev/null \
+  | grep 'cap-drop=all' | grep -c 'no-new-privileges' || true)
+if [ "${runs:-0}" -gt 0 ] && [ "$locked" = "$runs" ]; then
+  ok "all $runs gate container(s) ran with no capabilities"
+else
+  bad "$locked of ${runs:-0} gate containers dropped capabilities"
 fi
 
 printf '\n'

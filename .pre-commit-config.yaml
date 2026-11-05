@@ -35,7 +35,7 @@ repos:
     hooks:
       - id: shellcheck
         name: shellcheck (bin/sdlc and the tests)
-        entry: podman --events-backend=none run --rm --log-driver=none -v .:/mnt:ro,Z -w /mnt docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh tests/test_host_contract.sh
+        entry: podman --events-backend=none run --rm --log-driver=none -v .:/mnt:ro,z -w /mnt docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh tests/test_host_contract.sh
         language: system
         pass_filenames: false
         always_run: true
@@ -61,13 +61,20 @@ repos:
   # it is right. The validator matches the image NAME, so exact tags still pass
   # `Constitution / Validate constitution`.
   #
+  # A SECOND deviation, for the reason bin/sdlc's run_in_image states: `z`, not
+  # `Z`. `Z` relabels the worktree with a category pair private to one
+  # container, taking it out from under every other container that mounts the
+  # same tree -- including a plain `-v .:/mnt:ro` in another hook or workflow
+  # step, which then cannot read the repo at all. It cost half an hour here.
+  # These three hooks mount one tree, so they share the label.
+  #
   # The fleet example should change the same way; raised separately.
   # `--events-backend=none --log-driver=none` keeps a gate out of the journal.
   - repo: local
     hooks:
       - id: gourmand
         name: Gourmand (AI slop detection)
-        entry: podman --events-backend=none run --rm --log-driver=none -v .:/src:Z -w /src quay.io/crunchtools/gourmand:1.0.0 check --full
+        entry: podman --events-backend=none run --rm --log-driver=none -v .:/src:z -w /src quay.io/crunchtools/gourmand:1.0.0 check --full
         language: system
         pass_filenames: false
         always_run: true
@@ -75,7 +82,7 @@ repos:
 
       - id: gatehouse
         name: Gatehouse (AI code review, staged diff)
-        entry: bash -c 'git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,Z -w /src quay.io/crunchtools/gatehouse:0.22.0 --stdin'
+        entry: bash -c 'git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,z -w /src quay.io/crunchtools/gatehouse:0.23.0 --stdin'
         language: system
         pass_filenames: false
         always_run: true

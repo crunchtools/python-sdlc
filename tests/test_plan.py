@@ -64,7 +64,7 @@ def cannot_run(fn, *args) -> str | None:
 empty: dict = {}
 check(
     "commit defaults",
-    S.resolve(empty, "commit") == ["ruff-check", "ruff-format", "hooks-installed"],
+    S.resolve(empty, "commit") == ["ruff-check", "ruff-format", "gourmand", "hooks-installed"],
 )
 check("push defaults", S.resolve(empty, "push") == S.DEFAULTS["push"])
 ci = S.resolve(empty, "ci")
@@ -331,6 +331,16 @@ check(
     set(lanes.values()) == {S.MAIN_LANE},
     str(lanes),
 )
+# Gourmand judges what ruff leaves behind, so it must come after both ruff
+# steps. A commit tier that reviewed the unformatted tree would report findings
+# that the same commit had already fixed.
+order = S.resolve(empty, "commit")
+check(
+    "gourmand runs after the two ruff steps",
+    order.index("gourmand") > max(order.index("ruff-check"), order.index("ruff-format")),
+    str(order),
+)
+
 commit = S.lane_of(empty, S.resolve(empty, "commit"))
 check("commit is always one lane", set(commit.values()) == {S.MAIN_LANE}, str(commit))
 
@@ -409,12 +419,68 @@ for lane in set(lanes_seen):
     runs = [c for i, c in enumerate(seq) if i == 0 or seq[i - 1] != c]
     check(f"lane {lane}: each check's steps are contiguous", len(runs) == len(set(runs)), str(seq))
 
-single = plan_of("push", '[project]\nname = "fx"\nversion = "0.0.0"\n')
+# The in-image pytest run mounts the repo's test files, so it has the same
+# exposure to the host's bytecode that bin/sdlc's own containers have: pytest's
+# rewriter reads its cached code as marshalled and cannot correct the path it
+# was compiled from. See tests/test_pycache_prefix.py.
+argv = next(r[3].split(S.UNIT_SEPARATOR) for r in rows if r[0] == "image-tests" and r[2] == "host")
 check(
-    "push is one lane, so it runs exactly as it did before",
-    {r[1] for r in single} == {S.MAIN_LANE},
-    str({r[1] for r in single}),
+    "the in-image pytest run keeps its bytecode out of the tree",
+    "PYTHONPYCACHEPREFIX=/tmp/pycache" in argv,
+    str(argv),
 )
+
+# Push has two lanes: everything that computes, and the reviewer. Gatehouse
+# reads the diff bin/sdlc computed on the host, never the worktree, so it is the
+# one check that can run beside a command that rewrites the tree -- and the one
+# whose time is an API call rather than a CPU, so overlapping it is free.
+pushed = plan_of("push", '[project]\nname = "fx"\nversion = "0.0.0"\n')
+check(
+    "push puts the reviewer in its own lane",
+    {r[0] for r in pushed if r[1] == S.REVIEW_LANE} == {"gatehouse"},
+    str([(r[0], r[1]) for r in pushed]),
+)
+check(
+    "everything that computes stays in one lane",
+    {r[1] for r in pushed} == {S.MAIN_LANE, S.REVIEW_LANE},
+    str({r[1] for r in pushed}),
+)
+# CI gets Gatehouse from its own workflow, so there is nothing to split off.
+ci_rows = plan_of("ci", '[project]\nname = "fx"\nversion = "0.0.0"\n')
+check(
+    "ci is one lane, having no reviewer to run beside",
+    {r[1] for r in ci_rows} == {S.MAIN_LANE},
+    str({r[1] for r in ci_rows}),
+)
+
+
+# ------------------------------------------------ arguments for a single check
+#
+# bin/sdlc joins the words after `--` with the unit separator and exports
+# SDLC_ARGS. It is not a plan field: the plan is this script telling the host
+# what to run, and `plain()` guards it. This goes the other way and ends up in
+# an argv list, so there is no shell between the caller and the tool.
+
+PASSTHROUGH = [
+    (None, []),
+    ("", []),
+    ("-q", ["-q"]),
+    (f"-k{S.UNIT_SEPARATOR}", ["-k", ""]),  # `-k ''` is a legitimate argument
+    (f"tests/x.py::test_y{S.UNIT_SEPARATOR}-n0", ["tests/x.py::test_y", "-n0"]),
+    # A word with spaces survives as ONE word, which is the whole reason the
+    # separator is used instead of splitting on whitespace.
+    (f"-k{S.UNIT_SEPARATOR}not slow", ["-k", "not slow"]),
+]
+for raw, want in PASSTHROUGH:
+    saved = os.environ.pop("SDLC_ARGS", None)
+    if raw is not None:
+        os.environ["SDLC_ARGS"] = raw
+    try:
+        check(f"passthrough {raw!r}", S.passthrough() == want, str(S.passthrough()))
+    finally:
+        os.environ.pop("SDLC_ARGS", None)
+        if saved is not None:
+            os.environ["SDLC_ARGS"] = saved
 
 
 def main() -> int:

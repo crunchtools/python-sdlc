@@ -6,6 +6,175 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-04
+
+Fewer push cycles, and a gate you can see into. Every change here comes from
+one piece of evidence: crunchtools/trentina#706 took five pushes, four of them
+rejected, about 28 minutes of gate time, and not one of those four rejections
+was something the developer could have seen before pushing.
+
+### Added
+
+- **Gourmand runs at commit, not only at push.** Its findings are
+  deterministic -- the same tree gives the same answer, with no model and no
+  network -- so paying for them at push, where each rejection costs a
+  six-to-eight minute cycle and a re-review of the whole diff, was paying the
+  wrong price. Measured in full mode, warm: 1.7s on this repo, 3.2s on
+  trentina. Full rather than `--diff-source`, because full mode also sees
+  duplication across files, which is most of what it is for. It runs after both
+  ruff steps so it judges the formatted tree, and it stays in push as well: a
+  commit can be made with `--no-verify`, and push is the tier that renders the
+  verdicts.
+
+  Semgrep deliberately does not join it. It takes 27s, and `semgrep` exits 2 on
+  a repo with no `.semgrep`, so as a default it would break the commit hook
+  across the fleet. A repo that wants it there writes
+  `[tool.sdlc.commit] checks = ["semgrep"]`.
+
+- **`sdlc <check> -- <args>`.** `sdlc pytest tests/test_x.py` used to run the
+  whole suite: the dispatcher read `"$1"` and dropped everything after it
+  without a word, so the first thing anyone reaches for after a rejected push
+  -- rerun just that test -- silently did the most expensive possible thing
+  instead.
+
+  ```
+  sdlc pytest -- tests/test_x.py::test_y -n0
+  ```
+
+  The arguments are appended after the config's `args` and after
+  `-n $SDLC_JOBS`, so the caller's flag wins: `-- -n0` turns off the
+  parallelism the gate just added, which is how you read a traceback. An
+  argument that is not behind `--` is an exit 2 rather than a guess, and so is
+  `--` on a tier, which is several checks. They travel by name through the
+  environment and land in an argv list, never through the plan and never
+  through a shell.
+
+- **A record of what the last run cost.**
+
+  | Path | What is in it |
+  |---|---|
+  | `<git-dir>/sdlc/last-<command>.json` | each check, its exit, its seconds, its log |
+  | `<git-dir>/sdlc/logs-<command>/` | what each buffered check printed |
+
+  The serial path -- which is the path every `sdlc push` took -- printed no
+  durations whatsoever, so nothing about the slowest tier in this tool could be
+  tuned by anyone who had not sat watching it with a stopwatch. It now prints
+  the same per-check footer the lane path always had. The record is also what
+  an agent needs after a rejected push: which check, how long, where its output
+  went.
+
+  In the git directory rather than a committed `.sdlc/`, because it is one
+  machine's last run, and asked of `git rev-parse --git-path` because in a
+  linked worktree `.git` is a file. It is **written, never read**: a verdict
+  comes from running the check, and a file that could stand in for one would be
+  a way past a gate. Failing to write it never fails a gate.
+
+- **A recipe in `--help` and the README** for the order that costs least, plus
+  the two things that reliably mislead people here: that the Python running the
+  tests is the image's and not the machine's, and that CI triage rather than
+  the local record is the authority on a review finding.
+
+### Changed
+
+- **The review runs beside the rest.** Gatehouse is the one check that does not
+  read the worktree -- its input is the `origin/<default>...HEAD` diff,
+  committed objects that `bin/sdlc` computes on the host and pipes in on stdin
+  -- so the rule that sends a tree-rewriting command down a single lane does
+  not apply to it. It is also the only check whose time is not CPU: one API
+  call and then waiting, measured at 35s on a 365-line diff, previously spent
+  with the CPUs idle. `sdlc push` therefore has two lanes now; `sdlc ci` still
+  has one, because CI gets Gatehouse from its own workflow.
+
+  What makes it free is a change to the budget: a lane whose every step is a
+  question `bin/sdlc` answers itself takes one CPU and is **left out of the
+  division**, so the main lane keeps the whole budget it had. Dividing by the
+  lane count would have handed half the machine to a lane that wants no CPU at
+  all, which is precisely how lanes were measured as a regression on a 4-vCPU
+  runner in 0.3.2.
+
+  And the working lane keeps the terminal. Buffering every lane is right when
+  both are computing and wrong here -- the buffered lane would be the whole of
+  a push, and three minutes of silence reads like a hang -- so when exactly one
+  lane runs containers, that lane streams as it always did and the others are
+  printed whole after it.
+
+- **A release builds the commit once.** `container.yml` fired on a push to main
+  *and* on a `v*` tag, and `release.yml` tags the commit that just merged, so
+  both events built the same sha and both pushed `:<sha>`; the second push
+  replaced the first's manifest. That cost v0.3.5 its image -- a git tag and a
+  GitHub release with no `0.3.5` behind them, which for a fleet pinning by
+  exact release is an exit 2 and nothing checked. A tag event now builds
+  nothing: it resolves the digest the main-branch run already pushed, **runs
+  the contract test against it again**, and promotes that.
+
+  The re-verification is not ceremony. `:<sha>` is pushed before it is
+  verified, so a main run whose contract test failed leaves a pushed but
+  untested digest on the registry; promoting that on the strength of the push
+  alone would publish an image no job ever tested. The skip is per step rather
+  than per job, because a job-level `if:` would skip every job that `needs:` it
+  and the fix would have looked right while promoting nothing.
+
+- **`z`, not `Z`, in this repo's own hooks**, for the reason `bin/sdlc` has
+  carried since it was written: `Z` relabels the worktree with a category pair
+  private to one container, taking the tree out from under every other
+  container that mounts it. Two local hooks did it anyway, and the result was
+  that a plain `-v "$PWD:/mnt:ro"` -- the shellcheck step -- could not read the
+  repo at all. The local Gatehouse hook also pinned 0.22.0 while the image
+  bakes 0.23.0: the drift this repo exists to delete, in its own config.
+
+### Fixed
+
+- **A test run on the laptop no longer decides the gate's verdict.** The gate
+  mounts the worktree at `/repo`, so the container and the laptop share the
+  tree's `__pycache__`. Bytecode carries the path it was compiled from, and
+  pytest's assertion rewriter reads its cached code back as marshalled --
+  `_read_pyc` returns `marshal.load(fp)` as it stands, because the point of
+  that cache is the rewritten code. So a module compiled on the host kept
+  `/home/<user>/.../x.py` in `co_filename` while `__file__` was
+  `/repo/.../x.py`, and any test comparing the two failed in the gate and
+  nowhere else. That was four of the five pushes on trentina#706.
+
+  `PYTHONPYCACHEPREFIX=/tmp/pycache`, in **both** containers that mount the
+  tree: `run_in_image` and the `pytest-in-image` argv. With it set, the
+  container neither reads the tree's bytecode nor writes any back into it --
+  the second direction matters because the commit tier mounts the tree
+  read-write. A plain `import` never showed this, because the stdlib's loader
+  calls `_imp._fix_co_filename`; the regression test pins both halves of that.
+
+### Security
+
+- **The gate's own containers run with no capabilities.** A gate runs the
+  repo's own code -- conftest, mypy plugins, semgrep rules, a Containerfile's
+  `RUN` lines -- so the container it runs in is a boundary, not a convenience.
+  `pytest-in-image` has been locked down since it was written; the gate's own
+  containers, which run far more repo-supplied code, had none of it.
+  `--cap-drop=all --security-opt=no-new-privileges` on both. Not
+  `--network none`, which `uv sync`, `pip-audit` and Gatehouse need, and not
+  `--read-only`, because rewriting the tree is the point of the commit tier.
+  Normalizing `/opt/codeql`'s ownership and modes is part of this, not
+  housekeeping. The bundle extracts 25 precompiled `.qlx` files at mode 0600
+  owned by uid 1001, and the container's root had been reading them purely on
+  `CAP_DAC_OVERRIDE`; without it `codeql database analyze` recompiled all 55
+  queries and then died with an internal error -- 355 seconds and an exit 2
+  instead of a verdict. Found by running trentina's whole `sdlc push` against
+  the image, which is the only place it shows: a bare `podman run` still holds
+  the capability, so a tool broken this way passes every hand-test.
+  `tests/contract.sh` now asserts that no file under `/opt` needs that
+  capability.
+
+### Not done, and why
+
+- **Incremental local review** (#18's 0.5.0) is out. It trades the second look
+  at unchanged code -- which on trentina#706 found two real crashes -- for
+  speed; it depends on two unshipped changes in `crunchtools/gatehouse`; and
+  with the review now running beside the rest, it only saves wall time if the
+  review is the longest lane, which nobody has measured. The durations added
+  here are how that gets decided.
+- **`--consensus-json` from the local Gatehouse run** is out. Gatehouse has the
+  flag, but the container mounts the worktree read-only, so collecting the file
+  would mean a new writable bind mount inside the git directory -- a real cost
+  against a convenience the terminal output already provides.
+
 ## [0.3.7] - 2026-11-04
 
 ### Added
