@@ -338,6 +338,10 @@ RECORD_FOR=            # the command being recorded
 state_init() {         # command
   STATE=$(git rev-parse --git-path sdlc 2>/dev/null) || STATE=
   [ -n "$STATE" ] || return 0
+  # `--git-path` answers relative to the current directory, so the paths this
+  # records would only resolve from the top of the worktree. An agent reading
+  # the record is as likely to be somewhere else.
+  case $STATE in /*) ;; *) STATE="$REPO/$STATE" ;; esac
   LOGS="$STATE/logs-$1"
   mkdir -p "$LOGS" 2>/dev/null || { STATE=; LOGS=; return 0; }
   # One run's worth. A history nobody prunes is a directory that grows until
