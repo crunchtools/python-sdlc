@@ -456,6 +456,18 @@ else
   bad "$prefixed of ${mounts:-0} containers mounting the worktree set PYTHONPYCACHEPREFIX"
 fi
 
+# A gate runs the repo's own code, so its containers get no capabilities and no
+# way to acquire one. Asserted over every `run` the launcher itself builds --
+# `podman volume` lines and a repo's own host steps are not it.
+runs=$(grep -c 'run --rm' "$LOG" 2>/dev/null || true)
+locked=$(grep 'run --rm' "$LOG" 2>/dev/null \
+  | grep 'cap-drop=all' | grep -c 'no-new-privileges' || true)
+if [ "${runs:-0}" -gt 0 ] && [ "$locked" = "$runs" ]; then
+  ok "all $runs gate container(s) ran with no capabilities"
+else
+  bad "$locked of ${runs:-0} gate containers dropped capabilities"
+fi
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
   printf 'host contract PASSED\n'; exit 0

@@ -191,6 +191,15 @@ run_in_image() {
   # is writable, with no --user and no --userns=keep-id. Two bugs came from
   # trying to be cleverer than this.
   #
+  # No capabilities, and no way to acquire one. A gate runs a repo's own code --
+  # conftest, mypy plugins, semgrep rules, a Containerfile's RUN lines -- so the
+  # container it runs in is a boundary, not a convenience. `kind_pytest_in_image`
+  # has locked its container down this way since it was written; the gate's own
+  # containers never did. Nothing here needs a capability: the tools read the
+  # tree, write the cache volume and talk to the network, and rootless podman
+  # maps the container's root to the invoking user, so file access is the
+  # developer's own either way.
+  #
   # PYTHONPYCACHEPREFIX is what keeps the shared tree from deciding a verdict.
   # /repo is the developer's worktree, so its `__pycache__` is the laptop's, and
   # bytecode carries the path it was compiled from. pytest's assertion rewriter
@@ -208,6 +217,7 @@ run_in_image() {
   # never hit it.
   set -- \
     --events-backend=none run --rm --log-driver=none \
+    --cap-drop=all --security-opt=no-new-privileges \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     -v "$REPO:/repo:$_mode,z" -w /repo \
     -v "$CACHE_VOLUME:/cache" \
@@ -325,6 +335,7 @@ run_host() {
     build) set -- build --cpu-period 100000 --cpu-quota "$(( GATE_CPUS * 100000 ))" \
                         --memory "$GATE_MEMORY" "$@" ;;
     run)   set -- --events-backend=none run --log-driver=none \
+                        --cap-drop=all --security-opt=no-new-privileges \
                         --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 "$@" ;;
     *)     die "a host step may only build or run; refused: podman $_sub" ;;
   esac
