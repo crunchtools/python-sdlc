@@ -121,8 +121,10 @@ def conflicting(opened: dict[str, str]) -> tuple[list[str], list[str]]:
     rest of the fleet has been bumped. Across 33 repos that is minutes of a
     release doing nothing. Here each round asks only the repos still unanswered.
 
-    Returns (cannot merge, no answer). UNKNOWN is deliberately not a failure: a
-    release must not go red because the API was slow.
+    Returns (cannot merge, no answer). UNKNOWN is deliberately not a failure,
+    and neither is a query the API refuses: a release must not go red because
+    GitHub was slow or momentarily unavailable. Both are reported by name, so a
+    guard that quietly answered for nobody is visible rather than assumed.
     """
     pending = dict(opened)
     cannot: list[str] = []
@@ -130,17 +132,31 @@ def conflicting(opened: dict[str, str]) -> tuple[list[str], list[str]]:
         if attempt:
             time.sleep(PAUSE)
         for repo, url in list(pending.items()):
-            state = gh(
-                "pr",
-                "view",
-                url,
-                "-R",
-                f"{ORG}/{repo}",
-                "--json",
-                "mergeable",
-                "--jq",
-                ".mergeable",
-            ).strip()
+            try:
+                state = gh(
+                    "pr",
+                    "view",
+                    url,
+                    "-R",
+                    f"{ORG}/{repo}",
+                    "--json",
+                    "mergeable",
+                    "--jq",
+                    ".mergeable",
+                ).strip()
+            except subprocess.CalledProcessError as exc:
+                # Named, and survived. Outside the main loop's per-repo handler,
+                # an exception here would end the whole run with a traceback and
+                # no summary -- and the summary is the thing this script exists
+                # to print (RT#1553, below). One repo the API will not answer
+                # for is reported as unanswered, like UNKNOWN: a release must not
+                # go red because a query failed.
+                print(
+                    f"  warning: {repo}: cannot read whether it can merge: {exc.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                del pending[repo]
+                continue
             if not state or state == "UNKNOWN":
                 continue
             del pending[repo]
