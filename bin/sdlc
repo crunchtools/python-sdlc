@@ -301,6 +301,89 @@ t_gatehouse() {
     --env-file "$_env" -i "$IMAGE" gatehouse
 }
 
+# ------------------------------------------------------------------- the record
+#
+# What the last run of each command found, and how long each check took:
+#
+#   <git-dir>/sdlc/last-<command>.json     check, exit, seconds, log
+#   <git-dir>/sdlc/logs-<command>/*.log    what a buffered check printed
+#
+# The serial path printed no durations at all, so nothing about this gate could
+# be tuned by anyone who had not sat watching it. It is also what an agent needs
+# after a rejected push: which check, how long, and where its output went,
+# without running the whole tier again to find out.
+#
+# Inside the git directory rather than in a committed `.sdlc/`, because this is
+# one machine's last run and belongs to nobody else. `git rev-parse --git-path`
+# is asked rather than assembled: in a linked worktree `.git` is a file.
+#
+# The record is WRITE-ONLY. Nothing in either half of this tool reads it to
+# decide anything, and nothing may start: a verdict comes from running the
+# check. An input would make a stale or hand-edited file into a way past a gate,
+# and the gate is the only thing here worth having.
+#
+# Failing to write it is never a failure of the gate. Every function below
+# degrades to doing nothing.
+
+# Whole seconds. Every duration printed and recorded is measured with this, in
+# both the serial and the lane path.
+now_s() { date +%s 2>/dev/null || printf 0; }
+
+STATE=                 # <git-dir>/sdlc, or empty when there is nowhere to write
+LOGS=                  # the log directory for the running command
+PART=                  # the per-check lines, rendered to JSON when the run ends
+RECORD_FOR=            # the command being recorded
+
+state_init() {         # command
+  STATE=$(git rev-parse --git-path sdlc 2>/dev/null) || STATE=
+  [ -n "$STATE" ] || return 0
+  LOGS="$STATE/logs-$1"
+  mkdir -p "$LOGS" 2>/dev/null || { STATE=; LOGS=; return 0; }
+  # One run's worth. A history nobody prunes is a directory that grows until
+  # someone notices it, and the question is always about the last run.
+  rm -f "$LOGS"/*.log 2>/dev/null || true
+  PART="$STATE/last-$1.json.part"
+  : > "$PART" 2>/dev/null || { PART=; return 0; }
+  RECORD_FOR=$1
+}
+
+check_log() {          # index check -> a path, or nothing when there is no state
+  [ -n "$LOGS" ] || return 0
+  # A check name reaches a filename here, and `plain()` in the image refuses a
+  # tab, a newline and the separator but not a slash. The index keeps two
+  # checks that sanitize to the same name from sharing one log.
+  printf '%s/%s-%s.log' "$LOGS" "$1" "$(printf '%s' "$2" | tr -c 'A-Za-z0-9._-' '_')"
+}
+
+record_check() {       # check rc seconds log
+  [ -n "$PART" ] || return 0
+  # Appended from the lane subshells as well as from here, so the order is the
+  # order checks FINISHED. One short line per check, one write each.
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" >> "$PART" 2>/dev/null || true
+}
+
+record_finish() {      # worst status
+  [ -n "$PART" ] && [ -f "$PART" ] || return 0
+  # awk because the escaping has to be done once and correctly: a check name or
+  # a path is the only thing here that can carry a quote or a backslash.
+  awk -F'\t' -v cmd="$RECORD_FOR" -v worst="$1" \
+      -v when="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" '
+    function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+    BEGIN {
+      printf "{\n  \"command\": \"%s\",\n  \"finished\": \"%s\",\n", esc(cmd), esc(when)
+      printf "  \"exit\": %s,\n  \"checks\": [\n", worst
+    }
+    {
+      if (n++) printf ",\n"
+      printf "    {\"check\": \"%s\", \"exit\": %s, \"seconds\": %s, \"log\": ", \
+             esc($1), $2, $3
+      if ($4 == "") printf "null}"; else printf "\"%s\"}", esc($4)
+    }
+    END { printf "\n  ]\n}\n" }
+  ' "$PART" > "$STATE/last-$RECORD_FOR.json" 2>/dev/null || true
+  rm -f "$PART" 2>/dev/null || true
+}
+
 # --------------------------------------------------------------------- the plan
 #
 # Which checks run is decided by the repo's [tool.sdlc.commit], [tool.sdlc.push]
@@ -367,9 +450,22 @@ run_step() {           # mode payload -> the step's exit status
   esac
 }
 
+_close_serial() {      # the open check is finished: footer and record
+  [ -n "${_scur:-}" ] || return 0
+  # Only a PASS prints here. A failure has already said so, at the moment it
+  # happened, rather than when the next check starts.
+  [ "$_scur_rc" -eq 0 ] && printf '\n== %s passed in %ss\n' "$_scur" "$_scur_took"
+  record_check "$_scur" "$_scur_rc" "$_scur_took" ""
+  _scur=
+}
+
 run_serial() {         # the plan -> its worst step status
   _worst=0
   _failed=
+  _scur=
+  _scur_rc=0
+  _scur_took=0
+  _sidx=0
   _ifs=$IFS
   set -f
   IFS='
@@ -383,18 +479,32 @@ run_serial() {         # the plan -> its worst step status
     _payload=${_rest#*"$TAB"}
     # One failed step ends that check; the next check still runs.
     case " $_failed " in *" $_check "*) continue ;; esac
+    # A check's steps are contiguous, so a new name closes the previous block.
+    # The timing is per CHECK, not per step: `pytest-in-image` is a deps step
+    # and then the run, and what anyone wants to know is what pytest cost.
+    if [ "$_check" != "$_scur" ]; then
+      _close_serial
+      _sidx=$((_sidx + 1))
+      _scur=$_check
+      _scur_rc=0
+      _scur_took=0
+    fi
+    _t0=$(now_s)
     _rc=0
     run_step "$_mode" "$_payload" || _rc=$?
+    _scur_took=$(( _scur_took + $(now_s) - _t0 ))
     if [ "$_rc" -ne 0 ]; then
       _failed="$_failed $_check"
-      printf '\n%s: %s %s\n' "$ME" "$_check" \
-        "$([ "$_rc" -eq 2 ] && echo 'COULD NOT RUN' || echo 'FAILED')" >&2
+      _scur_rc=$_rc
+      printf '\n%s: %s %s after %ss\n' "$ME" "$_check" \
+        "$([ "$_rc" -eq 2 ] && echo 'COULD NOT RUN' || echo 'FAILED')" "$_scur_took" >&2
       # A later 1 must not mask an earlier 2.
       if [ "$_rc" -eq 2 ] || [ "$_worst" -eq 2 ]; then _worst=2; else _worst=1; fi
     fi
   done
   IFS=$_ifs
   set +f
+  _close_serial
   return "$_worst"
 }
 
@@ -432,8 +542,6 @@ OUT=                   # the lane scratch directory, while lanes are running
 STALL_MAX=${SDLC_LANE_STALL:-3600}
 case "$STALL_MAX" in ''|*[!0-9]*) die "SDLC_LANE_STALL must be a whole number" ;; esac
 
-now_s() { date +%s 2>/dev/null || printf 0; }
-
 _lanes_running() {     # 0 while any lane has not yet written its done marker
   _j=0
   while [ "$_j" -lt "$NLANES" ]; do
@@ -456,6 +564,13 @@ _close_check() {       # the open check's block is complete
         "$_cur_took" >> "$OUT/out.$_cur"
     fi
     printf '%s\n' "$_cur_rc" > "$OUT/rc.$_cur"
+    # Kept where the record can point at it. The scratch directory goes away
+    # when the command ends; this is what someone reads afterwards.
+    _log=$(check_log "$_cur" "$_cur_name")
+    if [ -n "$_log" ]; then
+      cat "$OUT/out.$_cur" > "$_log" 2>/dev/null || _log=
+    fi
+    record_check "$_cur_name" "$_cur_rc" "$_cur_took" "$_log"
     _cur=
   fi
 }
@@ -514,9 +629,93 @@ run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
   return "$_worst"
 }
 
+lane_has_container() { # plan lane -> 0 when any of its steps runs a container
+  printf '%s\n' "$1" | awk -F"$TAB" -v l="$2" '
+    $2 == l && $3 != "local" { found = 1 }
+    END { exit found ? 0 : 1 }'
+}
+
+run_split() {          # the plan -> the worst status, one lane streaming
+  # The case where exactly one lane runs containers and the others only ask this
+  # script questions -- today that is a push, with the reviewer beside the rest.
+  #
+  # run_lanes buffers EVERY lane to a file and prints each block when it is
+  # finished, because two lanes writing one terminal produce a log nobody can
+  # read. That is the right trade when both lanes are working. It is the wrong
+  # one here: the lane that is working is the whole of a push, and buffering it
+  # would mean watching nothing for the length of the test suite. Someone
+  # waiting on a silent terminal for three minutes concludes it has hung.
+  #
+  # So the lane with the containers runs in the FOREGROUND, through the ordinary
+  # sequential path -- same output, live, as a repo with one lane has always had
+  # -- and the others run beside it, buffered, and are printed whole after it.
+  OUT=$(mktemp -d) || die "cannot create a scratch directory for the lane logs"
+  trap 'rm -rf "$OUT"; record_finish 2' EXIT HUP INT TERM
+
+  printf '%s\n' "$1" | cut -f1 | awk '!seen[$0]++' > "$OUT/order"
+  printf '%s\n' "$1" | cut -f2 | awk '!seen[$0]++' > "$OUT/lanes"
+
+  # Once, here, rather than from whichever lane gets there first.
+  need_volume "$CACHE_VOLUME"
+
+  _spfg=
+  _spk=0
+  _sppids=
+  _spidx=
+  while IFS= read -r _splane; do
+    if lane_has_container "$1" "$_splane"; then
+      _spfg=$_splane
+      continue
+    fi
+    _spk=$((_spk + 1))
+    # The same global numbering run_lanes uses, so an index names the same check
+    # in both paths.
+    printf '%s\n' "$1" | awk -F"$TAB" -v OFS="$TAB" -v l="$_splane" '
+      !($1 in idx) { idx[$1] = ++n }
+      $2 == l      { print idx[$1], $1, $3, $4 }' > "$OUT/steps.$_spk"
+    printf '%s: beside the rest: %s(output follows)\n' "$ME" \
+      "$(cut -f2 "$OUT/steps.$_spk" | awk '!seen[$0]++' | tr '\n' ' ')"
+    _spidx="$_spidx $(cut -f1 "$OUT/steps.$_spk" | awk '!seen[$0]++' | tr '\n' ' ')"
+    run_lane "$_spk" "$OUT/steps.$_spk" 1 &
+    _sppids="$_sppids $!"
+  done < "$OUT/lanes"
+
+  _spworst=0
+  _spplan=$(printf '%s\n' "$1" | awk -F"$TAB" -v l="$_spfg" '$2 == l')
+  if [ -n "$_spplan" ]; then
+    run_serial "$_spplan" || _spworst=$?
+  fi
+
+  # Reaped BEFORE the blocks below are printed: the status is the answer and is
+  # never guessed from what a file happened to contain, and once every lane has
+  # stopped nothing is still writing.
+  for _spp in $_sppids; do
+    _sprc=0
+    wait "$_spp" || _sprc=$?
+    case "$_sprc" in
+      0) ;;
+      2) _spworst=2 ;;
+      *) [ "$_spworst" -eq 2 ] || _spworst=1 ;;
+    esac
+  done
+
+  for _spi in $_spidx; do
+    if [ -f "$OUT/out.$_spi" ]; then
+      cat "$OUT/out.$_spi"
+    else
+      printf '\n%s: %s NEVER RAN: its lane stopped before reaching it\n' "$ME" \
+        "$(awk -v n="$_spi" 'NR == n {print; exit}' "$OUT/order")" >&2
+    fi
+  done
+
+  rm -rf "$OUT"
+  trap - EXIT HUP INT TERM
+  return "$_spworst"
+}
+
 run_lanes() {          # the plan -> the worst status of every lane
   OUT=$(mktemp -d) || die "cannot create a scratch directory for the lane logs"
-  trap 'rm -rf "$OUT"' EXIT HUP INT TERM
+  trap 'rm -rf "$OUT"; record_finish 2' EXIT HUP INT TERM
 
   # The checks in plan order, first appearance: the order blocks are printed in.
   printf '%s\n' "$1" | cut -f1 | awk '!seen[$0]++' > "$OUT/order"
@@ -524,10 +723,23 @@ run_lanes() {          # the plan -> the worst status of every lane
   NCHECKS=$(awk 'END {print NR}' "$OUT/order")
   NLANES=$(awk 'END {print NR}' "$OUT/lanes")
 
+  # Divided between the lanes that actually run something on a CPU. A lane whose
+  # every step is `local` -- a question this script answers itself, or a reviewer
+  # that is one API call and then waiting -- takes a single CPU and is left out
+  # of the division, so putting one beside the others costs the others nothing.
+  # Without that, adding a lane that does no computing would have halved the
+  # budget of the lane that does, which is exactly how lanes were measured as a
+  # regression (see the budget, above).
+  #
   # Floor of one, so a budget smaller than the lane count does overshoot it by
   # a CPU or two. The alternative is running the lanes one after another on a
   # single-CPU budget, which is the thing this exists to stop doing.
-  _lane_cpus=$(( GATE_CPUS / NLANES ))
+  _oncpu=0
+  while IFS= read -r _lane; do
+    lane_has_container "$1" "$_lane" && _oncpu=$((_oncpu + 1))
+  done < "$OUT/lanes"
+  [ "$_oncpu" -lt 1 ] && _oncpu=1
+  _lane_cpus=$(( GATE_CPUS / _oncpu ))
   [ "$_lane_cpus" -lt 1 ] && _lane_cpus=1
 
   # Once, here, rather than from whichever lane gets there first.
@@ -545,7 +757,8 @@ run_lanes() {          # the plan -> the worst status of every lane
       $2 == l      { print idx[$1], $1, $3, $4 }' > "$OUT/steps.$_k"
     printf '%s:   lane %s: %s\n' "$ME" "$_lane" \
       "$(cut -f2 "$OUT/steps.$_k" | awk '!seen[$0]++' | tr '\n' ' ')"
-    run_lane "$_k" "$OUT/steps.$_k" "$_lane_cpus" &
+    if lane_has_container "$1" "$_lane"; then _cpus=$_lane_cpus; else _cpus=1; fi
+    run_lane "$_k" "$OUT/steps.$_k" "$_cpus" &
     _pids="$_pids $!"
   done < "$OUT/lanes"
 
@@ -614,13 +827,29 @@ run_plan() {           # commit | push | ci | <check>
     || die "the image could not plan '$1'; nothing was checked"
   [ -n "$_plan" ] || die "the image planned nothing for '$1'"
 
+  state_init "$1"
+  # However this ends -- a step's `die`, a signal -- the record is rendered from
+  # whatever was finished. 2 because the only way out through here is a gate
+  # that could not run; every ordinary ending goes through the call below.
+  trap 'record_finish 2' EXIT HUP INT TERM
+
   _n=$(printf '%s\n' "$_plan" | awk -F"$TAB" '!seen[$2]++ {n++} END {print n + 0}')
+  # How many of those lanes run a container, which decides which executor can
+  # keep the terminal live. Exactly one means everything else is waiting on
+  # something that is not a CPU, so that one can stream.
+  _oncpu=$(printf '%s\n' "$_plan" \
+    | awk -F"$TAB" '$3 != "local" && !seen[$2]++ {n++} END {print n + 0}')
   _rc=0
   if [ "${_n:-1}" -le 1 ]; then
     run_serial "$_plan" || _rc=$?
+  elif [ "${_oncpu:-0}" -eq 1 ]; then
+    run_split "$_plan" || _rc=$?
   else
     run_lanes "$_plan" || _rc=$?
   fi
+
+  trap - EXIT HUP INT TERM
+  record_finish "$_rc"
   return "$_rc"
 }
 

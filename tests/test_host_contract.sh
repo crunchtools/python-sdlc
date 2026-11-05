@@ -48,7 +48,7 @@ done
 # POSIX utilities. The rule is about language toolchains and linters, not about
 # rebuilding coreutils -- every machine with a shell has these.
 POSIX_UTILS="sh awk sed tr grep basename dirname nproc cat mktemp rm ln head id
-             cut sleep date wc"
+             cut sleep date wc mkdir tail"
 for prog in $POSIX_UTILS; do
   if full=$(command -v "$prog" 2>/dev/null); then ln -sf "$full" "$SHIM/$prog"; fi
 done
@@ -98,6 +98,9 @@ case " \$* " in
   *" plan lanes-stall "*)
     printf 'f${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
     printf 's${TAB}two${TAB}image-ro${TAB}very-slow-rc-one\n' ;;
+  *" plan lanes-review "*)
+    printf 'x${TAB}main${TAB}image-ro${TAB}tick-x\n'
+    printf 'rev${TAB}review${TAB}local${TAB}gatehouse\n' ;;
   *" plan lanes-budget "*)
     printf 'p${TAB}one${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
     printf 'q${TAB}two${TAB}image-ro${TAB}quiet-ok\n' ;;
@@ -119,6 +122,9 @@ case "\$_last" in
   step-one) printf 'RAN step-one\n'; sleep 1 ;;
   step-two) printf 'RAN step-two\n'; sleep 1 ;;
   slow-rc-two) printf 'RAN slow-rc-two\n'; sleep 2; exit 2 ;;
+  gatehouse)
+    if [ -f "$SHIM/review-fails" ]; then printf 'REVIEW FOUND SOMETHING\n'; exit 1; fi
+    printf 'REVIEW CLEAN\n' ;;
   must-not-run) printf 'RAN must-not-run\n'; touch "$SHIM/must-not-run" ;;
   after-the-failure|other-lane-first|other-lane-second)
     printf 'RAN %s\n' "\$_last" ;;
@@ -417,12 +423,79 @@ chmod +x "$GITSHIM/git"
 ENVFILE="$GITSHIM/gatehouse.env"
 : > "$ENVFILE"
 PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 && rc=0 || rc=$?
-rm -rf "$GITSHIM"
 if [ "$rc" -eq 0 ]; then
   ok "a passing review after a non-empty diff reports success"
 else
   bad "a passing review after a non-empty diff exited $rc"
 fi
+
+printf '\n== a lane that is not on a CPU\n\n'
+
+# A reviewer waiting on an API is not competing for the machine, so it runs
+# BESIDE the lane that is -- and the lane that is keeps the whole budget and
+# keeps the terminal. Buffering the working lane too, as run_lanes does, would
+# mean a push shows nothing for the length of the test suite.
+review() {             # [fails] -> exit status, output in $RUN/out
+  rm -f "$SHIM/review-fails"
+  [ "${1:-}" = fails ] && touch "$SHIM/review-fails"
+  # Not truncated: the argv assertions at the end of this file read the whole
+  # log, so this run's lines are taken from where it was instead.
+  _was=$(wc -l < "$LOG" 2>/dev/null || printf 0)
+  _rc=0
+  PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" SDLC_CPUS=4 \
+    sh bin/sdlc lanes-review > "$RUN/out" 2>&1 || _rc=$?
+  tail -n "+$((_was + 1))" "$LOG" > "$RUN/podman.log" 2>/dev/null || : > "$RUN/podman.log"
+  rm -f "$SHIM/review-fails"
+  return "$_rc"
+}
+
+review && rc=0 || rc=$?
+if [ "$rc" -eq 0 ]; then
+  ok "two lanes, one of them off the CPU, pass together"
+else
+  bad "a passing split run exited $rc"
+  sed 's/^/       /' "$RUN/out"
+fi
+
+# The working lane streamed: its output is there, and the buffered lane's block
+# comes after all of it rather than interleaved into it.
+fg_end=$(grep -n 'END tick-x' "$RUN/out" | cut -d: -f1)
+rev_at=$(grep -n 'REVIEW CLEAN' "$RUN/out" | cut -d: -f1)
+if [ -n "$fg_end" ] && [ -n "$rev_at" ] && [ "$rev_at" -gt "$fg_end" ]; then
+  ok "the lane off the CPU is printed whole, after the one that streamed"
+else
+  bad "the two lanes' output was not separated (fg=$fg_end review=$rev_at)"
+  sed 's/^/       /' "$RUN/out"
+fi
+
+# Said up front, before the streaming starts, so nobody wonders what else is
+# running. The check's name comes from the plan: no check is named in bin/sdlc.
+if grep -q 'beside the rest: rev' "$RUN/out"; then
+  ok "the run says what is going on beside it, and names it from the plan"
+else
+  bad "the split run did not say what was running beside the main lane"
+fi
+
+# The regression guard. Dividing the budget by the LANE count would have given
+# the working lane 2 of 4 to make room for a lane that wants no CPU at all --
+# which is how lanes were measured as a regression in the first place.
+if grep -q -- '--cpus 4 ' "$RUN/podman.log" && grep -q -- '--cpus 1 ' "$RUN/podman.log"; then
+  ok "the working lane kept the whole budget; the other took one CPU"
+else
+  bad "the budget was divided with a lane that runs no container"
+  grep -o -- '--cpus [0-9]*' "$RUN/podman.log" | sort -u | sed 's/^/       /'
+fi
+
+# And the verdict is the worst of the two, whichever lane it came from.
+review fails && rc=0 || rc=$?
+if [ "$rc" -eq 1 ]; then
+  ok "a finding in the lane off the CPU fails the command"
+else
+  bad "a failing review in a split run exited $rc, want 1"
+  sed 's/^/       /' "$RUN/out"
+fi
+
+rm -rf "$GITSHIM"
 
 # The targets that run a container must actually have tried to. Without this the
 # loop above would also pass if every target silently did nothing.

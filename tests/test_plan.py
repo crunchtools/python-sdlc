@@ -430,11 +430,27 @@ check(
     str(argv),
 )
 
-single = plan_of("push", '[project]\nname = "fx"\nversion = "0.0.0"\n')
+# Push has two lanes: everything that computes, and the reviewer. Gatehouse
+# reads the diff bin/sdlc computed on the host, never the worktree, so it is the
+# one check that can run beside a command that rewrites the tree -- and the one
+# whose time is an API call rather than a CPU, so overlapping it is free.
+pushed = plan_of("push", '[project]\nname = "fx"\nversion = "0.0.0"\n')
 check(
-    "push is one lane, so it runs exactly as it did before",
-    {r[1] for r in single} == {S.MAIN_LANE},
-    str({r[1] for r in single}),
+    "push puts the reviewer in its own lane",
+    {r[0] for r in pushed if r[1] == S.REVIEW_LANE} == {"gatehouse"},
+    str([(r[0], r[1]) for r in pushed]),
+)
+check(
+    "everything that computes stays in one lane",
+    {r[1] for r in pushed} == {S.MAIN_LANE, S.REVIEW_LANE},
+    str({r[1] for r in pushed}),
+)
+# CI gets Gatehouse from its own workflow, so there is nothing to split off.
+ci_rows = plan_of("ci", '[project]\nname = "fx"\nversion = "0.0.0"\n')
+check(
+    "ci is one lane, having no reviewer to run beside",
+    {r[1] for r in ci_rows} == {S.MAIN_LANE},
+    str({r[1] for r in ci_rows}),
 )
 
 

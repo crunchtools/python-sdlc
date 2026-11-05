@@ -368,6 +368,24 @@ def plan_lines(cfg: dict, check: str) -> list[tuple[str, str, str]]:
 # existed. `sdlc push` has no image chain either, so push is unchanged too.
 
 MAIN_LANE = "main"
+REVIEW_LANE = "review"
+
+# Checks that run beside anything, including a command that rewrites the tree.
+#
+# The one-lane rule above protects readers of the TREE. Gatehouse does not read
+# the tree: its input is `git diff origin/<default>...HEAD`, committed objects
+# that bin/sdlc computes on the host before the container starts and pipes in on
+# stdin. So ruff can be rewriting your source while Gatehouse reviews the diff
+# and neither notices the other.
+#
+# It is also the only check whose time is not CPU -- it is one API call and then
+# waiting -- which is why it is worth moving. On push it was 35 seconds of a
+# six-to-eight minute tier spent with the CPUs idle. The launcher gives a lane
+# with no containers in it a single CPU and divides the budget between the rest,
+# so the main lane keeps the whole budget it had and this costs nothing to
+# overlap. That is the difference from the lanes that were measured as a
+# regression: those were two CPU-bound lanes splitting one budget.
+TREE_INDEPENDENT = ("gatehouse",)
 
 
 def lane_of(cfg: dict, checks: list[str]) -> dict[str, str]:
@@ -377,9 +395,10 @@ def lane_of(cfg: dict, checks: list[str]) -> dict[str, str]:
     `pytest-in-image` may be listed before the `image-build` that makes what it
     runs, and two builds may legitimately produce two different tags.
     """
-    # Nothing runs beside a check that rewrites the tree: one lane, in order.
+    # Nothing runs beside a check that rewrites the tree -- except the ones that
+    # do not read it.
     if any(check in WRITES_TREE for check in checks):
-        return dict.fromkeys(checks, MAIN_LANE)
+        return {c: REVIEW_LANE if c in TREE_INDEPENDENT else MAIN_LANE for c in checks}
     lanes: dict[str, str] = {}
     by_tag: dict[str, str] = {}
     for check in checks:
@@ -394,6 +413,9 @@ def lane_of(cfg: dict, checks: list[str]) -> dict[str, str]:
         # No build of that image in this command: the repo is testing something
         # already built, so it owes nothing to another lane and gets its own.
         lanes[check] = by_tag.get(image, check)
+    for check in checks:
+        if check in TREE_INDEPENDENT:
+            lanes[check] = REVIEW_LANE
     return {check: lanes.get(check, MAIN_LANE) for check in checks}
 
 

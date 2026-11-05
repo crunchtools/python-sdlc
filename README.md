@@ -96,24 +96,32 @@ A command's checks run in lanes. Steps of one lane run in sequence; lanes run
 at the same time, so a command takes about as long as its longest chain rather
 than the sum of everything in it.
 
-The image decides the lanes, by two rules:
+The image decides the lanes, by three rules:
 
 - An `image-build` check and every `pytest-in-image` check that runs the image
   it tags are **one lane** — the build has to finish before the tests start.
+- Gatehouse is the `review` lane, always. It is the one check that does not
+  read the worktree: its input is the `origin/<default-branch>...HEAD` diff,
+  which `bin/sdlc` computes on the host and pipes in. So it can run beside
+  anything, including a command that rewrites the tree.
 - Everything else is the `main` lane, in the order `tiers` prints. That is
   where `uv sync` happens, and one lane keeps two syncs out of one venv.
 
 A command that rewrites the tree — anything running `ruff-check`,
-`ruff-format` or `gourmand` — gets no lanes at all, because a build context
-reading those files while they change is judging a tree that no longer exists.
-That makes `sdlc commit` sequential by definition.
+`ruff-format` or `gourmand` — gets no lanes beside it except that reviewer,
+because a build context reading those files while they change is judging a tree
+that no longer exists. That makes `sdlc commit` sequential by definition.
 
-A repo with no `image-build` check has one lane and runs exactly as it did
-before lanes existed. So does `sdlc push`, which never builds a container.
+So `sdlc push` has two lanes: everything that computes, and the review. `sdlc
+ci` has one unless the repo builds an image, because CI gets Gatehouse from its
+own workflow.
 
 The CPU budget is for the whole gate, not for each container: it is divided
-between the lanes, floor of one CPU each. Two lanes are no busier on your
-laptop than one was.
+between the lanes that run containers, floor of one CPU each. A lane whose
+every step is a question `bin/sdlc` answers itself — the reviewer, which is one
+API call and then waiting — takes a single CPU and is **left out of that
+division**, so putting it beside the others costs them nothing. Two lanes are
+no busier on your laptop than one was.
 
 The budget itself is half the machine, so a gate cannot take the desktop away
 from the person running it — except where there is no such person. In CI, or
@@ -125,8 +133,37 @@ changelog entry.
 
 Each lane's output is buffered and printed whole, in the order `tiers` lists
 the checks, so two lanes never cut into each other's log. Each block ends with
-how long its check took, because buffering is what the `== <step>` timestamps
-used to tell you.
+how long its check took.
+
+With one exception, which is the shape `sdlc push` has: when exactly one lane
+runs containers and the rest do not, that lane runs in the **foreground** and
+streams to your terminal as it always did, and the others are printed after it.
+Buffering the lane that is doing the work would mean watching a silent terminal
+for the length of the test suite, which reads like a hang.
+
+## What the last run found
+
+Every command leaves a record, inside the git directory rather than in the
+worktree:
+
+| Path | What is in it |
+|---|---|
+| `<git-dir>/sdlc/last-<command>.json` | each check, its exit, its seconds, its log |
+| `<git-dir>/sdlc/logs-<command>/` | what each buffered check printed |
+
+```
+$ jq -r '.checks[] | "\(.seconds)s \(.check) exit \(.exit)"' .git/sdlc/last-push.json
+```
+
+The checks appear in the order they **finished**, which with lanes is not the
+order they were listed in. A check that streamed to your terminal has no log
+file: the terminal had it.
+
+The record is written, never read. Nothing in this tool consults it to decide
+anything, because a verdict comes from running the check — if a file could
+stand in for one, a stale or hand-edited file would be a way past a gate.
+Failing to write it never fails a gate either; a repo with nowhere to write
+simply has no record.
 
 If no check finishes for `SDLC_LANE_STALL` seconds (default 3600) the printer
 stops waiting on the order, says so, waits for every lane to stop and then
