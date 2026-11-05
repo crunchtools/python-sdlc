@@ -261,6 +261,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # A FIXED group, like promote's, and for the same kind of reason. Each repo
+    # gets ONE bump branch which this force-pushes, so two releases running at
+    # once would fight over it and the loser's version would be the one left on
+    # the branch. Serialized, the later release simply supersedes the earlier --
+    # which is correct, since its image contains the earlier one's code.
+    # Not cancel-in-progress: a half-finished fleet bump is worse than a slow one.
+    concurrency:
+      group: bump-consumers-python-sdlc
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
         with:

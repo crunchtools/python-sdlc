@@ -7,6 +7,20 @@ CI decides whether it lands -- a bad release fails per repo, not fleet-wide.
 The same shape as crunchtools/constitution's scripts/fleet-bump.py: clone,
 rewrite, push, open, queue, and name the repos that failed so they can be rerun.
 
+ONE BRANCH PER REPO, not one per version, and reused in place. Per-version
+branches look tidier and are a trap: two releases close together open two PRs
+against the same `rev:` line, and when the OLDER one merges it moves that line
+out from under the newer branch, which goes CONFLICTING. v0.4.0 and v0.5.0 were
+two minutes apart and left 10 repos exactly there.
+
+What makes that bad rather than merely untidy is the shape of the failure: a
+conflicting pull request runs no `pull_request` workflows AT ALL, so its
+required check is ABSENT rather than red. Auto-merge never fires, nothing
+reports a failure, and the PR sits looking green forever. So this also asks
+GitHub whether each pull request can actually merge, and a run that leaves one
+unmergeable FAILS -- the same reason this script already refuses to finish
+quietly (RT#1553, below).
+
 Usage: scripts/bump_consumers.py vX.Y.Z [--only repo,repo] [--dry-run]
 Needs GH_TOKEN able to push branches and open PRs across the org.
 """
@@ -20,10 +34,13 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ORG = "crunchtools"
 SELF = "python-sdlc"
+# One per repo, reused and force-updated each release. See the module docstring.
+BRANCH = f"chore/{SELF}"
 PIN = re.compile(
     r"(-\s*repo:\s*https://github\.com/crunchtools/python-sdlc(?:\.git)?\s*\n\s*rev:\s*)(v\d+\.\d+\.\d+)"
 )
@@ -65,8 +82,93 @@ def pinned_rev(repo: str) -> str | None:
     return match.group(2) if match else None
 
 
+def open_bump(repo: str) -> str | None:
+    """The bump pull request already open on this repo's branch, or None."""
+    return (
+        gh(
+            "pr",
+            "list",
+            "-R",
+            f"{ORG}/{repo}",
+            "--head",
+            BRANCH,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--jq",
+            ".[0].url // empty",
+        ).strip()
+        or None
+    )
+
+
+# How many times, and how long apart, the mergeability pass asks again. Asked
+# once per ROUND for the repos still unanswered, not once per repo: see
+# conflicting().
+ROUNDS = 3
+PAUSE = 5
+
+
+def conflicting(opened: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Which of these pull requests cannot merge, and which GitHub would not say.
+
+    Asked AFTER every repo has been bumped rather than inside bump(), and this
+    is the difference between a question and a wait. GitHub computes
+    mergeability asynchronously, so asked immediately after a push the answer is
+    always UNKNOWN; polling per repo would spend PAUSE seconds of a release run
+    per unanswered repo, serially, for an answer that arrives for free once the
+    rest of the fleet has been bumped. Across 33 repos that is minutes of a
+    release doing nothing. Here each round asks only the repos still unanswered.
+
+    Returns (cannot merge, no answer). UNKNOWN is deliberately not a failure,
+    and neither is a query the API refuses: a release must not go red because
+    GitHub was slow or momentarily unavailable. Both are reported by name, so a
+    guard that quietly answered for nobody is visible rather than assumed.
+    """
+    pending = dict(opened)
+    cannot: list[str] = []
+    for attempt in range(ROUNDS):
+        if attempt:
+            time.sleep(PAUSE)
+        for repo, url in list(pending.items()):
+            try:
+                state = gh(
+                    "pr",
+                    "view",
+                    url,
+                    "-R",
+                    f"{ORG}/{repo}",
+                    "--json",
+                    "mergeable",
+                    "--jq",
+                    ".mergeable",
+                ).strip()
+            except subprocess.CalledProcessError as exc:
+                # Named, and survived. Outside the main loop's per-repo handler,
+                # an exception here would end the whole run with a traceback and
+                # no summary -- and the summary is the thing this script exists
+                # to print (RT#1553, below). One repo the API will not answer
+                # for is reported as unanswered, like UNKNOWN: a release must not
+                # go red because a query failed.
+                print(
+                    f"  warning: {repo}: cannot read whether it can merge: {exc.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                del pending[repo]
+                continue
+            if not state or state == "UNKNOWN":
+                continue
+            del pending[repo]
+            if state == "CONFLICTING":
+                cannot.append(repo)
+        if not pending:
+            break
+    return cannot, sorted(pending)
+
+
 def bump(repo: str, version: str) -> str:
-    branch = f"chore/python-sdlc-{version}"
+    branch = BRANCH
     with tempfile.TemporaryDirectory() as workdir:
         root = Path(workdir) / repo
         gh("repo", "clone", f"{ORG}/{repo}", str(root), "--", "--depth", "1", "-q")
@@ -79,7 +181,10 @@ def bump(repo: str, version: str) -> str:
         def git(*a: str) -> None:
             subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True)
 
-        git("checkout", "-q", "-b", branch)
+        # -B, not -b: the branch is this script's own and may already exist from
+        # an earlier release. The clone is the CURRENT default branch, so the
+        # rewrite is always against what the repo pins right now.
+        git("checkout", "-q", "-B", branch)
         git(
             "-c",
             "user.name=crunchtools-ci",
@@ -89,25 +194,43 @@ def bump(repo: str, version: str) -> str:
             "-qam",
             f"chore: python-sdlc {version}",
         )
-        git("push", "-q", "-u", "origin", branch)
-        url = gh(
-            "pr",
-            "create",
-            "-R",
-            f"{ORG}/{repo}",
-            "--head",
-            branch,
-            "--title",
-            f"chore: python-sdlc {version}",
-            "--body",
-            f"Moves the python-sdlc pin to {version}. Its own CI "
-            f"decides whether it lands; it merges itself when green.",
-        ).strip()
+        # Forced, because this branch carries one commit that is rewritten each
+        # release rather than a history worth keeping.
+        git("push", "-q", "-u", "--force", "origin", branch)
+
+        title = f"chore: python-sdlc {version}"
+        body = (
+            f"Moves the python-sdlc pin to {version}. Its own CI decides whether "
+            f"it lands; it merges itself when green.\n\n"
+            f"One branch per repo, reused each release, so two releases close "
+            f"together cannot leave two pull requests fighting over the same line."
+        )
+        url = open_bump(repo)
+        if url:
+            # Reused rather than opened again. The force-push above has already
+            # moved it to this version; this only makes it say so.
+            gh("pr", "edit", url, "-R", f"{ORG}/{repo}", "--title", title, "--body", body)
+            print(f"  updated in place: {url}")
+        else:
+            url = gh(
+                "pr",
+                "create",
+                "-R",
+                f"{ORG}/{repo}",
+                "--head",
+                branch,
+                "--title",
+                title,
+                "--body",
+                body,
+            ).strip()
         try:
             gh("pr", "merge", url, "--auto", "--merge")
         except subprocess.CalledProcessError as exc:
             reason = exc.stderr.strip()
             print(f"  warning: {repo}: auto-merge not queued: {reason}", file=sys.stderr)
+        # Whether it can actually merge is asked once, for the whole fleet,
+        # after this loop has finished. See conflicting().
         return url
 
 
@@ -143,22 +266,46 @@ def main() -> int:
 
     repos = args.only.split(",") if args.only else org_repos()
     current, stale, failed = survey(repos, args.version)
-    opened = []
+    opened: dict[str, str] = {}
     if not args.dry_run:
         for repo in stale:
             try:
-                print(f"  {bump(repo, args.version)}")
-                opened.append(repo)
+                url = bump(repo, args.version)
+                print(f"  {url}")
+                opened[repo] = url
             except (subprocess.CalledProcessError, RuntimeError) as bump_error:
                 detail = getattr(bump_error, "stderr", "") or ""
                 print(f"  FAILED: {bump_error}: {detail}".rstrip(": "), file=sys.stderr)
                 failed.append(repo)
 
+    # One pass over everything just opened. A pull request that cannot merge is
+    # the one failure here that NOTHING else reports: a conflicting pull request
+    # runs no `pull_request` workflows, so its required check is absent rather
+    # than red, auto-merge never fires, and it sits looking green indefinitely.
+    # v0.4.0 and v0.5.0 two minutes apart left 10 repos exactly there.
+    cannot: list[str] = []
+    if opened:
+        cannot, unanswered = conflicting(opened)
+        for repo in cannot:
+            print(
+                f"  CANNOT MERGE: {opened[repo]} conflicts with its base. "
+                f"Nothing else will report this.",
+                file=sys.stderr,
+            )
+            failed.append(repo)
+        if unanswered:
+            print(
+                f"  note: GitHub would not say whether these can merge: {', '.join(unanswered)}",
+                file=sys.stderr,
+            )
+
     # Always say what happened. A run with nothing to do and a run that could
     # not open a pull request both used to print nothing at all, which is how
     # RT#1553 -- the App had no `pull_requests: write` -- survived two releases
     # looking like a job that had half worked.
-    did = f"{len(stale)} would be bumped" if args.dry_run else f"{len(opened)} bumped"
+    # `failed` also carries repos whose config could not be READ, which were
+    # never opened, so it is not what to subtract here.
+    did = f"{len(stale)} would be bumped" if args.dry_run else f"{len(opened) - len(cannot)} bumped"
     print(
         f"{len(current) + len(stale)} repo(s) pin python-sdlc: "
         f"{did} to {args.version}, {len(current)} already there, {len(failed)} failed"
