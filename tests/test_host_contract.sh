@@ -57,8 +57,12 @@ done
 
 # POSIX utilities. The rule is about language toolchains and linters, not about
 # rebuilding coreutils -- every machine with a shell has these.
+#
+# Only what bin/sdlc ITSELF runs belongs here. Every entry is one tool this test
+# stops checking for, and checking for them is the whole job. What this file's
+# own helpers use is irrelevant: they run with the real PATH, not the shim's.
 POSIX_UTILS="sh awk sed tr grep basename dirname nproc cat mktemp rm ln head id
-             cut sleep date wc mkdir tail"
+             cut sleep date wc mkdir"
 for prog in $POSIX_UTILS; do
   if full=$(command -v "$prog" 2>/dev/null); then ln -sf "$full" "$SHIM/$prog"; fi
 done
