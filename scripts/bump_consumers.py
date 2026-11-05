@@ -7,6 +7,20 @@ CI decides whether it lands -- a bad release fails per repo, not fleet-wide.
 The same shape as crunchtools/constitution's scripts/fleet-bump.py: clone,
 rewrite, push, open, queue, and name the repos that failed so they can be rerun.
 
+ONE BRANCH PER REPO, not one per version, and reused in place. Per-version
+branches look tidier and are a trap: two releases close together open two PRs
+against the same `rev:` line, and when the OLDER one merges it moves that line
+out from under the newer branch, which goes CONFLICTING. v0.4.0 and v0.5.0 were
+two minutes apart and left 10 repos exactly there.
+
+What makes that bad rather than merely untidy is the shape of the failure: a
+conflicting pull request runs no `pull_request` workflows AT ALL, so its
+required check is ABSENT rather than red. Auto-merge never fires, nothing
+reports a failure, and the PR sits looking green forever. So this also asks
+GitHub whether each pull request can actually merge, and a run that leaves one
+unmergeable FAILS -- the same reason this script already refuses to finish
+quietly (RT#1553, below).
+
 Usage: scripts/bump_consumers.py vX.Y.Z [--only repo,repo] [--dry-run]
 Needs GH_TOKEN able to push branches and open PRs across the org.
 """
@@ -20,10 +34,13 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ORG = "crunchtools"
 SELF = "python-sdlc"
+# One per repo, reused and force-updated each release. See the module docstring.
+BRANCH = f"chore/{SELF}"
 PIN = re.compile(
     r"(-\s*repo:\s*https://github\.com/crunchtools/python-sdlc(?:\.git)?\s*\n\s*rev:\s*)(v\d+\.\d+\.\d+)"
 )
@@ -65,8 +82,48 @@ def pinned_rev(repo: str) -> str | None:
     return match.group(2) if match else None
 
 
+def open_bump(repo: str) -> str | None:
+    """The bump pull request already open on this repo's branch, or None."""
+    return (
+        gh(
+            "pr",
+            "list",
+            "-R",
+            f"{ORG}/{repo}",
+            "--head",
+            BRANCH,
+            "--state",
+            "open",
+            "--json",
+            "url",
+            "--jq",
+            ".[0].url // empty",
+        ).strip()
+        or None
+    )
+
+
+def can_merge(repo: str, url: str) -> str:
+    """MERGEABLE, CONFLICTING, or UNKNOWN if GitHub will not say in time.
+
+    GitHub computes this asynchronously after a push, so the first answer is
+    almost always UNKNOWN. UNKNOWN is NOT treated as a failure: a release must
+    not go red because the API was slow. CONFLICTING is, because nothing else
+    will ever report it -- see the module docstring.
+    """
+    for attempt in range(6):
+        if attempt:
+            time.sleep(5)
+        state = gh(
+            "pr", "view", url, "-R", f"{ORG}/{repo}", "--json", "mergeable", "--jq", ".mergeable"
+        ).strip()
+        if state and state != "UNKNOWN":
+            return state
+    return "UNKNOWN"
+
+
 def bump(repo: str, version: str) -> str:
-    branch = f"chore/python-sdlc-{version}"
+    branch = BRANCH
     with tempfile.TemporaryDirectory() as workdir:
         root = Path(workdir) / repo
         gh("repo", "clone", f"{ORG}/{repo}", str(root), "--", "--depth", "1", "-q")
@@ -79,7 +136,10 @@ def bump(repo: str, version: str) -> str:
         def git(*a: str) -> None:
             subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True)
 
-        git("checkout", "-q", "-b", branch)
+        # -B, not -b: the branch is this script's own and may already exist from
+        # an earlier release. The clone is the CURRENT default branch, so the
+        # rewrite is always against what the repo pins right now.
+        git("checkout", "-q", "-B", branch)
         git(
             "-c",
             "user.name=crunchtools-ci",
@@ -89,25 +149,49 @@ def bump(repo: str, version: str) -> str:
             "-qam",
             f"chore: python-sdlc {version}",
         )
-        git("push", "-q", "-u", "origin", branch)
-        url = gh(
-            "pr",
-            "create",
-            "-R",
-            f"{ORG}/{repo}",
-            "--head",
-            branch,
-            "--title",
-            f"chore: python-sdlc {version}",
-            "--body",
-            f"Moves the python-sdlc pin to {version}. Its own CI "
-            f"decides whether it lands; it merges itself when green.",
-        ).strip()
+        # Forced, because this branch carries one commit that is rewritten each
+        # release rather than a history worth keeping.
+        git("push", "-q", "-u", "--force", "origin", branch)
+
+        title = f"chore: python-sdlc {version}"
+        body = (
+            f"Moves the python-sdlc pin to {version}. Its own CI decides whether "
+            f"it lands; it merges itself when green.\n\n"
+            f"One branch per repo, reused each release, so two releases close "
+            f"together cannot leave two pull requests fighting over the same line."
+        )
+        url = open_bump(repo)
+        if url:
+            # Reused rather than opened again. The force-push above has already
+            # moved it to this version; this only makes it say so.
+            gh("pr", "edit", url, "-R", f"{ORG}/{repo}", "--title", title, "--body", body)
+            print(f"  updated in place: {url}")
+        else:
+            url = gh(
+                "pr",
+                "create",
+                "-R",
+                f"{ORG}/{repo}",
+                "--head",
+                branch,
+                "--title",
+                title,
+                "--body",
+                body,
+            ).strip()
         try:
             gh("pr", "merge", url, "--auto", "--merge")
         except subprocess.CalledProcessError as exc:
             reason = exc.stderr.strip()
             print(f"  warning: {repo}: auto-merge not queued: {reason}", file=sys.stderr)
+
+        state = can_merge(repo, url)
+        if state == "CONFLICTING":
+            raise RuntimeError(
+                f"{url} cannot merge. Nothing else will say so: a conflicting "
+                f"pull request runs no workflows, so its required check is absent "
+                f"rather than failing and auto-merge never fires"
+            )
         return url
 
 
