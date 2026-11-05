@@ -103,23 +103,52 @@ def open_bump(repo: str) -> str | None:
     )
 
 
-def can_merge(repo: str, url: str) -> str:
-    """MERGEABLE, CONFLICTING, or UNKNOWN if GitHub will not say in time.
+# How many times, and how long apart, the mergeability pass asks again. Asked
+# once per ROUND for the repos still unanswered, not once per repo: see
+# conflicting().
+ROUNDS = 3
+PAUSE = 5
 
-    GitHub computes this asynchronously after a push, so the first answer is
-    almost always UNKNOWN. UNKNOWN is NOT treated as a failure: a release must
-    not go red because the API was slow. CONFLICTING is, because nothing else
-    will ever report it -- see the module docstring.
+
+def conflicting(opened: dict[str, str]) -> tuple[list[str], list[str]]:
+    """Which of these pull requests cannot merge, and which GitHub would not say.
+
+    Asked AFTER every repo has been bumped rather than inside bump(), and this
+    is the difference between a question and a wait. GitHub computes
+    mergeability asynchronously, so asked immediately after a push the answer is
+    always UNKNOWN; polling per repo would spend PAUSE seconds of a release run
+    per unanswered repo, serially, for an answer that arrives for free once the
+    rest of the fleet has been bumped. Across 33 repos that is minutes of a
+    release doing nothing. Here each round asks only the repos still unanswered.
+
+    Returns (cannot merge, no answer). UNKNOWN is deliberately not a failure: a
+    release must not go red because the API was slow.
     """
-    for attempt in range(6):
+    pending = dict(opened)
+    cannot: list[str] = []
+    for attempt in range(ROUNDS):
         if attempt:
-            time.sleep(5)
-        state = gh(
-            "pr", "view", url, "-R", f"{ORG}/{repo}", "--json", "mergeable", "--jq", ".mergeable"
-        ).strip()
-        if state and state != "UNKNOWN":
-            return state
-    return "UNKNOWN"
+            time.sleep(PAUSE)
+        for repo, url in list(pending.items()):
+            state = gh(
+                "pr",
+                "view",
+                url,
+                "-R",
+                f"{ORG}/{repo}",
+                "--json",
+                "mergeable",
+                "--jq",
+                ".mergeable",
+            ).strip()
+            if not state or state == "UNKNOWN":
+                continue
+            del pending[repo]
+            if state == "CONFLICTING":
+                cannot.append(repo)
+        if not pending:
+            break
+    return cannot, sorted(pending)
 
 
 def bump(repo: str, version: str) -> str:
@@ -184,14 +213,8 @@ def bump(repo: str, version: str) -> str:
         except subprocess.CalledProcessError as exc:
             reason = exc.stderr.strip()
             print(f"  warning: {repo}: auto-merge not queued: {reason}", file=sys.stderr)
-
-        state = can_merge(repo, url)
-        if state == "CONFLICTING":
-            raise RuntimeError(
-                f"{url} cannot merge. Nothing else will say so: a conflicting "
-                f"pull request runs no workflows, so its required check is absent "
-                f"rather than failing and auto-merge never fires"
-            )
+        # Whether it can actually merge is asked once, for the whole fleet,
+        # after this loop has finished. See conflicting().
         return url
 
 
@@ -227,22 +250,46 @@ def main() -> int:
 
     repos = args.only.split(",") if args.only else org_repos()
     current, stale, failed = survey(repos, args.version)
-    opened = []
+    opened: dict[str, str] = {}
     if not args.dry_run:
         for repo in stale:
             try:
-                print(f"  {bump(repo, args.version)}")
-                opened.append(repo)
+                url = bump(repo, args.version)
+                print(f"  {url}")
+                opened[repo] = url
             except (subprocess.CalledProcessError, RuntimeError) as bump_error:
                 detail = getattr(bump_error, "stderr", "") or ""
                 print(f"  FAILED: {bump_error}: {detail}".rstrip(": "), file=sys.stderr)
                 failed.append(repo)
 
+    # One pass over everything just opened. A pull request that cannot merge is
+    # the one failure here that NOTHING else reports: a conflicting pull request
+    # runs no `pull_request` workflows, so its required check is absent rather
+    # than red, auto-merge never fires, and it sits looking green indefinitely.
+    # v0.4.0 and v0.5.0 two minutes apart left 10 repos exactly there.
+    cannot: list[str] = []
+    if opened:
+        cannot, unanswered = conflicting(opened)
+        for repo in cannot:
+            print(
+                f"  CANNOT MERGE: {opened[repo]} conflicts with its base. "
+                f"Nothing else will report this.",
+                file=sys.stderr,
+            )
+            failed.append(repo)
+        if unanswered:
+            print(
+                f"  note: GitHub would not say whether these can merge: {', '.join(unanswered)}",
+                file=sys.stderr,
+            )
+
     # Always say what happened. A run with nothing to do and a run that could
     # not open a pull request both used to print nothing at all, which is how
     # RT#1553 -- the App had no `pull_requests: write` -- survived two releases
     # looking like a job that had half worked.
-    did = f"{len(stale)} would be bumped" if args.dry_run else f"{len(opened)} bumped"
+    # `failed` also carries repos whose config could not be READ, which were
+    # never opened, so it is not what to subtract here.
+    did = f"{len(stale)} would be bumped" if args.dry_run else f"{len(opened) - len(cannot)} bumped"
     print(
         f"{len(current) + len(stale)} repo(s) pin python-sdlc: "
         f"{did} to {args.version}, {len(current)} already there, {len(failed)} failed"
