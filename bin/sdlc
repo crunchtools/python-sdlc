@@ -185,9 +185,11 @@ need_volume() {
 # So the host's git makes the clone, once per tag, and the checkout is mounted
 # read-only at the path `validate` already looks in. The container still gets
 # no git config and no credentials -- what crosses is a public repo's files.
-# Done once here, before any lane forks, so two lanes never race one clone.
-# Every failure is silent on purpose: without the mount `validate` tries its
-# own clone and reports a 2 exactly as it did before.
+# Done once here, before any lane forks. Two sdlc runs -- two repos on one tag
+# -- can still meet, so each clones into its own directory and publishes it
+# with `ln -sn`, which only one of them can win; the loser removes only its own
+# copy and uses the winner's. Every failure is silent on purpose: without the
+# mount `validate` tries its own clone and reports a 2 exactly as it did before.
 CONSTITUTION_MOUNT=
 host_constitution() {
   _manifest=$REPO/.specify/memory/constitution.md
@@ -197,13 +199,16 @@ host_constitution() {
                 exit
               }' "$_manifest")
   [ -n "$_tag" ] || return 0
-  _dir=${XDG_CACHE_HOME:-$HOME/.cache}/python-sdlc/constitution/$_tag
+  _root=${XDG_CACHE_HOME:-$HOME/.cache}/python-sdlc/constitution
+  _dir=$_root/$_tag
   if [ ! -f "$_dir/constitution.md" ]; then
-    rm -rf "$_dir"
-    mkdir -p "$_dir" 2>/dev/null || return 0
+    mkdir -p "$_root" 2>/dev/null || return 0
+    _own=$(mktemp -d "$_root/.$_tag.XXXXXX" 2>/dev/null) || return 0
     git clone --quiet --depth 1 --branch "$_tag" \
-        https://github.com/crunchtools/constitution "$_dir" >/dev/null 2>&1 \
-      || { rm -rf "$_dir"; return 0; }
+        https://github.com/crunchtools/constitution "$_own" >/dev/null 2>&1 \
+      || { rm -rf "$_own"; return 0; }
+    ln -sn "${_own##*/}" "$_dir" 2>/dev/null || rm -rf "$_own"
+    [ -f "$_dir/constitution.md" ] || return 0
   fi
   CONSTITUTION_MOUNT="$_dir:/cache/constitution/$_tag:ro,z"
 }
