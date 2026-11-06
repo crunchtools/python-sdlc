@@ -6,6 +6,22 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-06
+
+### Fixed
+
+- **The constitution gate no longer depends on a warm cache.** `validate`
+  clones crunchtools/constitution from inside the container, which on a gateway
+  seat goes through a CONNECT proxy that refuses github.com -- the route to
+  GitHub there is a git `insteadOf` in the host's git config, which the
+  container never reads. A seat whose cache volume already held the pinned tag
+  passed; an empty volume, or a repo moving to a tag nobody had fetched, was a
+  gate that could not run. `bin/sdlc` now makes that clone with the host's git,
+  once per tag under `~/.cache/python-sdlc/constitution/`, and mounts it
+  read-only where `validate` already looks. The container still gets no git
+  config or credentials. If the host clone fails, nothing changes: `validate`
+  tries its own and reports a 2 as before.
+
 ## [0.5.0] - 2026-11-05
 
 ### Changed
