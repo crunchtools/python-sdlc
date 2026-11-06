@@ -625,10 +625,27 @@ case "\$1" in
 esac
 EOF
 chmod +x "$CLONESHIM/git"
+# The check's own verdict depends on the checkout (CI has no pre-push hook), so
+# each concurrent run must match one that had a cache to itself.
+_solo=$(mktemp -d)
+PATH="$CLONESHIM" XDG_CACHE_HOME="$_solo" sh bin/sdlc hooks-installed >/dev/null 2>&1 \
+  && _want=0 || _want=$?
+rm -rf "$_solo"
+_pids=
 for _ in 1 2 3; do
   PATH="$CLONESHIM" XDG_CACHE_HOME="$CLONECACHE" sh bin/sdlc hooks-installed >/dev/null 2>&1 &
+  _pids="$_pids $!"
 done
-wait
+_odd=0
+for _pid in $_pids; do
+  wait "$_pid" && _got=0 || _got=$?
+  [ "$_got" = "$_want" ] || _odd=$((_odd + 1))
+done
+if [ "$_odd" = 0 ]; then
+  ok "three runs racing one cold cache each exit $_want, as a run alone does"
+else
+  bad "$_odd of 3 runs racing one cold cache did not exit $_want"
+fi
 _root="$CLONECACHE/python-sdlc/constitution"
 _links=$(find "$_root" -mindepth 1 -maxdepth 1 -type l | wc -l | tr -d ' ')
 _dirs=$(find "$_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
