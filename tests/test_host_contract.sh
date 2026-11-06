@@ -607,6 +607,40 @@ else
   bad "$locked of ${runs:-0} gate containers dropped capabilities"
 fi
 
+# The constitution is cloned by the HOST's git and published with `ln -sn`, so
+# runs that meet on a cold cache never delete each other's clone. Three run at
+# once against a git whose clone is slow and offline; what must be left is one
+# checkout, one link to it, and no loser's copy.
+CLONESHIM=$(mktemp -d)
+CLONECACHE=$(mktemp -d)
+for prog in $POSIX_UTILS podman pre-commit gh; do
+  [ -e "$SHIM/$prog" ] && ln -s "$(readlink -f "$SHIM/$prog")" "$CLONESHIM/$prog"
+done
+REALGIT=$(command -v git)
+cat > "$CLONESHIM/git" <<EOF
+#!/bin/sh
+case "\$1" in
+  clone) for dest; do :; done; sleep 1; : > "\$dest/constitution.md" ;;
+  *) exec "$REALGIT" "\$@" ;;
+esac
+EOF
+chmod +x "$CLONESHIM/git"
+for _ in 1 2 3; do
+  PATH="$CLONESHIM" XDG_CACHE_HOME="$CLONECACHE" sh bin/sdlc hooks-installed >/dev/null 2>&1 &
+done
+wait
+_root="$CLONECACHE/python-sdlc/constitution"
+_links=$(find "$_root" -mindepth 1 -maxdepth 1 -type l | wc -l | tr -d ' ')
+_dirs=$(find "$_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+_nested=$(find "$_root" -mindepth 2 -name '.v*' | wc -l | tr -d ' ')
+if [ "$_links" = 1 ] && [ "$_dirs" = 1 ] && [ "$_nested" = 0 ] \
+   && [ -f "$(find "$_root" -mindepth 1 -maxdepth 1 -type l)/constitution.md" ]; then
+  ok "three runs on a cold cache leave one constitution checkout and one link"
+else
+  bad "concurrent constitution clones left $_links link(s), $_dirs dir(s), $_nested nested"
+fi
+rm -rf "$CLONESHIM" "$CLONECACHE"
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
   printf 'host contract PASSED\n'; exit 0
