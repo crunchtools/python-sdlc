@@ -905,7 +905,36 @@ def t_pytest(s: dict) -> int:
     return run(cmd, env=env, cwd=project_dir())[0]
 
 
+GOURMAND_SIDECARS = (
+    "gourmand-exceptions.toml",
+    "gourmand-patterns.toml",
+    "gourmand-audit-ledger.toml",
+)
+"""Files gourmand resolves RELATIVE TO gourmand.toml, so each one needs it to exist."""
+
+
+def gourmand_orphan(root: Path) -> str | None:
+    """The sidecar file that would be ignored for want of a gourmand.toml, if there is one."""
+    if (root / "gourmand.toml").is_file():
+        return None
+    return next((name for name in GOURMAND_SIDECARS if (root / name).is_file()), None)
+
+
 def t_gourmand(s: dict) -> int:
+    # With no gourmand.toml, a sidecar file is found on disk, never parsed, and nothing is
+    # said about it: the gate goes red listing violations you already justified, which reads
+    # exactly like a wrong justification, so the natural response is to rewrite the
+    # justification. That cost an evening on this repository before the cause was spotted,
+    # and 26 repositories carry an exceptions file. A 2, not a warning: a check that cannot
+    # do what it was configured to do must not report as though it did, and a warning
+    # scrolls past on a long run with the violation list underneath it.
+    orphan = gourmand_orphan(REPO)
+    if orphan:
+        cannot(
+            f"found {orphan} but no gourmand.toml beside it, so no entry in it would be "
+            f"loaded. Add a gourmand.toml (an empty [output] table is enough) or remove "
+            f"{orphan}"
+        )
     step("gourmand check --full")
     return run(["gourmand", "check", "--full", "."])[0]
 
