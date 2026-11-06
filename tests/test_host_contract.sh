@@ -607,6 +607,57 @@ else
   bad "$locked of ${runs:-0} gate containers dropped capabilities"
 fi
 
+# The constitution is cloned by the HOST's git and published with `ln -sn`, so
+# runs that meet on a cold cache never delete each other's clone. Three run at
+# once against a git whose clone is slow and offline; what must be left is one
+# checkout, one link to it, and no loser's copy.
+CLONESHIM=$(mktemp -d)
+CLONECACHE=$(mktemp -d)
+for prog in $POSIX_UTILS podman pre-commit gh; do
+  [ -e "$SHIM/$prog" ] && ln -s "$(readlink -f "$SHIM/$prog")" "$CLONESHIM/$prog"
+done
+REALGIT=$(command -v git)
+cat > "$CLONESHIM/git" <<EOF
+#!/bin/sh
+case "\$1" in
+  clone) for dest; do :; done; sleep 1; : > "\$dest/constitution.md" ;;
+  *) exec "$REALGIT" "\$@" ;;
+esac
+EOF
+chmod +x "$CLONESHIM/git"
+# The check's own verdict depends on the checkout (CI has no pre-push hook), so
+# each concurrent run must match one that had a cache to itself.
+_solo=$(mktemp -d)
+PATH="$CLONESHIM" XDG_CACHE_HOME="$_solo" sh bin/sdlc hooks-installed >/dev/null 2>&1 \
+  && _want=0 || _want=$?
+rm -rf "$_solo"
+_pids=
+for _ in 1 2 3; do
+  PATH="$CLONESHIM" XDG_CACHE_HOME="$CLONECACHE" sh bin/sdlc hooks-installed >/dev/null 2>&1 &
+  _pids="$_pids $!"
+done
+_odd=0
+for _pid in $_pids; do
+  wait "$_pid" && _got=0 || _got=$?
+  [ "$_got" = "$_want" ] || _odd=$((_odd + 1))
+done
+if [ "$_odd" = 0 ]; then
+  ok "three runs racing one cold cache each exit $_want, as a run alone does"
+else
+  bad "$_odd of 3 runs racing one cold cache did not exit $_want"
+fi
+_root="$CLONECACHE/python-sdlc/constitution"
+_links=$(find "$_root" -mindepth 1 -maxdepth 1 -type l | wc -l | tr -d ' ')
+_dirs=$(find "$_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+_nested=$(find "$_root" -mindepth 2 -name '.v*' | wc -l | tr -d ' ')
+if [ "$_links" = 1 ] && [ "$_dirs" = 1 ] && [ "$_nested" = 0 ] \
+   && [ -f "$(find "$_root" -mindepth 1 -maxdepth 1 -type l)/constitution.md" ]; then
+  ok "three runs on a cold cache leave one constitution checkout and one link"
+else
+  bad "concurrent constitution clones left $_links link(s), $_dirs dir(s), $_nested nested"
+fi
+rm -rf "$CLONESHIM" "$CLONECACHE"
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
   printf 'host contract PASSED\n'; exit 0

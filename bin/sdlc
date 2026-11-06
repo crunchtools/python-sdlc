@@ -172,6 +172,48 @@ need_volume() {
   podman volume exists "$1" 2>/dev/null || die "cannot create the podman volume $1"
 }
 
+# ------------------------------------------------- the constitution, by the host
+#
+# `validate` clones crunchtools/constitution at the tag the repo pins, into the
+# cache volume. From inside the container that clone takes whatever route the
+# network gives a container, and on a gateway seat that is a CONNECT proxy that
+# refuses github.com: the route to GitHub there is a git `insteadOf` in the
+# HOST's git config, which the container never reads. A warm cache volume hid
+# it; an empty one, or a repo moving to a tag nobody has fetched, was a gate
+# that could not run (claude-agent#9, developer3, 2026-11-06).
+#
+# So the host's git makes the clone, once per tag, and the checkout is mounted
+# read-only at the path `validate` already looks in. The container still gets
+# no git config and no credentials -- what crosses is a public repo's files.
+# Done once here, before any lane forks. Two sdlc runs -- two repos on one tag
+# -- can still meet, so each clones into its own directory and publishes it
+# with `ln -sn`, which only one of them can win; the loser removes only its own
+# copy and uses the winner's. Every failure is silent on purpose: without the
+# mount `validate` tries its own clone and reports a 2 exactly as it did before.
+CONSTITUTION_MOUNT=
+host_constitution() {
+  _manifest=$REPO/.specify/memory/constitution.md
+  [ -f "$_manifest" ] || return 0
+  _tag=$(awk '/^>[ \t]*\*\*Inherits:\*\*/ {
+                if (match($0, /v[0-9]+\.[0-9]+\.[0-9]+/)) print substr($0, RSTART, RLENGTH)
+                exit
+              }' "$_manifest")
+  [ -n "$_tag" ] || return 0
+  _root=${XDG_CACHE_HOME:-$HOME/.cache}/python-sdlc/constitution
+  _dir=$_root/$_tag
+  if [ ! -f "$_dir/constitution.md" ]; then
+    mkdir -p "$_root" 2>/dev/null || return 0
+    _own=$(mktemp -d "$_root/.$_tag.XXXXXX" 2>/dev/null) || return 0
+    git clone --quiet --depth 1 --branch "$_tag" \
+        https://github.com/crunchtools/constitution "$_own" >/dev/null 2>&1 \
+      || { rm -rf "$_own"; return 0; }
+    ln -sn "${_own##*/}" "$_dir" 2>/dev/null || rm -rf "$_own"
+    [ -f "$_dir/constitution.md" ] || return 0
+  fi
+  CONSTITUTION_MOUNT="$_dir:/cache/constitution/$_tag:ro,z"
+}
+host_constitution
+
 # ------------------------------------------------------------------ podman run
 #
 # `z`, not `Z`: more than one of these can mount the same tree at once, and `Z`
@@ -221,6 +263,7 @@ run_in_image() {
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     -v "$REPO:/repo:$_mode,z" -w /repo \
     -v "$CACHE_VOLUME:/cache" \
+    ${CONSTITUTION_MOUNT:+-v "$CONSTITUTION_MOUNT"} \
     --tmpfs /tmp:rw,exec,size=4g,mode=1777 \
     -e HOME=/tmp \
     -e PYTHONPYCACHEPREFIX=/tmp/pycache \
