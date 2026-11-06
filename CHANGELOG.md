@@ -6,6 +6,21 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- **A gourmand sidecar file with no `gourmand.toml` beside it stops the gate
+  instead of being ignored.** gourmand resolves
+  `gourmand-exceptions.toml`, `gourmand-patterns.toml` and
+  `gourmand-audit-ledger.toml` relative to `gourmand.toml`. With no
+  `gourmand.toml` the sidecar is found on disk, never parsed, and nothing is
+  said about it, so the gate goes red listing violations that were already
+  justified — which reads exactly like a wrong justification, so the natural
+  response is to rewrite the justification, repeatedly. It cost an evening on
+  this repository before the cause was found, and 26 repositories in the fleet
+  carry an exceptions file. `gourmand` now exits 2 naming the file it found and
+  the one it wanted, because a check that cannot do what it was configured to do
+  must not report as though it did (#25).
+
 ## [0.5.1] - 2026-11-06
 
 ### Fixed
