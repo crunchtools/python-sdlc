@@ -4,7 +4,8 @@
 # arrived at the hard way in #689: the build pushes ONLY the commit SHA tag, the
 # gates address the image by the DIGEST the build reported, and `latest` plus the
 # semver tags move in a separate promote job that copies that tested digest
-# without rebuilding.
+# without rebuilding. `latest` is the newest RELEASE and `main` is the branch
+# (constitution 1.33.0); a push to main moves `main` alone.
 #
 # Why that matters more here than anywhere else: 35 repos will pin this image.
 # A published tag that was never the thing the contract test ran against is a
@@ -221,25 +222,52 @@ jobs:
 
       # Copies the tested digest. No rebuild, so the bytes that were verified
       # are the bytes that get the tag.
-      - name: Move latest, and the version tags on a release tag
+      - name: Move main, and latest plus the version tags on a release tag
         env:
           REF: ${{ needs.build.outputs.ref }}
         run: |
           set -eu
-          # The profile: promotion MUST NOT move `latest` back to an older
+          # ONE floating tag moves per run, and which one is the whole point of
+          # constitution 1.33.0. `latest` is the newest RELEASE: it moves on a
+          # version tag and never on a push to main, because 44 units across the
+          # fleet pull `:latest` and every one of their authors meant "the newest
+          # release". `main` is the tag for the branch, for a consumer that wants
+          # continuous delivery and is willing to name it.
+          #
+          # Before this, `latest` was main. On 2026-11-07 that put unreleased
+          # trentina 6.11.0 into production at 02:01 through podman-auto-update,
+          # where it climbed to the unit's 4g cap and was SIGKILLed. Nothing had
+          # asked for it and nothing was watching (RT#1559).
+          #
+          # A prerelease moves no floating tag: `latest` is the newest STABLE
+          # release, and a release candidate is not the branch either. SemVer
+          # puts every prerelease identifier after a hyphen, so the pattern
+          # `v*-*` is the whole test.
+          floating=
+          case "$GITHUB_REF" in
+            refs/tags/v*-*) ;;
+            refs/tags/v*)   floating=latest ;;
+            *)              floating=main ;;
+          esac
+
+          # The profile: promotion MUST NOT move a floating tag back to an older
           # commit when a newer one has landed. A scheduled rebuild or a
           # re-dispatch of an old commit would otherwise quietly demote the
-          # registry, and 35 repos pin this image.
-          current=$(skopeo inspect --format \
-            '{{ index .Labels "org.opencontainers.image.revision" }}' \
-            "docker://$QUAY:latest" 2>/dev/null || true)
-          if [ -n "${current:-}" ] && [ "$current" != "$GITHUB_SHA" ]; then
-            if git merge-base --is-ancestor "$GITHUB_SHA" "$current" 2>/dev/null; then
-              echo "refusing: :latest is $current, which already contains $GITHUB_SHA" >&2
-              exit 1
+          # registry, and 35 repos pin this image. Asked of whichever tag THIS
+          # run moves: a re-run of an old release tag must not demote `latest`
+          # any more than a re-dispatched old commit may demote `main`.
+          if [ -n "$floating" ]; then
+            current=$(skopeo inspect --format \
+              '{{ index .Labels "org.opencontainers.image.revision" }}' \
+              "docker://$QUAY:$floating" 2>/dev/null || true)
+            if [ -n "${current:-}" ] && [ "$current" != "$GITHUB_SHA" ]; then
+              if git merge-base --is-ancestor "$GITHUB_SHA" "$current" 2>/dev/null; then
+                echo "refusing: :$floating is $current, which already contains $GITHUB_SHA" >&2
+                exit 1
+              fi
             fi
+            skopeo copy "docker://$REF" "docker://$QUAY:$floating"
           fi
-          skopeo copy "docker://$REF" "docker://$QUAY:latest"
           case "$GITHUB_REF" in
             refs/tags/v*)
               version=${GITHUB_REF#refs/tags/v}

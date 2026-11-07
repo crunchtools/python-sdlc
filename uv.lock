@@ -1,0 +1,8 @@
+version = 1
+revision = 5
+requires-python = ">=3.14"
+
+[[package]]
+name = "python-sdlc"
+version = "0.5.1"
+source = { virtual = "." }
