@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-07
+
+### Changed
+
+- gatehouse 0.23.0 -> 0.24.0.
+
 ### Fixed
 
 - **A gourmand sidecar file with no `gourmand.toml` beside it stops the gate
