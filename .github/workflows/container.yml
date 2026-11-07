@@ -238,9 +238,16 @@ jobs:
           # trentina 6.11.0 into production at 02:01 through podman-auto-update,
           # where it climbed to the unit's 4g cap and was SIGKILLed. Nothing had
           # asked for it and nothing was watching (RT#1559).
+          #
+          # A prerelease moves no floating tag: `latest` is the newest STABLE
+          # release, and a release candidate is not the branch either. SemVer
+          # puts every prerelease identifier after a hyphen, so the pattern
+          # `v*-*` is the whole test.
+          floating=
           case "$GITHUB_REF" in
-            refs/tags/v*) floating=latest ;;
-            *)            floating=main ;;
+            refs/tags/v*-*) ;;
+            refs/tags/v*)   floating=latest ;;
+            *)              floating=main ;;
           esac
 
           # The profile: promotion MUST NOT move a floating tag back to an older
@@ -249,16 +256,18 @@ jobs:
           # registry, and 35 repos pin this image. Asked of whichever tag THIS
           # run moves: a re-run of an old release tag must not demote `latest`
           # any more than a re-dispatched old commit may demote `main`.
-          current=$(skopeo inspect --format \
-            '{{ index .Labels "org.opencontainers.image.revision" }}' \
-            "docker://$QUAY:$floating" 2>/dev/null || true)
-          if [ -n "${current:-}" ] && [ "$current" != "$GITHUB_SHA" ]; then
-            if git merge-base --is-ancestor "$GITHUB_SHA" "$current" 2>/dev/null; then
-              echo "refusing: :$floating is $current, which already contains $GITHUB_SHA" >&2
-              exit 1
+          if [ -n "$floating" ]; then
+            current=$(skopeo inspect --format \
+              '{{ index .Labels "org.opencontainers.image.revision" }}' \
+              "docker://$QUAY:$floating" 2>/dev/null || true)
+            if [ -n "${current:-}" ] && [ "$current" != "$GITHUB_SHA" ]; then
+              if git merge-base --is-ancestor "$GITHUB_SHA" "$current" 2>/dev/null; then
+                echo "refusing: :$floating is $current, which already contains $GITHUB_SHA" >&2
+                exit 1
+              fi
             fi
+            skopeo copy "docker://$REF" "docker://$QUAY:$floating"
           fi
-          skopeo copy "docker://$REF" "docker://$QUAY:$floating"
           case "$GITHUB_REF" in
             refs/tags/v*)
               version=${GITHUB_REF#refs/tags/v}
