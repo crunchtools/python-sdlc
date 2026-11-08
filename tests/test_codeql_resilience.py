@@ -82,11 +82,38 @@ def memory() -> bool:
     return ok
 
 
+def failures() -> bool:
+    """Either CodeQL step exiting non-zero is a 2 that names the step."""
+    ok = True
+    real_run, real_step = _SDLC.run, _SDLC.step
+    _SDLC.step = lambda _msg: None
+    try:
+        for failing, says in (
+            ("create", "could not build a database"),
+            ("analyze", "analyze failed"),
+        ):
+            _SDLC.run = lambda cmd, failing=failing, **_kw: (7 if cmd[2] == failing else 0, "")
+            try:
+                _SDLC.run_codeql(
+                    ["codeql", "database", "create"], ["codeql", "database", "analyze"], Path("/x")
+                )
+                raised = ""
+            except _SDLC.CannotRunError as exc:
+                raised = str(exc)
+            ok &= check(
+                says in raised and "exit 7" in raised, f"a failed {failing} is a 2 that says so"
+            )
+    finally:
+        _SDLC.run, _SDLC.step = real_run, real_step
+    return ok
+
+
 def main() -> int:
     saved = dict(os.environ)
     try:
         ok = database_and_lock()
         ok &= memory()
+        ok &= failures()
     finally:
         os.environ.clear()
         os.environ.update(saved)
