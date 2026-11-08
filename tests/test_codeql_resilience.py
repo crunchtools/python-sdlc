@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""A CodeQL that cannot run must not be what teaches people `--no-verify`.
+"""CodeQL must not fail for want of memory or for a half-built cache.
 
 python-sdlc#33: on josui-skills a killed run left a half-built database that a
-person had to delete by hand, the evaluator was sized by CodeQL's own guess
-rather than the container's budget, and an analysis that died blocked every
-push with no door but `--no-verify` -- which skips every gate, not the broken
-one. These are the three pieces of that fix that need no CodeQL to test.
+person had to delete by hand, and the evaluator was sized by CodeQL's own guess
+rather than the container's budget, so analyze died and every push was refused.
 
 Run: tests/test_codeql_resilience.py   (needs the image's python3 and PyYAML)
 """
@@ -18,7 +16,6 @@ import os
 import stat
 import sys
 import tempfile
-from collections.abc import Callable
 from pathlib import Path
 
 # Loaded by path, as in test_codeql_globs.py: `sdlc` has no .py extension.
@@ -42,15 +39,6 @@ EIGHT_G_RAM_MB = 6144
 def check(ok: bool, what: str) -> bool:
     print(f"{'ok  ' if ok else 'FAIL'} {what}")
     return ok
-
-
-def raises(exc: type[BaseException], fn: Callable[[], object]) -> bool:
-    """True when `fn` raises `exc`. Anything else it raises fails the test run."""
-    try:
-        fn()
-    except exc:
-        return True
-    return False
 
 
 def database_and_lock() -> bool:
@@ -94,30 +82,11 @@ def memory() -> bool:
     return ok
 
 
-def deferral() -> bool:
-    """Deferring to CI is a push-only, outside-CI privilege."""
-    ok = True
-    os.environ.pop("CI", None)
-    os.environ["SDLC_TIER"] = "ci"
-    ok &= check(not _SDLC.ci_judges(), "`sdlc ci` never defers: nothing judges after it")
-    os.environ["SDLC_TIER"] = "codeql"
-    ok &= check(not _SDLC.ci_judges(), "the inner loop's `sdlc codeql` never defers")
-    os.environ["SDLC_TIER"] = "push"
-    os.environ["CI"] = "true"
-    ok &= check(not _SDLC.ci_judges(), "a push inside CI never defers")
-    ok &= check(
-        raises(_SDLC.CannotRunError, lambda: _SDLC.codeql_broke("x")),
-        "where CI does not judge, a broken CodeQL is still a 2",
-    )
-    return ok
-
-
 def main() -> int:
     saved = dict(os.environ)
     try:
         ok = database_and_lock()
         ok &= memory()
-        ok &= deferral()
     finally:
         os.environ.clear()
         os.environ.update(saved)

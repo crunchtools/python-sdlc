@@ -119,8 +119,6 @@ case " \$* " in
     printf 'p${TAB}one${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
     printf 'q${TAB}two${TAB}image-ro${TAB}quiet-ok\n' ;;
   *" plan "*)
-    if [ -f "$SHIM/defer-last" ]; then printf 'codeql${TAB}main${TAB}image-ro${TAB}rc-three\n'; exit 0; fi
-    if [ -f "$SHIM/defer" ]; then printf 'codeql${TAB}main${TAB}image-ro${TAB}rc-three\n'; fi
     printf 'mypy${TAB}main${TAB}image-ro${TAB}mypy\n'
     printf 'ruff-check${TAB}main${TAB}image-rw${TAB}ruff-check\n'
     printf 'image${TAB}main${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
@@ -133,7 +131,6 @@ case "\$_last" in
     printf 'DONE %s\n' "\$_last" >> "$SHIM/race.log" ;;
   rc-one)      printf 'RAN rc-one\n'; exit 1 ;;
   rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
-  rc-three)    printf 'RAN rc-three\n'; exit 3 ;;
   slow-rc-one) printf 'RAN slow-rc-one\n'; sleep 2; exit 1 ;;
   very-slow-rc-one) printf 'RAN very-slow-rc-one\n'; sleep 6; printf 'LAST LINE\n'; exit 1 ;;
   step-one) printf 'RAN step-one\n'; sleep 1 ;;
@@ -188,44 +185,18 @@ else
   bad "a host step's word was evaluated as shell"
 fi
 
-printf '\n== a check deferred to CI\n\n'
+printf '\n== what CodeQL is told\n\n'
 
-# 3 is the image saying "could not run, and CI judges this commit". A push lets
-# it through, loudly, so --no-verify is not the only door past a broken
-# CodeQL; every other command must still treat it as a 2 (python-sdlc#33).
-touch "$SHIM/defer"
+# CodeQL sizes its evaluator itself unless told, and rootless podman can drop
+# --memory silently, so the budget is handed to the image as well (#33).
 log_mark
-PATH="$SHIM" sh bin/sdlc push > "$RUN/out" 2>&1 && rc=0 || rc=$?
+PATH="$SHIM" sh bin/sdlc push >/dev/null 2>&1 || true
 log_since
-if [ "$rc" -eq 0 ] && grep -q 'codeql COULD NOT RUN -- DEFERRED TO CI' "$RUN/out" \
-   && grep -q ' mypy$' "$RUN/podman.log"; then
-  ok "a push lets a deferred check through, says so, and runs the rest"
+if grep -q -- '-e SDLC_MEMORY=8g' "$RUN/podman.log"; then
+  ok "the image is told the memory budget"
 else
-  bad "a deferred check on push exited $rc or said nothing"
+  bad "the image was not given SDLC_MEMORY"
 fi
-if grep -q 'SDLC_MEMORY=' "$RUN/podman.log" && grep -q -- '-e SDLC_TIER' "$RUN/podman.log"; then
-  ok "the image is told the memory budget and the tier"
-else
-  bad "the image was not given SDLC_MEMORY and SDLC_TIER"
-fi
-for target in ci codeql; do
-  PATH="$SHIM" sh bin/sdlc "$target" > "$RUN/out" 2>&1 && rc=0 || rc=$?
-  if [ "$rc" -eq 2 ] && ! grep -q 'DEFERRED' "$RUN/out"; then
-    ok "$target treats a deferral as could-not-run (exit 2)"
-  else
-    bad "$target let a deferral through (exit $rc)"
-  fi
-done
-rm -f "$SHIM/defer"
-# Alone, so the deferral is the LAST status the executor saw.
-touch "$SHIM/defer-last"
-PATH="$SHIM" sh bin/sdlc push > "$RUN/out" 2>&1 && rc=0 || rc=$?
-if [ "$rc" -eq 0 ]; then
-  ok "a push whose only check deferred exits 0"
-else
-  bad "a push whose only check deferred exited $rc"
-fi
-rm -f "$SHIM/defer-last"
 
 printf '\n== the CPU budget\n\n'
 

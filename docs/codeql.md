@@ -34,7 +34,7 @@ fails.
 
 ## When it cannot run
 
-Three things went wrong on josui-skills at once (#33), and each has its own fix.
+Two things went wrong on josui-skills at once (#33).
 
 - **Memory.** CodeQL sizes its evaluator itself and does not look at the
   container: `codeql resolve ram` gave a 1509 MB heap under `--memory 8g` and
@@ -49,15 +49,6 @@ Three things went wrong on josui-skills at once (#33), and each has its own fix.
   database mid-run. The gate now takes a lock beside it and waits. It clears
   the previous database before building and checks that it is gone. A
   half-built one is a cache miss, not something a person deletes by hand.
-- **Deferring to CI.** When CodeQL itself breaks — `create` or `analyze` exits
-  non-zero — at the **push** tier, outside CI, in a repo with a workflow that
-  runs `sdlc ci`, the check exits **3**. The launcher prints `DEFERRED TO CI`,
-  records it in `last-push.json`, and lets the push through. Anywhere else (`sdlc ci`,
-  `sdlc codeql`, a repo with no such workflow) it is still a 2. A config the
-  repo got wrong is still a 2 everywhere, because CI fails on it the same way.
-
-`--no-verify` skips every gate, so refusing the push left it as the only way
-past one broken tool. A deferral leaves the other gates running.
 
 ## The config file
 

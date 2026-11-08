@@ -6,16 +6,6 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
-### Added
-
-- **Exit 3: could not run, deferred to CI.** When CodeQL itself breaks at the
-  push tier, outside CI, in a repo whose workflow runs `sdlc ci`, the push goes
-  through with a loud `DEFERRED TO CI` and the record shows exit 3. Before
-  this, a broken CodeQL blocked every push and `--no-verify`, which skips every
-  gate, was the only way past it. `sdlc ci`, `sdlc codeql` and a config error
-  are still 2. A tool's own exit 3 is mapped to 2, so only the gate can defer
-  (#33).
-
 ### Fixed
 
 - **CodeQL's evaluator gets the memory the gate budgets.** CodeQL ignored the
@@ -28,8 +18,8 @@ All notable changes to this project are documented here, following
   other's database mid-run. The previous database is removed, read-only parts
   included, and checked to be gone before `create` runs (#33).
 - `run_plan` read run_serial's per-step `_rc` as its own result, because shell
-  variables are global. It had no visible effect while every non-zero step
-  failed the run, but it turned a deferred push's 0 into a 3.
+  variables are global. Harmless today, because every non-zero step fails the
+  run, but one new status away from a wrong exit code.
 
 ## [0.5.3] - 2026-11-08
 
