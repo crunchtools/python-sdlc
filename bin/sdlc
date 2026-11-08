@@ -270,6 +270,7 @@ run_in_image() {
     -e SEMGREP_SETTINGS_FILE=/tmp/semgrep.yml \
     -e "SDLC_PROJECT=$PROJECT" \
     -e "SDLC_JOBS=$GATE_CPUS" \
+    -e "SDLC_MEMORY=$GATE_MEMORY" \
     -e "SDLC_HOST_REPO=$REPO" \
     -e "SDLC_CACHE_VOLUME=$CACHE_VOLUME" \
     ${SDLC_SKIP:+-e SDLC_SKIP} \
@@ -887,18 +888,21 @@ run_plan() {           # commit | push | ci | <check>
   # something that is not a CPU, so that one can stream.
   _oncpu=$(printf '%s\n' "$_plan" \
     | awk -F"$TAB" '$3 != "local" && !seen[$2]++ {n++} END {print n + 0}')
-  _rc=0
+  # Its own name: shell variables are global, and run_serial's loop sets `_rc`
+  # for every step, so the last step's status leaked in here whenever
+  # run_serial itself returned 0.
+  _plan_rc=0
   if [ "${_n:-1}" -le 1 ]; then
-    run_serial "$_plan" || _rc=$?
+    run_serial "$_plan" || _plan_rc=$?
   elif [ "${_oncpu:-0}" -eq 1 ]; then
-    run_split "$_plan" || _rc=$?
+    run_split "$_plan" || _plan_rc=$?
   else
-    run_lanes "$_plan" || _rc=$?
+    run_lanes "$_plan" || _plan_rc=$?
   fi
 
   trap - EXIT HUP INT TERM
-  record_finish "$_rc"
-  return "$_rc"
+  record_finish "$_plan_rc"
+  return "$_plan_rc"
 }
 
 # ---------------------------------------------------------------------- dispatch

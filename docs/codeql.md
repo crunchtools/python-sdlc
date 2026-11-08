@@ -32,6 +32,24 @@ That command is the one way to make a finding stop failing without fixing it,
 and it lands in a commit a reviewer reads. With no baseline file, every finding
 fails.
 
+## When it cannot run
+
+Two things went wrong on josui-skills at once (#33).
+
+- **Memory.** CodeQL sizes its evaluator itself and does not look at the
+  container: `codeql resolve ram` gave a 1509 MB heap under `--memory 8g` and
+  under `--memory 2g` alike. The gate now passes `--ram` explicitly, three
+  quarters of the smallest of `SDLC_MEMORY`, the cgroup's `memory.max` and the
+  machine's MemTotal. All three, because rootless podman drops `--memory`
+  silently when the memory controller is not delegated, as in a developer
+  container. At the default 8g that is `--ram=6144`, a 4.6 GB heap.
+- **One database per project, one run at a time.** The database lives at
+  `/cache/codeql/<worktree basename>`, so two checkouts with the same basename,
+  or a push retried while the last is still running, deleted each other's
+  database mid-run. The gate now takes a lock beside it and waits. It clears
+  the previous database before building and checks that it is gone. A
+  half-built one is a cache miss, not something a person deletes by hand.
+
 ## The config file
 
 `.github/codeql/codeql-config.yml` is the **Action's** format, not the CLI's.

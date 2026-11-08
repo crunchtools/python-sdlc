@@ -185,6 +185,19 @@ else
   bad "a host step's word was evaluated as shell"
 fi
 
+printf '\n== what CodeQL is told\n\n'
+
+# CodeQL sizes its evaluator itself unless told, and rootless podman can drop
+# --memory silently, so the budget is handed to the image as well (#33).
+log_mark
+PATH="$SHIM" sh bin/sdlc push >/dev/null 2>&1 || true
+log_since
+if grep -q -- '-e SDLC_MEMORY=8g' "$RUN/podman.log"; then
+  ok "the image is told the memory budget"
+else
+  bad "the image was not given SDLC_MEMORY"
+fi
+
 printf '\n== the CPU budget\n\n'
 
 # Halving the machine protects the person at the keyboard. Two cases have no

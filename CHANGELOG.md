@@ -6,6 +6,21 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- **CodeQL's evaluator gets the memory the gate budgets.** CodeQL ignored the
+  container and gave itself a ~1.2-1.5 GB heap, and analyze died on
+  josui-skills with status 70. `--ram` is now three quarters of the smallest of
+  `SDLC_MEMORY`, the cgroup limit and MemTotal: 6144 MB at the default 8g
+  (#33).
+- **A half-built CodeQL database no longer needs a person to delete it.** Runs
+  on one project take a lock and wait for each other instead of deleting each
+  other's database mid-run. The previous database is removed, read-only parts
+  included, and checked to be gone before `create` runs (#33).
+- `run_plan` read run_serial's per-step `_rc` as its own result, because shell
+  variables are global. Harmless today, because every non-zero step fails the
+  run, but one new status away from a wrong exit code.
+
 ## [0.5.3] - 2026-11-08
 
 ### Changed
