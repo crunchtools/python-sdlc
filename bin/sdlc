@@ -275,6 +275,7 @@ run_in_image() {
     -e "SDLC_PROJECT=$PROJECT" \
     -e "SDLC_JOBS=$GATE_CPUS" \
     -e "SDLC_MEMORY=$GATE_MEMORY" \
+    -e "SDLC_DEFAULT_BRANCH=$(default_branch 2>/dev/null || :)" \
     ${SDLC_TIER:+-e SDLC_TIER} \
     -e "SDLC_HOST_REPO=$REPO" \
     -e "SDLC_CACHE_VOLUME=$CACHE_VOLUME" \

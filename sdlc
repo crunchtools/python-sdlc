@@ -1316,23 +1316,43 @@ def ci_judges() -> bool:
     except OSError as exc:
         print(f"codeql: cannot read {workflows}, so nothing may be deferred: {exc}", flush=True)
         return False
+    # The launcher knows it; 10 of the 69 checkouts in this fleet are not main.
+    default = (os.environ.get("SDLC_DEFAULT_BRANCH") or "").removeprefix("origin/")
     for f in files:
         try:
-            if runs_sdlc_ci(f.read_text(encoding="utf-8", errors="replace")):
+            if runs_sdlc_ci(f.read_text(encoding="utf-8", errors="replace"), default):
                 return True
         except OSError as exc:
             print(f"codeql: cannot read {f}, so it cannot grant a deferral: {exc}", flush=True)
     return False
 
 
-JUDGING_EVENTS = frozenset({"push", "pull_request", "pull_request_target", "merge_group"})
+JUDGING_EVENTS = ("pull_request", "pull_request_target", "merge_group", "push")
+
+# A path ending in `bin/sdlc`, then `ci` as its argument: how a workflow
+# actually invokes the gate (`$RUNNER_TEMP/sdlc/bin/sdlc ci`).
+_RUNS_SDLC_CI = re.compile(r"""(?:^|[\s;&|("'=])\S*bin/sdlc\s+ci\b""")
 
 
-def judges_a_commit(text: str) -> bool:
-    """Is this workflow triggered by something that judges a pushed commit?
+def runs_sdlc_ci(text: str, default_branch: str) -> bool:
+    """Does this workflow RUN the gate, in a job that this commit reaches?
 
-    `on:` is YAML 1.1's boolean `True` once parsed, which is why both keys are
-    looked for. A file this cannot parse grants nothing.
+    Not "does the text `sdlc ci` appear in it". Every way of answering that
+    question loosely hands a push a verdict nobody ever reaches, and each of
+    these was a real finding against an earlier version of this function:
+
+    - trentina carries `VERIFIER_JOB: sdlc ci` as a job name and `sdlc ci`
+      inside an error message. So the invocation is looked for in parsed
+      `steps[].run` scripts only -- never in a comment, a `name:`, an `env:`
+      value or an echoed string (python-sdlc#34).
+    - a job or step behind an `if:` may be skipped on this very commit, so a
+      conditional one grants nothing.
+    - a workflow triggered only by `workflow_dispatch` or `schedule` judges
+      nothing anybody pushed, and `on: push` filtered to another branch is the
+      same gap wearing the right event name. The trigger has to reach
+      `default_branch`, which is the branch XII's required status check guards.
+
+    A workflow this cannot parse grants nothing.
     """
     try:
         doc = yaml.safe_load(text)
@@ -1340,35 +1360,97 @@ def judges_a_commit(text: str) -> bool:
         return False
     if not isinstance(doc, dict):
         return False
+    return judges_a_commit(doc, default_branch) and any_step_runs_the_gate(doc)
+
+
+def judges_a_commit(doc: dict, default_branch: str) -> bool:
+    """Does a trigger of this workflow cover the default branch?
+
+    `on:` is YAML 1.1's boolean `True` once parsed, which is why both keys are
+    looked for.
+    """
     on = doc.get("on", doc.get(True))
     if isinstance(on, str):
-        return on in JUDGING_EVENTS
-    if isinstance(on, dict):
-        return bool(JUDGING_EVENTS & set(on))
-    if isinstance(on, list):
-        return bool(JUDGING_EVENTS & {e for e in on if isinstance(e, str)})
+        events: dict[str, object] = {on: None}
+    elif isinstance(on, list):
+        events = {e: None for e in on if isinstance(e, str)}
+    elif isinstance(on, dict):
+        events = {k: v for k, v in on.items() if isinstance(k, str)}
+    else:
+        return False
+    return any(covers_branch(events[e], default_branch) for e in JUDGING_EVENTS if e in events)
+
+
+def covers_branch(filters: object, branch: str) -> bool:
+    """Does this event's branch filter reach `branch`?
+
+    GitHub applies `branches` in order and lets a later `!pattern` take a
+    branch back out, which a set of names cannot express: `['**', '!main']`
+    excludes `main` while containing a pattern that matches everything
+    (Gatehouse, on the first version of this). Rather than reimplement that
+    ordering, a filter carrying any negation grants nothing, and so does
+    `branches-ignore`, which cannot be evaluated without knowing every branch.
+    """
+    if not isinstance(filters, dict):
+        return True
+    if "branches-ignore" in filters:
+        return False
+    branches = filters.get("branches")
+    if branches is None:
+        return True
+    if not isinstance(branches, list) or not all(isinstance(b, str) for b in branches):
+        return False
+    if any(b.startswith("!") for b in branches):
+        return False
+    return bool(branch) and any(branch_matches(b, branch) for b in branches)
+
+
+def branch_matches(pattern: str, branch: str) -> bool:
+    """GitHub's filter-pattern glob, where `*` stops at a `/` and `**` does not."""
+    out = ["^"]
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            if pattern[i + 1 : i + 2] == "*":
+                out.append(".*")
+                i += 2
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "+":
+            out.append(".")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    out.append("$")
+    return re.match("".join(out), branch) is not None
+
+
+def any_step_runs_the_gate(doc: dict) -> bool:
+    """Is there an unconditional `steps[].run` that invokes `bin/sdlc ci`?"""
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return False
+    for job in jobs.values():
+        if not isinstance(job, dict) or job.get("if") is not None:
+            continue
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict) or step.get("if") is not None:
+                continue
+            run = step.get("run")
+            if isinstance(run, str) and invokes_the_gate(run):
+                return True
     return False
 
 
-# A path ending in `bin/sdlc`, then `ci` as its argument: how a workflow
-# actually invokes the gate (`$RUNNER_TEMP/sdlc/bin/sdlc ci`).
-_RUNS_SDLC_CI = re.compile(r"""(?:^|[\s;&|("'=])\S*bin/sdlc\s+ci\b""")
-
-
-def runs_sdlc_ci(text: str) -> bool:
-    """Does this workflow RUN the gate on what is being pushed?
-
-    Two ways to answer wrong, both caught here. The text `sdlc ci` is not a
-    run: trentina alone carries it as a job name (`VERIFIER_JOB: sdlc ci`) and
-    inside an error message, and a comment or a YAML `name:` must never grant a
-    push its way through (python-sdlc#34, Gatehouse). And a workflow that runs
-    the gate only on `workflow_dispatch` or `schedule` judges nothing that was
-    just pushed, so the trigger has to cover this commit: `push`, or
-    `pull_request`, which is where XII's required status check blocks the merge.
-    """
-    if not judges_a_commit(text):
-        return False
-    for raw in text.splitlines():
+def invokes_the_gate(script: str) -> bool:
+    """Does this shell script run the gate, rather than talk about it?"""
+    for raw in script.splitlines():
         line = raw.split("#", 1)[0]
         if "echo" in line or "printf" in line:
             continue
@@ -1389,7 +1471,12 @@ def codeql_broke(msg: str) -> NoReturn:
 
 
 def run_codeql(create: list[str], analyze: list[str], sarif: Path) -> None:
-    """Build the database and analyse it, or fail as 'could not run'."""
+    """Build the database and analyse it, or report that it could not run.
+
+    Either step failing means no verdict was reached, which is a 2 -- except
+    on a push whose CI will judge the same commit, where `codeql_broke` makes
+    it a 3 and says so loudly (constitution XII, v1.35.0).
+    """
     step("codeql database create")
     rc, _ = run(create, env=project_env())
     if rc != 0:
@@ -1398,7 +1485,8 @@ def run_codeql(create: list[str], analyze: list[str], sarif: Path) -> None:
     rc, _ = run(analyze, env=project_env())
     if rc != 0:
         # Analysis failing is not the tool's verdict ON the code -- it means no
-        # verdict was reached, which the exit-code contract makes a 2.
+        # verdict was reached, which the exit-code contract makes a 2, or a 3
+        # where CI will judge this commit.
         codeql_broke(f"codeql database analyze failed (exit {rc}); nothing was judged")
 
 

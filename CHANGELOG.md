@@ -17,8 +17,14 @@ All notable changes to this project are documented here, following
   2, so only the gate can defer, and it is granted per check -- today only
   CodeQL. The text `sdlc ci` alone does not unlock it: a comment, a YAML `name:`
   and an echoed string are mentions, not runs, and trentina has two of those.
-  Neither is a workflow nothing triggers on the commit -- the file has to run
-  the gate on `push` or `pull_request`, and one that cannot be parsed grants
+  The question is answered from the PARSED workflow: an unconditional
+  `steps[].run` invoking a path ending in `bin/sdlc` with `ci` as its argument,
+  in a workflow whose `push`, `pull_request`, `pull_request_target` or
+  `merge_group` trigger is unfiltered or reaches the default branch under
+  GitHub's own glob rules. A job name,
+  a step name, an `env:` value, a comment and an echoed string are mentions;
+  a job or step behind an `if:` may be skipped on this commit; `on: push`
+  filtered to another branch judges nothing; a file that does not parse grants
   nothing (#33, constitution#99).
 
 ### Changed

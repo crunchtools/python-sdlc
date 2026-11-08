@@ -57,14 +57,29 @@ Three things went wrong on josui-skills at once (#33), and each has its own fix.
   repo got wrong is still a 2 everywhere, because CI fails on it the same way.
   Constitution XII, v1.35.0, is what permits this; nothing else may defer.
 
-"Really runs the gate" is two tests, because both ways of answering it wrong
-hand a push a verdict nobody will ever reach. A **line that runs** it: a path
-ending in `bin/sdlc` with `ci` as its argument, not the text `sdlc ci` in a
-comment, a YAML `name:` or an echoed string — trentina carries it as a job
-name and inside an error message. And a **trigger that covers the commit**:
-`push`, `pull_request`, `pull_request_target` or `merge_group`. A
-`workflow_dispatch`-only job judges nothing anybody pushed, and a workflow
-this cannot parse grants nothing.
+"Really runs the gate" is answered from the parsed workflow, never by
+searching it as text, because every loose answer hands a push a verdict nobody
+reaches:
+
+- an **unconditional `steps[].run`** that invokes a path ending in `bin/sdlc`
+  with `ci` as its argument. A job name, a step name, an `env:` value, a
+  comment and an echoed string are mentions — trentina carries two of them.
+  A job or step behind an `if:` may be skipped on this very commit, so it
+  grants nothing: ashigaru's `sdlc ci` job sits behind `ASHIGARU_ENABLED`, and
+  a broken CodeQL there is correctly still a 2.
+- a **trigger that reaches the commit**: `push`, `pull_request`,
+  `pull_request_target` or `merge_group`, unfiltered or naming the default
+  branch — the branch XII's required status check guards, matched with
+  GitHub's own glob rules, where `*` stops at a `/` and `**` does not.
+  `workflow_dispatch` alone judges nothing anybody pushed, and `on: push`
+  filtered to another branch is the same gap wearing the right event name.
+  Two filters are not evaluated at all and grant nothing: `branches-ignore`,
+  which needs every branch name to judge, and any `branches` list carrying a
+  negation, because GitHub applies those in order and `['**', '!main']`
+  excludes `main` while matching everything.
+
+A workflow this cannot parse grants nothing, and neither does a run where the
+default branch is unknown and the trigger is filtered.
 
 `--no-verify` skips every gate, so refusing the push left it as the only way
 past one broken tool. A deferral leaves the other gates running.

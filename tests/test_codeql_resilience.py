@@ -141,34 +141,71 @@ def deferral() -> bool:
 def mentions_are_not_a_run() -> bool:
     """Only a workflow that RUNS the gate on this commit unlocks a deferral.
 
-    The mentions are python-sdlc#34's Gatehouse finding; the triggers are the
-    one it raised on the restore, a workflow_dispatch-only job that judges
-    nothing anybody pushed.
+    Every case here was a Gatehouse finding against an earlier version of
+    `runs_sdlc_ci`, which read the file as text: a mention in a name, an env
+    value or an echo; a job or step behind an `if:`; a trigger that does not
+    reach the branch; and a branch filter whose negation a set of names
+    cannot express.
     """
     ok = True
-    on_push = "on:\n  push:\n    branches: [main]\njobs:\n  ci:\n"
-    for text, judged, what in (
-        (on_push + "    steps:\n      - run: $RUNNER_TEMP/sdlc/bin/sdlc ci\n", True, "a real run"),
-        (on_push + "    steps:\n      - run: ./bin/sdlc ci\n", True, "a relative run"),
-        (on_push + "    env:\n      VERIFIER_JOB: sdlc ci\n", False, "a job name"),
-        (on_push + "    # the sdlc ci job is the judge\n", False, "a comment"),
-        (on_push + '    steps:\n      - run: echo "bin/sdlc ci did nothing"\n', False, "an echo"),
-        (on_push + "    name: sdlc ci\n", False, "a YAML name:"),
+    runs = "    steps:\n      - run: $RUNNER_TEMP/sdlc/bin/sdlc ci\n"
+    cases = (
+        ("on:\n  push:\n    branches: [main]\njobs:\n  ci:\n" + runs, True, "a real run"),
+        ("on: pull_request\njobs:\n  ci:\n" + runs, True, "a PR run"),
+        ("on: push\njobs:\n  ci:\n" + runs, True, "an unfiltered push"),
+        ("on:\n  push:\n    branches: ['**']\njobs:\n  ci:\n" + runs, True, "a ** filter"),
+        ("on:\n  push:\n    branches: [ma*]\njobs:\n  ci:\n" + runs, True, "a glob that matches"),
+        ("on: push\njobs:\n  ci:\n    name: ./bin/sdlc ci\n", False, "a job name:"),
+        ("on: push\njobs:\n  ci:\n    env:\n      JOB: bin/sdlc ci\n", False, "an env value"),
+        ("on: push\njobs:\n  ci:\n    steps:\n      - name: bin/sdlc ci\n", False, "a step name:"),
         (
-            "on:\n  workflow_dispatch:\njobs:\n  ci:\n    steps:\n      - run: ./bin/sdlc ci\n",
+            'on: push\njobs:\n  ci:\n    steps:\n      - run: echo "bin/sdlc ci did nothing"\n',
             False,
-            "a run no push triggers",
+            "an echo",
+        ),
+        ("on: push\njobs:\n  ci:\n    # bin/sdlc ci is the judge\n", False, "a comment"),
+        ("on: push\njobs:\n  ci:\n    if: false\n" + runs, False, "a conditional job"),
+        (
+            "on: push\njobs:\n  ci:\n    steps:\n      - run: ./bin/sdlc ci\n        if: false\n",
+            False,
+            "a conditional step",
+        ),
+        ("on:\n  workflow_dispatch:\njobs:\n  ci:\n" + runs, False, "a run no push triggers"),
+        (
+            "on:\n  push:\n    branches: [release]\njobs:\n  ci:\n" + runs,
+            False,
+            "a push filtered to another branch",
         ),
         (
-            "on: pull_request\njobs:\n  ci:\n    steps:\n      - run: ./bin/sdlc ci\n",
-            True,
-            "a pull_request run, where the required check blocks the merge",
+            "on:\n  push:\n    branches: ['**', '!main']\njobs:\n  ci:\n" + runs,
+            False,
+            "a filter whose negation takes the branch back out",
+        ),
+        (
+            "on:\n  push:\n    branches-ignore: [wip]\njobs:\n  ci:\n" + runs,
+            False,
+            "a branches-ignore filter",
+        ),
+        (
+            "on:\n  push:\n    branches: [feature/*]\njobs:\n  ci:\n" + runs,
+            False,
+            "a `*` that does not cross a slash",
         ),
         (": : not yaml : [\n", False, "a workflow that does not parse"),
-    ):
+    )
+    for text, judged, what in cases:
         ok &= check(
-            _SDLC.runs_sdlc_ci(text) is judged, f"{what} {'does' if judged else 'does not'} judge"
+            _SDLC.runs_sdlc_ci(text, "main") is judged,
+            f"{what} {'does' if judged else 'does not'} judge",
         )
+    ok &= check(
+        not _SDLC.runs_sdlc_ci("on:\n  push:\n    branches: [main]\njobs:\n  ci:\n" + runs, ""),
+        "with no default branch known, a filtered push grants nothing",
+    )
+    ok &= check(
+        _SDLC.branch_matches("**", "feature/x") and not _SDLC.branch_matches("*", "feature/x"),
+        "`**` crosses a slash and `*` does not",
+    )
     return ok
 
 
