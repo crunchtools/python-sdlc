@@ -6,6 +6,31 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- **Exit 3: could not run, deferred to CI.** When CodeQL itself breaks at the
+  push tier, outside CI, in a repo whose workflow runs `sdlc ci`, the push goes
+  through with a loud `DEFERRED TO CI` and the record shows exit 3. Before
+  this, a broken CodeQL blocked every push and `--no-verify`, which skips every
+  gate, was the only way past it. `sdlc ci`, `sdlc codeql` and a config error
+  are still 2. A tool's own exit 3 is mapped to 2, so only the gate can defer
+  (#33).
+
+### Fixed
+
+- **CodeQL's evaluator gets the memory the gate budgets.** CodeQL ignored the
+  container and gave itself a ~1.2-1.5 GB heap, and analyze died on
+  josui-skills with status 70. `--ram` is now three quarters of the smallest of
+  `SDLC_MEMORY`, the cgroup limit and MemTotal: 6144 MB at the default 8g
+  (#33).
+- **A half-built CodeQL database no longer needs a person to delete it.** Runs
+  on one project take a lock and wait for each other instead of deleting each
+  other's database mid-run. The previous database is removed, read-only parts
+  included, and checked to be gone before `create` runs (#33).
+- `run_plan` read run_serial's per-step `_rc` as its own result, because shell
+  variables are global. It had no visible effect while every non-zero step
+  failed the run, but it turned a deferred push's 0 into a 3.
+
 ## [0.5.3] - 2026-11-08
 
 ### Changed

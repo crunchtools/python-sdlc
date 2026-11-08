@@ -10,6 +10,14 @@ THE EXIT CODE CONTRACT, which is the whole point of this file:
     0   the check ran and found nothing
     1   the check ran and found something
     2   the check COULD NOT RUN
+    3   the check COULD NOT RUN, and CI will judge this same commit
+
+3 exists for one case and is granted by this file, never returned by a tool:
+CodeQL at the push tier, when the analysis itself broke and the repo's CI runs
+`sdlc ci`. It is not a pass. It is a loud "nothing was judged here, CI is the
+judge", which the launcher lets through instead of refusing the push -- because
+refusing left `--no-verify` as the only door, and that door skips every other
+gate too (python-sdlc#33).
 
 2 is never to be worked around. A gate that cannot run and reports 0 is worse
 than no gate, because the pipeline goes green and nobody looks again. The
@@ -26,6 +34,7 @@ the tool's own verdict is a 2.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -33,6 +42,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
@@ -96,10 +106,15 @@ def self_reported(name: str) -> str:
 CLEAN = 0
 FOUND = 1
 CANNOT_RUN = 2
+DEFERRED = 3
 
 
 class CannotRunError(Exception):
     """Raised for anything that is not the tool's own verdict. Becomes exit CANNOT_RUN."""
+
+
+class DeferredError(Exception):
+    """Could not run, and CI will judge the same commit. Becomes exit DEFERRED."""
 
 
 def cannot(msg: str) -> NoReturn:
@@ -1050,6 +1065,12 @@ def t_codeql(s: dict) -> int:
     if config != default_config and not (REPO / config).is_file():
         cannot(f"codeql config {config} does not exist")
     db = CACHE / "codeql" / project_name()
+    # Held until this process exits. The database directory is named for the
+    # worktree's basename, so two checkouts that share one -- or a push retried
+    # while the last is still running -- used ONE directory: each deleted the
+    # other's database mid-run, which left half-built caches and analyses dying
+    # with nothing to read (python-sdlc#33).
+    lock_codeql(db)
     # Compiled query plans, kept between runs. CodeQL's default is ~/.codeql,
     # which is /tmp in this image and gone when the container exits, so every
     # run compiled all of security-extended again: 1m32s-3m13s of trentina's
@@ -1059,15 +1080,15 @@ def t_codeql(s: dict) -> int:
     # a changed query recompiles and nothing stale is reused.
     caches = CACHE / "codeql-common"
     sarif = Path("/tmp/codeql-results.sarif")
-    shutil.rmtree(db, ignore_errors=True)
+    clear_database(db)
     # An unwritable cache is a 2, not a traceback and not a 1. The same bug in
     # `validate` surfaced as a PermissionError stack trace with an exit status
     # that claimed a finding.
     try:
-        db.parent.mkdir(parents=True, exist_ok=True)
         caches.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         cannot(f"cannot create the CodeQL database directory {db.parent}: {exc}")
+    ram = f"--ram={codeql_ram_mb()}"
 
     create = [
         "codeql",
@@ -1078,6 +1099,7 @@ def t_codeql(s: dict) -> int:
         "--source-root=.",
         "--overwrite",
         f"--common-caches={caches}",
+        ram,
     ]
     analyze = [
         "codeql",
@@ -1088,6 +1110,7 @@ def t_codeql(s: dict) -> int:
         f"--output={sarif}",
         f"--threads={os.environ.get('SDLC_JOBS', '0')}",
         f"--common-caches={caches}",
+        ram,
     ]
 
     # `--codescanning-config` is NOT a CLI flag in 2.27.4, on either subcommand.
@@ -1186,18 +1209,141 @@ def read_codeql_config(path: Path) -> tuple[list[str], list[str]]:
     return queries, ignores
 
 
+def lock_codeql(db: Path) -> None:
+    """Take this project's CodeQL lock, waiting for whoever holds it."""
+    try:
+        db.parent.mkdir(parents=True, exist_ok=True)
+        # Deliberately never closed: the lock is released when the process ends.
+        fd = os.open(db.parent / f"{db.name}.lock", os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"codeql: another run holds {db.name}'s database; waiting for it", flush=True)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError as exc:
+        cannot(f"cannot lock the CodeQL database directory {db.parent}: {exc}")
+
+
+def clear_database(db: Path) -> None:
+    """Remove the last run's database, and PROVE it is gone.
+
+    Nothing in it is reused, so a half-built one -- `trap/` and `working/` with
+    no `db-python`, from a run that was killed -- is just a cache miss. This
+    used to be `rmtree(ignore_errors=True)`, and when that quietly left anything
+    behind, `create --overwrite` refused the directory as "not a CodeQL
+    database" and a person had to delete it by hand.
+    """
+    errors: list[str] = []
+
+    def retry(func: Callable[[str], object], path: str, _exc: BaseException) -> None:
+        # A read-only directory cannot have its entries unlinked; open it up
+        # and try once more before recording the failure.
+        try:
+            os.chmod(os.path.dirname(path) or ".", 0o700)
+            if os.path.isdir(path) and not os.path.islink(path):
+                os.chmod(path, 0o700)
+            func(path)
+        except OSError as again:
+            errors.append(f"{path}: {again}")
+
+    if db.exists() or db.is_symlink():
+        shutil.rmtree(db, onexc=retry)
+    if db.exists() or db.is_symlink():
+        cannot(f"cannot clear the previous CodeQL database {db}: {'; '.join(errors[:3])}")
+
+
+def memory_limit_mb() -> int | None:
+    """The smallest memory ceiling this container can see, in MB.
+
+    Three sources, because none is reliable alone. `SDLC_MEMORY` is the budget
+    the launcher gave `podman run --memory`, which rootless podman silently
+    drops when the cgroup memory controller is not delegated -- a gate inside a
+    developer container is exactly that. The cgroup's own `memory.max` is the
+    one the kernel enforces. MemTotal is the machine.
+    """
+    found: list[int] = []
+    budget = os.environ.get("SDLC_MEMORY", "").strip().lower()
+    match = re.fullmatch(r"(\d+)([kmg]?)b?", budget)
+    if match:
+        scale = {"": 1 / 2**20, "k": 1 / 1024, "m": 1, "g": 1024}[match.group(2)]
+        found.append(int(int(match.group(1)) * scale))
+    try:
+        cg = Path("/sys/fs/cgroup/memory.max").read_text(encoding="utf-8").strip()
+        if cg.isdigit():
+            found.append(int(cg) // 2**20)
+    except OSError:
+        pass
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemTotal:"):
+                found.append(int(line.split()[1]) // 1024)
+    except OSError, ValueError, IndexError:
+        pass
+    return min((f for f in found if f > 0), default=None)
+
+
+def codeql_ram_mb() -> int:
+    """`--ram` for the evaluator: three quarters of the ceiling, never under 2048.
+
+    Left to itself CodeQL does not look at the container at all. `codeql
+    resolve ram` gave a 1509 MB heap in a container with 8g and in one with 2g
+    alike, and 1253 MB on josui-skills' dataset -- where analyze then died with
+    status 70 (python-sdlc#33). The 8g the launcher budgets was never used.
+
+    The quarter left over is for the JVM outside its heap, file-backed maps of
+    the dataset, and /tmp, which is a tmpfs and so is charged to this same
+    cgroup. 2048 is CodeQL's own floor; it rounds anything smaller up.
+    """
+    limit = memory_limit_mb()
+    return max(2048, limit * 3 // 4) if limit else 2048
+
+
+def ci_judges() -> bool:
+    """Is a push's CodeQL also judged by CI on this same commit?
+
+    True only at the push tier, outside CI, with codeql in the ci tier and a
+    workflow that runs `sdlc ci`. Anywhere else -- `sdlc ci` itself, the inner
+    loop's `sdlc codeql`, a repo without that workflow -- nobody else will
+    judge the commit, and a check that could not run stays a 2.
+    """
+    if os.environ.get("SDLC_TIER") != "push" or os.environ.get("CI"):
+        return False
+    if "codeql" not in resolve(sdlc_config(), "ci"):
+        return False
+    workflows = REPO / ".github" / "workflows"
+    try:
+        files = [*workflows.glob("*.yml"), *workflows.glob("*.yaml")]
+        return any(
+            re.search(r"\bsdlc\s+ci\b", f.read_text(encoding="utf-8", errors="replace"))
+            for f in files
+        )
+    except OSError:
+        return False
+
+
+def codeql_broke(msg: str) -> NoReturn:
+    """CodeQL itself failed: defer to CI when CI will judge, otherwise a 2.
+
+    Only for the TOOL breaking. A config the repo got wrong stays a 2 wherever
+    it is found, because CI would fail on it in exactly the same way.
+    """
+    if ci_judges():
+        raise DeferredError(msg)
+    cannot(msg)
+
+
 def run_codeql(create: list[str], analyze: list[str], sarif: Path) -> None:
     """Build the database and analyse it, or fail as 'could not run'."""
     step("codeql database create")
     rc, _ = run(create, env=project_env())
     if rc != 0:
-        cannot("codeql could not build a database; nothing was analysed")
+        codeql_broke(f"codeql could not build a database (exit {rc}); nothing was analysed")
     step("codeql database analyze")
     rc, _ = run(analyze, env=project_env())
     if rc != 0:
         # Analysis failing is not the tool's verdict ON the code -- it means no
         # verdict was reached, which the exit-code contract makes a 2.
-        cannot(f"codeql database analyze failed (exit {rc}); nothing was judged")
+        codeql_broke(f"codeql database analyze failed (exit {rc}); nothing was judged")
 
 
 def baseline_path(s: dict) -> Path:
@@ -1346,7 +1492,9 @@ def main() -> int:
     fn = BUILTINS.get(args.what)
     if fn is None:
         cannot(f"{args.what} is not a check this image runs itself")
-    return fn(check_settings(sdlc_config(), args.what))
+    rc = fn(check_settings(sdlc_config(), args.what))
+    # A tool's own 3 is not a deferral; only DeferredError grants one.
+    return CANNOT_RUN if rc == DEFERRED else rc
 
 
 if __name__ == "__main__":
@@ -1355,5 +1503,14 @@ if __name__ == "__main__":
     except CannotRunError as exc:
         print(f"GATE CANNOT RUN: {exc}", file=sys.stderr)
         sys.exit(CANNOT_RUN)
+    except DeferredError as exc:
+        print(
+            f"GATE CANNOT RUN: {exc}\n"
+            f"DEFERRED TO CI: this push is NOT blocked, and NOTHING was judged here. "
+            f"The `sdlc ci` job is the judge of this commit -- read its verdict "
+            f"before merging. Rerun `sdlc codeql` to see the failure as a 2.",
+            file=sys.stderr,
+        )
+        sys.exit(DEFERRED)
     except KeyboardInterrupt:
         sys.exit(CANNOT_RUN)
