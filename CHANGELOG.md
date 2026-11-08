@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-08
+
 ### Added
 
 - **Exit 3: could not run, deferred to CI** (constitution 1.35.0, XII). When
