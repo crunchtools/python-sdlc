@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-11-08
+
 ### Fixed
 
 - **CodeQL's evaluator gets the memory the gate budgets.** CodeQL ignored the
