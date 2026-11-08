@@ -10,6 +10,14 @@ THE EXIT CODE CONTRACT, which is the whole point of this file:
     0   the check ran and found nothing
     1   the check ran and found something
     2   the check COULD NOT RUN
+    3   the check COULD NOT RUN, and CI will judge this same commit
+
+3 exists for one case and is granted by this file, never returned by a tool:
+CodeQL at the push tier, when the analysis itself broke and the repo's CI runs
+`sdlc ci`. It is not a pass. It is a loud "nothing was judged here, CI is the
+judge", which the launcher lets through instead of refusing the push -- because
+refusing left `--no-verify` as the only door, and that door skips every other
+gate too (python-sdlc#33).
 
 2 is never to be worked around. A gate that cannot run and reports 0 is worse
 than no gate, because the pipeline goes green and nobody looks again. The
@@ -98,10 +106,15 @@ def self_reported(name: str) -> str:
 CLEAN = 0
 FOUND = 1
 CANNOT_RUN = 2
+DEFERRED = 3
 
 
 class CannotRunError(Exception):
     """Raised for anything that is not the tool's own verdict. Becomes exit CANNOT_RUN."""
+
+
+class DeferredError(Exception):
+    """Could not run, and CI will judge the same commit. Becomes exit DEFERRED."""
 
 
 def cannot(msg: str) -> NoReturn:
@@ -1285,18 +1298,108 @@ def codeql_ram_mb() -> int:
     return max(2048, limit * 3 // 4) if limit else 2048
 
 
+def ci_judges() -> bool:
+    """Is a push's CodeQL also judged by CI on this same commit?
+
+    True only at the push tier, outside CI, with codeql in the ci tier and a
+    workflow that RUNS `bin/sdlc ci`. Anywhere else -- `sdlc ci` itself, the
+    inner loop's `sdlc codeql`, a repo without that workflow -- nobody else
+    will judge the commit, and a check that could not run stays a 2.
+    """
+    if os.environ.get("SDLC_TIER") != "push" or os.environ.get("CI"):
+        return False
+    if "codeql" not in resolve(sdlc_config(), "ci"):
+        return False
+    workflows = REPO / ".github" / "workflows"
+    try:
+        files = [*workflows.glob("*.yml"), *workflows.glob("*.yaml")]
+    except OSError as exc:
+        print(f"codeql: cannot read {workflows}, so nothing may be deferred: {exc}", flush=True)
+        return False
+    for f in files:
+        try:
+            if runs_sdlc_ci(f.read_text(encoding="utf-8", errors="replace")):
+                return True
+        except OSError as exc:
+            print(f"codeql: cannot read {f}, so it cannot grant a deferral: {exc}", flush=True)
+    return False
+
+
+JUDGING_EVENTS = frozenset({"push", "pull_request", "pull_request_target", "merge_group"})
+
+
+def judges_a_commit(text: str) -> bool:
+    """Is this workflow triggered by something that judges a pushed commit?
+
+    `on:` is YAML 1.1's boolean `True` once parsed, which is why both keys are
+    looked for. A file this cannot parse grants nothing.
+    """
+    try:
+        doc = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(doc, dict):
+        return False
+    on = doc.get("on", doc.get(True))
+    if isinstance(on, str):
+        return on in JUDGING_EVENTS
+    if isinstance(on, dict):
+        return bool(JUDGING_EVENTS & set(on))
+    if isinstance(on, list):
+        return bool(JUDGING_EVENTS & {e for e in on if isinstance(e, str)})
+    return False
+
+
+# A path ending in `bin/sdlc`, then `ci` as its argument: how a workflow
+# actually invokes the gate (`$RUNNER_TEMP/sdlc/bin/sdlc ci`).
+_RUNS_SDLC_CI = re.compile(r"""(?:^|[\s;&|("'=])\S*bin/sdlc\s+ci\b""")
+
+
+def runs_sdlc_ci(text: str) -> bool:
+    """Does this workflow RUN the gate on what is being pushed?
+
+    Two ways to answer wrong, both caught here. The text `sdlc ci` is not a
+    run: trentina alone carries it as a job name (`VERIFIER_JOB: sdlc ci`) and
+    inside an error message, and a comment or a YAML `name:` must never grant a
+    push its way through (python-sdlc#34, Gatehouse). And a workflow that runs
+    the gate only on `workflow_dispatch` or `schedule` judges nothing that was
+    just pushed, so the trigger has to cover this commit: `push`, or
+    `pull_request`, which is where XII's required status check blocks the merge.
+    """
+    if not judges_a_commit(text):
+        return False
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0]
+        if "echo" in line or "printf" in line:
+            continue
+        if _RUNS_SDLC_CI.search(line):
+            return True
+    return False
+
+
+def codeql_broke(msg: str) -> NoReturn:
+    """CodeQL itself failed: defer to CI when CI will judge, otherwise a 2.
+
+    Only for the TOOL breaking. A config the repo got wrong stays a 2 wherever
+    it is found, because CI would fail on it in exactly the same way.
+    """
+    if ci_judges():
+        raise DeferredError(msg)
+    cannot(msg)
+
+
 def run_codeql(create: list[str], analyze: list[str], sarif: Path) -> None:
     """Build the database and analyse it, or fail as 'could not run'."""
     step("codeql database create")
     rc, _ = run(create, env=project_env())
     if rc != 0:
-        cannot(f"codeql could not build a database (exit {rc}); nothing was analysed")
+        codeql_broke(f"codeql could not build a database (exit {rc}); nothing was analysed")
     step("codeql database analyze")
     rc, _ = run(analyze, env=project_env())
     if rc != 0:
         # Analysis failing is not the tool's verdict ON the code -- it means no
         # verdict was reached, which the exit-code contract makes a 2.
-        cannot(f"codeql database analyze failed (exit {rc}); nothing was judged")
+        codeql_broke(f"codeql database analyze failed (exit {rc}); nothing was judged")
 
 
 def baseline_path(s: dict) -> Path:
@@ -1445,7 +1548,9 @@ def main() -> int:
     fn = BUILTINS.get(args.what)
     if fn is None:
         cannot(f"{args.what} is not a check this image runs itself")
-    return fn(check_settings(sdlc_config(), args.what))
+    rc = fn(check_settings(sdlc_config(), args.what))
+    # A tool's own 3 is not a deferral; only DeferredError grants one.
+    return CANNOT_RUN if rc == DEFERRED else rc
 
 
 if __name__ == "__main__":
@@ -1454,5 +1559,14 @@ if __name__ == "__main__":
     except CannotRunError as exc:
         print(f"GATE CANNOT RUN: {exc}", file=sys.stderr)
         sys.exit(CANNOT_RUN)
+    except DeferredError as exc:
+        print(
+            f"GATE CANNOT RUN: {exc}\n"
+            f"DEFERRED TO CI: this push is NOT blocked, and NOTHING was judged here. "
+            f"The `sdlc ci` job is the judge of this commit -- read its verdict "
+            f"before merging. Rerun `sdlc codeql` to see the failure as a 2.",
+            file=sys.stderr,
+        )
+        sys.exit(DEFERRED)
     except KeyboardInterrupt:
         sys.exit(CANNOT_RUN)

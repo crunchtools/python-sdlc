@@ -19,6 +19,10 @@
 #   0  ran, found nothing
 #   1  ran, found something
 #   2  COULD NOT RUN -- never to be worked around
+#   3  COULD NOT RUN, deferred to CI -- push only, granted by the image when
+#      CodeQL itself broke and `sdlc ci` will judge the same commit. Printed
+#      loudly, recorded, and not a refusal (python-sdlc#33). Anywhere but a
+#      push it is a 2.
 #
 # Podman's own 125/126/127 mean the container never started, so they map to 2.
 # trentina's gates.sh maps them to 1 via `|| fail`, which reports "found
@@ -271,6 +275,7 @@ run_in_image() {
     -e "SDLC_PROJECT=$PROJECT" \
     -e "SDLC_JOBS=$GATE_CPUS" \
     -e "SDLC_MEMORY=$GATE_MEMORY" \
+    ${SDLC_TIER:+-e SDLC_TIER} \
     -e "SDLC_HOST_REPO=$REPO" \
     -e "SDLC_CACHE_VOLUME=$CACHE_VOLUME" \
     ${SDLC_SKIP:+-e SDLC_SKIP} \
@@ -485,6 +490,20 @@ run_host() {
 }
 
 run_step() {           # mode payload -> the step's exit status
+  _rs=0
+  _run_step "$@" || _rs=$?
+  # Only a push may defer to CI. Anything else that reports 3 could not run.
+  if [ "$_rs" -eq 3 ] && [ "${SDLC_TIER:-}" != push ]; then return 2; fi
+  return "$_rs"
+}
+
+deferred() {           # check -> the warning a deferral prints, every time
+  printf '\n%s: %s COULD NOT RUN -- DEFERRED TO CI.\n' "$ME" "$1" >&2
+  printf '%s:   This push is not blocked, and nothing was judged here.\n' "$ME" >&2
+  printf '%s:   The "sdlc ci" job is the verdict on this commit.\n' "$ME" >&2
+}
+
+_run_step() {
   case "$1" in
     image-ro) run_in_image ro nostdin "$IMAGE" "$2" ;;
     image-rw) run_in_image rw nostdin "$IMAGE" "$2" ;;
@@ -542,7 +561,11 @@ run_serial() {         # the plan -> its worst step status
     _rc=0
     run_step "$_mode" "$_payload" || _rc=$?
     _scur_took=$(( _scur_took + $(now_s) - _t0 ))
-    if [ "$_rc" -ne 0 ]; then
+    if [ "$_rc" -eq 3 ]; then
+      _failed="$_failed $_check"
+      _scur_rc=3
+      deferred "$_check"
+    elif [ "$_rc" -ne 0 ]; then
       _failed="$_failed $_check"
       _scur_rc=$_rc
       printf '\n%s: %s %s after %ss\n' "$ME" "$_check" \
@@ -607,6 +630,8 @@ _close_check() {       # the open check's block is complete
     # and then the run -- ended with two, the first of them "passed in 0s".
     if [ "$_cur_rc" -eq 0 ]; then
       printf '\n== %s passed in %ss\n' "$_cur_name" "$_cur_took" >> "$OUT/out.$_cur"
+    elif [ "$_cur_rc" -eq 3 ]; then
+      deferred "$_cur_name" 2>> "$OUT/out.$_cur"
     else
       printf '\n%s: %s %s after %ss\n' "$ME" "$_cur_name" \
         "$([ "$_cur_rc" -eq 2 ] && echo 'COULD NOT RUN' || echo 'FAILED')" \
@@ -662,7 +687,10 @@ run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
     _rc=0
     run_step "$_mode" "$_payload" >> "$OUT/out.$_i" 2>&1 || _rc=$?
     _cur_took=$(( _cur_took + $(now_s) - _t0 ))
-    if [ "$_rc" -ne 0 ]; then
+    if [ "$_rc" -eq 3 ]; then
+      _failed="$_failed $_check"
+      _cur_rc=3
+    elif [ "$_rc" -ne 0 ]; then
       _failed="$_failed $_check"
       _cur_rc=$_rc
       # A later 1 must not mask an earlier 2, in this lane or any other.
@@ -872,6 +900,9 @@ run_lanes() {          # the plan -> the worst status of every lane
 }
 
 run_plan() {           # commit | push | ci | <check>
+  # The image asks this to decide whether CodeQL may defer to CI.
+  SDLC_TIER=$1
+  export SDLC_TIER
   _plan=$(run_in_image ro nostdin "$IMAGE" plan "$1") \
     || die "the image could not plan '$1'; nothing was checked"
   [ -n "$_plan" ] || die "the image planned nothing for '$1'"
@@ -889,8 +920,8 @@ run_plan() {           # commit | push | ci | <check>
   _oncpu=$(printf '%s\n' "$_plan" \
     | awk -F"$TAB" '$3 != "local" && !seen[$2]++ {n++} END {print n + 0}')
   # Its own name: shell variables are global, and run_serial's loop sets `_rc`
-  # for every step, so the last step's status leaked in here whenever
-  # run_serial itself returned 0.
+  # for every step. A deferred step's 3 survived into here and became the
+  # exit status of a push that run_serial had passed.
   _plan_rc=0
   if [ "${_n:-1}" -le 1 ]; then
     run_serial "$_plan" || _plan_rc=$?
@@ -931,6 +962,8 @@ usage: $ME commit | push | ci | <check> | tiers | list | versions | codeql-basel
 Configure each command in pyproject.toml: [tool.sdlc.commit],
 [tool.sdlc.push], [tool.sdlc.ci]. Skip one check once: SDLC_SKIP=name.
 Exit 2 means a check COULD NOT RUN and is never to be worked around.
+A push prints DEFERRED TO CI, and goes through, only when CodeQL itself broke
+and the repo's \`sdlc ci\` job will judge the same commit.
 
 Working a change, in the order that costs least:
 

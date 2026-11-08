@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""CodeQL must not fail for want of memory or for a half-built cache.
+"""A CodeQL that cannot run must not be what teaches people `--no-verify`.
 
 python-sdlc#33: on josui-skills a killed run left a half-built database that a
-person had to delete by hand, and the evaluator was sized by CodeQL's own guess
-rather than the container's budget, so analyze died and every push was refused.
+person had to delete by hand, the evaluator was sized by CodeQL's own guess
+rather than the container's budget, and an analysis that died blocked every
+push with no door but `--no-verify` -- which skips every gate, not the broken
+one. These are the three pieces of that fix that need no CodeQL to test.
 
 Run: tests/test_codeql_resilience.py   (needs the image's python3 and PyYAML)
 """
@@ -16,6 +18,7 @@ import os
 import stat
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 # Loaded by path, as in test_codeql_globs.py: `sdlc` has no .py extension.
@@ -39,6 +42,15 @@ EIGHT_G_RAM_MB = 6144
 def check(ok: bool, what: str) -> bool:
     print(f"{'ok  ' if ok else 'FAIL'} {what}")
     return ok
+
+
+def raises(exc: type[BaseException], fn: Callable[[], object]) -> bool:
+    """True when `fn` raises `exc`. Anything else it raises fails the test run."""
+    try:
+        fn()
+    except exc:
+        return True
+    return False
 
 
 def database_and_lock() -> bool:
@@ -108,12 +120,66 @@ def failures() -> bool:
     return ok
 
 
+def deferral() -> bool:
+    """Deferring to CI is a push-only, outside-CI privilege."""
+    ok = True
+    os.environ.pop("CI", None)
+    os.environ["SDLC_TIER"] = "ci"
+    ok &= check(not _SDLC.ci_judges(), "`sdlc ci` never defers: nothing judges after it")
+    os.environ["SDLC_TIER"] = "codeql"
+    ok &= check(not _SDLC.ci_judges(), "the inner loop's `sdlc codeql` never defers")
+    os.environ["SDLC_TIER"] = "push"
+    os.environ["CI"] = "true"
+    ok &= check(not _SDLC.ci_judges(), "a push inside CI never defers")
+    ok &= check(
+        raises(_SDLC.CannotRunError, lambda: _SDLC.codeql_broke("x")),
+        "where CI does not judge, a broken CodeQL is still a 2",
+    )
+    return ok
+
+
+def mentions_are_not_a_run() -> bool:
+    """Only a workflow that RUNS the gate on this commit unlocks a deferral.
+
+    The mentions are python-sdlc#34's Gatehouse finding; the triggers are the
+    one it raised on the restore, a workflow_dispatch-only job that judges
+    nothing anybody pushed.
+    """
+    ok = True
+    on_push = "on:\n  push:\n    branches: [main]\njobs:\n  ci:\n"
+    for text, judged, what in (
+        (on_push + "    steps:\n      - run: $RUNNER_TEMP/sdlc/bin/sdlc ci\n", True, "a real run"),
+        (on_push + "    steps:\n      - run: ./bin/sdlc ci\n", True, "a relative run"),
+        (on_push + "    env:\n      VERIFIER_JOB: sdlc ci\n", False, "a job name"),
+        (on_push + "    # the sdlc ci job is the judge\n", False, "a comment"),
+        (on_push + '    steps:\n      - run: echo "bin/sdlc ci did nothing"\n', False, "an echo"),
+        (on_push + "    name: sdlc ci\n", False, "a YAML name:"),
+        (
+            "on:\n  workflow_dispatch:\njobs:\n  ci:\n    steps:\n      - run: ./bin/sdlc ci\n",
+            False,
+            "a run no push triggers",
+        ),
+        (
+            "on: pull_request\njobs:\n  ci:\n    steps:\n      - run: ./bin/sdlc ci\n",
+            True,
+            "a pull_request run, where the required check blocks the merge",
+        ),
+        (": : not yaml : [\n", False, "a workflow that does not parse"),
+    ):
+        ok &= check(
+            _SDLC.runs_sdlc_ci(text) is judged, f"{what} {'does' if judged else 'does not'} judge"
+        )
+    return ok
+
+
 def main() -> int:
     saved = dict(os.environ)
     try:
         ok = database_and_lock()
         ok &= memory()
         ok &= failures()
+        ok &= deferral()
+        ok &= mentions_are_not_a_run()
     finally:
         os.environ.clear()
         os.environ.update(saved)
