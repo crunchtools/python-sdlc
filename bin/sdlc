@@ -500,7 +500,7 @@ run_step() {           # mode payload -> the step's exit status
 deferred() {           # check -> the warning a deferral prints, every time
   printf '\n%s: %s COULD NOT RUN -- DEFERRED TO CI.\n' "$ME" "$1" >&2
   printf '%s:   This push is not blocked, and nothing was judged here.\n' "$ME" >&2
-  printf '%s:   The `sdlc ci` job is the verdict on this commit.\n' "$ME" >&2
+  printf '%s:   The "sdlc ci" job is the verdict on this commit.\n' "$ME" >&2
 }
 
 _run_step() {
