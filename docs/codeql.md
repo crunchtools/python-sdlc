@@ -34,7 +34,7 @@ fails.
 
 ## When it cannot run
 
-Two things went wrong on josui-skills at once (#33).
+Three things went wrong on josui-skills at once (#33), and each has its own fix.
 
 - **Memory.** CodeQL sizes its evaluator itself and does not look at the
   container: `codeql resolve ram` gave a 1509 MB heap under `--memory 8g` and
@@ -49,6 +49,40 @@ Two things went wrong on josui-skills at once (#33).
   database mid-run. The gate now takes a lock beside it and waits. It clears
   the previous database before building and checks that it is gone. A
   half-built one is a cache miss, not something a person deletes by hand.
+- **Deferring to CI.** When CodeQL itself breaks — `create` or `analyze` exits
+  non-zero — at the **push** tier, outside CI, in a repo whose CI really runs
+  the gate, the check exits **3**. The launcher prints `DEFERRED TO CI`,
+  records it in `last-push.json`, and lets the push through. Anywhere else (`sdlc ci`,
+  `sdlc codeql`, a repo with no such workflow) it is still a 2. A config the
+  repo got wrong is still a 2 everywhere, because CI fails on it the same way.
+  Constitution XII, v1.35.0, is what permits this; nothing else may defer.
+
+"Really runs the gate" is answered from the parsed workflow, never by
+searching it as text, because every loose answer hands a push a verdict nobody
+reaches:
+
+- an **unconditional `steps[].run`** that invokes a path ending in `bin/sdlc`
+  with `ci` as its argument. A job name, a step name, an `env:` value, a
+  comment and an echoed string are mentions — trentina carries two of them.
+  A job or step behind an `if:` may be skipped on this very commit, so it
+  grants nothing: ashigaru's `sdlc ci` job sits behind `ASHIGARU_ENABLED`, and
+  a broken CodeQL there is correctly still a 2.
+- a **trigger that reaches the commit**: `push`, `pull_request`,
+  `pull_request_target` or `merge_group`, unfiltered or naming the default
+  branch — the branch XII's required status check guards, matched with
+  GitHub's own glob rules, where `*` stops at a `/` and `**` does not.
+  `workflow_dispatch` alone judges nothing anybody pushed, and `on: push`
+  filtered to another branch is the same gap wearing the right event name.
+  Two filters are not evaluated at all and grant nothing: `branches-ignore`,
+  which needs every branch name to judge, and any `branches` list carrying a
+  negation, because GitHub applies those in order and `['**', '!main']`
+  excludes `main` while matching everything.
+
+A workflow this cannot parse grants nothing, and neither does a run where the
+default branch is unknown and the trigger is filtered.
+
+`--no-verify` skips every gate, so refusing the push left it as the only way
+past one broken tool. A deferral leaves the other gates running.
 
 ## The config file
 

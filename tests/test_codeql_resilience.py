@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""CodeQL must not fail for want of memory or for a half-built cache.
+"""A CodeQL that cannot run must not be what teaches people `--no-verify`.
 
 python-sdlc#33: on josui-skills a killed run left a half-built database that a
-person had to delete by hand, and the evaluator was sized by CodeQL's own guess
-rather than the container's budget, so analyze died and every push was refused.
+person had to delete by hand, the evaluator was sized by CodeQL's own guess
+rather than the container's budget, and an analysis that died blocked every
+push with no door but `--no-verify` -- which skips every gate, not the broken
+one. These are the three pieces of that fix that need no CodeQL to test.
 
 Run: tests/test_codeql_resilience.py   (needs the image's python3 and PyYAML)
 """
@@ -16,6 +18,7 @@ import os
 import stat
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 # Loaded by path, as in test_codeql_globs.py: `sdlc` has no .py extension.
@@ -39,6 +42,15 @@ EIGHT_G_RAM_MB = 6144
 def check(ok: bool, what: str) -> bool:
     print(f"{'ok  ' if ok else 'FAIL'} {what}")
     return ok
+
+
+def raises(exc: type[BaseException], fn: Callable[[], object]) -> bool:
+    """True when `fn` raises `exc`. Anything else it raises fails the test run."""
+    try:
+        fn()
+    except exc:
+        return True
+    return False
 
 
 def database_and_lock() -> bool:
@@ -108,12 +120,103 @@ def failures() -> bool:
     return ok
 
 
+def deferral() -> bool:
+    """Deferring to CI is a push-only, outside-CI privilege."""
+    ok = True
+    os.environ.pop("CI", None)
+    os.environ["SDLC_TIER"] = "ci"
+    ok &= check(not _SDLC.ci_judges(), "`sdlc ci` never defers: nothing judges after it")
+    os.environ["SDLC_TIER"] = "codeql"
+    ok &= check(not _SDLC.ci_judges(), "the inner loop's `sdlc codeql` never defers")
+    os.environ["SDLC_TIER"] = "push"
+    os.environ["CI"] = "true"
+    ok &= check(not _SDLC.ci_judges(), "a push inside CI never defers")
+    ok &= check(
+        raises(_SDLC.CannotRunError, lambda: _SDLC.codeql_broke("x")),
+        "where CI does not judge, a broken CodeQL is still a 2",
+    )
+    return ok
+
+
+def mentions_are_not_a_run() -> bool:
+    """Only a workflow that RUNS the gate on this commit unlocks a deferral.
+
+    Every case here was a Gatehouse finding against an earlier version of
+    `runs_sdlc_ci`, which read the file as text: a mention in a name, an env
+    value or an echo; a job or step behind an `if:`; a trigger that does not
+    reach the branch; and a branch filter whose negation a set of names
+    cannot express.
+    """
+    ok = True
+    runs = "    steps:\n      - run: $RUNNER_TEMP/sdlc/bin/sdlc ci\n"
+    cases = (
+        ("on:\n  push:\n    branches: [main]\njobs:\n  ci:\n" + runs, True, "a real run"),
+        ("on: pull_request\njobs:\n  ci:\n" + runs, True, "a PR run"),
+        ("on: push\njobs:\n  ci:\n" + runs, True, "an unfiltered push"),
+        ("on:\n  push:\n    branches: ['**']\njobs:\n  ci:\n" + runs, True, "a ** filter"),
+        ("on:\n  push:\n    branches: [ma*]\njobs:\n  ci:\n" + runs, True, "a glob that matches"),
+        ("on: push\njobs:\n  ci:\n    name: ./bin/sdlc ci\n", False, "a job name:"),
+        ("on: push\njobs:\n  ci:\n    env:\n      JOB: bin/sdlc ci\n", False, "an env value"),
+        ("on: push\njobs:\n  ci:\n    steps:\n      - name: bin/sdlc ci\n", False, "a step name:"),
+        (
+            'on: push\njobs:\n  ci:\n    steps:\n      - run: echo "bin/sdlc ci did nothing"\n',
+            False,
+            "an echo",
+        ),
+        ("on: push\njobs:\n  ci:\n    # bin/sdlc ci is the judge\n", False, "a comment"),
+        ("on: push\njobs:\n  ci:\n    if: false\n" + runs, False, "a conditional job"),
+        (
+            "on: push\njobs:\n  ci:\n    steps:\n      - run: ./bin/sdlc ci\n        if: false\n",
+            False,
+            "a conditional step",
+        ),
+        ("on:\n  workflow_dispatch:\njobs:\n  ci:\n" + runs, False, "a run no push triggers"),
+        (
+            "on:\n  push:\n    branches: [release]\njobs:\n  ci:\n" + runs,
+            False,
+            "a push filtered to another branch",
+        ),
+        (
+            "on:\n  push:\n    branches: ['**', '!main']\njobs:\n  ci:\n" + runs,
+            False,
+            "a filter whose negation takes the branch back out",
+        ),
+        (
+            "on:\n  push:\n    branches-ignore: [wip]\njobs:\n  ci:\n" + runs,
+            False,
+            "a branches-ignore filter",
+        ),
+        (
+            "on:\n  push:\n    branches: [feature/*]\njobs:\n  ci:\n" + runs,
+            False,
+            "a `*` that does not cross a slash",
+        ),
+        (": : not yaml : [\n", False, "a workflow that does not parse"),
+    )
+    for text, judged, what in cases:
+        ok &= check(
+            _SDLC.runs_sdlc_ci(text, "main") is judged,
+            f"{what} {'does' if judged else 'does not'} judge",
+        )
+    ok &= check(
+        not _SDLC.runs_sdlc_ci("on:\n  push:\n    branches: [main]\njobs:\n  ci:\n" + runs, ""),
+        "with no default branch known, a filtered push grants nothing",
+    )
+    ok &= check(
+        _SDLC.branch_matches("**", "feature/x") and not _SDLC.branch_matches("*", "feature/x"),
+        "`**` crosses a slash and `*` does not",
+    )
+    return ok
+
+
 def main() -> int:
     saved = dict(os.environ)
     try:
         ok = database_and_lock()
         ok &= memory()
         ok &= failures()
+        ok &= deferral()
+        ok &= mentions_are_not_a_run()
     finally:
         os.environ.clear()
         os.environ.update(saved)
