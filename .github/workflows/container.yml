@@ -257,6 +257,16 @@ jobs:
           # registry, and 35 repos pin this image. Asked of whichever tag THIS
           # run moves: a re-run of an old release tag must not demote `latest`
           # any more than a re-dispatched old commit may demote `main`.
+          # Copy the tested digest, never a rewrap of it (constitution VII,
+          # RT#1550): --preserve-digests refuses a copy that would change the
+          # manifest, and the read-back fails the job if the tag resolves to
+          # anything but the digest that was tested.
+          want=${REF#*@}
+          promote() {
+            skopeo copy --all --preserve-digests "docker://$REF" "docker://$QUAY:$1"
+            got=$(skopeo inspect --format '{{.Digest}}' "docker://$QUAY:$1")
+            [ "$got" = "$want" ] || { echo ":$1 resolves to $got, not the tested $want" >&2; exit 1; }
+          }
           if [ -n "$floating" ]; then
             current=$(skopeo inspect --format \
               '{{ index .Labels "org.opencontainers.image.revision" }}' \
@@ -267,14 +277,14 @@ jobs:
                 exit 1
               fi
             fi
-            skopeo copy "docker://$REF" "docker://$QUAY:$floating"
+            promote "$floating"
           fi
           case "$GITHUB_REF" in
             refs/tags/v*)
               version=${GITHUB_REF#refs/tags/v}
-              skopeo copy "docker://$REF" "docker://$QUAY:$version"
+              promote "$version"
               # The minor tag so a consumer MAY track patches if it chooses to.
-              skopeo copy "docker://$REF" "docker://$QUAY:${version%.*}"
+              promote "${version%.*}"
               echo "promoted $version"
               ;;
           esac
