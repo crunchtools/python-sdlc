@@ -6,6 +6,15 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- **The constitution check could not run on an SELinux host with a cold
+  cache.** The launcher mounted the `ln -sn` link to the host's checkout, and
+  podman's `z` relabels the path it is given, so the link was relabelled and
+  the directory behind it kept `cache_home_t`. The container was refused it and
+  reported "missing validate-constitution.py". It now mounts the resolved
+  directory. Found converting mcp-atlassian (RT#1552).
+
 ## [0.6.2] - 2026-11-10
 
 ### Changed

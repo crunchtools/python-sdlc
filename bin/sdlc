@@ -214,7 +214,12 @@ host_constitution() {
     ln -sn "${_own##*/}" "$_dir" 2>/dev/null || rm -rf "$_own"
     [ -f "$_dir/constitution.md" ] || return 0
   fi
-  CONSTITUTION_MOUNT="$_dir:/cache/constitution/$_tag:ro,z"
+  # Mount the checkout, not the link to it. Podman relabels the path it is
+  # given, and given the link it relabels the LINK: the directory keeps
+  # cache_home_t, the container is refused it, and on an SELinux host every
+  # cold tag came back "missing validate-constitution.py" (RT#1552).
+  _src=$(cd -P -- "$_dir" 2>/dev/null && pwd) || return 0
+  CONSTITUTION_MOUNT="$_src:/cache/constitution/$_tag:ro,z"
 }
 host_constitution
 
