@@ -698,6 +698,19 @@ if [ "$_links" = 1 ] && [ "$_dirs" = 1 ] && [ "$_nested" = 0 ] \
 else
   bad "concurrent constitution clones left $_links link(s), $_dirs dir(s), $_nested nested"
 fi
+# The mount must name the checkout itself. `z` relabels the path podman is
+# given, so a symlink source relabels only the link and SELinux refuses the
+# directory behind it.
+log_mark
+PATH="$CLONESHIM" XDG_CACHE_HOME="$CLONECACHE" sh bin/sdlc mypy >/dev/null 2>&1 || :
+log_since
+_mnt=$(tr ' ' '\n' < "$RUN/podman.log" | grep ':/cache/constitution/' | head -1)
+_mnt=${_mnt%%:*}
+if [ -n "$_mnt" ] && [ -d "$_mnt" ] && [ ! -L "$_mnt" ]; then
+  ok "the constitution mount names the checkout, not the link"
+else
+  bad "the constitution mount source is '${_mnt:-absent}', not a resolved directory"
+fi
 rm -rf "$CLONESHIM" "$CLONECACHE"
 
 printf '\n'
