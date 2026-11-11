@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-11-11
+
+### Changed
+
+- gatehouse 0.25.1 -> 0.25.2.
+
 ### Fixed
 
 - **The constitution check could not run on an SELinux host with a cold
