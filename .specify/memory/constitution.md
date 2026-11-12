@@ -4,7 +4,7 @@
 > **Ratified:** 2026-11-04
 > **Amended:** 2026-11-04
 > **Status:** Active
-> **Inherits:** [crunchtools/constitution](https://github.com/crunchtools/constitution) v1.40.0
+> **Inherits:** [crunchtools/constitution](https://github.com/crunchtools/constitution) v1.41.0
 > **Profile:** Container Image
 
 This is a manifest. It carries only what is unique to this repo; the fleet rules
