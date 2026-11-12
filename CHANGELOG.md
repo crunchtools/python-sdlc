@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `sdlc-validate` now says "cannot read the constitution checkout" when the
+  checkout directory cannot be listed (e.g. an SELinux label), instead of
+  reporting `validate-constitution.py` as missing.
+
 ## [0.6.3] - 2026-11-11
 
 ### Changed

@@ -25,6 +25,7 @@ The clone is cached per tag in the cache volume, never in the worktree.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -80,6 +81,16 @@ def main() -> int:
             die(f"cannot clone the constitution at {tag}: {proc.stderr.strip()}")
 
     validator = checkout / "validate-constitution.py"
+    # A directory that cannot be listed (an SELinux label, a mode) is not a
+    # directory with a file missing; `exists()` cannot tell them apart.
+    try:
+        os.listdir(checkout)
+    except OSError as exc:
+        die(
+            f"cannot read the constitution checkout at {checkout} ({tag}): {exc}; "
+            f"the checkout is there but not readable -- check its SELinux label "
+            f"and mode, not the constitution tag"
+        )
     # The two files whose absence makes the validator pass without looking.
     for required in (
         validator,
