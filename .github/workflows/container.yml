@@ -292,11 +292,26 @@ jobs:
               [ "$got" = "$want" ] || { echo "$repo:$1 resolves to $got, not the tested $want" >&2; exit 1; }
             done
           }
+          # The published revision of a tag, or nothing when the tag does not
+          # exist yet. Anything else -- auth, network, a registry error --
+          # stops the job: a guard that cannot read what it guards would
+          # otherwise wave the move through.
+          revision_of() {
+            if out=$(skopeo inspect --format \
+                '{{ index .Labels "org.opencontainers.image.revision" }}' \
+                "docker://$1" 2>"$RUNNER_TEMP/inspect.err"); then
+              printf '%s' "$out"
+            elif grep -qi 'manifest unknown' "$RUNNER_TEMP/inspect.err"; then
+              :
+            else
+              echo "cannot read $1 to guard it:" >&2
+              cat "$RUNNER_TEMP/inspect.err" >&2
+              exit 1
+            fi
+          }
           if [ -n "$floating" ]; then
             for repo in "$QUAY" "$SDLC"; do
-              current=$(skopeo inspect --format \
-                '{{ index .Labels "org.opencontainers.image.revision" }}' \
-                "docker://$repo:$floating" 2>/dev/null || true)
+              current=$(revision_of "$repo:$floating")
               if [ -n "${current:-}" ] && [ "$current" != "$GITHUB_SHA" ]; then
                 if git merge-base --is-ancestor "$GITHUB_SHA" "$current" 2>/dev/null; then
                   echo "refusing: $repo:$floating is $current, which already contains $GITHUB_SHA" >&2

@@ -797,6 +797,35 @@ def token(value: object) -> str:
     cannot(f"unknown value {text}; known: @project.version, @git.sha, @now")
 
 
+# An image reference, and nothing that could be read as anything else. These
+# values are repo-controlled and land in a HOST podman argv: one beginning with
+# `-` is an option (`--privileged`), one with a comma rewrites the
+# `--mount type=image,source=...` it is spliced into, and whitespace or a
+# newline is two words. So every image and tag any check uses -- built in or a
+# kind, set or defaulted -- must match this, and bin/sdlc checks again.
+#
+# The distribution grammar, narrowed: an optional registry host and port, a
+# lowercase path, an optional tag and an optional sha256 digest.
+_IMAGE_PATH = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+IMAGE_REF_RE = re.compile(
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]+)?/)?"
+    rf"{_IMAGE_PATH}(?:/{_IMAGE_PATH})*"
+    r"(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?"
+    r"(?:@sha256:[0-9a-f]{64})?"
+)
+
+
+def image_ref(name: str, key: str, value: object) -> str:
+    """`value` as an image reference, or a refusal."""
+    text = str(value)
+    if not isinstance(value, str) or not IMAGE_REF_RE.fullmatch(text):
+        cannot(
+            f"{name}: {key} {text!r} is not an image reference such as "
+            f"localhost/name:tag or quay.io/org/name:1.0"
+        )
+    return text
+
+
 def in_repo(name: str, key: str, value: object) -> str:
     """A repo-relative path that stays inside the repo, or a refusal.
 
@@ -811,7 +840,12 @@ def in_repo(name: str, key: str, value: object) -> str:
         cannot(f"{name}: {key} {text!r} is outside the repository")
     if not target.exists():
         cannot(f"{name}: {key} {text!r} does not exist")
-    return str(target.relative_to(REPO.resolve())) or "."
+    rel = str(target.relative_to(REPO.resolve())) or "."
+    # A path is a positional word in a podman argv, so one podman would read as
+    # an option is refused like any other path it should not be given.
+    if rel.startswith("-"):
+        cannot(f"{name}: {key} {text!r} begins with '-', which podman would read as an option")
+    return rel
 
 
 def table(settings: dict, key: str) -> dict:
@@ -834,7 +868,7 @@ def kind_image_build(name: str, settings: dict) -> list[tuple[str, str, str]]:
         argv += ["--build-arg", f"{key}={token(value)}"]
     for key, value in table(settings, "labels").items():
         argv += ["--label", f"{key}={token(value)}"]
-    argv += ["-t", str(settings.get("tag", default_image_tag())), context]
+    argv += ["-t", image_ref(name, "tag", settings.get("tag", default_image_tag())), context]
     return [host_step(name, argv)]
 
 
@@ -886,7 +920,7 @@ def kind_pytest_in_image(name: str, settings: dict) -> list[tuple[str, str, str]
         argv += ["-v", f"{host}/{rel}:/repo/{rel}:ro,z"]
     for key, value in table(settings, "env").items():
         argv += ["-e", f"{key}={token(value)}"]
-    argv += [str(settings.get("image", default_image_tag()))]
+    argv += [image_ref(name, "image", settings.get("image", default_image_tag()))]
     argv += ["-m", "pytest", "-p", "no:cacheprovider"]
     argv += names(settings.get("args", ["-q", "-rfE"]), f"{name}.args")
     argv += tests
@@ -918,7 +952,9 @@ SMOKE_SECONDS_MAX = 600
 def container_image(cfg: dict, settings: dict) -> str:
     """What smoke and scan judge: their own `image`, or what container-build tags."""
     built = check_settings(cfg, "container-build").get("tag", default_image_tag())
-    return str(settings.get("image", built))
+    if "image" in settings:
+        return image_ref("container-smoke/scan", "image", settings["image"])
+    return image_ref("container-build", "tag", built)
 
 
 def check_container_build(cfg: dict, name: str, s: dict) -> list[tuple[str, str, str]]:
@@ -957,7 +993,9 @@ def check_container_smoke(cfg: dict, name: str, s: dict) -> list[tuple[str, str,
         argv += ["--network", "none"]
     for key, value in table(s, "env").items():
         argv += ["-e", f"{key}={token(value)}"]
-    argv += [container_image(cfg, s), *names(s.get("args"), f"{name}.args")]
+    # `--` before the image: nothing after it is a podman option, whatever it
+    # says, and bin/sdlc checks the word that follows it.
+    argv += ["--", container_image(cfg, s), *names(s.get("args"), f"{name}.args")]
     payload = UNIT_SEPARATOR.join([str(seconds), *(plain(a, name) for a in argv)])
     return [(name, "host-up", payload)]
 
@@ -1013,6 +1051,7 @@ def check_container_scan(cfg: dict, name: str, s: dict) -> list[tuple[str, str, 
         f"SDLC_SCAN_FAIL_ON={fail_on}",
         "-e",
         f"SDLC_SCAN_ONLY_FIXED={'1' if only_fixed else '0'}",
+        "--",
         GATE_IMAGE,
         "scan-rootfs",
     ]

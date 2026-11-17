@@ -537,6 +537,26 @@ record_finish() {      # worst status
 TAB=$(printf '\t')
 US=$(printf '\037')
 
+check_image_word() {   # run-args -> dies unless the word after `--` is an image
+  # The planner validates every image reference; this holds the same line on
+  # the host, because the host is what a bad one would harm. Only the word
+  # after a `--` is judged: before it podman reads options, after the image it
+  # passes arguments to the container.
+  _ciafter=
+  for _ciw in "$@"; do
+    if [ "$_ciafter" = yes ]; then
+      case "$_ciw" in
+        ''|-*|*[!A-Za-z0-9._/:@-]*)
+          die "a host step names '$_ciw' as its image, which is not an image reference" ;;
+      esac
+      return 0
+    fi
+    [ "$_ciw" = -- ] && _ciafter=yes
+  done
+  [ "$_ciafter" = yes ] && die "a host step ends with '--' and names no image"
+  return 0
+}
+
 run_up() {             # seconds run-args -> the smoke verdict
   # A `podman run` that may be a service. It starts detached, and its STATE is
   # asked once a second for up to <seconds>: still running at the end passes,
@@ -549,6 +569,8 @@ run_up() {             # seconds run-args -> the smoke verdict
   # name, however it ended. A k8s-file log so its output can be shown, which
   # --log-driver=none would discard.
   _upsecs=$1; shift
+  case " $* " in *" -- "*) ;; *) die "a run given time to stay up must name its image after '--'" ;; esac
+  check_image_word "$@"
   _cname=sdlc-smoke-$$-$(now_s)
   _uprc=0
   podman --events-backend=none run -d --name "$_cname" --log-driver=k8s-file \
@@ -619,7 +641,8 @@ run_host() {           # argv [seconds] -> the step's verdict
   case "$_sub" in
     build) set -- build --cpu-period 100000 --cpu-quota "$(( GATE_CPUS * 100000 ))" \
                         --memory "$GATE_MEMORY" "$@" ;;
-    run)   set -- --events-backend=none run --log-driver=none \
+    run)   check_image_word "$@"
+           set -- --events-backend=none run --log-driver=none \
                         --cap-drop=all --security-opt=no-new-privileges \
                         --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 "$@" ;;
     *)     die "a host step may only build or run; refused: podman $_sub" ;;

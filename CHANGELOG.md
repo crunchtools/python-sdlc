@@ -43,6 +43,18 @@ All notable changes to this project are documented here, following
 - The image is also published as `quay.io/crunchtools/sdlc`: the same digest
   copied, never rebuilt, with the same tags as `python-sdlc`.
 
+### Security
+
+- **A repo's config cannot inject podman options.** Every image and tag a
+  check uses -- `container-build`'s tag, smoke's and scan's image, and the
+  `image-build` and `pytest-in-image` kinds (the last two since they were
+  added) -- must be an image reference: nothing starting with `-`, no comma,
+  no whitespace. Otherwise the planner exits 2. The smoke and scan runs put
+  the image after `--`, and `bin/sdlc` checks that word again on the host. A
+  repo path that begins with `-` is refused the same way.
+- The promote guard fails closed: it treats only "manifest unknown" as an
+  absent tag, and any other failure to read a tag's revision stops the job.
+
 ### Fixed
 
 - `bin/sdlc`'s `run_host` kept its exit status in `_rc`, which `run_serial`

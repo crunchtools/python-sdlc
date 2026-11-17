@@ -740,6 +740,84 @@ except S.CannotRunError as exc:
 check("a built-in container check cannot set a kind", msg is not None and "built in" in msg)
 
 
+# ------------------------------------------------------- image reference injection
+#
+# An image or tag is repo-controlled and lands in a HOST podman argv. Anything
+# podman would read as an option, a comma that would rewrite
+# `--mount type=image,source=...`, or whitespace that would split into two
+# words is refused, wherever it is set: container-build's tag, smoke's and
+# scan's image, and the image-build and pytest-in-image kinds.
+
+INJECTIONS = ["-x", "--privileged", "a,b", "a b", "a\nb", "Upper/Case"]
+
+
+def refused(fn) -> str | None:
+    try:
+        fn()
+    except S.CannotRunError as exc:
+        return str(exc)
+    return None
+
+
+for bad in INJECTIONS:
+    value = json.dumps(bad)
+    for table, key in (
+        ("container-build", "tag"),
+        ("container-smoke", "image"),
+        ("container-scan", "image"),
+    ):
+        msg = refused(
+            lambda t=table, k=key, v=value: container_plan("ci", f"[tool.sdlc.ci.{t}]\n{k} = {v}\n")
+        )
+        check(
+            f"{table} {key} {bad!r} is refused",
+            msg is not None and "image reference" in msg,
+            str(msg),
+        )
+    msg = refused(
+        lambda v=value: plan_of(
+            "ci",
+            '[project]\nname = "fx"\nversion = "0"\n[tool.sdlc.ci]\nchecks = ["t"]\n'
+            f'[tool.sdlc.ci.t]\nkind = "pytest-in-image"\ntests = ["tests/"]\nimage = {v}\n',
+        )
+    )
+    check(
+        f"pytest-in-image image {bad!r} is refused",
+        msg is not None and "image reference" in msg,
+        str(msg),
+    )
+    msg = refused(
+        lambda v=value: plan_of(
+            "ci",
+            '[project]\nname = "fx"\nversion = "0"\n[tool.sdlc.ci]\nchecks = ["b"]\n'
+            f'[tool.sdlc.ci.b]\nkind = "image-build"\ntag = {v}\n',
+        )
+    )
+    check(
+        f"image-build tag {bad!r} is refused",
+        msg is not None and "image reference" in msg,
+        str(msg),
+    )
+
+for good in (
+    "localhost/fx:sdlc",
+    "quay.io/crunchtools/sdlc:main",
+    "registry.example.com:5000/a/b_c-d:1.0",
+    "quay.io/x/y@sha256:" + "0" * 64,
+):
+    check(f"{good} is an image reference", S.IMAGE_REF_RE.fullmatch(good) is not None)
+
+rows = container_plan("ci")
+smoke_words = next(r[3] for r in rows if r[0] == "container-smoke").split(S.UNIT_SEPARATOR)
+check(
+    "smoke puts the image after --, so nothing after it is a podman option",
+    smoke_words[smoke_words.index("--") + 1] == "localhost/fx:sdlc",
+    str(smoke_words),
+)
+scan_words = next(r[3] for r in rows if r[0] == "container-scan").split(S.UNIT_SEPARATOR)
+check("scan puts the gate image after --", scan_words[-3:] == ["--", S.GATE_IMAGE, "scan-rootfs"])
+
+
 # ------------------------------------------------------------- [tool.sdlc] image
 #
 # bin/sdlc reads the key with awk before this script runs. If TOML and awk

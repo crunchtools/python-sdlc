@@ -140,14 +140,22 @@ case " \$* " in
     printf 'p${TAB}one${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
     printf 'q${TAB}two${TAB}image-ro${TAB}quiet-ok\n' ;;
   *" plan gate-word "*)
-    printf 'gate-word${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}@sdlc-image${US}scan-rootfs\n' ;;
+    printf 'gate-word${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}--${US}@sdlc-image${US}scan-rootfs\n' ;;
+  *" plan inject-up "*)
+    printf 'inject-up${TAB}main${TAB}host-up${TAB}5${US}podman${US}run${US}--${US}--privileged${US}-v${US}/:/host\n' ;;
+  *" plan inject-run "*)
+    printf 'inject-run${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}--${US}-x\n' ;;
+  *" plan inject-comma "*)
+    printf 'inject-comma${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}--${US}a,b\n' ;;
+  *" plan inject-nodd "*)
+    printf 'inject-nodd${TAB}main${TAB}host-up${TAB}5${US}podman${US}run${US}--privileged${US}img\n' ;;
   *" plan up-"*)
     _secs=1; _what=\$_last
     case "\$_last" in up-build) _what=build ;; up-noseconds) _secs=soon ;; esac
     if [ "\$_what" = build ]; then
       printf '%s${TAB}main${TAB}host-up${TAB}1${US}podman${US}build${US}-t${US}x${US}.\n' "\$_last"
     else
-      printf '%s${TAB}main${TAB}host-up${TAB}%s${US}podman${US}run${US}localhost/x:sdlc${US}go-%s\n' \
+      printf '%s${TAB}main${TAB}host-up${TAB}%s${US}podman${US}run${US}--${US}localhost/x:sdlc${US}go-%s\n' \
         "\$_last" "\$_secs" "\$_last"
     fi ;;
   *" plan "*)
@@ -245,12 +253,26 @@ done
 log_mark
 PATH="$SHIM" sh bin/sdlc up-stays >/dev/null 2>&1 || true
 log_since
-if grep -q -- 'run -d --name sdlc-smoke-[0-9-]* --log-driver=k8s-file --cap-drop=all --security-opt=no-new-privileges .* localhost/x:sdlc go-up-stays$' "$RUN/podman.log" \
+if grep -q -- 'run -d --name sdlc-smoke-[0-9-]* --log-driver=k8s-file --cap-drop=all --security-opt=no-new-privileges .* -- localhost/x:sdlc go-up-stays$' "$RUN/podman.log" \
    && grep -q -- '^rm -f sdlc-smoke-' "$RUN/podman.log"; then
   ok "host-up runs detached and locked down, and removes the container"
 else
   bad "host-up's run or cleanup is wrong: $(grep -E 'up-stays|rm -f' "$RUN/podman.log" | tail -2)"
 fi
+
+# A repo's config must never reach the host's podman as an option. The planner
+# refuses such an image; the launcher refuses it again, here, on the host.
+for case_ in inject-up inject-run inject-comma inject-nodd; do
+  log_mark
+  rc=0
+  PATH="$SHIM" sh bin/sdlc "$case_" > "$RUN/out" 2>&1 || rc=$?
+  log_since
+  if [ "$rc" -eq 2 ] && ! grep -q -- '--privileged\|a,b\| -x$' "$RUN/podman.log"; then
+    ok "$case_: an image word that is not an image is refused (exit 2) and never run"
+  else
+    bad "$case_ exited $rc: $(grep -E 'privileged|a,b| -x$' "$RUN/podman.log" | tail -1)"
+  fi
+done
 
 printf '\n== a check deferred to CI\n\n'
 
