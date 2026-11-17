@@ -358,13 +358,22 @@ else
   ok "ruff-check fails on broken code"
 fi
 # A finding ruff could fix is still a finding here -- that is the whole of #48.
-podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
-  "$IMAGE" sdlc lint >/dev/null 2>&1 && rc=0 || rc=$?
+# Both tools must report: a lint that stopped at the first failure would hide
+# the formatter's findings behind the linter's.
+out=$(podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
+        "$IMAGE" sdlc lint 2>&1) && rc=0 || rc=$?
 if [ "$rc" -eq 1 ]; then
   ok "lint fails on code ruff would fix, without fixing it"
 else
   bad "lint exited $rc on unused imports and bad formatting, want 1"
 fi
+case "$out" in
+  *F401*"1 file would be reformatted"*)
+    ok "lint reports the linter's and the formatter's findings in one run" ;;
+  *)
+    bad "lint did not report both an F401 and a file to reformat"
+    printf '%s\n' "$out" | sed 's/^/       /' | tail -12 ;;
+esac
 if podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
      "$IMAGE" sdlc semgrep >/dev/null 2>&1; then
   bad "semgrep passed a file matching its own fixture rule"
