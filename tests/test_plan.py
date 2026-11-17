@@ -413,6 +413,46 @@ def plan_of(target: str, pyproject: str, **env) -> list[list[str]]:
     return [line.split("\t") for line in buf.getvalue().splitlines()]
 
 
+# python-sdlc#50: a push skip is the only way a verdict leaves ci, so ci and
+# tiers say so; otherwise a green ci reads the same whether lint ran or not.
+check("no push skip, nothing to report", S.push_skips(empty) == [])
+check(
+    "a push skip is named, in push order",
+    S.push_skips({"push": {"skip": ["codeql", "lint"]}}) == ["lint", "codeql"],
+)
+check(
+    "the reviewers ci never runs are not named",
+    S.push_skips({"push": {"skip": ["gatehouse", "mypy"]}}) == ["mypy"],
+)
+check(
+    "a verdict ci adds back is not named",
+    S.push_skips({"push": {"skip": ["lint"]}, "ci": {"checks": ["lint"]}}) == [],
+)
+
+
+def stderr_and_stdout(fn, target: str | None, pyproject: str) -> tuple[str, str]:
+    with tempfile.TemporaryDirectory() as root:
+        Path(root, "pyproject.toml").write_text(pyproject)
+        S.REPO = Path(root)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            fn(*([target] if target else []))
+    return err.getvalue(), out.getvalue()
+
+
+SKIPS = '[tool.sdlc.push]\nskip = ["lint", "codeql"]\n'
+NAMED = "sdlc ci: not run, skipped in [tool.sdlc.push]: lint, codeql"
+err, out = stderr_and_stdout(S.t_plan, "ci", SKIPS)
+check("sdlc ci names its push skips once", err.splitlines() == [NAMED], err)
+check("the plan itself stays clean", NAMED not in out, out)
+err, _ = stderr_and_stdout(S.t_plan, "push", SKIPS)
+check("only ci names them", err == "", err)
+err, _ = stderr_and_stdout(S.t_plan, "ci", "[tool.ruff]\n")
+check("a repo that skips nothing hears nothing", err == "", err)
+_, out = stderr_and_stdout(S.t_tiers, None, SKIPS)
+check("sdlc tiers prints the same line", f"  {NAMED}" in out.splitlines(), out)
+
+
 TRENTINA = """
 [project]
 name = "fx"

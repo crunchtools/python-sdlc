@@ -296,6 +296,23 @@ def resolve(cfg: dict, command: str) -> list[str]:
     return out
 
 
+def push_skips(cfg: dict) -> list[str]:
+    """The push verdicts ci does not run because [tool.sdlc.push] skips them.
+
+    That skip is the only way a repo takes a verdict out of ci, and a verdict
+    that is not run is otherwise just absent: a green `sdlc ci` read the same
+    whether the repo ran lint or opted out of it (python-sdlc#50).
+    """
+    drop = set(names(block(cfg, "push").get("skip"), "[tool.sdlc.push] skip"))
+    ci = resolve(cfg, "ci")
+    return [c for c in DEFAULTS["push"] if c in drop and c not in CI_EXCLUDES and c not in ci]
+
+
+def push_skip_line(cfg: dict) -> str | None:
+    gone = push_skips(cfg)
+    return f"sdlc ci: not run, skipped in [tool.sdlc.push]: {', '.join(gone)}" if gone else None
+
+
 def check_settings(cfg: dict, name: str) -> dict:
     """A check's own table, wherever it is written. Names are unique."""
     found = [
@@ -469,6 +486,10 @@ def t_plan(target: str) -> int:
     for check in checks:
         if check not in BUILTINS and kind_of(cfg, check) is None:
             cannot(f"unknown check: {check}")
+    # stderr, because stdout is the plan the launcher parses.
+    line = push_skip_line(cfg) if target == "ci" else None
+    if line:
+        print(line, file=sys.stderr)
     lanes = lane_of(cfg, checks)
     for check in checks:
         lane = plain(lanes[check], "a lane name")
@@ -495,6 +516,9 @@ def t_tiers() -> int:
             print(f"  {check}{note}")
         if parallel:
             print(f"  {len(set(lanes.values()))} lanes, run at the same time")
+        line = push_skip_line(cfg) if command == "ci" else None
+        if line:
+            print(f"  {line}")
     if skipped():
         print(f"\nSDLC_SKIP is skipping: {', '.join(sorted(skipped()))}")
     return CLEAN
