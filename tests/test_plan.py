@@ -741,6 +741,84 @@ except S.CannotRunError as exc:
 check("a built-in container check cannot set a kind", msg is not None and "built in" in msg)
 
 
+# -------------------------------------------------------------- scan-rootfs
+#
+# grype's exit codes are the reverse of this file's: 2 is a finding and 1 is
+# "could not scan". scan-rootfs translates them, and a broken cache is a 2, not
+# a traceback. A fake grype stands in, recording its argv.
+
+FAKE_GRYPE = """#!/bin/sh
+printf '%s\\n' "$@" > "$FAKE_DIR/argv"
+exit "$(cat "$FAKE_DIR/rc")"
+"""
+
+
+def scan_with(grype_rc: int, *, broken_cache: bool = False, **env) -> tuple[int | str, list[str]]:
+    with tempfile.TemporaryDirectory() as root:
+        bindir = Path(root, "bin")
+        bindir.mkdir()
+        fake = bindir / "grype"
+        fake.write_text(FAKE_GRYPE)
+        fake.chmod(0o755)
+        Path(root, "rc").write_text(str(grype_rc))
+        Path(root, "scan").mkdir()
+        saved = (dict(os.environ), S.SCAN_ROOT, S.GRYPE_DB, S.REPO)
+        os.environ.update({"PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_DIR": root, **env})
+        S.SCAN_ROOT = Path(root, "scan")
+        S.REPO = Path(root)
+        if broken_cache:
+            Path(root, "cache").write_text("a file where a directory goes")
+        S.GRYPE_DB = Path(root, "cache", "grype")
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                out: int | str = S.t_scan_rootfs()
+        except S.CannotRunError as exc:
+            out = str(exc)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved[0])
+            S.SCAN_ROOT, S.GRYPE_DB, S.REPO = saved[1:]
+        argv_file = Path(root, "argv")
+        argv = argv_file.read_text().split("\n") if argv_file.is_file() else []
+    return out, argv
+
+
+out, argv = scan_with(0)
+check("scan-rootfs: grype 0 is clean", out == S.CLEAN, str(out))
+check(
+    "scan-rootfs fails on a fixable critical by default",
+    "--fail-on" in argv
+    and argv[argv.index("--fail-on") + 1] == "critical"
+    and "--only-fixed" in argv,
+    str(argv),
+)
+out, _ = scan_with(2)
+check("scan-rootfs: grype 2, above the threshold, is a finding", out == S.FOUND, str(out))
+out, _ = scan_with(1)
+check("scan-rootfs: grype 1 could not scan, which is a 2", isinstance(out, str), str(out))
+out, argv = scan_with(0, SDLC_SCAN_FAIL_ON="high", SDLC_SCAN_ONLY_FIXED="0")
+check(
+    "scan-rootfs takes its threshold and drops --only-fixed when told",
+    argv[argv.index("--fail-on") + 1] == "high" and "--only-fixed" not in argv,
+    str(argv),
+)
+out, _ = scan_with(0, SDLC_SCAN_FAIL_ON="severe")
+check("scan-rootfs refuses an unknown severity", isinstance(out, str) and "severe" in out, str(out))
+out, _ = scan_with(0, broken_cache=True)
+check(
+    "scan-rootfs: a cache it cannot write is a 2, not a traceback",
+    isinstance(out, str) and "database cache" in out,
+    str(out),
+)
+
+with tempfile.TemporaryDirectory() as root:
+    Path(root, "Containerfile").write_text(CF)
+    Path(root, "sdlc.toml").write_bytes(b"\xff\xfe not utf-8")
+    S.REPO = Path(root)
+    msg = cannot_run(S.config_document)
+check("an sdlc.toml that is not UTF-8 is a 2, not a traceback", msg is not None, str(msg))
+
+
 # ------------------------------------------------ arguments for a single check
 #
 # bin/sdlc joins the words after `--` with the unit separator and exports

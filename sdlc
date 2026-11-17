@@ -170,7 +170,7 @@ def config_document() -> dict:
         )
     try:
         return tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         cannot(f"cannot read {path}: {exc}")
 
 
@@ -1026,6 +1026,7 @@ def t_containerfile_lint(s: dict) -> int:
 
 
 GRYPE_DB = CACHE / "grype"
+SCAN_ROOT = Path("/scan")
 
 
 def t_scan_rootfs() -> int:
@@ -1036,21 +1037,33 @@ def t_scan_rootfs() -> int:
     nowhere else. Its vulnerability database lives in the cache volume and is
     refreshed when stale; one lock keeps two gates from rewriting it at once.
     """
-    if not Path("/scan").is_dir():
+    if not SCAN_ROOT.is_dir():
         cannot("nothing is mounted at /scan; container-scan runs this, not a person")
     fail_on = os.environ.get("SDLC_SCAN_FAIL_ON", "critical")
     if fail_on not in GRYPE_SEVERITIES:
-        cannot(f"SDLC_SCAN_FAIL_ON must be one of {', '.join(GRYPE_SEVERITIES)}")
-    cmd = ["grype", "dir:/scan", "--name", project_name(), "--fail-on", fail_on, "-o", "table"]
+        cannot(f"SDLC_SCAN_FAIL_ON is {fail_on!r}; it must be one of {', '.join(GRYPE_SEVERITIES)}")
+    cmd = [
+        "grype",
+        f"dir:{SCAN_ROOT}",
+        "--name",
+        project_name(),
+        "--fail-on",
+        fail_on,
+        "-o",
+        "table",
+    ]
     if os.environ.get("SDLC_SCAN_ONLY_FIXED", "1") == "1":
         cmd.append("--only-fixed")
     env = dict(os.environ)
     env.update({"GRYPE_DB_CACHE_DIR": str(GRYPE_DB), "GRYPE_CHECK_FOR_APP_UPDATE": "false"})
-    GRYPE_DB.mkdir(parents=True, exist_ok=True)
     step(f"grype, failing on a {'fixable ' if '--only-fixed' in cmd else ''}{fail_on} or worse")
-    with (GRYPE_DB / ".lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        rc = run(cmd, env=env)[0]
+    try:
+        GRYPE_DB.mkdir(parents=True, exist_ok=True)
+        with (GRYPE_DB / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            rc = run(cmd, env=env)[0]
+    except OSError as exc:
+        cannot(f"cannot use grype's database cache at {GRYPE_DB}: {exc}")
     if rc == 0:
         return CLEAN
     if rc == 2:  # noqa: PLR2004 -- grype's own "above the threshold"
