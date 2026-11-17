@@ -13,6 +13,10 @@ All notable changes to this project are documented here, following
   `sdlc ci: not run, skipped in [tool.sdlc.push]: lint, codeql` (#50).
   Before, a skipped verdict was simply absent, so a green ci could not be
   told from one that opted out.
+- This repo's own gatehouse pre-commit hook now pins
+  `quay.io/crunchtools/gatehouse:0.26.0` (was 0.23.0, missed by the image
+  bumps). 0.23.0 predates `GATEHOUSE_LLM_BASE_URL` (0.24.0), so it ignored the
+  seat's Trentina proxy and sent the proxy token straight to OpenRouter: 401.
 
 ## [0.7.1] - 2026-11-17
 

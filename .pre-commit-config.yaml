@@ -82,7 +82,7 @@ repos:
 
       - id: gatehouse
         name: Gatehouse (AI code review, staged diff)
-        entry: bash -c 'git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,z -w /src quay.io/crunchtools/gatehouse:0.23.0 --stdin'
+        entry: bash -c 'git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,z -w /src quay.io/crunchtools/gatehouse:0.26.0 --stdin'
         language: system
         pass_filenames: false
         always_run: true
