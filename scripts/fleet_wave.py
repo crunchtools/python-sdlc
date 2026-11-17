@@ -508,7 +508,15 @@ def survey(api: Api, apply: bool) -> Wave:
 
 def run(
     wave: Wave, names: list[str], available: dict[str, str], ledger: Path, pause: float
-) -> dict:
+) -> dict[str, int]:
+    """Process `names` in order, one at a time, `pause` seconds apart.
+
+    `available` is the org listing (name -> default branch); a name not in it is
+    skipped. Each repo's outcome is appended to `ledger` as it finishes, and a
+    repo whose last ledger action is in DONE is not processed again. Returns
+    how many repos ended in each action, plus "already done" for those passed
+    over -- so the counts always add up to len(names).
+    """
     done = read_ledger(ledger)
     counts: dict[str, int] = {}
     for n, repo in enumerate(names):
