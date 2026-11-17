@@ -6,6 +6,14 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `sdlc ci` and `sdlc tiers` now name the push verdicts a repo took out of
+  ci with `[tool.sdlc.push] skip`, as one line:
+  `sdlc ci: not run, skipped in [tool.sdlc.push]: lint, codeql` (#50).
+  Before, a skipped verdict was simply absent, so a green ci could not be
+  told from one that opted out.
+
 ## [0.7.1] - 2026-11-17
 
 ### Changed
