@@ -84,6 +84,10 @@ secrets (`--mount=type=secret`, `subscription-manager`, RHSM) that `sdlc ci`
 is not given; the publish workflow keeps building those with its secrets. A
 Python repo that names no stacks is left alone, and an existing key that does
 not already say this is refused rather than rewritten.
+`scripts/fleet_wave.py` runs it across the org: a plan by default, one
+auto-merging pull request per repo with `--apply`, a TSV ledger either way.
+It reads `GH_TOKEN` from the environment for the GitHub API (required with
+`--apply`), and pushes with the credentials git already has.
 
 **What floating trusts.** Whoever can move `quay.io/crunchtools/sdlc:latest`
 now decides the host-side code every seat and runner runs, and that code is no

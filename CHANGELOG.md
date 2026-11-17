@@ -32,6 +32,18 @@ All notable changes to this project are documented here, following
   `.specify/`; refuses with exit 2 a shape it would have to guess at. Every
   file it would write is parsed back and held to the floating wiring before
   anything is written, and a second run is a no-op.
+- `scripts/fleet_wave.py`: runs the converter across the org, the last
+  fleet-wide PR wave. A dry run by default: each public, non-archived repo (or
+  each named in `--repos FILE`) is shallow-cloned at the default branch the API
+  names, converted and verified -- a second converter run must be a no-op, the
+  bootstrap committed executable, nothing outside the converter's files
+  changed -- and the plan goes to a TSV ledger. Preflight skips a repo whose
+  `SDLC_IMAGE` the bootstrap would refuse or that has an open
+  `chore/python-sdlc` PR. `--apply` pushes `chore/sdlc-floating` (reused, one
+  per repo), opens or updates one PR with a fixed body, and queues a squash
+  auto-merge, through the REST and GraphQL APIs with `GH_TOKEN` from the
+  environment, never argv. Sequential; a re-run skips what the ledger says is
+  done.
 
 - `container-smoke` SKIPS an image whose PID 1 is systemd (`/sbin/init`,
   `/usr/sbin/init`, `systemd`, as in ubi-init and bootc images): systemd needs
