@@ -22,6 +22,7 @@ Run inside the image, which has the interpreter and PyYAML the script needs:
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 import sys
@@ -536,6 +537,85 @@ for linked in (".pre-commit-config.yaml", ".sdlc", ".github/workflows/gourmand.y
         and not (outside.parent / "bin").exists(),
         refused.stderr,
     )
+
+
+# ------------------------------------------- review findings, one test each
+
+# 1. A second run is a no-op even when the converted file kept other hooks.
+repo = make_repo({".pre-commit-config.yaml": RUFF_AND_STANDALONE})
+first = convert(repo, apply=True)
+again = convert(repo, apply=True)
+check(
+    "a converted repo that kept other hooks: the second run exits 0 and changes nothing",
+    first.returncode == 0 and again.returncode == 0 and again.stdout == "",
+    again.stderr + again.stdout,
+)
+
+
+def load(text: str) -> dict:
+    """The YAML, or {} when it does not load: a test reports, it does not crash."""
+    try:
+        return yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return {}
+
+
+# 2. A block-style default_install_hook_types is replaced whole.
+block_style = "default_install_hook_types:\n  - pre-commit\n\n" + RUFF_AND_STANDALONE
+repo = make_repo({".pre-commit-config.yaml": block_style})
+done = convert(repo, apply=True)
+written = snapshot(repo)[".pre-commit-config.yaml"]
+check(
+    "a block-style default_install_hook_types becomes valid YAML naming both",
+    done.returncode == 0
+    and load(written).get("default_install_hook_types") == ["pre-commit", "pre-push"]
+    and "  - pre-commit\n" not in written.split("repos:")[0],
+    done.stderr + written,
+)
+
+# 3. A `repos:` in a header comment is not where the key goes.
+commented = "# repos: below are the gates\n" + RUFF_AND_STANDALONE
+repo = make_repo({".pre-commit-config.yaml": commented})
+done = convert(repo, apply=True)
+written = snapshot(repo)[".pre-commit-config.yaml"]
+check(
+    "a header comment that says repos: is left as it was",
+    done.returncode == 0
+    and written.startswith("# repos: below are the gates\n")
+    and load(written).get("default_install_hook_types") == ["pre-commit", "pre-push"],
+    done.stderr + written,
+)
+
+# 4. The guard: what would be written is parsed back and held to the wiring.
+_SPEC = importlib.util.spec_from_file_location("convert_repo", SCRIPT)
+C = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(C)
+repo = make_repo({})
+good = {
+    repo / ".sdlc/bin/sdlc": BOOTSTRAP,
+    repo / ".pre-commit-config.yaml": HOOKS,
+    repo / ".github/workflows/ci.yml": CI,
+}
+for label, path, text in (
+    ("YAML that does not load", ".github/workflows/ci.yml", "jobs: [\n"),
+    ("hooks without pre-push", ".pre-commit-config.yaml", HOOKS.replace(", pre-push]", "]")),
+    ("hooks still pinned", ".pre-commit-config.yaml", PINNED_HOOKS),
+    ("no sdlc ci job running the bootstrap", ".github/workflows/ci.yml", GOURMAND),
+):
+    bad = {**good, repo / path: text}
+    try:
+        C.verify(repo, bad)
+        refused = False
+    except C.RefusedError:
+        refused = True
+    check(f"the guard refuses a plan with {label}", refused)
+try:
+    C.verify(repo, good)
+    accepted = True
+except C.RefusedError as exc:
+    accepted = False
+    print(exc)
+check("the guard accepts the floating wiring", accepted)
 
 
 def main() -> int:

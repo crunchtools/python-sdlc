@@ -385,6 +385,25 @@ localhost/python-sdlc:dev .`) and run it with
 `SDLC_IMAGE=localhost/python-sdlc:dev`. `sdlc` has no push step, and only this
 repo's GitHub Actions on main publish to quay.io.
 
+## When :latest is broken
+
+A floating repo runs whatever `:latest` is, so a bad release reaches every repo
+at once. Until a fixed release ships:
+
+- **A local commit or push:** `git commit --no-verify` / `git push --no-verify`.
+  CI still judges the pull request.
+- **CI, fleet-wide:** set the organization variable `SDLC_IMAGE` to the last
+  good release, `X.Y.Z`. Every floating repo's CI picks it up on its next run,
+  with no pull request; a repository variable of the same name does the same
+  for one repo. Clear it once the fix is on `:latest`.
+- **A seat:** `SDLC_IMAGE=X.Y.Z git push`.
+
+The fallback needs a release that carries the launcher. The bootstrap asks the
+image for it, so a tag older than the first release with `sdlc launcher` cannot
+be pinned this way: it exits 2.
+Rolling back works only once two releases carry `launcher` -- the broken one
+and a good one before it.
+
 ## Skipping a check
 
 `SDLC_SKIP=gatehouse git push` skips one check, once, for a false positive. The

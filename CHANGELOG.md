@@ -18,11 +18,16 @@ All notable changes to this project are documented here, following
   and `examples/ci.yml` are the hook and CI forms; the CI job keeps the name
   `sdlc ci`, and a repo opts its CI into `:main` with the repository variable
   `SDLC_IMAGE`.
+- README "When :latest is broken": `--no-verify` locally, the organization
+  variable `SDLC_IMAGE` set to the last good release for CI, and why that
+  works only once two releases carry `launcher`.
 - `scripts/convert_repo.py`: converts one checkout to the floating form, from
   either the rev-pinned python-sdlc hooks or the standalone Gourmand and
   Gatehouse hooks. Deterministic; prints the diff and writes nothing without
   `--apply`; keeps every workflow the stubs do not cover; never touches
-  `.specify/`; refuses with exit 2 a shape it would have to guess at.
+  `.specify/`; refuses with exit 2 a shape it would have to guess at. Every
+  file it would write is parsed back and held to the floating wiring before
+  anything is written, and a second run is a no-op.
 
 - `container-smoke` SKIPS an image whose PID 1 is systemd (`/sbin/init`,
   `/usr/sbin/init`, `systemd`, as in ubi-init and bootc images): systemd needs

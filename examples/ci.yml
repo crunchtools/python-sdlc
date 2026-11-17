@@ -3,10 +3,11 @@
 # predicts a green CI (constitution XII). Nothing here pins a release: the
 # image prints its own launcher, and both float on :latest.
 #
-# The repository variable SDLC_IMAGE opts this repo into other tooling: `main`
-# for what has merged to python-sdlc and not been released, or a release such
-# as `0.9.0` to hold one back. A variable, not a line in this file, because a
-# pull request must not choose the image that judges it.
+# The variable SDLC_IMAGE -- a repository's, or the organization's for the
+# whole fleet -- picks other tooling: `main` for what has merged to python-sdlc
+# and not been released, or a release such as `0.9.0` to hold one back. A
+# variable, not a line in this file, because a pull request must not choose
+# the image that judges it.
 #
 # Gourmand runs as its own job, not inside `sdlc ci`: XII has CI run push's
 # checks except Gourmand and Gatehouse, which run through their own workflows

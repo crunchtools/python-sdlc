@@ -189,12 +189,57 @@ def without_replaced(lines: list[str]) -> str:
     return "".join(kept).rstrip("\n") + "\n" if kept else ""
 
 
+FLOATING_ENTRIES = {"sdlc-commit": f"{BOOTSTRAP_AT} commit", "sdlc-push": f"{BOOTSTRAP_AT} push"}
+BOTH_HOOK_TYPES = "default_install_hook_types: [pre-commit, pre-push]"
+
+
+def is_floating(repos: list) -> bool:
+    """Already converted: the floating hooks, and nothing they replace."""
+    local = {
+        h.get("id"): h.get("entry")
+        for r in repos
+        if r.get("repo") == "local"
+        for h in r.get("hooks") or []
+    }
+    pinned = any(SDLC_REPO.match(str(r.get("repo", ""))) for r in repos)
+    return (
+        not pinned
+        and not set(local) & STANDALONE_HOOKS
+        and all(local.get(hook) == entry for hook, entry in FLOATING_ENTRIES.items())
+    )
+
+
+def with_both_hook_types(head: list[str]) -> list[str]:
+    """The lines above `repos:`, with `default_install_hook_types` naming both.
+
+    By line, not by pattern: the key may be written in block style, its list
+    items on the lines below it, and a comment may say `repos:` too.
+    """
+    out: list[str] = []
+    replaced = False
+    skipping = False
+    for line in head:
+        if skipping and re.match(r"^\s+-", line):
+            continue  # an item of the block-style list being replaced
+        skipping = False
+        if re.match(r"^default_install_hook_types:", line):
+            out.append(BOTH_HOOK_TYPES + "\n")
+            replaced = skipping = True
+            continue
+        out.append(line)
+    if not replaced:
+        out += [BOTH_HOOK_TYPES + "\n", "\n"]
+    return out
+
+
 def convert_hooks(text: str) -> str:
     """The hooks file with the floating hooks in place of the pinned or standalone ones."""
     template = HOOKS_TEMPLATE.read_text()
     if text == template:
         return text
     repos = parse(".pre-commit-config.yaml", text).get("repos") or []
+    if is_floating(repos):
+        return text
     refuse_hooks(repos)
     if only_replaced(repos):
         # Nothing else in it: the template, header and all, since the old
@@ -204,12 +249,7 @@ def convert_hooks(text: str) -> str:
     start = next((n for n, line in enumerate(lines) if re.match(r"^repos:\s*$", line)), None)
     if start is None:
         raise RefusedError(".pre-commit-config.yaml: no top-level `repos:` line")
-    head = "".join(lines[: start + 1])
-    both = "default_install_hook_types: [pre-commit, pre-push]"
-    if re.search(r"^default_install_hook_types:", head, re.M):
-        head = re.sub(r"^default_install_hook_types:.*$", both, head, count=1, flags=re.M)
-    else:
-        head = head.replace("repos:", f"{both}\n\nrepos:", 1)
+    head = "".join(with_both_hook_types(lines[:start])) + lines[start]
     return head + without_replaced(lines[start + 1 :]) + floating_hooks_item()
 
 
@@ -423,7 +463,45 @@ def plan(repo: Path) -> tuple[dict[Path, str | None], list[str]]:
         if moved != text:
             planned[path] = moved
     refuse_links(repo, list(planned))
+    verify(repo, planned)
     return planned, notes
+
+
+def verify(repo: Path, planned: dict[Path, str | None]) -> None:
+    """Refuse a plan whose files do not load, or do not wire what they should.
+
+    Every YAML file this writes is parsed back, and the result is held to the
+    wiring itself -- the floating hooks, both hook types, a job named `sdlc ci`
+    running the bootstrap -- rather than to how the text was produced.
+    """
+    for path, text in planned.items():
+        if text is not None and path.suffix in (".yml", ".yaml"):
+            parse(rel(repo, path), text)
+    hooks = parse(".pre-commit-config.yaml", planned[repo / ".pre-commit-config.yaml"] or "")
+    types = hooks.get("default_install_hook_types") or []
+    if not (isinstance(types, list) and {"pre-commit", "pre-push"} <= set(types)):
+        raise RefusedError("the converted hooks file does not install both hook types")
+    if not is_floating(hooks.get("repos") or []):
+        raise RefusedError("the converted hooks file does not run .sdlc/bin/sdlc as its only sdlc")
+    if planned[repo / BOOTSTRAP_AT] != BOOTSTRAP.read_text():
+        raise RefusedError(f"{BOOTSTRAP_AT} would not be bin/sdlc-bootstrap")
+    wf_dir = repo / ".github" / "workflows"
+    texts = {p: planned.get(p, "") for p in planned if p.parent == wf_dir and planned[p]}
+    texts |= {
+        p: p.read_text()
+        for p in (sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else [])
+        if p not in planned
+    }
+    floating = re.compile(rf"^\s*{re.escape(FLOATING_CI_LINE)}\s*$", re.M)
+    if not any(
+        is_sdlc_job(job)
+        and any(floating.search(str(step.get("run", ""))) for step in job.get("steps") or [])
+        for path, text in texts.items()
+        for job in jobs_of(parse(rel(repo, path), text)).values()
+    ):
+        raise RefusedError(
+            "no converted workflow has a job named `sdlc ci` running .sdlc/bin/sdlc ci"
+        )
 
 
 def diff(repo: Path, planned: dict[Path, str | None]) -> str:
