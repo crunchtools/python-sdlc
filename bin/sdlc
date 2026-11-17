@@ -650,10 +650,12 @@ run_up() {             # seconds run-args -> the smoke verdict
              "$_cname" 2>/dev/null) || _upstate=
   podman logs "$_cname" 2>&1 || :
   podman rm -f -v "$_cname" >/dev/null 2>&1 || :
+  # Exit 0 is a pass whatever OOMKilled says: nested rootless podman reports
+  # it true even for `true`. It counts only beside a non-zero exit.
   case "$_upstate" in
     'true '*)      printf 'still running after %ss: the image starts and stays up\n' "$_upsecs"; return 0 ;;
-    *' true')      printf '%s: the container was killed for memory\n' "$ME" >&2; return 1 ;;
     'false 0 '*)   return 0 ;;
+    *' true')      printf '%s: the container was killed for memory\n' "$ME" >&2; return 1 ;;
     'false '*)     printf '%s: the container exited %s within %ss of starting\n' "$ME" \
                      "$(printf '%s' "$_upstate" | cut -d' ' -f2)" "$_upsecs" >&2; return 1 ;;
     *)             printf '%s: podman could not report the container state; nothing was judged\n' "$ME" >&2
@@ -716,10 +718,23 @@ run_step() {           # mode payload -> the step's exit status
   _run_step "$@" || _rs=$?
   # Only a push may defer to CI. Anything else that reports 3 could not run.
   if [ "$_rs" -eq 3 ] && [ "${SDLC_TIER:-}" != push ]; then return 2; fi
-  # Only run_up may skip, and only by its own decision. A tool inside a check
-  # exiting 4 found something, as it always has.
-  if [ "$_rs" -eq 4 ] && [ "$1" != host-up ]; then return 1; fi
+  # Two statuses mean "not gating", and each comes from one place only:
+  #   4  SKIPPED, not judged: run_up for a systemd PID 1, and
+  #      containerfile-lint when hadolint cannot parse the Containerfile
+  #   5  found something, ADVISORY: an advisory smoke run's finding
+  # Anything else exiting 4 or 5 -- any tool in any other check -- found
+  # something, as it always has.
+  case "$_rs:$1:$2" in
+    4:host-up:*|4:host-up-advisory:*|4:image-ro:containerfile-lint) ;;
+    1:host-up-advisory:*) return 5 ;;
+    4:*|5:*) return 1 ;;
+  esac
   return "$_rs"
+}
+
+advisory() {           # check seconds -> the footer of an advisory finding
+  printf '\n== %s FOUND SOMETHING, ADVISORY: not gating, after %ss\n' "$1" "$2"
+  printf '%s:   To make it gate: gate = true in [tool.sdlc.ci.%s]\n' "$ME" "$1"
 }
 
 deferred() {           # check -> the warning a deferral prints, every time
@@ -739,7 +754,7 @@ _run_step() {
         *) die "the image asked for an unknown local check: $2" ;;
       esac ;;
     host) run_host "$2" ;;
-    host-up)
+    host-up|host-up-advisory)
       _secs=${2%%"$US"*}
       case "$_secs" in ''|*[!0-9]*) die "a host-up step must start with a number of seconds" ;; esac
       run_host "${2#*"$US"}" "$_secs" ;;
@@ -753,6 +768,7 @@ _close_serial() {      # the open check is finished: footer and record
   # happened, rather than when the next check starts.
   [ "$_scur_rc" -eq 0 ] && printf '\n== %s passed in %ss\n' "$_scur" "$_scur_took"
   [ "$_scur_rc" -eq 4 ] && printf '\n== %s SKIPPED, not judged, after %ss\n' "$_scur" "$_scur_took"
+  [ "$_scur_rc" -eq 5 ] && advisory "$_scur" "$_scur_took"
   record_check "$_scur" "$_scur_rc" "$_scur_took" ""
   _scur=
 }
@@ -795,8 +811,8 @@ run_serial() {         # the plan -> its worst step status
       _failed="$_failed $_check"
       _scur_rc=3
       deferred "$_check"
-    elif [ "$_rc" -eq 4 ]; then
-      _scur_rc=4
+    elif [ "$_rc" -eq 4 ] || [ "$_rc" -eq 5 ]; then
+      _scur_rc=$_rc
     elif [ "$_rc" -ne 0 ]; then
       _failed="$_failed $_check"
       _scur_rc=$_rc
@@ -864,6 +880,8 @@ _close_check() {       # the open check's block is complete
       printf '\n== %s passed in %ss\n' "$_cur_name" "$_cur_took" >> "$OUT/out.$_cur"
     elif [ "$_cur_rc" -eq 4 ]; then
       printf '\n== %s SKIPPED, not judged, after %ss\n' "$_cur_name" "$_cur_took" >> "$OUT/out.$_cur"
+    elif [ "$_cur_rc" -eq 5 ]; then
+      advisory "$_cur_name" "$_cur_took" >> "$OUT/out.$_cur"
     elif [ "$_cur_rc" -eq 3 ]; then
       deferred "$_cur_name" 2>> "$OUT/out.$_cur"
     else
@@ -924,8 +942,8 @@ run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
     if [ "$_rc" -eq 3 ]; then
       _failed="$_failed $_check"
       _cur_rc=3
-    elif [ "$_rc" -eq 4 ]; then
-      _cur_rc=4
+    elif [ "$_rc" -eq 4 ] || [ "$_rc" -eq 5 ]; then
+      _cur_rc=$_rc
     elif [ "$_rc" -ne 0 ]; then
       _failed="$_failed $_check"
       _cur_rc=$_rc

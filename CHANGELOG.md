@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-17
+
 ### Added
 
 - **No `rev:` to pin.** The image now carries its own launcher
@@ -50,15 +52,41 @@ All notable changes to this project are documented here, following
   check's record carries exit 4. Only the smoke run can skip: a 4 from a tool
   in the image is still a finding.
 
+- `scripts/convert_repo.py` writes the config a converted repo needs to run
+  on its first try: `skip-stacks` for node, bootc or docs, which this image
+  cannot check yet, and `[tool.sdlc.ci] skip` for `container-build`,
+  `container-smoke` and `container-scan` when the Containerfile needs build
+  secrets (`--mount=type=secret`, `subscription-manager`, RHSM). A Python repo
+  naming no stacks is untouched; an existing key that disagrees is refused.
+
 ### Changed
 
+- **`container-smoke` is advisory by default.** It runs and prints what it
+  found as `FOUND SOMETHING, ADVISORY: not gating` (record exit 5), and the
+  command does not fail. `gate = true` in `[tool.sdlc.ci.container-smoke]`
+  makes a finding gate; a smoke run that could not run is still a 2.
+- `containerfile-lint` also ignores SC1072, which hadolint raises on an
+  exec-form `RUN ["python3", "-c", …]`, and a Containerfile hadolint cannot
+  parse (a `RUN` heredoc) is printed as ADVISORY and SKIPPED, not failed.
+- `examples/gatehouse.yml` is gatehouse at 4ae89d0 (gatehouse#150): the guard
+  also refuses a fork's change to `.sdlc/`. The converter brings an older guard
+  up to date.
 - `containerfile-lint` without a `.hadolint.yaml` now fails at `error`, not
   `warning`, and ignores DL3007 (floating base tags) and DL3041 (unpinned dnf
   packages), which the fleet does on purpose. Warnings such as DL3002 are
   printed and do not fail. A repo's `.hadolint.yaml` replaces these defaults.
 
+### Removed
+
+- `bump-consumers` (and `scripts/bump_consumers.py`): repos float on
+  `sdlc:latest`, so a release opens no bump pull requests. A repo still pinned
+  by `rev:` moves when it converts.
+
 ### Fixed
 
+- `container-smoke` passes an exit 0 whatever podman says of OOMKilled: nested
+  rootless podman reports it true even for `true`. OOMKilled counts only
+  beside a non-zero exit.
 - `container-smoke` removes the smoke container with `-v`, so an image that
   declares a `VOLUME` no longer leaks an anonymous volume on every run. A fleet
   measurement filled a seat's disk with 13 GB of them.

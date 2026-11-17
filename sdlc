@@ -111,6 +111,9 @@ CLEAN = 0
 FOUND = 1
 CANNOT_RUN = 2
 DEFERRED = 3
+# Not judged, printed as SKIPPED and never the command's exit. bin/sdlc honours
+# it from containerfile-lint and the smoke run only; anywhere else it is a 1.
+SKIPPED = 4
 
 
 class CannotRunError(Exception):
@@ -572,6 +575,9 @@ def kind_of(cfg: dict, name: str) -> str | None:
 #     host-up               the same, after a first word that is a number of
 #                           seconds: a `podman run` that is still running when
 #                           they are up is a pass (container-smoke)
+#     host-up-advisory      host-up whose finding is printed as ADVISORY and
+#                           does not fail the command (container-smoke without
+#                           `gate = true`)
 #
 # bin/sdlc refuses a host line that does not start with `podman`, so the host
 # contract is held by the launcher rather than trusted to the config. It splits
@@ -582,7 +588,7 @@ def kind_of(cfg: dict, name: str) -> str | None:
 
 UNIT_SEPARATOR = "\x1f"
 # Modes whose payload is a separator-joined argv, already checked word by word.
-HOST_MODES = ("host", "host-up")
+HOST_MODES = ("host", "host-up", "host-up-advisory")
 FORBIDDEN_IN_PLAN = ("\t", "\n", "\r", UNIT_SEPARATOR)
 
 
@@ -998,7 +1004,14 @@ def check_container_smoke(cfg: dict, name: str, s: dict) -> list[tuple[str, str,
     # says, and bin/sdlc checks the word that follows it.
     argv += ["--", container_image(cfg, s), *names(s.get("args"), f"{name}.args")]
     payload = UNIT_SEPARATOR.join([str(seconds), *(plain(a, name) for a in argv)])
-    return [(name, "host-up", payload)]
+    # Advisory unless the repo says `gate = true`: the fleet's images need env,
+    # args, network or capabilities written down before a smoke run can judge
+    # them, and a wave that turned them all red would teach SDLC_SKIP. A
+    # finding is printed and marked ADVISORY, never a pass.
+    gate = s.get("gate", False)
+    if not isinstance(gate, bool):
+        cannot(f"{name}: gate must be true or false")
+    return [(name, "host-up" if gate else "host-up-advisory", payload)]
 
 
 # The gate's own image in a host argv. bin/sdlc replaces this word with the
@@ -1069,8 +1082,13 @@ HOST_CHECKS = {
 # What the fleet does on purpose, so hadolint is told not to call it a defect.
 # DL3007: base tags float, because the Container Image profile rebuilds every
 # week to pick up errata through them. DL3041: dnf installs are not pinned to a
-# package version, for the same reason.
-HADOLINT_FLEET_IGNORES = ("DL3007", "DL3041")
+# package version, for the same reason. SC1072: ShellCheck's "fix any mentioned
+# problems" on an exec-form RUN ["python3", "-c", ...], which it misreads as
+# shell -- the form a stage with no /bin/sh has to use.
+HADOLINT_FLEET_IGNORES = ("DL3007", "DL3041", "SC1072")
+# hadolint's parse failure (DL1000) prints as file:line:column, which no rule
+# finding does. A Containerfile hadolint cannot read is not judged by it.
+HADOLINT_PARSE_FAILURE = re.compile(r"^\S+:\d+:\d+ ", re.M)
 
 
 def t_containerfile_lint(s: dict) -> int:
@@ -1101,11 +1119,19 @@ def t_containerfile_lint(s: dict) -> int:
             cannot(f"containerfile-lint: threshold must be one of {', '.join(HADOLINT_THRESHOLDS)}")
         cmd += ["--failure-threshold", str(threshold)]
     step(f"hadolint {' '.join(files)}")
-    rc = run([*cmd, *files])[0]
+    rc, out = run([*cmd, *files], tee=True)
     # hadolint has two answers: 0 clean, 1 found something at the threshold.
     # Anything else is the tool, not the Containerfile.
     if rc not in (CLEAN, FOUND):
         cannot(f"hadolint could not run (exit {rc})")
+    if rc == FOUND and HADOLINT_PARSE_FAILURE.search(out):
+        # A heredoc RUN, for one, which hadolint cannot parse though podman
+        # builds it. The build is the judge of that; this check says so.
+        print(
+            "ADVISORY: hadolint could not parse this Containerfile, so it is not "
+            "judged here; container-build still builds it"
+        )
+        return SKIPPED
     return rc
 
 

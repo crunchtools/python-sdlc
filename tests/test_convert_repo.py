@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -667,6 +668,168 @@ except C.RefusedError as exc:
     accepted = False
     print(exc)
 check("the guard accepts the floating wiring", accepted)
+
+# ------------------------------- config: a converted repo never exits 2 at once
+
+
+HOOKED = {".pre-commit-config.yaml": PINNED_HOOKS}
+
+
+def sdlc_cfg(repo: Path, name: str = "sdlc.toml") -> dict:
+    return tomllib.loads(snapshot(repo).get(name, "")).get("tool", {}).get("sdlc", {})
+
+
+for label, files, want in (
+    ("node", {"package.json": "{}\n"}, ["node"]),
+    ("bootc", {"Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n"}, ["bootc"]),
+    ("docs", {"README.md": "# hi\n"}, ["docs"]),
+):
+    repo = make_repo({**HOOKED, **files})
+    first = convert(repo, apply=True)
+    again = convert(repo, apply=True)
+    check(
+        f"a {label} repo gets skip-stacks for the stack this image cannot check yet",
+        first.returncode == 0 and sdlc_cfg(repo).get("skip-stacks") == want,
+        first.stderr + first.stdout,
+    )
+    check(
+        f"a {label} repo: the second run changes nothing",
+        again.returncode == 0 and again.stdout == "",
+        again.stderr + again.stdout,
+    )
+
+repo = make_repo(
+    {
+        **HOOKED,
+        "package.json": "{}\n",
+        "Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n",
+        "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["node"]\n',
+    }
+)
+refused = convert(repo, apply=True)
+check(
+    "a skip-stacks that leaves an unchecked stack out is refused, not rewritten",
+    refused.returncode == REFUSED
+    and "bootc" in refused.stderr
+    and sdlc_cfg(repo).get("skip-stacks") == ["node"],
+    refused.stderr,
+)
+
+RHSM_CONTAINERFILE = (
+    "FROM registry.access.redhat.com/ubi10/ubi:latest\n"
+    "RUN --mount=type=secret,id=rhsm subscription-manager register && dnf -y install httpd\n"
+)
+repo = make_repo(
+    {
+        **HOOKED,
+        "Containerfile": RHSM_CONTAINERFILE,
+        "sdlc.toml": '[tool.sdlc.push]\nskip = ["constitution"]\n',
+    }
+)
+first = convert(repo, apply=True)
+again = convert(repo, apply=True)
+cfg = sdlc_cfg(repo)
+check(
+    "a Containerfile that needs build secrets skips the container checks in `sdlc ci`",
+    first.returncode == 0
+    and cfg.get("ci", {}).get("skip") == ["container-build", "container-smoke", "container-scan"]
+    and cfg.get("push", {}).get("skip") == ["constitution"],
+    first.stderr + snapshot(repo).get("sdlc.toml", ""),
+)
+check("build secrets: the second run changes nothing", again.returncode == 0 and again.stdout == "")
+
+repo = make_repo(
+    {
+        **HOOKED,
+        "Containerfile": "FROM quay.io/hummingbird/python:3.14\n# no RHSM needed: UBI content only\n",
+    }
+)
+done = convert(repo, apply=True)
+check(
+    "a comment that mentions RHSM is not a build secret",
+    done.returncode == 0 and "sdlc.toml" not in snapshot(repo),
+    done.stderr + done.stdout,
+)
+
+repo = make_repo(
+    {
+        **HOOKED,
+        "Containerfile": RHSM_CONTAINERFILE,
+        "sdlc.toml": '[tool.sdlc.ci]\nskip = ["container-scan"]\n',
+    }
+)
+refused = convert(repo, apply=True)
+check(
+    "build secrets beside an existing ci skip are refused, not merged",
+    refused.returncode == REFUSED and sdlc_cfg(repo)["ci"]["skip"] == ["container-scan"],
+    refused.stderr,
+)
+
+COMPAT = '[project]\nname = "x"\nversion = "0"\n'
+repo = make_repo({**HOOKED, "pyproject.toml": COMPAT, "package.json": "{}\n"})
+done = convert(repo, apply=True)
+check(
+    "a Python repo naming no stacks keeps its pyproject untouched",
+    done.returncode == 0 and snapshot(repo)["pyproject.toml"] == COMPAT,
+    done.stderr,
+)
+
+# ----------------------------- gatehouse: an older guard is brought up to date
+
+# The guard as the fleet copied it, before gatehouse#150 added .sdlc/.
+OLD_GUARD = (
+    GATEHOUSE.replace("^(\\.github/workflows|\\.sdlc)/", "^\\.github/workflows/")
+    .replace(
+        "a file out of .github/workflows/ or .sdlc/ unseen",
+        "a workflow out of .github/workflows/ unseen",
+    )
+    .replace("modifies .github/workflows/ or .sdlc/ —", "modifies .github/workflows/ —")
+)
+repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": OLD_GUARD})
+done = convert(repo, apply=True)
+check(
+    "an older gatehouse.yml guard is replaced by the example's, which covers .sdlc/",
+    OLD_GUARD != GATEHOUSE
+    and done.returncode == 0
+    and snapshot(repo)[".github/workflows/gatehouse.yml"] == GATEHOUSE,
+    done.stderr,
+)
+CUSTOM = GATEHOUSE.replace("review.yml@v0", "review.yml@v1")
+repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": CUSTOM})
+done = convert(repo, apply=True)
+check(
+    "a gatehouse.yml customized beyond the guard is kept",
+    CUSTOM != GATEHOUSE
+    and done.returncode == 0
+    and snapshot(repo)[".github/workflows/gatehouse.yml"] == CUSTOM,
+    done.stderr,
+)
+GUARD_CHANGED = OLD_GUARD.replace(
+    'echo "No workflow files changed."', 'echo "No workflow files changed."\n          make audit'
+)
+repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": GUARD_CHANGED})
+done = convert(repo, apply=True)
+check(
+    "a guard script changed beyond gatehouse#150's lines is kept, not overwritten",
+    GUARD_CHANGED != OLD_GUARD
+    and done.returncode == 0
+    and snapshot(repo)[".github/workflows/gatehouse.yml"] == GUARD_CHANGED,
+    done.stderr,
+)
+GUARD_ENV = OLD_GUARD.replace(
+    "          EVENT: ${{ github.event_name }}\n",
+    "          EVENT: ${{ github.event_name }}\n          EXTRA: kept\n",
+)
+repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": GUARD_ENV})
+done = convert(repo, apply=True)
+check(
+    "an older guard whose step has its own env is kept, not overwritten",
+    GUARD_ENV != OLD_GUARD
+    and done.returncode == 0
+    and snapshot(repo)[".github/workflows/gatehouse.yml"] == GUARD_ENV,
+    done.stderr,
+)
+check("the gatehouse example's guard covers .sdlc/", "|\\.sdlc)/" in GATEHOUSE)
 
 
 def main() -> int:

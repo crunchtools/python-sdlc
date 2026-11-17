@@ -681,9 +681,17 @@ check(
 smoke = by_check["container-smoke"]
 words = smoke[3].split(S.UNIT_SEPARATOR)
 check(
-    "container-smoke is host-up, its first word the seconds",
-    smoke[2] == "host-up" and words[0] == str(S.SMOKE_SECONDS) and words[1:3] == ["podman", "run"],
+    "container-smoke is advisory by default, its first word the seconds",
+    smoke[2] == "host-up-advisory"
+    and words[0] == str(S.SMOKE_SECONDS)
+    and words[1:3] == ["podman", "run"],
     str(smoke),
+)
+gated = {r[0]: r for r in container_plan("ci", "[tool.sdlc.ci.container-smoke]\ngate = true\n")}
+check("container-smoke gates with gate = true", gated["container-smoke"][2] == "host-up")
+check(
+    "container-smoke gate must be a boolean",
+    cannot_run(container_plan, "ci", '[tool.sdlc.ci.container-smoke]\ngate = "yes"\n') is not None,
 )
 check("container-smoke has no network by default", "--network" in words and "none" in words)
 check("container-smoke never pulls what it judges", "--pull=never" in words, str(words))
