@@ -101,8 +101,13 @@ nested `pyproject.toml` still applies to the files under it.
 | Command | Runs |
 |---|---|
 | `commit` | ruff-check, ruff-format, gourmand, hooks-installed |
-| `push` | mypy, pytest, gourmand, gatehouse, semgrep, pip-audit, constitution, codeql |
-| `ci` | mypy, pytest, semgrep, pip-audit, constitution, codeql |
+| `push` | lint, mypy, pytest, gourmand, gatehouse, semgrep, pip-audit, constitution, codeql |
+| `ci` | lint, mypy, pytest, semgrep, pip-audit, constitution, codeql |
+
+`ruff-check` and `ruff-format` fix what they find, so they pass on anything
+fixable. `lint` is the same two tools as a verdict — `ruff check --no-fix` and
+`ruff format --check`, changing nothing — and it is the only ruff that push
+and ci run.
 
 `sdlc tiers` prints what each command runs in the repo you are in, and which
 lane each check runs in.
@@ -197,7 +202,7 @@ One rule for all three blocks:
 
 - `checks` **adds** to that command's defaults; `skip` removes from them.
   What push skips, ci skips too.
-- **`[tool.sdlc.ci] skip` may not name a push verdict** — mypy, pytest,
+- **`[tool.sdlc.ci] skip` may not name a push verdict** — lint, mypy, pytest,
   semgrep, pip-audit, constitution or codeql. Constitution XII says CI runs
   push's checks except Gourmand and Gatehouse, and this tool decides which two
   those are. Skipping a verdict in ci alone leaves it on pre-push, which is a
@@ -238,7 +243,7 @@ tests = ["tests/image/"]
 | `semgrep` | `config` (default `.semgrep`), `tests` (default `.semgrep/run-tests.sh`), `paths` (default `["."]`) |
 | `codeql` | `config` (default `.github/codeql/codeql-config.yml`), `baseline` (default `.sdlc/codeql-baseline.json`) |
 | `constitution` | `manifest` (default `.specify/memory/constitution.md`) |
-| `ruff-check`, `ruff-format`, `mypy`, `gourmand`, `gatehouse`, `pip-audit`, `hooks-installed` | none |
+| `ruff-check`, `ruff-format`, `lint`, `mypy`, `gourmand`, `gatehouse`, `pip-audit`, `hooks-installed` | none |
 
 ### Kinds, for a repo's own checks
 
