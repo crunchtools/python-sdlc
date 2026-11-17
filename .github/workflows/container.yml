@@ -88,7 +88,7 @@ jobs:
           set -eu
           podman run --rm -v "$PWD:/mnt:ro,z" -w /mnt \
             docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh \
-            tests/test_host_contract.sh scripts/release-version.sh
+            tests/test_host_contract.sh tests/test_container_stack.sh scripts/release-version.sh
           tests/test_host_contract.sh
           tests/test_release_version.py
 
@@ -129,6 +129,12 @@ jobs:
               --entrypoint /opt/constitution-venv/bin/python3 \
               "localhost/python-sdlc:$GITHUB_SHA" "$t"
           done
+
+      # The container stack through the real launcher and a real podman: the
+      # image mount grype scans is something only podman can prove.
+      - name: Container stack end to end
+        if: env.IS_TAG != 'true'
+        run: tests/test_container_stack.sh "localhost/python-sdlc:$GITHUB_SHA"
 
       - name: Log in to Quay
         if: github.event_name != 'pull_request'
