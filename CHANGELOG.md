@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-17
+
+### Changed
+
+- gatehouse 0.25.2 -> 0.26.0.
+
 ## [0.7.0] - 2026-11-17
 
 ### Changed
