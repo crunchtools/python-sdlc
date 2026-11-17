@@ -338,6 +338,15 @@ check(
     refused.stderr,
 )
 
+for broken in ("repos: [\n", "- a list\n"):
+    repo = make_repo({".pre-commit-config.yaml": broken})
+    refused = convert(repo)
+    check(
+        f"a hooks file that is not a YAML mapping ({broken.strip()!r}) is refused, not a traceback",
+        refused.returncode == REFUSED and "Traceback" not in refused.stderr,
+        refused.stderr,
+    )
+
 repo = make_repo({".pre-commit-config.yaml": "repos: []\n"})
 refused = convert(repo)
 check(
@@ -374,6 +383,99 @@ check(
     after[".github/workflows/gatehouse.yml"] == custom
     and "kept: .github/workflows/gatehouse.yml" in done.stderr,
 )
+
+
+# A mixed workflow whose `sdlc ci` step is not the exact pinned form, or has
+# two of them, is not rewritten by guesswork.
+for label, text in (
+    ("an edited pinned step", MIXED.replace("--depth 1", "--depth 2")),
+    ("two sdlc ci steps", MIXED + PINNED_STEP),
+):
+    repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/tests.yml": text})
+    before = snapshot(repo)
+    refused = convert(repo, apply=True)
+    check(
+        f"mixed: {label} is refused (exit 2) and nothing is written",
+        refused.returncode == REFUSED and snapshot(repo) == before,
+        refused.stderr,
+    )
+
+# Standalone hooks sharing their `repo: local` item with a hook of the repo's
+# own: only the two standalone hooks go.
+OWN_HOOK = """\
+      - id: shellcheck
+        name: shellcheck
+        entry: podman run --rm -v .:/mnt:ro,z -w /mnt docker.io/koalaman/shellcheck:v0.11.0 run.sh
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+"""
+repo = make_repo({".pre-commit-config.yaml": STANDALONE_HOOKS.replace("    hooks:\n", "    hooks:\n" + OWN_HOOK, 1)})
+done = convert(repo, apply=True)
+hooks = yaml.safe_load(snapshot(repo)[".pre-commit-config.yaml"])
+local = [[h["id"] for h in r["hooks"]] for r in hooks["repos"] if r["repo"] == "local"]
+check(
+    "a repo's own local hook survives beside the floating ones, with its settings",
+    done.returncode == 0
+    and local == [["shellcheck"], ["sdlc-commit", "sdlc-push"]]
+    and hooks["repos"][0]["hooks"][0]["stages"] == ["pre-commit"],
+    f"{local} {done.stderr}",
+)
+
+# ---------------------------------------------- what the stub would drop
+
+# A job carrying more than examples/ci.yml has -- a step, an env, a service --
+# keeps its workflow; only its `sdlc ci` step is rewritten.
+richer = OLD_CI.replace(
+    "      - uses: actions/checkout@v7\n",
+    "      - uses: actions/checkout@v7\n      - run: make generated-files\n",
+)
+repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": richer})
+done = convert(repo, apply=True)
+after = snapshot(repo)
+check(
+    "a richer sdlc ci job keeps its extra step, floated in place",
+    done.returncode == 0
+    and "make generated-files" in after[".github/workflows/ci.yml"]
+    and "\n          .sdlc/bin/sdlc ci\n" in after[".github/workflows/ci.yml"],
+    done.stderr,
+)
+for extra in ("    env:\n      FOO: bar\n", "    services:\n      db:\n        image: x\n"):
+    job_level = OLD_CI.replace(
+        "    runs-on: ubuntu-latest\n", f"    runs-on: ubuntu-latest\n{extra}", 1
+    )
+    repo = make_repo(
+        {".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": job_level}
+    )
+    done = convert(repo, apply=True)
+    check(
+        f"a job with {extra.split(':')[0].strip()} is not replaced by the stub",
+        extra in snapshot(repo)[".github/workflows/ci.yml"],
+        done.stderr,
+    )
+
+# ------------------------------------------------------------- symlinks
+
+# --apply writes, deletes and chmods. A checkout whose planned paths link
+# elsewhere must not steer those at the runner's own files.
+outside = Path(tempfile.mkdtemp()) / "victim"
+outside.write_text("mine\n")
+for linked in (".pre-commit-config.yaml", ".sdlc", ".github/workflows/gourmand.yml"):
+    files = {".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": OLD_CI}
+    repo = make_repo({k: v for k, v in files.items() if k != linked})
+    target = repo / linked
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()
+    target.symlink_to(outside.parent if linked == ".sdlc" else outside)
+    refused = convert(repo, apply=True)
+    check(
+        f"a symlinked {linked} is refused and nothing outside is touched",
+        refused.returncode == REFUSED
+        and outside.read_text() == "mine\n"
+        and not (outside.parent / "bin").exists(),
+        refused.stderr,
+    )
 
 
 def main() -> int:

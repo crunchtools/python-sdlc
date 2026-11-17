@@ -91,6 +91,19 @@ class RefusedError(Exception):
 # ------------------------------------------------------------------ templates
 
 
+def parse(name: str, text: str) -> dict:
+    """A YAML mapping, or a refusal naming the file."""
+    try:
+        parsed = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise RefusedError(f"{name} is not YAML: {exc}") from exc
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        raise RefusedError(f"{name} is not a YAML mapping")
+    return parsed
+
+
 def floating_hooks_item() -> str:
     """The `- repo: local` item of examples/pre-commit-floating.yaml."""
     text = HOOKS_TEMPLATE.read_text()
@@ -181,7 +194,7 @@ def convert_hooks(text: str) -> str:
     template = HOOKS_TEMPLATE.read_text()
     if text == template:
         return text
-    repos = (yaml.safe_load(text) or {}).get("repos") or []
+    repos = parse(".pre-commit-config.yaml", text).get("repos") or []
     refuse_hooks(repos)
     if only_replaced(repos):
         # Nothing else in it: the template, header and all, since the old
@@ -203,9 +216,8 @@ def convert_hooks(text: str) -> str:
 # ------------------------------------------------------------------ workflows
 
 
-def jobs_of(text: str) -> dict:
-    parsed = yaml.safe_load(text) or {}
-    jobs = parsed.get("jobs") if isinstance(parsed, dict) else None
+def jobs_of(parsed: dict) -> dict:
+    jobs = parsed.get("jobs")
     return jobs if isinstance(jobs, dict) else {}
 
 
@@ -222,6 +234,41 @@ def is_sdlc_job(job: object) -> bool:
 
 def is_gourmand_job(job: object) -> bool:
     return isinstance(job, dict) and bool(GOURMAND_CALL.match(str(job.get("uses", ""))))
+
+
+# What examples/ci.yml replaces whole: a job with nothing on it but these keys,
+# and steps that are only the checkout and the `sdlc ci` step. Anything more --
+# another step, a service, an env, a matrix -- is something ci.yml would
+# drop, so that workflow keeps its place and only its step is rewritten.
+COVERED_SDLC_KEYS = {"name", "runs-on", "steps", "permissions"}
+COVERED_GOURMAND_KEYS = {"name", "uses"}
+COVERED_WORKFLOW_KEYS = {"name", True, "on", "permissions", "jobs"}  # YAML 1.1 reads on: as True
+CHECKOUT = re.compile(r"^actions/checkout@")
+
+
+def is_covered_step(step: object) -> bool:
+    if not isinstance(step, dict):
+        return False
+    if CHECKOUT.match(str(step.get("uses", ""))):
+        return set(step) <= {"uses", "with"} and set(step.get("with") or {}) <= {
+            "persist-credentials"
+        }
+    run = str(step.get("run", "")) + "\n"
+    rest = PINNED_STEP.sub("", run, count=1).replace("set -eu\n", "", 1).strip()
+    pinned = PINNED_STEP.search(run) is not None and not rest
+    floating = run.strip() == FLOATING_CI_LINE
+    return set(step) <= {"name", "run", "env"} and (pinned or floating)
+
+
+def is_covered_job(job: object) -> bool:
+    """A job examples/ci.yml has in full, so replacing it loses nothing."""
+    if is_gourmand_job(job):
+        return set(job) <= COVERED_GOURMAND_KEYS
+    return (
+        is_sdlc_job(job)
+        and set(job) <= COVERED_SDLC_KEYS
+        and all(is_covered_step(step) for step in job.get("steps") or [])
+    )
 
 
 def float_sdlc_step(name: str, text: str) -> str:
@@ -251,8 +298,10 @@ def classify(files: list[Path]) -> tuple[list[Path], list[Path]]:
     for path in files:
         if path.name.startswith("gatehouse"):
             continue
-        jobs = list(jobs_of(path.read_text()).values())
-        if jobs and all(is_sdlc_job(j) or is_gourmand_job(j) for j in jobs):
+        parsed = parse(path.name, path.read_text())
+        jobs = list(jobs_of(parsed).values())
+        whole = set(parsed) <= COVERED_WORKFLOW_KEYS
+        if jobs and whole and all(is_covered_job(j) for j in jobs):
             covered.append(path)
         elif any(is_sdlc_job(j) for j in jobs):
             mixed.append(path)
@@ -283,16 +332,15 @@ def convert_workflows(repo: Path, planned: dict[Path, str | None], notes: list[s
     gatehouse = wf_dir / "gatehouse.yml"
     canonical = GATEHOUSE_TEMPLATE.read_text()
     current = gatehouse.read_text() if gatehouse.exists() else canonical
-    if yaml.safe_load(current) == yaml.safe_load(canonical):
+    if parse(gatehouse.name, current) == parse(GATEHOUSE_TEMPLATE.name, canonical):
         planned[gatehouse] = canonical
     else:
         notes.append(f"kept: {rel(repo, gatehouse)} (differs from the stub in more than comments)")
 
-    named = {note.split(" ")[1] for note in notes}
     notes += [
         f"kept: {rel(repo, path)}"
         for path in files
-        if path not in planned and rel(repo, path) not in named
+        if path not in planned and path not in covered and path != gatehouse
     ]
 
 
@@ -303,18 +351,35 @@ def rel(repo: Path, path: Path) -> str:
     return str(path.relative_to(repo))
 
 
+def refuse_links(repo: Path, paths: list[Path]) -> None:
+    """Refuse a planned path that is, or sits under, a symlink.
+
+    A checkout is someone else's content: a `.sdlc` or `.pre-commit-config.yaml`
+    that links outside it would have --apply write, delete or chmod a file of
+    the person running this.
+    """
+    for path in paths:
+        for part in [path, *path.parents]:
+            if part == repo:
+                break
+            if part.is_symlink():
+                raise RefusedError(f"{rel(repo, part)} is a symlink; this script writes no links")
+
+
 def plan(repo: Path) -> tuple[dict[Path, str | None], list[str]]:
     """Every file the conversion writes (None: deletes), and what it kept."""
     planned: dict[Path, str | None] = {repo / BOOTSTRAP_AT: BOOTSTRAP.read_text()}
     notes: list[str] = []
     hooks = repo / ".pre-commit-config.yaml"
+    wf_dir = repo / ".github" / "workflows"
+    refuse_links(repo, [hooks, *planned, wf_dir, repo / "pyproject.toml", repo / "sdlc.toml"])
     planned[hooks] = convert_hooks(hooks.read_text() if hooks.exists() else "")
     convert_workflows(repo, planned, notes)
     notes.append(f"writes: {BOOTSTRAP_AT}, executable (python-sdlc's bin/sdlc-bootstrap)")
     # An image reference in anything that survives, and in the repo's config.
-    wf_dir = repo / ".github" / "workflows"
     candidates = [repo / "pyproject.toml", repo / "sdlc.toml"]
     candidates += sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else []
+    refuse_links(repo, candidates)
     for path in candidates:
         if not path.exists() or planned.get(path, "") is None:
             continue
@@ -322,6 +387,7 @@ def plan(repo: Path) -> tuple[dict[Path, str | None], list[str]]:
         moved = re.sub(re.escape(OLD_IMAGE) + r"(?![\w.-])", NEW_IMAGE, text)
         if moved != text:
             planned[path] = moved
+    refuse_links(repo, list(planned))
     return planned, notes
 
 
@@ -363,6 +429,13 @@ def main() -> int:
     for note in notes:
         print(f"convert_repo: {repo.name}: {note}", file=sys.stderr)
     if args.apply:
+        # Again at the moment of writing: plan() refused links, and the
+        # checkout is not ours to trust between then and now.
+        try:
+            refuse_links(repo, list(planned))
+        except RefusedError as exc:
+            print(f"convert_repo: {repo.name}: NOT CONVERTED: {exc}", file=sys.stderr)
+            return 2
         for path, text in planned.items():
             if text is None:
                 path.unlink(missing_ok=True)
