@@ -70,20 +70,36 @@ GOURMAND_CALL = re.compile(r"^crunchtools/gatehouse/\.github/workflows/gourmand\
 SDLC_CI_LINE = re.compile(r"^\s*[\"']?(?:\S*/)?sdlc[\"']?\s+ci\b", re.M)
 
 # The step every converted repo's `sdlc ci` job runs today, rev read from the
-# hooks file and the launcher cloned at it. Matched exactly, indent aside: a
-# step that says anything else is not one this script will guess at.
-PINNED_STEP = re.compile(
-    r"^(?P<i>[ \t]*)rev=\$\(awk "
+# hooks file and the launcher cloned at it, the launcher's path quoted or not.
+# Matched exactly, indent aside: a step that says anything else is not one this
+# script will guess at.
+PINNED_BODY = (
+    r"[ \t]*rev=\$\(awk "
     r"'/repo: https:\\/\\/github\.com\\/crunchtools\\/python-sdlc/ \{f=1; next\}\n"
     r"[ \t]*f && /rev:/ \{print \$2; exit\}' \.pre-commit-config\.yaml\)\n"
     r"[ \t]*\[ -n \"\$rev\" \] \|\| "
     r"\{ echo \"no python-sdlc rev in \.pre-commit-config\.yaml\" >&2; exit 2; \}\n"
     r"[ \t]*git clone -q --depth 1 --branch \"\$rev\" "
     r"https://github\.com/crunchtools/python-sdlc \"\$RUNNER_TEMP/sdlc\"\n"
-    r"[ \t]*\$RUNNER_TEMP/sdlc/bin/sdlc ci\n",
+    r"[ \t]*(?P<q>\"?)\$RUNNER_TEMP/sdlc/bin/sdlc(?P=q) ci\n"
+)
+PINNED_STEP = re.compile(r"^" + PINNED_BODY, re.M)
+STEP_NAME = re.compile(r"^(?P<i>[ \t]*)- name: sdlc ci\n(?P<j>[ \t]*)run: \|\n", re.M)
+# The whole pinned step: its name, a `set -eu` the old form opened with, and
+# the pinned body, with no line after it still inside the `run: |` block. The
+# validator wants the step's run to be exactly the launcher, so the block goes.
+WHOLE_STEP = re.compile(
+    r"^(?P<i>[ \t]*)- name: sdlc ci\n(?P<j>[ \t]*)run: \|\n"
+    r"(?:[ \t]*set -eu\n)?" + PINNED_BODY + r"(?!(?P=j)[ \t]+\S)",
     re.M,
 )
-STEP_NAME = re.compile(r"^(?P<i>[ \t]*)- name: sdlc ci\n(?P<j>[ \t]*)run: \|\n", re.M)
+# What an earlier convert_repo.py left: the launcher still inside a block that
+# opens with `set -eu`, which v1.46.0's exact-run check fails.
+LEFTOVER_RUN = re.compile(
+    rf"^(?P<j>[ \t]*)run: \|\n[ \t]*set -eu\n[ \t]*{re.escape(FLOATING_CI_LINE)}\n"
+    r"(?!(?P=j)[ \t]+\S)",
+    re.M,
+)
 
 
 class RefusedError(Exception):
@@ -362,21 +378,23 @@ def is_covered_workflow(parsed: dict, jobs: list) -> bool:
 def float_sdlc_step(name: str, text: str) -> str:
     """The pinned `sdlc ci` step of a workflow the stub cannot replace, floated."""
     if not PINNED_STEP.search(text):
-        if re.search(rf"^\s*{re.escape(FLOATING_CI_LINE)}\s*$", text, re.M):
+        if LEFTOVER_RUN.search(text):
+            return LEFTOVER_RUN.sub(lambda m: f"{m.group('j')}run: {FLOATING_CI_LINE}\n", text)
+        if re.search(rf"^\s*run: {re.escape(FLOATING_CI_LINE)}\s*$", text, re.M):
             return text  # already floating
         raise RefusedError(
             f"{name}: its `sdlc ci` step is not the pinned form this script rewrites"
         )
-    found = STEP_NAME.search(text)
+    found = WHOLE_STEP.search(text)
     if found is None or len(STEP_NAME.findall(text)) != 1:
         raise RefusedError(
-            f"{name}: no single `- name: sdlc ci` step directly followed by `run: |`"
+            f"{name}: no single `- name: sdlc ci` step whose `run: |` is the pinned "
+            f"form and nothing else"
         )
-    j = found.group("j")
+    i, j = found.group("i"), found.group("j")
     env = f"{j}env:\n{j}  SDLC_IMAGE: ${{{{ vars.SDLC_IMAGE }}}}\n"
-    text = text.replace(found.group(0), f"{found.group('i')}- name: sdlc ci\n{env}{j}run: |\n", 1)
-    # `set -eu` stays the step's first line; the clone becomes the bootstrap.
-    return PINNED_STEP.sub(lambda m: f"{m.group('i')}{FLOATING_CI_LINE}\n", text, count=1)
+    floated = f"{i}- name: sdlc ci\n{env}{j}run: {FLOATING_CI_LINE}\n"
+    return text[: found.start()] + floated + text[found.end() :]
 
 
 # gatehouse#150's change to the guard's script, from new back to old: the one
@@ -696,10 +714,13 @@ def verify(repo: Path, planned: dict[Path, str | None]) -> None:
                 f"{rel(repo, path)} still fetches python-sdlc by the rev this removes; "
                 f"convert that step by hand"
             )
-    floating = re.compile(rf"^\s*{re.escape(FLOATING_CI_LINE)}\s*$", re.M)
+    # Exactly the launcher, as constitution v1.46.0's check_floating_ci reads it:
+    # a `set -eu` beside it fails the required check.
     if not any(
         is_sdlc_job(job)
-        and any(floating.search(str(step.get("run", ""))) for step in job.get("steps") or [])
+        and any(
+            str(step.get("run", "")).strip() == FLOATING_CI_LINE for step in job.get("steps") or []
+        )
         for path, text in texts.items()
         for job in jobs_of(parse(rel(repo, path), text)).values()
     ):

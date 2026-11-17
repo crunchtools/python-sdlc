@@ -6,6 +6,17 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- **`convert_repo.py` floats a shared-file `sdlc ci` step to exactly
+  `run: .sdlc/bin/sdlc ci`** (a227). It used to keep `set -eu` above the
+  launcher in a `run: |` block, which constitution v1.46.0's exact-run check
+  fails (gatehouse needed a hand fix). A block an earlier run left that way is
+  rewritten too, a pinned step with more in its block is refused, and the
+  final verify reads the run as the validator does. The pinned form now
+  accepts a quoted launcher path, `"$RUNNER_TEMP/sdlc/bin/sdlc" ci`, which
+  made the fleet wave refuse gatehouse.
+
 ## [0.9.0] - 2026-11-17
 
 ### Added

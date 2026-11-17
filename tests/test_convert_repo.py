@@ -324,7 +324,8 @@ check("mixed: the other job is kept", "make test" in tests_yml)
 check("mixed: gourmand.yml is kept, no stub took it", ".github/workflows/gourmand.yml" in after)
 check(
     "mixed: the step floats, reading SDLC_IMAGE from the repository variable",
-    "\n          .sdlc/bin/sdlc ci\n" in tests_yml
+    "\n        run: .sdlc/bin/sdlc ci\n" in tests_yml
+    and "set -eu" not in tests_yml
     and "SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}" in tests_yml
     and "git clone" not in tests_yml,
 )
@@ -404,11 +405,41 @@ check(
 )
 
 
+# constitution v1.46.0 wants the step's run to be exactly the launcher: no
+# `set -eu` left above it. gatehouse's ci.yml quoted the launcher's path, and an
+# earlier convert_repo.py left `set -eu` in the block; both float to the exact line.
+for label, text in (
+    (
+        "a quoted launcher path",
+        MIXED.replace("$RUNNER_TEMP/sdlc/bin/sdlc ci", '"$RUNNER_TEMP/sdlc/bin/sdlc" ci'),
+    ),
+    (
+        "the leftover `set -eu` block",
+        MIXED.replace(
+            PINNED_STEP.split("run: |\n", 1)[1], "          set -eu\n          .sdlc/bin/sdlc ci\n"
+        ),
+    ),
+):
+    repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/tests.yml": text})
+    done = convert(repo, apply=True)
+    steps = yaml.safe_load(snapshot(repo)[".github/workflows/tests.yml"])["jobs"]["sdlc"]["steps"]
+    check(
+        f"mixed: {label} floats to a run that is exactly `.sdlc/bin/sdlc ci`",
+        done.returncode == 0 and [s.get("run") for s in steps] == [".sdlc/bin/sdlc ci"],
+        f"{steps} {done.stderr}",
+    )
+    check(f"mixed: {label}: a second run finds nothing to do", convert(repo).stdout == "")
+
 # A mixed workflow whose `sdlc ci` step is not the exact pinned form, or has
 # two of them, is not rewritten by guesswork.
 for label, text in (
     ("an edited pinned step", MIXED.replace("--depth 1", "--depth 2")),
     ("two sdlc ci steps", MIXED + PINNED_STEP),
+    ("a line after the pinned body", MIXED + "          echo done\n"),
+    (
+        "mismatched quotes",
+        MIXED.replace("$RUNNER_TEMP/sdlc/bin/sdlc ci", '"$RUNNER_TEMP/sdlc/bin/sdlc ci'),
+    ),
 ):
     repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/tests.yml": text})
     before = snapshot(repo)
@@ -462,7 +493,7 @@ check(
     "a richer sdlc ci job keeps its extra step, floated in place",
     done.returncode == 0
     and "make generated-files" in after[".github/workflows/ci.yml"]
-    and "\n          .sdlc/bin/sdlc ci\n" in after[".github/workflows/ci.yml"],
+    and "\n        run: .sdlc/bin/sdlc ci\n" in after[".github/workflows/ci.yml"],
     done.stderr,
 )
 for extra in ("    env:\n      FOO: bar\n", "    services:\n      db:\n        image: x\n"):
@@ -512,7 +543,7 @@ for label, old_text, new_text in (
         f"a ci.yml with {label} keeps it, its step floated in place",
         done.returncode == 0
         and new_text.strip() in kept
-        and "\n          .sdlc/bin/sdlc ci\n" in kept,
+        and "\n        run: .sdlc/bin/sdlc ci\n" in kept,
         done.stderr,
     )
 
