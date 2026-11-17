@@ -477,6 +477,43 @@ for extra in ("    env:\n      FOO: bar\n", "    services:\n      db:\n        i
         done.stderr,
     )
 
+# Events and permissions are part of what a workflow does. One that runs on
+# more than the stub does, or with other permissions, is not replaced.
+for label, old_text, new_text in (
+    (
+        "a schedule",
+        "on:\n  pull_request:\n",
+        "on:\n  pull_request:\n  schedule:\n    - cron: '0 6 * * 1'\n",
+    ),
+    (
+        "a release branch",
+        "on:\n  pull_request:\n",
+        "on:\n  pull_request:\n  push:\n    branches: [release]\n",
+    ),
+    ("a path filter", "on:\n  pull_request:\n", "on:\n  pull_request:\n    paths: ['src/**']\n"),
+    (
+        "workflow permissions",
+        "on:\n  pull_request:\n",
+        "on:\n  pull_request:\npermissions:\n  contents: write\n",
+    ),
+    (
+        "job permissions",
+        "    runs-on: ubuntu-latest\n",
+        "    runs-on: ubuntu-latest\n    permissions:\n      packages: write\n",
+    ),
+):
+    text = OLD_CI.replace(old_text, new_text, 1)
+    repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": text})
+    done = convert(repo, apply=True)
+    kept = snapshot(repo)[".github/workflows/ci.yml"]
+    check(
+        f"a ci.yml with {label} keeps it, its step floated in place",
+        done.returncode == 0
+        and new_text.strip() in kept
+        and "\n          .sdlc/bin/sdlc ci\n" in kept,
+        done.stderr,
+    )
+
 # ------------------------------------------------------------- symlinks
 
 # --apply writes, deletes and chmods. A checkout whose planned paths link

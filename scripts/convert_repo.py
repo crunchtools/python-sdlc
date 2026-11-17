@@ -260,6 +260,12 @@ def is_covered_step(step: object) -> bool:
     return set(step) <= {"name", "run", "env"} and (pinned or floating)
 
 
+READ_ONLY = {"contents": "read"}
+# The events examples/ci.yml answers. A workflow that also runs on a schedule, a
+# release, another branch or a path filter would lose that by being replaced.
+STUB_BRANCHES = {"main", "master"}
+
+
 def is_covered_job(job: object) -> bool:
     """A job examples/ci.yml has in full, so replacing it loses nothing."""
     if is_gourmand_job(job):
@@ -267,7 +273,37 @@ def is_covered_job(job: object) -> bool:
     return (
         is_sdlc_job(job)
         and set(job) <= COVERED_SDLC_KEYS
+        and job.get("permissions", READ_ONLY) == READ_ONLY
         and all(is_covered_step(step) for step in job.get("steps") or [])
+    )
+
+
+def is_covered_trigger(on: object) -> bool:
+    """`on:` asks for no more than examples/ci.yml answers."""
+    if isinstance(on, str):
+        on = {on: None}
+    if isinstance(on, list):
+        on = dict.fromkeys(on)
+    if not isinstance(on, dict) or not set(on) <= {"push", "pull_request", "workflow_dispatch"}:
+        return False
+    # examples/ci.yml answers every pull request, so a pull_request limited to the
+    # default branch loses nothing by being replaced; a push must be to one.
+    return not on.get("workflow_dispatch") and all(
+        isinstance(on.get(event) or {}, dict)
+        and set(on.get(event) or {}) <= {"branches"}
+        and set((on.get(event) or {}).get("branches") or []) <= STUB_BRANCHES
+        for event in ("push", "pull_request")
+    )
+
+
+def is_covered_workflow(parsed: dict, jobs: list) -> bool:
+    """A workflow examples/ci.yml replaces with nothing lost: events, permissions, jobs."""
+    return (
+        bool(jobs)
+        and set(parsed) <= COVERED_WORKFLOW_KEYS
+        and is_covered_trigger(parsed.get("on", parsed.get(True)))
+        and parsed.get("permissions", READ_ONLY) == READ_ONLY
+        and all(is_covered_job(j) for j in jobs)
     )
 
 
@@ -300,8 +336,7 @@ def classify(files: list[Path]) -> tuple[list[Path], list[Path]]:
             continue
         parsed = parse(path.name, path.read_text())
         jobs = list(jobs_of(parsed).values())
-        whole = set(parsed) <= COVERED_WORKFLOW_KEYS
-        if jobs and whole and all(is_covered_job(j) for j in jobs):
+        if is_covered_workflow(parsed, jobs):
             covered.append(path)
         elif any(is_sdlc_job(j) for j in jobs):
             mixed.append(path)
