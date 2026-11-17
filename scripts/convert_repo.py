@@ -406,22 +406,25 @@ def same_gatehouse(current: dict, canonical: dict) -> bool:
     brought up to date; any other difference in any step, the guard's
     included, keeps the file as it is.
     """
-
-    def guard_runs(doc: dict) -> list:
-        guard = (doc.get("jobs") or {}).get("guard")
-        steps = guard.get("steps") if isinstance(guard, dict) else None
-        return [s.get("run") if isinstance(s, dict) else None for s in steps or []]
-
     if current == canonical:
         return True
-    old, new = guard_runs(current), guard_runs(canonical)
-    if len(old) != len(new):
+    guard = (current.get("jobs") or {}).get("guard")
+    new = (canonical.get("jobs") or {}).get("guard") or {}
+    steps = guard.get("steps") if isinstance(guard, dict) else None
+    if not isinstance(steps, list) or len(steps) != len(new.get("steps") or []):
         return False
-    before = [prior_guard(run) if isinstance(run, str) else run for run in new]
-    if old != before or old == new:
-        return False
-    jobs = dict(current["jobs"])
-    jobs["guard"] = {**jobs["guard"], "steps": canonical["jobs"]["guard"]["steps"]}
+    # Only a `run` that is exactly the pre-#150 script becomes the new one;
+    # every other field of every step is then compared as it is.
+    updated = [
+        {**step, "run": want["run"]}
+        if isinstance(step, dict)
+        and isinstance(want, dict)
+        and isinstance(want.get("run"), str)
+        and step.get("run") == prior_guard(want["run"])
+        else step
+        for step, want in zip(steps, new["steps"], strict=True)
+    ]
+    jobs = {**current["jobs"], "guard": {**guard, "steps": updated}}
     return {**current, "jobs": jobs} == canonical
 
 

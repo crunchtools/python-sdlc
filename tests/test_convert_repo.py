@@ -816,6 +816,19 @@ check(
     and snapshot(repo)[".github/workflows/gatehouse.yml"] == GUARD_CHANGED,
     done.stderr,
 )
+GUARD_ENV = OLD_GUARD.replace(
+    "          EVENT: ${{ github.event_name }}\n",
+    "          EVENT: ${{ github.event_name }}\n          EXTRA: kept\n",
+)
+repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": GUARD_ENV})
+done = convert(repo, apply=True)
+check(
+    "an older guard whose step has its own env is kept, not overwritten",
+    GUARD_ENV != OLD_GUARD
+    and done.returncode == 0
+    and snapshot(repo)[".github/workflows/gatehouse.yml"] == GUARD_ENV,
+    done.stderr,
+)
 check("the gatehouse example's guard covers .sdlc/", "|\\.sdlc)/" in GATEHOUSE)
 
 
