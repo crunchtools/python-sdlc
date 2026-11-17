@@ -1,11 +1,11 @@
-# A Gourmand or Gatehouse release reaches every Python repo in three steps, and
-# this is the first: move the pin and bump this image's patch version, as a pull
+# A Gourmand or Gatehouse release reaches every repo in three steps, and this
+# is the first: move the pin and bump this image's patch version, as a pull
 # request that merges itself when CI is green.
 #
 #   1. this workflow      new tool release -> PR moving the pin here
 #   2. release.yml        that PR merges -> python-sdlc vX.Y.Z is released
-#   3. container.yml      the release is promoted -> a bump PR in every repo
-#                         that pins python-sdlc (scripts/bump_consumers.py)
+#   3. container.yml      the release is promoted to sdlc:latest, which every
+#                         converted repo floats on: no pull request per repo
 #
 # Gourmand and Gatehouse send `parent-image-updated` when they release. The
 # weekly run catches a dispatch that was lost.

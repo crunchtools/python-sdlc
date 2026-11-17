@@ -47,6 +47,12 @@ All notable changes to this project are documented here, following
   packages), which the fleet does on purpose. Warnings such as DL3002 are
   printed and do not fail. A repo's `.hadolint.yaml` replaces these defaults.
 
+### Removed
+
+- `bump-consumers` (and `scripts/bump_consumers.py`): repos float on
+  `sdlc:latest`, so a release opens no bump pull requests. A repo still pinned
+  by `rev:` moves when it converts.
+
 ### Fixed
 
 - `container-smoke` removes the smoke container with `-v`, so an image that

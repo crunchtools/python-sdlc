@@ -457,8 +457,9 @@ sees it. `sdlc codeql-baseline` writes it from the current findings. See
 ## How a new Gourmand or Gatehouse arrives
 
 Their releases trigger a rebuild here, which is released as a new python-sdlc
-version, which opens a version-bump pull request in each Python repo. The laptop
-then runs the reviewer CI runs.
+version and promoted to `sdlc:latest`. Every converted repo floats on that tag,
+so the laptop then runs the reviewer CI runs, with no pull request per repo. A
+repo still pinned by `rev:` moves only when it converts or bumps by hand.
 
 ## Host contract
 
