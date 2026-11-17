@@ -535,7 +535,7 @@ check(
     refused.returncode == REFUSED and snapshot(repo) == before,
     refused.stderr,
 )
-for event in ("pull_request_target", "workflow_run"):
+for event in ("pull_request_target", "workflow_run", "issue_comment", "pull_request_review"):
     privileged = MIXED.replace("on:\n  pull_request:\n", f"on:\n  {event}:\n")
     repo = make_repo(
         {".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/tests.yml": privileged}

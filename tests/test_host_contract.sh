@@ -933,7 +933,8 @@ for good in "0.9.0:quay.io/crunchtools/sdlc:0.9.0" \
 done
 for bad_ in localhost/sdlc:dev quay.io/evil/sdlc:latest quay.io/crunchtools/sdlcx:latest \
             1.2 v1.2.3 1.2.3.4 1..3 @sha256:abc "@sha256:$(printf '%s' "$D64" | tr a G)" \
-            'main;id' '--privileged' quay.io/crunchtools/sdlc; do
+            'main;id' '--privileged' quay.io/crunchtools/sdlc \
+            quay.io/crunchtools/sdlc1.2.3 quay.io/crunchtools/sdlcmain; do
   log_mark
   rc=0
   SDLC_IMAGE=$bad_ boot tiers > "$RUN/out" 2>&1 || rc=$?

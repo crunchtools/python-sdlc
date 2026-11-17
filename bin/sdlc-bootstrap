@@ -30,8 +30,10 @@ refuse() {
 
 # The value, with the repository named in full or not at all.
 want=${SDLC_IMAGE:-latest}
-want=${want#"$FLEET"}
-want=${want#:}
+case $want in
+  "$FLEET":*) want=${want#"$FLEET":} ;;
+  "$FLEET"@*) want=${want#"$FLEET"} ;;
+esac
 case $want in
   main|latest) image=$FLEET:$want ;;
   @sha256:*)

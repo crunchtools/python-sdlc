@@ -304,9 +304,12 @@ def is_covered_step(step: object) -> bool:
 
 FLOATING_ENV = {"SDLC_IMAGE": "${{ vars.SDLC_IMAGE }}"}
 GOURMAND_JOB_NAME = "Code Quality (Gourmand)"  # a required check: never renamed by this
-# Events that run with secrets on code a pull request controls. The bootstrap
-# now comes from the checkout, so a step running it there would run PR code.
-PRIVILEGED_EVENTS = {"pull_request_target", "workflow_run"}
+# The events a floated `sdlc ci` step may run under. The bootstrap now comes
+# from the checkout, so under any event that hands secrets to code a pull
+# request controls (pull_request_target, workflow_run, issue_comment and the
+# rest) it would run that code with them. An allowlist, not a denylist: an
+# event added to GitHub later is refused until someone has looked at it.
+FLOATABLE_EVENTS = {"push", "pull_request", "workflow_dispatch", "schedule", "merge_group"}
 READ_ONLY = {"contents": "read"}
 # The events examples/ci.yml answers. A workflow that also runs on a schedule, a
 # release, another branch or a path filter would lose that by being replaced.
@@ -401,10 +404,11 @@ def convert_workflows(repo: Path, planned: dict[Path, str | None], notes: list[s
             on = parse(path.name, path.read_text())
             on = on.get("on", on.get(True))
             events = set(on) if isinstance(on, (dict, list)) else {on}
-            if events & PRIVILEGED_EVENTS:
+            if not events <= FLOATABLE_EVENTS:
+                others = ", ".join(sorted(map(str, events - FLOATABLE_EVENTS)))
                 raise RefusedError(
-                    f"{rel(repo, path)} runs on {', '.join(sorted(events & PRIVILEGED_EVENTS))}; "
-                    f"its `sdlc ci` step would run the pull request's .sdlc/bin/sdlc with secrets"
+                    f"{rel(repo, path)} runs on {others}; "
+                    f"its `sdlc ci` step could run a pull request's .sdlc/bin/sdlc with secrets"
                 )
             planned[path] = float_sdlc_step(rel(repo, path), path.read_text())
             notes.append(f"floated: {rel(repo, path)} (its `sdlc ci` job shares the file)")
