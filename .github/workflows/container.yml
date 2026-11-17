@@ -88,8 +88,10 @@ jobs:
           set -eu
           podman run --rm -v "$PWD:/mnt:ro,z" -w /mnt \
             docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d bin/sdlc tests/contract.sh \
-            tests/test_host_contract.sh tests/test_container_stack.sh scripts/release-version.sh
+            tests/test_host_contract.sh tests/test_container_stack.sh scripts/release-version.sh \
+            scripts/revision-of.sh tests/test_revision_of.sh
           tests/test_host_contract.sh
+          tests/test_revision_of.sh
           tests/test_release_version.py
 
       - name: Build
@@ -292,26 +294,11 @@ jobs:
               [ "$got" = "$want" ] || { echo "$repo:$1 resolves to $got, not the tested $want" >&2; exit 1; }
             done
           }
-          # The published revision of a tag, or nothing when the tag does not
-          # exist yet. Anything else -- auth, network, a registry error --
-          # stops the job: a guard that cannot read what it guards would
-          # otherwise wave the move through.
-          revision_of() {
-            if out=$(skopeo inspect --format \
-                '{{ index .Labels "org.opencontainers.image.revision" }}' \
-                "docker://$1" 2>"$RUNNER_TEMP/inspect.err"); then
-              printf '%s' "$out"
-            elif grep -qi 'manifest unknown' "$RUNNER_TEMP/inspect.err"; then
-              :
-            else
-              echo "cannot read $1 to guard it:" >&2
-              cat "$RUNNER_TEMP/inspect.err" >&2
-              exit 1
-            fi
-          }
           if [ -n "$floating" ]; then
             for repo in "$QUAY" "$SDLC"; do
-              current=$(revision_of "$repo:$floating")
+              # Fails closed: only an absent tag reads as empty
+              # (scripts/revision-of.sh, tests/test_revision_of.sh).
+              current=$(scripts/revision-of.sh "$repo:$floating")
               if [ -n "${current:-}" ] && [ "$current" != "$GITHUB_SHA" ]; then
                 if git merge-base --is-ancestor "$GITHUB_SHA" "$current" 2>/dev/null; then
                   echo "refusing: $repo:$floating is $current, which already contains $GITHUB_SHA" >&2
