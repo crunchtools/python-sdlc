@@ -776,7 +776,15 @@ check(
 
 # ----------------------------- gatehouse: an older guard is brought up to date
 
-OLD_GUARD = GATEHOUSE.replace("^(\\.github/workflows|\\.sdlc)/", "^\\.github/workflows/")
+# The guard as the fleet copied it, before gatehouse#150 added .sdlc/.
+OLD_GUARD = (
+    GATEHOUSE.replace("^(\\.github/workflows|\\.sdlc)/", "^\\.github/workflows/")
+    .replace(
+        "a file out of .github/workflows/ or .sdlc/ unseen",
+        "a workflow out of .github/workflows/ unseen",
+    )
+    .replace("modifies .github/workflows/ or .sdlc/ —", "modifies .github/workflows/ —")
+)
 repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": OLD_GUARD})
 done = convert(repo, apply=True)
 check(
@@ -794,6 +802,18 @@ check(
     CUSTOM != GATEHOUSE
     and done.returncode == 0
     and snapshot(repo)[".github/workflows/gatehouse.yml"] == CUSTOM,
+    done.stderr,
+)
+GUARD_CHANGED = OLD_GUARD.replace(
+    'echo "No workflow files changed."', 'echo "No workflow files changed."\n          make audit'
+)
+repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": GUARD_CHANGED})
+done = convert(repo, apply=True)
+check(
+    "a guard script changed beyond gatehouse#150's lines is kept, not overwritten",
+    GUARD_CHANGED != OLD_GUARD
+    and done.returncode == 0
+    and snapshot(repo)[".github/workflows/gatehouse.yml"] == GUARD_CHANGED,
     done.stderr,
 )
 check("the gatehouse example's guard covers .sdlc/", "|\\.sdlc)/" in GATEHOUSE)

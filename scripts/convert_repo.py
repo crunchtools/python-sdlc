@@ -379,26 +379,50 @@ def float_sdlc_step(name: str, text: str) -> str:
     return PINNED_STEP.sub(lambda m: f"{m.group('i')}{FLOATING_CI_LINE}\n", text, count=1)
 
 
-def same_gatehouse(current: dict, canonical: dict) -> bool:
-    """`current` is examples/gatehouse.yml in all but comments and the guard's script.
+# gatehouse#150's change to the guard's script, from new back to old: the one
+# earlier script a fleet copy may carry and still be brought up to date.
+GUARD_BEFORE_150 = (
+    (
+        "a file out of .github/workflows/ or .sdlc/ unseen",
+        "a workflow out of .github/workflows/ unseen",
+    ),
+    ("'^(\\.github/workflows|\\.sdlc)/'", "'^\\.github/workflows/'"),
+    ("modifies .github/workflows/ or .sdlc/ —", "modifies .github/workflows/ —"),
+)
 
-    The guard's script is the one part gatehouse has changed since the fleet
-    copied it (gatehouse#150: it now refuses a fork's change to .sdlc/ too), so
-    an older copy differing only there is brought up to date, not kept.
+
+def prior_guard(run: str) -> str:
+    """The guard script as it was before gatehouse#150."""
+    for after, prior in GUARD_BEFORE_150:
+        run = run.replace(after, prior)
+    return run
+
+
+def same_gatehouse(current: dict, canonical: dict) -> bool:
+    """`current` is examples/gatehouse.yml in all but comments, or its guard is the one before.
+
+    gatehouse#150 changed the guard's script (it now refuses a fork's change to
+    .sdlc/ too). A copy whose guard script is exactly the one before that is
+    brought up to date; any other difference in any step, the guard's
+    included, keeps the file as it is.
     """
 
-    def without_guard_script(doc: dict) -> dict:
-        jobs = dict(doc.get("jobs") or {})
-        guard = jobs.get("guard")
-        if isinstance(guard, dict):
-            steps = [
-                {k: v for k, v in step.items() if k != "run"} if isinstance(step, dict) else step
-                for step in guard.get("steps") or []
-            ]
-            jobs["guard"] = {**guard, "steps": steps}
-        return {**doc, "jobs": jobs}
+    def guard_runs(doc: dict) -> list:
+        guard = (doc.get("jobs") or {}).get("guard")
+        steps = guard.get("steps") if isinstance(guard, dict) else None
+        return [s.get("run") if isinstance(s, dict) else None for s in steps or []]
 
-    return without_guard_script(current) == without_guard_script(canonical)
+    if current == canonical:
+        return True
+    old, new = guard_runs(current), guard_runs(canonical)
+    if len(old) != len(new):
+        return False
+    before = [prior_guard(run) if isinstance(run, str) else run for run in new]
+    if old != before or old == new:
+        return False
+    jobs = dict(current["jobs"])
+    jobs["guard"] = {**jobs["guard"], "steps": canonical["jobs"]["guard"]["steps"]}
+    return {**current, "jobs": jobs} == canonical
 
 
 def classify(files: list[Path]) -> tuple[list[Path], list[Path]]:
