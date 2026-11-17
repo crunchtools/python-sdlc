@@ -65,6 +65,8 @@ for probe in \
   "gourmand:gourmand --version" \
   "codeql:codeql version --format=terse" \
   "uv:uv --version" \
+  "hadolint:hadolint --version" \
+  "grype:grype version" \
   "git:git --version" \
   "jq:jq --version" \
   "curl:curl --version" \
@@ -105,6 +107,11 @@ check_version semgrep   "$(inside sh -c 'printf %s "$SDLC_SEMGREP_VERSION"')" \
                         "$(inside sh -c 'semgrep --version' 2>&1)"
 check_version pip-audit "$(inside sh -c 'printf %s "$SDLC_PIP_AUDIT_VERSION"')" \
                         "$(inside sh -c 'pip-audit --version' 2>&1)"
+
+check_version hadolint  "$(inside sh -c 'printf %s "$SDLC_HADOLINT_VERSION"')" \
+                        "$(inside sh -c 'hadolint --version' 2>&1)"
+check_version grype     "$(inside sh -c 'printf %s "$SDLC_GRYPE_VERSION"')" \
+                        "$(inside sh -c 'grype version' 2>&1)"
 
 # codeql's bundle name is codeql-bundle-vX.Y.Z and the CLI reports X.Y.Z.
 _bundle=$(inside sh -c 'printf %s "$SDLC_CODEQL_BUNDLE"')
@@ -429,6 +436,40 @@ else
   bad "bin/sdlc inside a container exited $rc (124 means it hung)"
 fi
 
+# ------------------------------------------------------- the container stack
+#
+# A repo with a Containerfile and no pyproject.toml is the container stack and
+# nothing else: no ruff, no pytest, and CI builds, smokes and scans the image.
+# Planned on the real image because detection reads the mounted tree.
+CFIX=$(mktemp -d)
+printf 'FROM quay.io/hummingbird/python:3.14\nUSER 65532\n' > "$CFIX/Containerfile"
+plan=$(podman run --rm -v "$CFIX:/repo:ro,z" -w /repo --entrypoint="" \
+         -e SDLC_HOST_REPO=/host -e SDLC_CACHE_VOLUME=v -e SDLC_IMAGE=gate \
+         "$IMAGE" sdlc plan ci 2>&1 | cut -f1 | awk '!s[$0]++' | tr '\n' ' ')
+want="containerfile-lint constitution container-build container-smoke container-scan "
+if [ "$plan" = "$want" ]; then
+  ok "a Containerfile-only repo plans the container stack in ci"
+else
+  bad "sdlc plan ci on a Containerfile-only repo gave '$plan', want '$want'"
+fi
+if out=$(podman run --rm -v "$CFIX:/repo:ro,z" -w /repo --entrypoint="" \
+           "$IMAGE" sdlc containerfile-lint 2>&1); then
+  ok "containerfile-lint runs clean on a read-only fixture Containerfile"
+else
+  bad "containerfile-lint failed on a clean fixture Containerfile"
+  printf '%s\n' "$out" | sed 's/^/       /' | tail -8
+fi
+printf 'FROM quay.io/hummingbird/python\nRUN cd /tmp && ls\n' > "$CFIX/Containerfile"
+rc=0
+podman run --rm -v "$CFIX:/repo:ro,z" -w /repo --entrypoint="" \
+  "$IMAGE" sdlc containerfile-lint >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ]; then
+  ok "containerfile-lint finds an untagged FROM and a cd (exit 1)"
+else
+  bad "containerfile-lint on a bad Containerfile exited $rc, want 1"
+fi
+rm -rf "$CFIX"
+
 # --------------------------------------- `sdlc versions` matches the build pins
 #
 # The version table is the image's central promise: a consuming repo pins this
@@ -444,7 +485,9 @@ for row in \
   "gourmand:SDLC_GOURMAND_VERSION" \
   "gatehouse:SDLC_GATEHOUSE_VERSION" \
   "codeql:SDLC_CODEQL_BUNDLE" \
-  "uv:SDLC_UV_VERSION"
+  "uv:SDLC_UV_VERSION" \
+  "hadolint:SDLC_HADOLINT_VERSION" \
+  "grype:SDLC_GRYPE_VERSION"
 do
   tool=${row%%:*}
   var=${row#*:}

@@ -81,6 +81,27 @@ cat > "$SHIM/podman" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$LOG"
 for _last in "\$@"; do :; done
+# container-smoke: a detached run records which case it is, and inspect
+# answers that case's state as: Running ExitCode OOMKilled.
+case " \$* " in
+  *" inspect "*)
+    _st=\$(cat "$SHIM/upcase" 2>/dev/null)
+    case "\$_st" in
+      go-up-stays)    _full='true 0 false' ;;
+      go-up-exits-0)  _full='false 0 false' ;;
+      go-up-dies-255) _full='false 255 false' ;;
+      go-up-dies-3)   _full='false 3 false' ;;
+      go-up-oom)      _full='false 137 true' ;;
+      *) exit 125 ;;
+    esac
+    case " \$* " in
+      *ExitCode*) printf '%s\n' "\$_full" ;;
+      *) printf '%s\n' "\${_full%% *}" ;;
+    esac
+    exit 0 ;;
+  *" logs "*) printf 'CONTAINER LOG\n'; exit 0 ;;
+  *" rm -f "*) exit 0 ;;
+esac
 case " \$* " in
   *" plan gatehouse-direct "*)
     printf 'gatehouse${TAB}main${TAB}local${TAB}gatehouse\n' ;;
@@ -118,6 +139,25 @@ case " \$* " in
   *" plan lanes-budget "*)
     printf 'p${TAB}one${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
     printf 'q${TAB}two${TAB}image-ro${TAB}quiet-ok\n' ;;
+  *" plan gate-word "*)
+    printf 'gate-word${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}--${US}@sdlc-image${US}scan-rootfs\n' ;;
+  *" plan inject-up "*)
+    printf 'inject-up${TAB}main${TAB}host-up${TAB}5${US}podman${US}run${US}--${US}--privileged${US}-v${US}/:/host\n' ;;
+  *" plan inject-run "*)
+    printf 'inject-run${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}--${US}-x\n' ;;
+  *" plan inject-comma "*)
+    printf 'inject-comma${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}--${US}a,b\n' ;;
+  *" plan inject-nodd "*)
+    printf 'inject-nodd${TAB}main${TAB}host-up${TAB}5${US}podman${US}run${US}--privileged${US}img\n' ;;
+  *" plan up-"*)
+    _secs=1; _what=\$_last
+    case "\$_last" in up-build) _what=build ;; up-noseconds) _secs=soon ;; esac
+    if [ "\$_what" = build ]; then
+      printf '%s${TAB}main${TAB}host-up${TAB}1${US}podman${US}build${US}-t${US}x${US}.\n' "\$_last"
+    else
+      printf '%s${TAB}main${TAB}host-up${TAB}%s${US}podman${US}run${US}--${US}localhost/x:sdlc${US}go-%s\n' \
+        "\$_last" "\$_secs" "\$_last"
+    fi ;;
   *" plan "*)
     if [ -f "$SHIM/defer-last" ]; then printf 'codeql${TAB}main${TAB}image-ro${TAB}rc-three\n'; exit 0; fi
     if [ -f "$SHIM/defer" ]; then printf 'codeql${TAB}main${TAB}image-ro${TAB}rc-three\n'; fi
@@ -131,6 +171,9 @@ case "\$_last" in
     printf 'START %s\n' "\$_last" >> "$SHIM/race.log"
     printf 'BEGIN %s\n' "\$_last"; sleep 1; printf 'END %s\n' "\$_last"
     printf 'DONE %s\n' "\$_last" >> "$SHIM/race.log" ;;
+  go-up-*)
+    printf '%s\n' "\$_last" > "$SHIM/upcase"
+    case "\$_last" in go-up-podman) exit 125 ;; go-up-127) exit 127 ;; esac ;;
   rc-one)      printf 'RAN rc-one\n'; exit 1 ;;
   rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
   rc-three)    printf 'RAN rc-three\n'; exit 3 ;;
@@ -187,6 +230,49 @@ if [ ! -e "$SHIM/pwned" ]; then
 else
   bad "a host step's word was evaluated as shell"
 fi
+
+printf '\n== a run given time to stay up\n\n'
+
+# container-smoke's step: `host-up`, seconds and then a podman run. The
+# container starts detached and its STATE decides: still running, or exited 0,
+# passes; any other exit, the OOM killer, or an entrypoint that cannot start
+# (126/127) is a finding; podman failing to create it (125) is a 2. A 255 is
+# just another exit -- no clock is consulted.
+for case_ in up-stays:0 up-exits-0:0 up-dies-255:1 up-dies-3:1 up-oom:1 up-127:1 \
+             up-podman:2 up-build:2 up-noseconds:2; do
+  name=${case_%:*}; want=${case_#*:}
+  log_mark
+  PATH="$SHIM" sh bin/sdlc "$name" > "$RUN/out" 2>&1 && rc=0 || rc=$?
+  log_since
+  if [ "$rc" -eq "$want" ]; then
+    ok "host-up $name exits $want"
+  else
+    bad "host-up $name exited $rc, want $want: $(tail -3 "$RUN/out")"
+  fi
+done
+log_mark
+PATH="$SHIM" sh bin/sdlc up-stays >/dev/null 2>&1 || true
+log_since
+if grep -q -- 'run -d --name sdlc-smoke-[0-9-]* --log-driver=k8s-file --cap-drop=all --security-opt=no-new-privileges .* -- localhost/x:sdlc go-up-stays$' "$RUN/podman.log" \
+   && grep -q -- '^rm -f sdlc-smoke-' "$RUN/podman.log"; then
+  ok "host-up runs detached and locked down, and removes the container"
+else
+  bad "host-up's run or cleanup is wrong: $(grep -E 'up-stays|rm -f' "$RUN/podman.log" | tail -2)"
+fi
+
+# A repo's config must never reach the host's podman as an option. The planner
+# refuses such an image; the launcher refuses it again, here, on the host.
+for case_ in inject-up inject-run inject-comma inject-nodd; do
+  log_mark
+  rc=0
+  PATH="$SHIM" sh bin/sdlc "$case_" > "$RUN/out" 2>&1 || rc=$?
+  log_since
+  if [ "$rc" -eq 2 ] && ! grep -q -- '--privileged\|a,b\| -x$' "$RUN/podman.log"; then
+    ok "$case_: an image word that is not an image is refused (exit 2) and never run"
+  else
+    bad "$case_ exited $rc: $(grep -E 'privileged|a,b| -x$' "$RUN/podman.log" | tail -1)"
+  fi
+done
 
 printf '\n== a check deferred to CI\n\n'
 
@@ -620,6 +706,109 @@ if ! grep -q -- '-e SDLC_ARGS' "$RUN/podman.log"; then
   ok "an inherited SDLC_ARGS does not reach a tier"
 else
   bad "a tier forwarded SDLC_ARGS from the environment"
+fi
+
+printf '\n== an image other than the pinned release\n\n'
+
+# The inner loop runs a pull request's image. With no override, nothing about
+# the argv may change: no pull flag, the pinned image. With one, the image is
+# named on every run and a floating tag is pulled when newer.
+pinned="quay.io/crunchtools/python-sdlc:$(tr -d ' \t\n\r' < IMAGE_TAG)"
+last_run() { grep ' run --rm' "$RUN/podman.log" | tail -1; }
+
+log_mark
+PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- " $pinned tiers\$" && ! last_run | grep -q -- '--pull' \
+   && ! grep -q 'NOT THE PINNED RELEASE' "$RUN/out"; then
+  ok "no override: the pinned image, no pull flag, no banner"
+else
+  bad "no override changed the run: $(last_run)"
+fi
+
+log_mark
+SDLC_IMAGE=main PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- '--pull=newer .* quay.io/crunchtools/sdlc:main tiers$' \
+   && grep -q 'NOT THE PINNED RELEASE' "$RUN/out" && grep -q 'set by SDLC_IMAGE' "$RUN/out"; then
+  ok "SDLC_IMAGE=main runs quay.io/crunchtools/sdlc:main, pulled when newer, and says so"
+else
+  bad "SDLC_IMAGE=main: $(last_run) / $(head -3 "$RUN/out")"
+fi
+
+log_mark
+SDLC_IMAGE=localhost/python-sdlc:dev PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- ' localhost/python-sdlc:dev tiers$' && ! last_run | grep -q -- '--pull'; then
+  ok "a local image is run as built, never pulled"
+else
+  bad "SDLC_IMAGE=localhost/...: $(last_run)"
+fi
+
+rc=0
+SDLC_IMAGE='main;touch' PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "a bare SDLC_IMAGE that is not a tag is refused (exit 2)"
+else
+  bad "SDLC_IMAGE='main;touch' exited $rc"
+fi
+
+CREPO=$(mktemp -d)
+git -C "$CREPO" init -q
+printf '[project]\nname = "x"\n\n[tool.sdlc]\nimage = "0.8.0"\n' > "$CREPO/pyproject.toml"
+log_mark
+(cd "$CREPO" && CI='' GITHUB_ACTIONS='' PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- 'SDLC_CONFIG_IMAGE .*quay.io/crunchtools/sdlc:0.8.0 tiers$' \
+   && grep -q 'set by \[tool.sdlc\] image in pyproject.toml' "$RUN/out"; then
+  ok "[tool.sdlc] image = \"0.8.0\" runs that tag and tells the image what it read"
+else
+  bad "[tool.sdlc] image: $(last_run) / $(head -4 "$RUN/out")"
+fi
+log_mark
+(cd "$CREPO" && CI='' GITHUB_ACTIONS='' SDLC_IMAGE=main PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- 'quay.io/crunchtools/sdlc:main tiers$'; then
+  ok "SDLC_IMAGE beats [tool.sdlc] image"
+else
+  bad "SDLC_IMAGE did not beat the repo's image: $(last_run)"
+fi
+# The image is the judge, so a pull request must not pick it: CI and `sdlc ci`
+# refuse the repo's key outright. The planner cannot hold this line, because
+# it runs inside whichever image was chosen.
+for how in 'CI=true' 'GITHUB_ACTIONS=true' 'ci'; do
+  rc=0
+  case "$how" in
+    ci) (cd "$CREPO" && CI='' GITHUB_ACTIONS='' PATH="$SHIM" sh "$OLDPWD/bin/sdlc" ci) > "$RUN/out" 2>&1 || rc=$? ;;
+    *)  (cd "$CREPO" && CI='' GITHUB_ACTIONS='' env "$how" PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || rc=$? ;;
+  esac
+  if [ "$rc" -eq 2 ] && grep -q 'cannot choose the image that judges it' "$RUN/out"; then
+    ok "[tool.sdlc] image is refused under $how (exit 2)"
+  else
+    bad "[tool.sdlc] image under $how exited $rc"
+  fi
+done
+printf '[tool.sdlc]\nimage = "../../evil"\n' > "$CREPO/sdlc.toml"
+rm "$CREPO/pyproject.toml"
+rc=0
+(cd "$CREPO" && CI='' GITHUB_ACTIONS='' PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 2 ] && grep -q 'must be a tag such as' "$RUN/out"; then
+  ok "a repo's image that is not a plain tag is refused (exit 2)"
+else
+  bad "[tool.sdlc] image = ../../evil exited $rc: $(tail -2 "$RUN/out")"
+fi
+rm -rf "$CREPO"
+
+# container-scan runs the gate's own image as a host step, and only the
+# launcher knows which image that is: the plan names it `@sdlc-image`.
+log_mark
+SDLC_IMAGE=main PATH="$SHIM" sh bin/sdlc gate-word >/dev/null 2>&1 || true
+log_since
+if grep -q -- '--cap-drop=all .* quay.io/crunchtools/sdlc:main scan-rootfs$' "$RUN/podman.log" \
+   && ! grep -q '@sdlc-image' "$RUN/podman.log"; then
+  ok "a host step's @sdlc-image is the image this run is on"
+else
+  bad "@sdlc-image was not replaced: $(grep scan-rootfs "$RUN/podman.log" | tail -1)"
 fi
 
 printf '\n== what the containers are given\n\n'

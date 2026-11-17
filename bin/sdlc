@@ -44,9 +44,12 @@ step() { printf '\n== %s\n' "$*"; }
 IMAGE_TAG=$(tr -d ' \t\n\r' < "$HOOKS_DIR/IMAGE_TAG")
 [ -n "$IMAGE_TAG" ] || die "IMAGE_TAG is empty"
 # Read from the cloned hooks repo, so the `rev:` a repo pins fixes the launcher
-# and the image together and they cannot disagree. Overridable for development
-# of this repo itself, not for consumers.
-IMAGE=${SDLC_IMAGE:-quay.io/crunchtools/python-sdlc:$IMAGE_TAG}
+# and the image together and they cannot disagree. An override -- below, once
+# the repo is known -- replaces it for the inner loop, and says so every run.
+DEFAULT_IMAGE=quay.io/crunchtools/python-sdlc:$IMAGE_TAG
+# The fleet image: releases at their version tags, and `:main`, which is what
+# has merged to main and not yet been released.
+FLEET_IMAGE=quay.io/crunchtools/sdlc
 
 # --------------------------------------------------------------- preconditions
 
@@ -64,6 +67,72 @@ REPO=$(git rev-parse --show-toplevel 2>/dev/null) \
   || die "not inside a git repository"
 cd "$REPO"
 PROJECT=$(basename "$REPO")
+
+# ------------------------------------------------------------- an image override
+#
+# The inner loop: run what has merged to main before a release carries it,
+# `:main`, or a seat's own local build. Two ways in, the first winning:
+#
+#   SDLC_IMAGE=<ref> | <tag>     this seat, this run. A bare tag is a tag of
+#                                quay.io/crunchtools/sdlc: main, or a release.
+#   [tool.sdlc] image = "<tag>"  the repo, on a seat. The same bare tags and
+#                                nothing else, and REFUSED in CI and by `sdlc
+#                                ci`: a pull request must not choose the image
+#                                that judges it. The planner cannot enforce
+#                                that, because it runs inside the chosen image.
+#
+# The image is the judge, so a run that is not on the pinned release says so on
+# every invocation, loudly. And a floating tag is pulled when newer: `missing`,
+# podman's default, is how a two-week-old reviewer once judged trentina.
+CONFIG_FILE=pyproject.toml
+[ -f "$CONFIG_FILE" ] || CONFIG_FILE=sdlc.toml
+config_image() {       # the `image` key of [tool.sdlc], or nothing
+  [ -f "$CONFIG_FILE" ] || return 0
+  awk '
+    /^[ \t]*\[/ { s = ($0 ~ /^[ \t]*\[tool\.sdlc\][ \t]*(#.*)?$/); next }
+    s && /^[ \t]*image[ \t]*=/ {
+      v = $0; sub(/^[^=]*=[ \t]*/, "", v)
+      if (v ~ /^"[^"]*"/) { sub(/^"/, "", v); sub(/".*$/, "", v) }
+      print v; exit
+    }' "$CONFIG_FILE"
+}
+fleet_tag() {          # value where -> the image that tag names, or die
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*|[.-]*) die "$2 must be a tag such as main or 0.8.0; got '$1'" ;;
+  esac
+  printf '%s:%s' "$FLEET_IMAGE" "$1"
+}
+SDLC_CONFIG_IMAGE=$(config_image)
+export SDLC_CONFIG_IMAGE
+if [ -n "$SDLC_CONFIG_IMAGE" ]; then
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ "${1:-}" = ci ]; then
+    die "[tool.sdlc] image is for a developer's machine. CI and 'sdlc ci' run the pinned release, so a pull request cannot choose the image that judges it. Remove it from $CONFIG_FILE"
+  fi
+fi
+IMAGE=$DEFAULT_IMAGE
+IMAGE_FROM=
+if [ -n "${SDLC_IMAGE:-}" ]; then
+  case "$SDLC_IMAGE" in
+    */*) IMAGE=$SDLC_IMAGE ;;
+    *)   IMAGE=$(fleet_tag "$SDLC_IMAGE" SDLC_IMAGE) ;;
+  esac
+  IMAGE_FROM=SDLC_IMAGE
+elif [ -n "$SDLC_CONFIG_IMAGE" ]; then
+  IMAGE=$(fleet_tag "$SDLC_CONFIG_IMAGE" "[tool.sdlc] image in $CONFIG_FILE")
+  IMAGE_FROM="[tool.sdlc] image in $CONFIG_FILE"
+fi
+PULL_NEWER=
+if [ "$IMAGE" != "$DEFAULT_IMAGE" ]; then
+  case "$IMAGE" in localhost/*) ;; *) PULL_NEWER=yes ;; esac
+  {
+    printf '%s: ************************************************************\n' "$ME"
+    printf '%s: NOT THE PINNED RELEASE. This run is judged by\n' "$ME"
+    printf '%s:   %s\n' "$ME" "$IMAGE"
+    printf '%s: set by %s, in place of\n' "$ME" "$IMAGE_FROM"
+    printf '%s:   %s\n' "$ME" "$DEFAULT_IMAGE"
+    printf '%s: ************************************************************\n' "$ME"
+  } >&2
+fi
 
 # ---------------------------------------------------------- the resource budget
 #
@@ -268,6 +337,7 @@ run_in_image() {
   # never hit it.
   set -- \
     --events-backend=none run --rm --log-driver=none \
+    ${PULL_NEWER:+--pull=newer} \
     --cap-drop=all --security-opt=no-new-privileges \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     -v "$REPO:/repo:$_mode,z" -w /repo \
@@ -278,6 +348,7 @@ run_in_image() {
     -e PYTHONPYCACHEPREFIX=/tmp/pycache \
     -e SEMGREP_SETTINGS_FILE=/tmp/semgrep.yml \
     -e "SDLC_PROJECT=$PROJECT" \
+    ${SDLC_CONFIG_IMAGE:+-e SDLC_CONFIG_IMAGE} \
     -e "SDLC_JOBS=$GATE_CPUS" \
     -e "SDLC_MEMORY=$GATE_MEMORY" \
     -e "SDLC_DEFAULT_BRANCH=$(default_branch 2>/dev/null || :)" \
@@ -454,6 +525,8 @@ record_finish() {      # worst status
 #   image-ro | image-rw   `sdlc <payload>` in the image, the tree ro or rw
 #   local                 a check this file answers itself
 #   host                  a podman argv, words joined by the unit separator
+#   host-up               seconds, then a host argv: a run still going when
+#                         they are up passes (see run_host)
 #
 # A host line that does not start with `podman build` or `podman run` is
 # refused: the host contract is held here, by the launcher, not trusted to
@@ -464,7 +537,85 @@ record_finish() {      # worst status
 TAB=$(printf '\t')
 US=$(printf '\037')
 
-run_host() {
+check_image_word() {   # run-args -> dies unless the word after `--` is an image
+  # The planner validates every image reference; this holds the same line on
+  # the host, because the host is what a bad one would harm. Only the word
+  # after a `--` is judged: before it podman reads options, after the image it
+  # passes arguments to the container.
+  _ciafter=
+  for _ciw in "$@"; do
+    if [ "$_ciafter" = yes ]; then
+      case "$_ciw" in
+        ''|-*|*[!A-Za-z0-9._/:@-]*)
+          die "a host step names '$_ciw' as its image, which is not an image reference" ;;
+      esac
+      return 0
+    fi
+    [ "$_ciw" = -- ] && _ciafter=yes
+  done
+  [ "$_ciafter" = yes ] && die "a host step ends with '--' and names no image"
+  return 0
+}
+
+run_up() {             # seconds run-args -> the smoke verdict
+  # A `podman run` that may be a service. It starts detached, and its STATE is
+  # asked once a second for up to <seconds>: still running at the end passes,
+  # and so does exiting 0; any other exit, or the OOM killer, is a finding.
+  # Asked of podman, never inferred from a clock or from podman run's own
+  # status, because 255 is both podman's timeout kill and a program's crash,
+  # and a clock started before `podman run` counts creation as uptime.
+  #
+  # Not --rm: the state is read after the container stops. Removed here, by
+  # name, however it ended. A k8s-file log so its output can be shown, which
+  # --log-driver=none would discard.
+  _upsecs=$1; shift
+  case " $* " in *" -- "*) ;; *) die "a run given time to stay up must name its image after '--'" ;; esac
+  check_image_word "$@"
+  _cname=sdlc-smoke-$$-$(now_s)
+  _uprc=0
+  podman --events-backend=none run -d --name "$_cname" --log-driver=k8s-file \
+    --cap-drop=all --security-opt=no-new-privileges \
+    --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
+    "$@" </dev/null >/dev/null || _uprc=$?
+  case "$_uprc" in
+    0) ;;
+    # 125 is podman itself: the container never existed, nothing was judged.
+    125) podman rm -f "$_cname" >/dev/null 2>&1 || :
+         printf '%s: podman could not create the container (exit 125); nothing was judged\n' "$ME" >&2
+         return 2 ;;
+    # 126/127 is the image: an entrypoint that is missing or cannot execute,
+    # which is exactly what a smoke run exists to catch.
+    *) podman logs "$_cname" 2>&1 || :
+       podman rm -f "$_cname" >/dev/null 2>&1 || :
+       printf '%s: the image could not start its entrypoint (exit %s)\n' "$ME" "$_uprc" >&2
+       return 1 ;;
+  esac
+  _upi=0
+  while [ "$_upi" -lt "$_upsecs" ]; do
+    _uprun=$(podman inspect --format '{{.State.Running}}' "$_cname" 2>/dev/null) || _uprun=gone
+    [ "$_uprun" = true ] || break
+    sleep 1
+    _upi=$((_upi + 1))
+  done
+  _upstate=$(podman inspect --format '{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}' \
+             "$_cname" 2>/dev/null) || _upstate=
+  podman logs "$_cname" 2>&1 || :
+  podman rm -f "$_cname" >/dev/null 2>&1 || :
+  case "$_upstate" in
+    'true '*)      printf 'still running after %ss: the image starts and stays up\n' "$_upsecs"; return 0 ;;
+    *' true')      printf '%s: the container was killed for memory\n' "$ME" >&2; return 1 ;;
+    'false 0 '*)   return 0 ;;
+    'false '*)     printf '%s: the container exited %s within %ss of starting\n' "$ME" \
+                     "$(printf '%s' "$_upstate" | cut -d' ' -f2)" "$_upsecs" >&2; return 1 ;;
+    *)             printf '%s: podman could not report the container state; nothing was judged\n' "$ME" >&2
+                   return 2 ;;
+  esac
+}
+
+run_host() {           # argv [seconds] -> the step's verdict
+  # With seconds, the step is a `podman run` that may be a service: run_up
+  # judges it by its state.
+  _up=${2:-}
   _ifs=$IFS
   IFS=$US
   # shellcheck disable=SC2086  # splitting on the separator is the point
@@ -473,25 +624,41 @@ run_host() {
   [ "${1:-}" = podman ] || die "a host step may only run podman; refused: ${1:-<empty>}"
   _sub=${2:-}
   shift 2
+  # `@sdlc-image` is this gate's own image, which only this script knows: a
+  # check that runs the gate image as a host step (container-scan) names it so.
+  # Replaced as a whole word only, after the split, so it is never shell.
+  for _w in "$@"; do
+    shift
+    [ "$_w" = @sdlc-image ] && _w=$IMAGE
+    set -- "$@" "$_w"
+  done
+  if [ -n "$_up" ]; then
+    [ "$_sub" = run ] || die "only a podman run can be given a time to stay up"
+    run_up "$_up" "$@"
+    return
+  fi
   # The budget is applied here so it is defined once, whatever the step.
   case "$_sub" in
     build) set -- build --cpu-period 100000 --cpu-quota "$(( GATE_CPUS * 100000 ))" \
                         --memory "$GATE_MEMORY" "$@" ;;
-    run)   set -- --events-backend=none run --log-driver=none \
+    run)   check_image_word "$@"
+           set -- --events-backend=none run --log-driver=none \
                         --cap-drop=all --security-opt=no-new-privileges \
                         --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 "$@" ;;
     *)     die "a host step may only build or run; refused: podman $_sub" ;;
   esac
-  _rc=0
-  podman "$@" </dev/null || _rc=$?
+  # Not `_rc`: shell variables are global, and run_serial reads its own after
+  # this returns, so a status set here would survive into the caller.
+  _hrc=0
+  podman "$@" </dev/null || _hrc=$?
   # A failed build is a finding: the code does not produce an image. A run
   # that podman could not start (125-127) never ran, so it is a 2, and so is a
   # pytest status above 1 (interrupted, usage error, internal error, no tests).
-  case "$_sub:$_rc" in
+  case "$_sub:$_hrc" in
     *:0) return 0 ;;
     build:*) return 1 ;;
     run:1) return 1 ;;
-    *) printf '%s: podman %s exited %s; nothing was judged\n' "$ME" "$_sub" "$_rc" >&2; return 2 ;;
+    *) printf '%s: podman %s exited %s; nothing was judged\n' "$ME" "$_sub" "$_hrc" >&2; return 2 ;;
   esac
 }
 
@@ -520,6 +687,10 @@ _run_step() {
         *) die "the image asked for an unknown local check: $2" ;;
       esac ;;
     host) run_host "$2" ;;
+    host-up)
+      _secs=${2%%"$US"*}
+      case "$_secs" in ''|*[!0-9]*) die "a host-up step must start with a number of seconds" ;; esac
+      run_host "${2#*"$US"}" "$_secs" ;;
     *) die "the image asked for an unknown step mode: $1" ;;
   esac
 }
@@ -951,7 +1122,7 @@ case "${1:---help}" in
     STATE_HINT=$(git rev-parse --git-path sdlc 2>/dev/null) || STATE_HINT=
     [ -n "$STATE_HINT" ] || STATE_HINT='<git-dir>/sdlc'
     cat <<EOF
-usage: $ME commit | push | ci | <check> | tiers | list | versions | codeql-baseline
+usage: $ME commit | push | ci | <check> | tiers | stacks | list | versions | codeql-baseline
 
   commit            the pre-commit hook: seconds, offline, free
   push              the pre-push hook: every verdict, no container builds
@@ -961,12 +1132,14 @@ usage: $ME commit | push | ci | <check> | tiers | list | versions | codeql-basel
   <check> -- <args> one check, with arguments for the tool itself, as:
                       $ME pytest -- tests/test_x.py::test_y -n0
   tiers             what each command runs in this repo
+  stacks            which stacks this repo has: python, container, ...
   list              the built-in checks and the kinds
   versions          the exact tool versions the image carries
   codeql-baseline   accept every current CodeQL finding into the baseline
 
-Configure each command in pyproject.toml: [tool.sdlc.commit],
-[tool.sdlc.push], [tool.sdlc.ci]. Skip one check once: SDLC_SKIP=name.
+Configure each command in pyproject.toml, or in sdlc.toml in a repo without
+one: [tool.sdlc.commit], [tool.sdlc.push], [tool.sdlc.ci]. Skip one check
+once: SDLC_SKIP=name.
 Exit 2 means a check COULD NOT RUN and is never to be worked around.
 A push prints DEFERRED TO CI, and goes through, only when CodeQL itself broke
 and the repo's \`sdlc ci\` job will judge the same commit.
@@ -987,7 +1160,7 @@ which is only what happened on this machine last time.
 Image: $IMAGE
 EOF
     ;;
-  tiers|list|versions) run_in_image ro nostdin "$IMAGE" "$1" ;;
+  tiers|stacks|list|versions) run_in_image ro nostdin "$IMAGE" "$1" ;;
   codeql-baseline)     run_in_image rw nostdin "$IMAGE" "$1" ;;
   *)
     _target=$1

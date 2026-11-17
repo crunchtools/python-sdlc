@@ -96,6 +96,53 @@ share. The constitution validator, Gourmand, Gatehouse, CodeQL and
 `ruff check .` stay repo-wide, and ruff's own config is hierarchical, so a
 nested `pyproject.toml` still applies to the files under it.
 
+## Stacks
+
+One image serves every kind of repo. A **stack** is the set of checks that
+only mean something for one kind of repo, and which stacks a repo has is read
+off its files:
+
+| File at the root | Stack | Status |
+|---|---|---|
+| `pyproject.toml` | python | checked |
+| `Containerfile` or `Dockerfile` | container | checked |
+| `package.json` | node | not yet |
+| a Containerfile whose `FROM` is a bootc image | bootc | not yet |
+| none of these | docs | not yet |
+
+Gourmand, Gatehouse, the constitution validator and `hooks-installed` belong to
+no stack and run everywhere. A repo can add or drop a stack, and nothing more:
+
+```toml
+[tool.sdlc]
+stacks = ["container"]
+skip-stacks = ["node"]
+```
+
+**A Python repo that names neither key runs the python stack alone**, exactly
+as python-sdlc always has, whatever else is in it. Turning the container stack
+on under 36 pinned repos is its own decision, not a side effect of a bump.
+`sdlc stacks` shows what was detected and what runs.
+
+A stack this image names but cannot check yet is refused with exit 2, not left
+out: a node-only repo judged by the constitution alone would go green on checks
+that never ran. `skip-stacks` is how a repo says it accepts that.
+
+A repo with no `pyproject.toml` writes the same `[tool.sdlc]` tables in
+`sdlc.toml`. A repo with one configures sdlc there, and `sdlc.toml` beside it is
+refused.
+
+### The container stack
+
+| Check | Command | What it does |
+|---|---|---|
+| `containerfile-lint` | push, ci | hadolint over the Containerfile; the repo's `.hadolint.yaml` applies, and without one the threshold is `warning` |
+| `container-build` | ci | `podman build`, at the tag the next two read |
+| `container-smoke` | ci | starts the built image detached, with no network and no capabilities, and reads its state from podman: still running after `seconds`, or exited 0, passes; any other exit, the OOM killer, or an entrypoint that cannot start (126/127) fails |
+| `container-scan` | ci | grype over the built image's filesystem, mounted read-only by podman; fails on a fixable Critical by default, and the repo's `.grype.yaml` applies |
+
+Build, smoke and scan are one lane, beside everything else.
+
 ## What a repo gets with no config at all
 
 | Command | Runs |
@@ -244,6 +291,10 @@ tests = ["tests/image/"]
 | `codeql` | `config` (default `.github/codeql/codeql-config.yml`), `baseline` (default `.sdlc/codeql-baseline.json`) |
 | `constitution` | `manifest` (default `.specify/memory/constitution.md`) |
 | `ruff-check`, `ruff-format`, `lint`, `mypy`, `gourmand`, `gatehouse`, `pip-audit`, `hooks-installed` | none |
+| `containerfile-lint` | `containerfiles` (default: the root Containerfile or Dockerfile), `threshold` |
+| `container-build` | the `image-build` kind's settings; `containerfile` defaults to the root one |
+| `container-smoke` | `seconds` (default 10), `args`, `env`, `network` (default `false`), `image` |
+| `container-scan` | `fail_on` (default `critical`), `only_fixed` (default `true`), `image` |
 
 ### Kinds, for a repo's own checks
 
@@ -279,6 +330,36 @@ Values in `build_args`, `labels` and `env` may be `@project.version`,
 There is no shell kind. A repo that needs something these cannot express gets a
 new kind here, so the config stays something a person can read.
 
+## Running main before a release
+
+Every push to main publishes its tested image as `quay.io/crunchtools/sdlc:main`,
+the same name git and Gourmand use: what has merged and not yet been released.
+It is the digest the contract test ran against at `:<sha>`, read back after the
+copy, and it never moves back onto an older commit. Only a release moves `latest` and the version tags, and no
+pull request run touches a registry at all. The release is the gate.
+
+To run one on your machine, first matching wins:
+
+| How | Value |
+|---|---|
+| `SDLC_IMAGE=main git push` | a bare tag of `quay.io/crunchtools/sdlc` (`main`, or a release such as `0.8.0`), or a full image reference |
+| `[tool.sdlc] image = "main"` | a bare tag only, written on its own line under `[tool.sdlc]` |
+
+Every command on anything but the pinned release prints which image it is and
+what chose it. A registry tag is pulled when newer, so `:main` is the current
+`:main`, not whatever was cached.
+
+**CI never honours `[tool.sdlc] image`.** Under `CI` or `GITHUB_ACTIONS`, and
+for `sdlc ci` anywhere, the key is refused with exit 2. A pull request must not
+choose the image that judges it, and only the launcher can enforce that: the
+planner runs inside whichever image was chosen.
+
+**Nothing built on a laptop or a seat is ever pushed.** To try a change to
+this image before it merges, build it locally (`podman build -t
+localhost/python-sdlc:dev .`) and run it with
+`SDLC_IMAGE=localhost/python-sdlc:dev`. `sdlc` has no push step, and only this
+repo's GitHub Actions on main publish to quay.io.
+
 ## Skipping a check
 
 `SDLC_SKIP=gatehouse git push` skips one check, once, for a false positive. The
@@ -309,6 +390,7 @@ sees it. `sdlc codeql-baseline` writes it from the current findings. See
 | ruff, semgrep, pip-audit | this image |
 | Gourmand, Gatehouse | this image, copied from their official images |
 | CodeQL | this image (the Python-only bundle, 110 MB rather than 1.75 GB) |
+| hadolint, grype | this image, copied from their official images |
 | constitution validator | the repo — cloned at the release its own manifest names |
 | mypy, pytest | the repo's `uv.lock`, because they load the project's own plugins |
 

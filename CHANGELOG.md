@@ -6,6 +6,63 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- **Stacks.** One image for every kind of repo: the planner detects which
+  stacks a repo has from its files -- `pyproject.toml` is python, a root
+  `Containerfile` or `Dockerfile` is container, `package.json` is node, a
+  `bootc` base image is bootc, nothing is docs -- and runs each stack's checks
+  plus the ones every repo gets (Gourmand, Gatehouse, the constitution
+  validator, the hook check). `[tool.sdlc] stacks` adds a stack and
+  `skip-stacks` drops one; neither can name a command. `sdlc stacks` shows what
+  was detected and what runs. node, bootc and docs are named but not yet
+  checked, so a repo that has one is refused (exit 2) until it skips it, rather
+  than going green on checks that never ran.
+- **A Python repo that names no stacks runs exactly what it ran before**, with
+  or without a Containerfile. Proved by planning every public consumer's
+  `commit`, `push`, `ci` and `tiers` with v0.7.4 and with this image and
+  diffing the output.
+- **The container stack**: `containerfile-lint` (hadolint 2.14.0, in push and
+  ci) and, in ci only, `container-build`, `container-smoke` (the built image
+  starts detached with no network and no capabilities, and podman's report of
+  its state decides: still running after `seconds`, default 10, or exited 0,
+  passes; an entrypoint that cannot start fails) and `container-scan` (grype 0.121.0 over the
+  built image's filesystem, failing on a fixable Critical by default; the
+  repo's `.grype.yaml` applies).
+- `sdlc.toml`: the same `[tool.sdlc]` tables, for a repo with no
+  `pyproject.toml`. Refused beside one.
+- **Main before a release, as `:main`.** Every push to main publishes its
+  tested image as `quay.io/crunchtools/sdlc:main`: the digest the contract
+  test ran against, read back after the copy, never moved onto an older
+  commit. No pull request run touches a registry. On a developer's machine,
+  `SDLC_IMAGE=main` (or any tag or image reference) or
+  `[tool.sdlc] image = "<tag>"` runs it; CI and `sdlc ci` refuse the repo key
+  (exit 2). Every run on anything but the pinned release prints which image
+  it is and what chose it, and a registry tag is pulled when newer. With
+  neither set, nothing changes.
+- The image is also published as `quay.io/crunchtools/sdlc`: the same digest
+  copied, never rebuilt, with the same tags as `python-sdlc`.
+
+### Security
+
+- **A repo's config cannot inject podman options.** Every image and tag a
+  check uses -- `container-build`'s tag, smoke's and scan's image, and the
+  `image-build` and `pytest-in-image` kinds (the last two since they were
+  added) -- must be an image reference: nothing starting with `-`, no comma,
+  no whitespace. Otherwise the planner exits 2. The smoke and scan runs put
+  the image after `--`, and `bin/sdlc` checks that word again on the host. A
+  repo path that begins with `-` is refused the same way.
+- The promote guard fails closed: it treats only "manifest unknown" as an
+  absent tag, and any other failure to read a tag's revision stops the job.
+
+### Fixed
+
+- `bin/sdlc`'s `run_host` kept its exit status in `_rc`, which `run_serial`
+  also uses, so a host step could leak its own status. It has its own name now.
+- The hadolint, grype and shellcheck images are pinned by digest, and every
+  `actions/*` step in `container.yml`, `release.yml` and `update-tools.yml`
+  by commit SHA.
+
 ## [0.7.5] - 2026-11-17
 
 ### Changed
