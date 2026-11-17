@@ -164,6 +164,10 @@ jobs:
           digest=$(skopeo inspect --format '{{.Digest}}' "docker://$SDLC:pr-$PR")
           [ -n "$digest" ] || { echo "the registry reported no digest" >&2; exit 1; }
           echo "published $SDLC:pr-$PR ($digest)"
+          # What the registry holds is tested, not just what was built here,
+          # as the profile requires of every pushed digest -- and before
+          # `:beta`, which other repos run, can move onto it.
+          tests/contract.sh "$SDLC@$digest"
           if [ "$BETA" = true ]; then
             skopeo copy --all --preserve-digests "docker://$SDLC@$digest" "docker://$SDLC:beta"
             got=$(skopeo inspect --format '{{.Digest}}' "docker://$SDLC:beta")
