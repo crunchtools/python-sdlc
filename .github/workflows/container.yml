@@ -89,7 +89,7 @@ jobs:
           podman run --rm -v "$PWD:/mnt:ro,z" -w /mnt \
             docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d bin/sdlc tests/contract.sh \
             tests/test_host_contract.sh tests/test_container_stack.sh scripts/release-version.sh \
-            scripts/revision-of.sh tests/test_revision_of.sh
+            scripts/revision-of.sh tests/test_revision_of.sh bin/sdlc-bootstrap
           tests/test_host_contract.sh
           tests/test_revision_of.sh
           tests/test_release_version.py
@@ -126,7 +126,7 @@ jobs:
           set -eu
           for t in tests/test_plan.py tests/test_codeql_globs.py \
                    tests/test_pycache_prefix.py tests/test_gourmand_sidecar.py \
-                   tests/test_codeql_resilience.py; do
+                   tests/test_codeql_resilience.py tests/test_convert_repo.py; do
             podman run --rm -v "$PWD:/src:ro,z" -w /src \
               --entrypoint /opt/constitution-venv/bin/python3 \
               "localhost/python-sdlc:$GITHUB_SHA" "$t"

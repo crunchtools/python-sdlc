@@ -83,6 +83,17 @@ printf '%s\n' "\$*" >> "$LOG"
 for _last in "\$@"; do :; done
 # container-smoke: a detached run records which case it is, and inspect
 # answers that case's state as: Running ExitCode OOMKilled.
+# The image's own entrypoint and command, for the systemd PID 1 check: an
+# image named systemd-ep has ENTRYPOINT /sbin/init, one named systemd-cmd only
+# CMD /usr/lib/systemd/systemd, and any other image neither.
+case " \$* " in
+  *" image inspect "*)
+    case "\$*:\$_last" in
+      *Entrypoint*:*systemd-ep*) printf '/sbin/init\n' ;;
+      *Cmd*:*systemd-cmd*)       printf '/usr/lib/systemd/systemd\n--system\n' ;;
+    esac
+    exit 0 ;;
+esac
 case " \$* " in
   *" inspect "*)
     _st=\$(cat "$SHIM/upcase" 2>/dev/null)
@@ -101,6 +112,17 @@ case " \$* " in
     exit 0 ;;
   *" logs "*) printf 'CONTAINER LOG\n'; exit 0 ;;
   *" rm -f "*) exit 0 ;;
+esac
+# sdlc launcher REF: print this repo's launcher with the ref written in, as
+# the image does -- or fail, or print nothing, as $SHIM/launchcase says.
+case " \$* " in
+  *" launcher "*)
+    case "\$(cat "$SHIM/launchcase" 2>/dev/null)" in
+      fail)  exit 125 ;;
+      empty) exit 0 ;;
+    esac
+    sed "s|^LAUNCHED_FROM=\$|LAUNCHED_FROM='\$_last'|" "$PWD/bin/sdlc"
+    exit 0 ;;
 esac
 case " \$* " in
   *" plan gatehouse-direct "*)
@@ -149,6 +171,17 @@ case " \$* " in
     printf 'inject-comma${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}--${US}a,b\n' ;;
   *" plan inject-nodd "*)
     printf 'inject-nodd${TAB}main${TAB}host-up${TAB}5${US}podman${US}run${US}--privileged${US}img\n' ;;
+  *" plan up-systemd-ep "*)
+    printf 'up-systemd-ep${TAB}main${TAB}host-up${TAB}1${US}podman${US}run${US}--${US}localhost/systemd-ep:sdlc\n' ;;
+  *" plan up-systemd-cmd "*)
+    printf 'up-systemd-cmd${TAB}main${TAB}host-up${TAB}1${US}podman${US}run${US}--${US}localhost/systemd-cmd:sdlc\n' ;;
+  *" plan up-systemd-args "*)
+    printf 'up-systemd-args${TAB}main${TAB}host-up${TAB}1${US}podman${US}run${US}--${US}localhost/systemd-cmd:sdlc${US}go-up-stays\n' ;;
+  *" plan lanes-skip "*)
+    printf 'b${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
+    printf 'up-systemd-ep${TAB}two${TAB}host-up${TAB}1${US}podman${US}run${US}--${US}localhost/systemd-ep:sdlc\n' ;;
+  *" plan rc-four "*)
+    printf 'rc-four${TAB}main${TAB}image-ro${TAB}exit-four\n' ;;
   *" plan up-"*)
     _secs=1; _what=\$_last
     case "\$_last" in up-build) _what=build ;; up-noseconds) _secs=soon ;; esac
@@ -177,6 +210,7 @@ case "\$_last" in
   rc-one)      printf 'RAN rc-one\n'; exit 1 ;;
   rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
   rc-three)    printf 'RAN rc-three\n'; exit 3 ;;
+  exit-four)   printf 'RAN exit-four\n'; exit 4 ;;
   slow-rc-one) printf 'RAN slow-rc-one\n'; sleep 2; exit 1 ;;
   very-slow-rc-one) printf 'RAN very-slow-rc-one\n'; sleep 6; printf 'LAST LINE\n'; exit 1 ;;
   step-one) printf 'RAN step-one\n'; sleep 1 ;;
@@ -254,10 +288,58 @@ log_mark
 PATH="$SHIM" sh bin/sdlc up-stays >/dev/null 2>&1 || true
 log_since
 if grep -q -- 'run -d --name sdlc-smoke-[0-9-]* --log-driver=k8s-file --cap-drop=all --security-opt=no-new-privileges .* -- localhost/x:sdlc go-up-stays$' "$RUN/podman.log" \
-   && grep -q -- '^rm -f sdlc-smoke-' "$RUN/podman.log"; then
-  ok "host-up runs detached and locked down, and removes the container"
+   && grep -q -- '^rm -f -v sdlc-smoke-' "$RUN/podman.log"; then
+  ok "host-up runs detached and locked down, and removes the container and its volumes"
 else
   bad "host-up's run or cleanup is wrong: $(grep -E 'up-stays|rm -f' "$RUN/podman.log" | tail -2)"
+fi
+
+# A systemd PID 1 cannot boot under this run's lockdown, so container-smoke
+# says SKIPPED -- never "passed" -- and starts nothing. Not for an image whose
+# CMD a run argument replaces, and a 4 from anything else is still a finding.
+for case_ in up-systemd-ep up-systemd-cmd; do
+  log_mark
+  rc=0
+  PATH="$SHIM" sh bin/sdlc "$case_" > "$RUN/out" 2>&1 || rc=$?
+  log_since
+  if [ "$rc" -eq 0 ] && grep -q "SKIPPED: the image starts .* as PID 1, and systemd PID 1 needs privileges smoke cannot grant" "$RUN/out" \
+     && grep -q "== $case_ SKIPPED, not judged" "$RUN/out" && ! grep -q 'passed in' "$RUN/out" \
+     && ! grep -q ' run -d ' "$RUN/podman.log"; then
+    ok "$case_: a systemd PID 1 is SKIPPED with its reason, never run and never a pass"
+  else
+    bad "$case_ exited $rc: $(tail -3 "$RUN/out")"
+  fi
+done
+log_mark
+rc=0
+PATH="$SHIM" sh bin/sdlc up-systemd-args > "$RUN/out" 2>&1 || rc=$?
+log_since
+if [ "$rc" -eq 0 ] && grep -q ' run -d ' "$RUN/podman.log" && ! grep -q SKIPPED "$RUN/out"; then
+  ok "a run argument that replaces a systemd CMD is run and judged"
+else
+  bad "up-systemd-args exited $rc: $(tail -2 "$RUN/out")"
+fi
+rc=0
+PATH="$SHIM" SDLC_CPUS=4 sh bin/sdlc lanes-skip > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q '== up-systemd-ep SKIPPED, not judged' "$RUN/out" \
+   && grep -q '== b passed' "$RUN/out"; then
+  ok "in a lane, the skip is printed as SKIPPED and the run still exits 0"
+else
+  bad "lanes-skip exited $rc: $(tail -4 "$RUN/out")"
+fi
+rc=0
+PATH="$SHIM" sh bin/sdlc rc-four > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'rc-four FAILED' "$RUN/out" && ! grep -q SKIPPED "$RUN/out"; then
+  ok "a 4 from a check in the image is a finding, not a skip"
+else
+  bad "rc-four exited $rc: $(tail -2 "$RUN/out")"
+fi
+
+# Every smoke cleanup, whatever the case, takes the anonymous volumes with it.
+if grep -q -- '^rm -f -v sdlc-smoke-' "$LOG" && ! grep -q -- '^rm -f sdlc-smoke-' "$LOG"; then
+  ok "every smoke container is removed with -v"
+else
+  bad "a smoke cleanup left its volumes: $(grep -- '^rm -f sdlc-smoke-' "$LOG" | head -1)"
 fi
 
 # A repo's config must never reach the host's podman as an option. The planner
@@ -798,6 +880,119 @@ else
   bad "[tool.sdlc] image = ../../evil exited $rc: $(tail -2 "$RUN/out")"
 fi
 rm -rf "$CREPO"
+
+printf '\n== the floating launcher, from the image (bin/sdlc-bootstrap)\n\n'
+
+# A repo with no `rev:` runs the launcher the image prints. The bootstrap is the
+# whole of what such a repo carries, so it is held to the same host contract:
+# this PATH has podman and POSIX utilities and nothing else.
+boot() { PATH="$SHIM" sh "$PWD/bin/sdlc-bootstrap" "$@"; }
+
+log_mark
+boot tiers > "$RUN/out" 2>&1 || true
+log_since
+if grep -q -- '--security-opt=no-new-privileges --pull=newer -- quay.io/crunchtools/sdlc:latest launcher quay.io/crunchtools/sdlc:latest$' "$RUN/podman.log" \
+   && last_run | grep -q -- ' quay.io/crunchtools/sdlc:latest tiers$' && ! last_run | grep -q -- '--pull' \
+   && ! grep -q 'NOT THE PINNED RELEASE' "$RUN/out"; then
+  ok "no SDLC_IMAGE: the launcher from :latest runs :latest, no banner"
+else
+  bad "bootstrap on :latest: $(last_run) / $(head -3 "$RUN/out")"
+fi
+
+log_mark
+SDLC_IMAGE=main boot tiers > "$RUN/out" 2>&1 || true
+log_since
+if grep -q -- '-- quay.io/crunchtools/sdlc:main launcher quay.io/crunchtools/sdlc:main$' "$RUN/podman.log" \
+   && last_run | grep -q -- ' quay.io/crunchtools/sdlc:main tiers$' \
+   && grep -q 'NOT THE PINNED RELEASE' "$RUN/out"; then
+  ok "SDLC_IMAGE=main: main's own launcher runs main, and says it is not the release"
+else
+  bad "bootstrap on main: $(last_run) / $(head -3 "$RUN/out")"
+fi
+
+# What the bootstrap runs is what it pulls, so it pulls from one repository:
+# quay.io/crunchtools/sdlc at main, latest, a release or a digest.
+D64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+for good in "0.9.0:quay.io/crunchtools/sdlc:0.9.0" \
+            "@sha256:$D64:quay.io/crunchtools/sdlc@sha256:$D64" \
+            "quay.io/crunchtools/sdlc:main:quay.io/crunchtools/sdlc:main" \
+            "quay.io/crunchtools/sdlc@sha256:$D64:quay.io/crunchtools/sdlc@sha256:$D64"; do
+  case "$good" in
+    @sha256:*|quay.io/crunchtools/sdlc@*) value=${good%:quay.io/*}; want=${good#"$value":} ;;
+    *) value=${good%%:quay.io/*}; want=${good#"$value":} ;;
+  esac
+  case "$good" in quay.io/crunchtools/sdlc:main:*) value=quay.io/crunchtools/sdlc:main; want=$value ;; esac
+  log_mark
+  SDLC_IMAGE=$value boot tiers > "$RUN/out" 2>&1 || true
+  log_since
+  if grep -q -- "-- $want launcher $want\$" "$RUN/podman.log" && last_run | grep -q -- " $want tiers\$"; then
+    ok "SDLC_IMAGE=$value pulls and runs $want"
+  else
+    bad "SDLC_IMAGE=$value: $(last_run) / $(tail -1 "$RUN/out")"
+  fi
+done
+for bad_ in localhost/sdlc:dev quay.io/evil/sdlc:latest quay.io/crunchtools/sdlcx:latest \
+            1.2 v1.2.3 1.2.3.4 1..3 @sha256:abc "@sha256:$(printf '%s' "$D64" | tr a G)" \
+            'main;id' '--privileged' quay.io/crunchtools/sdlc \
+            quay.io/crunchtools/sdlc1.2.3 quay.io/crunchtools/sdlcmain; do
+  log_mark
+  rc=0
+  SDLC_IMAGE=$bad_ boot tiers > "$RUN/out" 2>&1 || rc=$?
+  log_since
+  if [ "$rc" -eq 2 ] && grep -q 'is not main, latest, X.Y.Z or @sha256' "$RUN/out" \
+     && ! [ -s "$RUN/podman.log" ]; then
+    ok "SDLC_IMAGE='$bad_' is refused (exit 2) before podman runs"
+  else
+    bad "SDLC_IMAGE='$bad_' exited $rc"
+  fi
+done
+
+# Nothing printed must never become nothing run and exit 0.
+for case_ in fail empty; do
+  printf '%s\n' "$case_" > "$SHIM/launchcase"
+  rc=0
+  boot tiers > "$RUN/out" 2>&1 || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    ok "an image that cannot print its launcher ($case_) is a 2"
+  else
+    bad "launcher $case_: bootstrap exited $rc"
+  fi
+done
+rm -f "$SHIM/launchcase"
+
+# The launcher's verdict is the bootstrap's: a 1 stays a 1.
+rc=0
+rm -f "$SHIM/must-not-run"
+boot lanes-keeps-going > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'RAN rc-one' "$RUN/out"; then
+  ok "the launcher's exit code comes back through the bootstrap"
+else
+  bad "a failing check through the bootstrap exited $rc"
+fi
+
+# Floating, the launcher needs no clone of python-sdlc: no IMAGE_TAG beside it.
+FLOAT=$(mktemp -d)
+sed "s|^LAUNCHED_FROM=\$|LAUNCHED_FROM='quay.io/crunchtools/sdlc:latest'|" bin/sdlc > "$FLOAT/sdlc"
+log_mark
+PATH="$SHIM" sh "$FLOAT/sdlc" tiers > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- ' quay.io/crunchtools/sdlc:latest tiers$'; then
+  ok "a printed launcher runs with no IMAGE_TAG and no clone"
+else
+  bad "printed launcher alone: $(last_run) / $(head -2 "$RUN/out")"
+fi
+rm -rf "$FLOAT"
+
+# A converted repo carries the bootstrap as .sdlc/bin/sdlc, and its hooks and
+# CI job start that file -- a script in the repo, which is what XII's host
+# contract lets a `system` hook run -- and nothing else.
+if grep -q '^        entry: \.sdlc/bin/sdlc commit$' examples/pre-commit-floating.yaml \
+   && grep -q '^        entry: \.sdlc/bin/sdlc push$' examples/pre-commit-floating.yaml \
+   && grep -q '^        run: \.sdlc/bin/sdlc ci$' examples/ci.yml; then
+  ok "the floating hooks and the CI stub run .sdlc/bin/sdlc"
+else
+  bad "examples/ do not run .sdlc/bin/sdlc as the hooks and the CI job"
+fi
 
 # container-scan runs the gate's own image as a host step, and only the
 # launcher knows which image that is: the plan names it `@sdlc-image`.

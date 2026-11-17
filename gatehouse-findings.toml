@@ -53,3 +53,21 @@ language is stable across every version the fleet ships. Pinning it would \
 freeze a CVE-bearing RPM into the gate image for no gain in reproducibility \
 that the digest-addressed release does not already provide.
 """
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "bin/sdlc-bootstrap"
+evidence = "image=${SDLC_IMAGE:-latest}\ncase $image in\n  */*) ;;\n  *) image=quay.io/crunchtools/sdlc:$image ;;"
+status = "not-a-bug"
+reason = """
+Floating on :latest is the decision this file implements, not a slip: the \
+fleet operator decided (a206) that nothing in a repo pins the launcher any \
+more and that it floats with :latest exactly as the tools already do, so the \
+conversion is the last fleet-wide pull-request wave. The pin moves from each \
+repo to the release gate: only a tagged, contract-tested release moves \
+:latest (container.yml promote), it never moves backwards, and a repo can hold \
+a release back with the repository variable SDLC_IMAGE. The constitution's \
+XII wording still describes the rev pin; amending it is the constitution \
+repo's change, flagged with this work rather than made here.
+"""

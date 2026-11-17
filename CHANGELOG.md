@@ -6,6 +6,51 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- **No `rev:` to pin.** The image now carries its own launcher
+  (`/usr/share/sdlc/launcher`) and prints it with `sdlc launcher <ref>`, the
+  ref written into it. `bin/sdlc-bootstrap` -- committed in a repo as
+  `.sdlc/bin/sdlc` -- pulls `quay.io/crunchtools/sdlc:${SDLC_IMAGE:-latest}`
+  when newer, asks it for the launcher and runs it, so a repo's hooks and CI
+  float with the image and a release needs no bump pull requests. An image
+  that cannot print its launcher is a 2. `SDLC_IMAGE` there may name only
+  `quay.io/crunchtools/sdlc` -- `main`, `latest`, `X.Y.Z` or `@sha256:<64
+  hex>` -- and anything else is refused with exit 2 before podman runs. `examples/pre-commit-floating.yaml`
+  and `examples/ci.yml` are the hook and CI forms; the CI job keeps the name
+  `sdlc ci`, and a repo opts its CI into `:main` with the repository variable
+  `SDLC_IMAGE`.
+- README "When :latest is broken": `--no-verify` locally, the organization
+  variable `SDLC_IMAGE` set to the last good release for CI, and why that
+  works only once two releases carry `launcher`.
+- `scripts/convert_repo.py`: converts one checkout to the floating form, from
+  either the rev-pinned python-sdlc hooks or the standalone Gourmand and
+  Gatehouse hooks. Deterministic; prints the diff and writes nothing without
+  `--apply`; keeps every workflow the stubs do not cover; never touches
+  `.specify/`; refuses with exit 2 a shape it would have to guess at. Every
+  file it would write is parsed back and held to the floating wiring before
+  anything is written, and a second run is a no-op.
+
+- `container-smoke` SKIPS an image whose PID 1 is systemd (`/sbin/init`,
+  `/usr/sbin/init`, `systemd`, as in ubi-init and bootc images): systemd needs
+  privileges the smoke run withholds on purpose. The run says why and prints
+  `SKIPPED, not judged`, never `passed`; the build and the scan still run. The
+  check's record carries exit 4. Only the smoke run can skip: a 4 from a tool
+  in the image is still a finding.
+
+### Changed
+
+- `containerfile-lint` without a `.hadolint.yaml` now fails at `error`, not
+  `warning`, and ignores DL3007 (floating base tags) and DL3041 (unpinned dnf
+  packages), which the fleet does on purpose. Warnings such as DL3002 are
+  printed and do not fail. A repo's `.hadolint.yaml` replaces these defaults.
+
+### Fixed
+
+- `container-smoke` removes the smoke container with `-v`, so an image that
+  declares a `VOLUME` no longer leaks an anonymous volume on every run. A fleet
+  measurement filled a seat's disk with 13 GB of them.
+
 ## [0.8.0] - 2026-11-17
 
 ### Added

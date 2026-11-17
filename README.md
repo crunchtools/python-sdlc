@@ -49,37 +49,63 @@ replace it.
 
 ## Wiring a repo
 
-`.pre-commit-config.yaml`, the whole file:
+A repo carries one file, `.sdlc/bin/sdlc` (this repo's `bin/sdlc-bootstrap`),
+and pins nothing. The launcher ships inside `quay.io/crunchtools/sdlc`; the
+bootstrap asks the image for it (`sdlc launcher <ref>`, which writes that ref
+into it) and runs it. So the launcher, the image and every tool inside it float
+together on `:latest`, for the laptop and CI both, and a release reaches every
+repo without a pull request.
+
+`.pre-commit-config.yaml` is
+[`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
+`language: system` hooks, `.sdlc/bin/sdlc commit` and `.sdlc/bin/sdlc push`.
+CI is [`examples/ci.yml`](examples/ci.yml), whose job is still named `sdlc ci`,
+so the required check does not change:
+
+```yaml
+      - name: sdlc ci
+        env:
+          SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}
+        run: .sdlc/bin/sdlc ci
+```
+
+`scripts/convert_repo.py <checkout>` converts a repo wired the old way -- the
+rev-pinned hooks below, or the standalone Gourmand and Gatehouse hooks -- and
+prints the diff; `--apply` writes it. It replaces a workflow only when the CI
+stub covers every job in it (`sdlc ci`, Gourmand), refreshes `gatehouse.yml`
+from [`examples/gatehouse.yml`](examples/gatehouse.yml) when it differs only in
+comments, keeps everything else (publish, release, container builds), and
+refuses with exit 2 a shape it would have to guess at.
+
+**What floating trusts.** Whoever can move `quay.io/crunchtools/sdlc:latest`
+now decides the host-side code every seat and runner runs, and that code is no
+longer read in git at a pinned rev before it runs. Only this repo's release
+workflow, after the contract test, moves the tag, and never backwards. Signing
+the image and verifying it on pull (a `policy.json` sigstore entry for
+`quay.io/crunchtools/sdlc`) would close the rest, and is not done yet.
+
+**An `sdlc` RPM, later.** It installs the same bootstrap as `/usr/bin/sdlc` on
+hosts and seats, so a person can type `sdlc tiers` anywhere. Nothing in a repo
+changes when it lands: the hooks keep starting the repo's own copy, which is
+identical, and the RPM never needs a release of its own, because the launcher
+it fetches floats with the image.
+
+The rev-pinned form still works, and is what a repo has until it converts:
 
 ```yaml
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
   - repo: https://github.com/crunchtools/python-sdlc
-    rev: v0.3.4
+    rev: v0.8.0
     hooks:
       - id: sdlc-commit
       - id: sdlc-push
 ```
 
-CI, one job, which reads the release from that same `rev:`:
-
-```yaml
-  sdlc:
-    name: sdlc ci
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: sdlc ci
-        run: |
-          rev=$(awk '/repo: https:\/\/github.com\/crunchtools\/python-sdlc/ {f=1; next}
-                     f && /rev:/ {print $2; exit}' .pre-commit-config.yaml)
-          git clone -q --depth 1 --branch "$rev" https://github.com/crunchtools/python-sdlc "$RUNNER_TEMP/sdlc"
-          $RUNNER_TEMP/sdlc/bin/sdlc ci
-```
-
-That `rev:` pins the launcher, the image and every tool inside it, for the
-laptop and CI both. One pin.
+with a CI step that clones this repo at that `rev:` and runs
+`$RUNNER_TEMP/sdlc/bin/sdlc ci`. That `rev:` pins the launcher, the image and
+every tool inside it.
 
 ### A project in a subdirectory
 
@@ -136,9 +162,9 @@ refused.
 
 | Check | Command | What it does |
 |---|---|---|
-| `containerfile-lint` | push, ci | hadolint over the Containerfile; the repo's `.hadolint.yaml` applies, and without one the threshold is `warning` |
+| `containerfile-lint` | push, ci | hadolint over the Containerfile. Without a `.hadolint.yaml` the threshold is `error` and DL3007 (floating base tags) and DL3041 (unpinned dnf) are ignored, as fleet conventions; warnings such as DL3002 are printed and do not fail. A repo's `.hadolint.yaml` replaces all of that |
 | `container-build` | ci | `podman build`, at the tag the next two read |
-| `container-smoke` | ci | starts the built image detached, with no network and no capabilities, and reads its state from podman: still running after `seconds`, or exited 0, passes; any other exit, the OOM killer, or an entrypoint that cannot start (126/127) fails |
+| `container-smoke` | ci | starts the built image detached, with no network and no capabilities, and reads its state from podman: still running after `seconds`, or exited 0, passes; any other exit, the OOM killer, or an entrypoint that cannot start (126/127) fails. An image whose PID 1 is systemd (`/sbin/init`, `systemd`) is SKIPPED with its reason: systemd needs privileges the run withholds |
 | `container-scan` | ci | grype over the built image's filesystem, mounted read-only by podman; fails on a fixable Critical by default, and the repo's `.grype.yaml` applies |
 
 Build, smoke and scan are one lane, beside everything else.
@@ -223,6 +249,10 @@ worktree:
 ```
 $ jq -r '.checks[] | "\(.seconds)s \(.check) exit \(.exit)"' .git/sdlc/last-push.json
 ```
+
+A check's `exit` is its status: 0 passed, 1 found something, 2 could not run,
+3 deferred to CI, and 4 SKIPPED, which only `container-smoke` reports, for a
+systemd PID 1 it cannot boot. A 4 never decides the command's own exit.
 
 The checks appear in the order they **finished**, which with lanes is not the
 order they were listed in. A check that streamed to your terminal has no log
@@ -338,7 +368,12 @@ It is the digest the contract test ran against at `:<sha>`, read back after the
 copy, and it never moves back onto an older commit. Only a release moves `latest` and the version tags, and no
 pull request run touches a registry at all. The release is the gate.
 
-To run one on your machine, first matching wins:
+A floating repo opts its CI into `:main` with the repository variable
+`SDLC_IMAGE=main` -- a setting only an admin can change, rather than a one-line
+edit a pull request could slip in. It is not a wall: a pull request from a
+branch can still edit `ci.yml` or `.sdlc/bin/sdlc` themselves, as it always
+could edit its workflows; an org ruleset's required workflow is what would
+close that. To run one on your machine, first matching wins:
 
 | How | Value |
 |---|---|
@@ -357,8 +392,31 @@ planner runs inside whichever image was chosen.
 **Nothing built on a laptop or a seat is ever pushed.** To try a change to
 this image before it merges, build it locally (`podman build -t
 localhost/python-sdlc:dev .`) and run it with
-`SDLC_IMAGE=localhost/python-sdlc:dev`. `sdlc` has no push step, and only this
-repo's GitHub Actions on main publish to quay.io.
+`SDLC_IMAGE=localhost/python-sdlc:dev` through this clone's `bin/sdlc`. A
+converted repo's `.sdlc/bin/sdlc` will not take it: the bootstrap runs what it
+pulls, so it pulls only `quay.io/crunchtools/sdlc` at `main`, `latest`, a
+release `X.Y.Z` or `@sha256:<digest>`, and refuses anything else with exit 2.
+`sdlc` has no push step, and only this repo's GitHub Actions on main publish to
+quay.io.
+
+## When :latest is broken
+
+A floating repo runs whatever `:latest` is, so a bad release reaches every repo
+at once. Until a fixed release ships:
+
+- **A local commit or push:** `git commit --no-verify` / `git push --no-verify`.
+  CI still judges the pull request.
+- **CI, fleet-wide:** set the organization variable `SDLC_IMAGE` to the last
+  good release, `X.Y.Z`. Every floating repo's CI picks it up on its next run,
+  with no pull request; a repository variable of the same name does the same
+  for one repo. Clear it once the fix is on `:latest`.
+- **A seat:** `SDLC_IMAGE=X.Y.Z git push`.
+
+The fallback needs a release that carries the launcher. The bootstrap asks the
+image for it, so a tag older than the first release with `sdlc launcher` cannot
+be pinned this way: it exits 2.
+Rolling back works only once two releases carry `launcher` -- the broken one
+and a good one before it.
 
 ## Skipping a check
 

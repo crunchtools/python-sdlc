@@ -210,6 +210,12 @@ COPY sdlc /usr/local/bin/sdlc
 COPY validate /usr/local/bin/sdlc-validate
 RUN chmod 0755 /usr/local/bin/sdlc /usr/local/bin/sdlc-validate
 
+# The host launcher rides in the image it starts, so a repo with no `rev:` gets
+# it with `sdlc launcher <ref>` (bin/sdlc-bootstrap) and it floats with the tag.
+# Data here, not a program: it runs on the host, never in this container.
+COPY bin/sdlc /usr/share/sdlc/launcher
+COPY bin/sdlc-bootstrap /usr/share/sdlc/bootstrap
+
 # Stays root, and WORKDIR /repo, because that is what Gourmand and Gatehouse do
 # and those two have been getting code into a container for analysis across this
 # fleet for a year. Copying their convention rather than inventing one:

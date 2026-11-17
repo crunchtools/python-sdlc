@@ -80,6 +80,43 @@ else
   fi
 fi
 
+# A systemd PID 1 needs privileges a smoke run withholds, so the smoke check
+# is SKIPPED with its reason -- read from the built image by real podman --
+# while the build and the scan still run and judge it.
+fixture systemd '["/sbin/init"]'
+rc=0
+(cd "$WORK/systemd" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" ci) > "$WORK/systemd.out" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] \
+   && grep -q 'systemd PID 1 needs privileges smoke cannot grant' "$WORK/systemd.out" \
+   && grep -q '== container-smoke SKIPPED, not judged' "$WORK/systemd.out" \
+   && ! grep -q 'container-smoke passed' "$WORK/systemd.out" \
+   && grep -q 'container-build passed' "$WORK/systemd.out" \
+   && grep -q 'container-scan passed' "$WORK/systemd.out"; then
+  ok "a systemd image: smoke SKIPPED with its reason, build and scan still pass"
+else
+  bad "sdlc ci on a systemd image exited $rc"
+  tail -20 "$WORK/systemd.out" | sed 's/^/       /'
+fi
+
+# An image that declares a VOLUME gets an anonymous volume per run. The smoke
+# run must take it away with the container, or every run leaks one: a fleet
+# measurement once filled a seat's disk with 13 GB of them.
+fixture volume '["python3", "-m", "http.server", "8080"]'
+printf 'VOLUME /data\n' >> "$WORK/volume/Containerfile"
+git -C "$WORK/volume" -c user.email=t@t -c user.name=t commit -qam volume
+podman volume ls -q | sort > "$WORK/volumes.before"
+rc=0
+(cd "$WORK/volume" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-build \
+   && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-smoke) > "$WORK/volume.out" 2>&1 || rc=$?
+podman volume ls -q | sort > "$WORK/volumes.after"
+leaked=$(comm -13 "$WORK/volumes.before" "$WORK/volumes.after" | wc -l | tr -d ' ')
+if [ "$rc" -eq 0 ] && [ "$leaked" -eq 0 ]; then
+  ok "a smoke run of an image with a VOLUME leaves no volume behind"
+else
+  bad "smoke run of a VOLUME image exited $rc and left $leaked volume(s)"
+  tail -10 "$WORK/volume.out" | sed 's/^/       /'
+fi
+
 printf '\n'
 [ "$FAILED" -eq 0 ] && { printf 'container stack PASSED\n'; exit 0; }
 printf 'container stack FAILED: %s check(s)\n' "$FAILED"; exit 1
