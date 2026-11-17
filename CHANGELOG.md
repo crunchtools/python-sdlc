@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-17
+
 ### Changed
 
 - **`sdlc push` and `sdlc ci` now run `lint`**: `ruff check --no-fix .` and
@@ -739,7 +741,22 @@ cached tag was never refreshed — that gate had been running a two-week-old
 reviewer while CI pulled fresh. Local and CI were different reviewers on the
 same diff.
 
-[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.7.0
+[0.6.3]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.6.3
+[0.6.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.6.2
+[0.6.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.6.1
+[0.6.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.6.0
+[0.5.3]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.5.3
+[0.5.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.5.2
+[0.5.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.5.1
+[0.5.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.5.0
+[0.4.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.4.0
+[0.3.7]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.7
+[0.3.6]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.6
+[0.3.5]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.5
+[0.3.4]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.4
+[0.3.3]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.3
 [0.3.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.2
 [0.3.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.1
 [0.3.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.3.0
