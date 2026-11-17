@@ -24,6 +24,12 @@ All notable changes to this project are documented here, following
   `--apply`; keeps every workflow the stubs do not cover; never touches
   `.specify/`; refuses with exit 2 a shape it would have to guess at.
 
+### Fixed
+
+- `container-smoke` removes the smoke container with `-v`, so an image that
+  declares a `VOLUME` no longer leaks an anonymous volume on every run. A fleet
+  measurement filled a seat's disk with 13 GB of them.
+
 ## [0.8.0] - 2026-11-17
 
 ### Added

@@ -598,13 +598,13 @@ run_up() {             # seconds run-args -> the smoke verdict
   case "$_uprc" in
     0) ;;
     # 125 is podman itself: the container never existed, nothing was judged.
-    125) podman rm -f "$_cname" >/dev/null 2>&1 || :
+    125) podman rm -f -v "$_cname" >/dev/null 2>&1 || :
          printf '%s: podman could not create the container (exit 125); nothing was judged\n' "$ME" >&2
          return 2 ;;
     # 126/127 is the image: an entrypoint that is missing or cannot execute,
     # which is exactly what a smoke run exists to catch.
     *) podman logs "$_cname" 2>&1 || :
-       podman rm -f "$_cname" >/dev/null 2>&1 || :
+       podman rm -f -v "$_cname" >/dev/null 2>&1 || :
        printf '%s: the image could not start its entrypoint (exit %s)\n' "$ME" "$_uprc" >&2
        return 1 ;;
   esac
@@ -618,7 +618,7 @@ run_up() {             # seconds run-args -> the smoke verdict
   _upstate=$(podman inspect --format '{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}' \
              "$_cname" 2>/dev/null) || _upstate=
   podman logs "$_cname" 2>&1 || :
-  podman rm -f "$_cname" >/dev/null 2>&1 || :
+  podman rm -f -v "$_cname" >/dev/null 2>&1 || :
   case "$_upstate" in
     'true '*)      printf 'still running after %ss: the image starts and stays up\n' "$_upsecs"; return 0 ;;
     *' true')      printf '%s: the container was killed for memory\n' "$ME" >&2; return 1 ;;

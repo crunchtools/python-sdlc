@@ -265,10 +265,17 @@ log_mark
 PATH="$SHIM" sh bin/sdlc up-stays >/dev/null 2>&1 || true
 log_since
 if grep -q -- 'run -d --name sdlc-smoke-[0-9-]* --log-driver=k8s-file --cap-drop=all --security-opt=no-new-privileges .* -- localhost/x:sdlc go-up-stays$' "$RUN/podman.log" \
-   && grep -q -- '^rm -f sdlc-smoke-' "$RUN/podman.log"; then
-  ok "host-up runs detached and locked down, and removes the container"
+   && grep -q -- '^rm -f -v sdlc-smoke-' "$RUN/podman.log"; then
+  ok "host-up runs detached and locked down, and removes the container and its volumes"
 else
   bad "host-up's run or cleanup is wrong: $(grep -E 'up-stays|rm -f' "$RUN/podman.log" | tail -2)"
+fi
+
+# Every smoke cleanup, whatever the case, takes the anonymous volumes with it.
+if grep -q -- '^rm -f -v sdlc-smoke-' "$LOG" && ! grep -q -- '^rm -f sdlc-smoke-' "$LOG"; then
+  ok "every smoke container is removed with -v"
+else
+  bad "a smoke cleanup left its volumes: $(grep -- '^rm -f sdlc-smoke-' "$LOG" | head -1)"
 fi
 
 # A repo's config must never reach the host's podman as an option. The planner
