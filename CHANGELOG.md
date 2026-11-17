@@ -6,6 +6,24 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- **No `rev:` to pin.** The image now carries its own launcher
+  (`/usr/share/sdlc/launcher`) and prints it with `sdlc launcher <ref>`, the
+  ref written into it. `bin/sdlc-bootstrap` -- committed in a repo as
+  `.sdlc/bin/sdlc` -- pulls `quay.io/crunchtools/sdlc:${SDLC_IMAGE:-latest}`
+  when newer, asks it for the launcher and runs it, so a repo's hooks and CI
+  float with the image and a release needs no bump pull requests. An image
+  that cannot print its launcher is a 2. `examples/pre-commit-floating.yaml`
+  and `examples/ci.yml` are the hook and CI forms; the CI job keeps the name
+  `sdlc ci`, and a repo opts its CI into `:main` with the repository variable
+  `SDLC_IMAGE`.
+- `scripts/convert_repo.py`: converts one checkout to the floating form, from
+  either the rev-pinned python-sdlc hooks or the standalone Gourmand and
+  Gatehouse hooks. Deterministic; prints the diff and writes nothing without
+  `--apply`; keeps every workflow the stubs do not cover; never touches
+  `.specify/`; refuses with exit 2 a shape it would have to guess at.
+
 ## [0.8.0] - 2026-11-17
 
 ### Added

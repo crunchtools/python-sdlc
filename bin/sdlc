@@ -32,7 +32,12 @@
 set -eu
 
 ME=$(basename "$0")
-HOOKS_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+# The image this file came from, when it came from one. `sdlc launcher <ref>`,
+# run inside quay.io/crunchtools/sdlc, prints this file with the ref written on
+# the next line; that is how a repo with no `rev:` gets its launcher
+# (bin/sdlc-bootstrap). Empty in a clone of python-sdlc, which pins by IMAGE_TAG.
+LAUNCHED_FROM=
 
 die()  { printf '%s: GATE CANNOT RUN: %s\n' "$ME" "$*" >&2; exit 2; }
 fail() { printf '%s: GATE FAILED: %s\n'     "$ME" "$*" >&2; exit 1; }
@@ -40,16 +45,26 @@ step() { printf '\n== %s\n' "$*"; }
 
 # ------------------------------------------------------------------ the image
 
-[ -f "$HOOKS_DIR/IMAGE_TAG" ] || die "$HOOKS_DIR/IMAGE_TAG is missing"
-IMAGE_TAG=$(tr -d ' \t\n\r' < "$HOOKS_DIR/IMAGE_TAG")
-[ -n "$IMAGE_TAG" ] || die "IMAGE_TAG is empty"
-# Read from the cloned hooks repo, so the `rev:` a repo pins fixes the launcher
-# and the image together and they cannot disagree. An override -- below, once
-# the repo is known -- replaces it for the inner loop, and says so every run.
-DEFAULT_IMAGE=quay.io/crunchtools/python-sdlc:$IMAGE_TAG
-# The fleet image: releases at their version tags, and `:main`, which is what
-# has merged to main and not yet been released.
+# The fleet image: releases at their version tags, `:latest` the newest of
+# them, and `:main`, which is what has merged to main and not yet been released.
 FLEET_IMAGE=quay.io/crunchtools/sdlc
+if [ -n "$LAUNCHED_FROM" ]; then
+  # Floating: the launcher and the image are one artifact, so the image that
+  # printed this file is the one it runs. The release it floats on is :latest.
+  DEFAULT_IMAGE=$LAUNCHED_FROM
+  RELEASE_IMAGE=$FLEET_IMAGE:latest
+else
+  HOOKS_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+  [ -f "$HOOKS_DIR/IMAGE_TAG" ] || die "$HOOKS_DIR/IMAGE_TAG is missing"
+  IMAGE_TAG=$(tr -d ' \t\n\r' < "$HOOKS_DIR/IMAGE_TAG")
+  [ -n "$IMAGE_TAG" ] || die "IMAGE_TAG is empty"
+  # Read from the cloned hooks repo, so the `rev:` a repo pins fixes the
+  # launcher and the image together and they cannot disagree. An override --
+  # below, once the repo is known -- replaces it for the inner loop, and says
+  # so every run.
+  DEFAULT_IMAGE=quay.io/crunchtools/python-sdlc:$IMAGE_TAG
+  RELEASE_IMAGE=$DEFAULT_IMAGE
+fi
 
 # --------------------------------------------------------------- preconditions
 
@@ -111,6 +126,7 @@ if [ -n "$SDLC_CONFIG_IMAGE" ]; then
 fi
 IMAGE=$DEFAULT_IMAGE
 IMAGE_FROM=
+[ -z "$LAUNCHED_FROM" ] || IMAGE_FROM="the image that printed this launcher"
 if [ -n "${SDLC_IMAGE:-}" ]; then
   case "$SDLC_IMAGE" in
     */*) IMAGE=$SDLC_IMAGE ;;
@@ -124,12 +140,14 @@ fi
 PULL_NEWER=
 if [ "$IMAGE" != "$DEFAULT_IMAGE" ]; then
   case "$IMAGE" in localhost/*) ;; *) PULL_NEWER=yes ;; esac
+fi
+if [ "$IMAGE" != "$RELEASE_IMAGE" ]; then
   {
     printf '%s: ************************************************************\n' "$ME"
     printf '%s: NOT THE PINNED RELEASE. This run is judged by\n' "$ME"
     printf '%s:   %s\n' "$ME" "$IMAGE"
     printf '%s: set by %s, in place of\n' "$ME" "$IMAGE_FROM"
-    printf '%s:   %s\n' "$ME" "$DEFAULT_IMAGE"
+    printf '%s:   %s\n' "$ME" "$RELEASE_IMAGE"
     printf '%s: ************************************************************\n' "$ME"
   } >&2
 fi

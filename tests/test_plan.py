@@ -963,6 +963,47 @@ for raw, want in PASSTHROUGH:
             os.environ["SDLC_ARGS"] = saved
 
 
+# ----------------------------------------------- the launcher the image prints
+
+# A repo with no `rev:` gets bin/sdlc from the image, with the ref it was pulled
+# by written in. The ref lands in a shell script, so it is checked first.
+_launcher_saved = S.LAUNCHER
+S.LAUNCHER = Path(__file__).resolve().parent.parent / "bin" / "sdlc"
+try:
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = S.t_launcher("quay.io/crunchtools/sdlc:latest")
+    printed = out.getvalue()
+    original = S.LAUNCHER.read_text()
+    check("launcher prints bin/sdlc", rc == S.CLEAN and len(printed) > len(original) - 10)
+    check(
+        "launcher writes the ref into the one LAUNCHED_FROM line, quoted",
+        "LAUNCHED_FROM='quay.io/crunchtools/sdlc:latest'\n" in printed
+        and printed.replace("LAUNCHED_FROM='quay.io/crunchtools/sdlc:latest'\n", "LAUNCHED_FROM=\n")
+        == original,
+    )
+    check("launcher with no ref cannot run", cannot_run(S.t_launcher, None) is not None)
+    for bad in [*INJECTIONS, "x'; touch /tmp/p; '", "$(id)", "quay.io/a:b\nrm -rf /"]:
+        check(f"launcher refuses ref {bad!r}", cannot_run(S.t_launcher, bad) is not None)
+    S.LAUNCHER = Path("/nonexistent/launcher")
+    check(
+        "an image without its launcher cannot run",
+        "ships no launcher" in (cannot_run(S.t_launcher, "localhost/x:y") or ""),
+    )
+    # A launcher whose line was edited away must not be printed unpinned.
+    with tempfile.NamedTemporaryFile("w", suffix="sdlc", delete=False) as handle:
+        handle.write(original.replace("LAUNCHED_FROM=\n", "LAUNCHED_FROM=x\n"))
+    S.LAUNCHER = Path(handle.name)
+    check(
+        "a launcher with no LAUNCHED_FROM= line is refused",
+        "LAUNCHED_FROM" in (cannot_run(S.t_launcher, "localhost/x:y") or ""),
+    )
+    os.unlink(handle.name)
+finally:
+    S.LAUNCHER = _launcher_saved
+check("launcher is a reserved name", "launcher" in S.RESERVED)
+
+
 def main() -> int:
     print()
     if FAILED:

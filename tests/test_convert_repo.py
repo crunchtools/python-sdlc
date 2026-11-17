@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""scripts/convert_repo.py, over repos built here in the shapes the fleet has.
+
+The conversion is the last PR wave, so what it writes is pinned case by case:
+
+  - the rev-pinned python-sdlc hooks and the standalone Gourmand and Gatehouse
+    hooks both become examples/pre-commit-floating.yaml, and a hooks file with
+    other repos in it keeps them
+  - a workflow whose every job the CI stub covers is replaced by it; one that
+    shares its `sdlc ci` job with other jobs keeps them and floats in place
+  - what the stubs do not cover is kept, and a ci.yml it cannot replace is
+    refused rather than guessed at
+  - the result runs `sdlc ci` by the constitution validator's reading and by
+    the image's own, so the required check is the same job
+  - nothing is written without --apply, a second run finds nothing to do, and
+    .specify/ is never touched
+
+Run inside the image, which has the interpreter and PyYAML the script needs:
+  podman run --rm -v .:/src:ro,z -w /src --entrypoint /opt/constitution-venv/bin/python3 \
+      quay.io/crunchtools/sdlc:<tag> tests/test_convert_repo.py
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = ROOT / "scripts" / "convert_repo.py"
+HOOKS = (ROOT / "examples" / "pre-commit-floating.yaml").read_text()
+CI = (ROOT / "examples" / "ci.yml").read_text()
+GATEHOUSE = (ROOT / "examples" / "gatehouse.yml").read_text()
+BOOTSTRAP = (ROOT / "bin" / "sdlc-bootstrap").read_text()
+
+# constitution validate-constitution.py `_runs_sdlc_ci`, and the image's own
+# CodeQL-deferral reading (`_RUNS_SDLC_CI` in sdlc). Both must still see the job.
+VALIDATOR = re.compile(r"^\s*[\"']?(?:\S*/)?sdlc[\"']?\s+ci\b", re.M)
+IMAGE = re.compile(r"""(?:^|[\s;&|("'=])\S*bin/sdlc\s+ci\b""")
+
+FAILED: list[str] = []
+REFUSED = 2  # the script's exit code for a shape it will not guess at
+EXECUTABLE = 0o111
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    print(f"{'ok  ' if cond else 'FAIL'} {name}" + (f" -- {detail}" if detail and not cond else ""))
+    if not cond:
+        FAILED.append(name)
+
+
+PINNED_HOOKS = """\
+# Every check runs from python-sdlc, pinned here once.
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/crunchtools/python-sdlc
+    rev: v0.8.0
+    hooks:
+      - id: sdlc-commit
+      - id: sdlc-push
+"""
+
+STANDALONE_HOOKS = """\
+repos:
+  - repo: local
+    hooks:
+      - id: gourmand
+        name: Gourmand (AI slop detection)
+        entry: podman run --rm -v .:/src:Z -w /src quay.io/crunchtools/gourmand:latest check --full
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+      - id: gatehouse
+        name: Gatehouse (AI code review, staged diff)
+        entry: bash -c 'git diff --cached | podman run --rm -i quay.io/crunchtools/gatehouse:latest --stdin'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, pre-merge-commit]
+"""
+
+RUFF_AND_STANDALONE = """\
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff-check
+""" + STANDALONE_HOOKS.split("repos:\n", 1)[1]
+
+PINNED_STEP = """\
+      - name: sdlc ci
+        run: |
+          set -eu
+          rev=$(awk '/repo: https:\\/\\/github.com\\/crunchtools\\/python-sdlc/ {f=1; next}
+                     f && /rev:/ {print $2; exit}' .pre-commit-config.yaml)
+          [ -n "$rev" ] || { echo "no python-sdlc rev in .pre-commit-config.yaml" >&2; exit 2; }
+          git clone -q --depth 1 --branch "$rev" https://github.com/crunchtools/python-sdlc "$RUNNER_TEMP/sdlc"
+          $RUNNER_TEMP/sdlc/bin/sdlc ci
+"""
+
+OLD_CI = (
+    """\
+name: CI
+on:
+  pull_request:
+jobs:
+  sdlc:
+    name: sdlc ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+"""
+    + PINNED_STEP
+    + """
+  gourmand:
+    name: Code Quality (Gourmand)
+    uses: crunchtools/gatehouse/.github/workflows/gourmand.yml@v0
+"""
+)
+
+GOURMAND = """\
+name: Gourmand
+on:
+  pull_request:
+jobs:
+  gourmand:
+    name: Code Quality (Gourmand)
+    uses: crunchtools/gatehouse/.github/workflows/gourmand.yml@v0
+"""
+
+MIXED = (
+    """\
+name: Tests
+on:
+  pull_request:
+jobs:
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+  sdlc:
+    name: sdlc ci
+    runs-on: ubuntu-latest
+    steps:
+"""
+    + PINNED_STEP
+)
+
+PUBLISH = """\
+name: Publish
+on:
+  release:
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: podman pull quay.io/crunchtools/python-sdlc:0.8.0
+      - run: echo quay.io/crunchtools/python-sdlc-extras
+"""
+
+CONSTITUTION = "# per-repo constitution\nInherits: v1.44.0\n"
+
+
+def make_repo(files: dict[str, str]) -> Path:
+    repo = Path(tempfile.mkdtemp())
+    (repo / ".git").mkdir()
+    for name, text in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    return repo
+
+
+def snapshot(repo: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(repo)): p.read_text()
+        for p in sorted(repo.rglob("*"))
+        if p.is_file() and ".git" not in p.parts
+    }
+
+
+def convert(repo: Path, apply: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), str(repo), *(["--apply"] if apply else [])],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def runs_sdlc_ci(text: str) -> bool:
+    for job in (yaml.safe_load(text).get("jobs") or {}).values():
+        if job.get("name") != "sdlc ci":
+            continue
+        for step in job.get("steps") or []:
+            run = str(step.get("run", ""))
+            if VALIDATOR.search(run) and any(IMAGE.search(line) for line in run.splitlines()):
+                return True
+    return False
+
+
+# ------------------------------------------------- a rev-pinned Python repo
+
+repo = make_repo(
+    {
+        ".pre-commit-config.yaml": PINNED_HOOKS,
+        ".github/workflows/ci.yml": OLD_CI,
+        ".github/workflows/gourmand.yml": GOURMAND,
+        ".github/workflows/gatehouse.yml": "# an older comment\n" + GATEHOUSE,
+        ".github/workflows/publish.yml": PUBLISH,
+        ".specify/memory/constitution.md": CONSTITUTION,
+    }
+)
+before = snapshot(repo)
+dry = convert(repo)
+check("python: the dry run exits 0", dry.returncode == 0, dry.stderr)
+check("python: the dry run prints a diff", "+++ b/.github/workflows/ci.yml" in dry.stdout)
+check("python: the dry run changes nothing", snapshot(repo) == before)
+done = convert(repo, apply=True)
+after = snapshot(repo)
+check("python: --apply exits 0", done.returncode == 0, done.stderr)
+check("python: the hooks file is the floating example", after[".pre-commit-config.yaml"] == HOOKS)
+check("python: ci.yml is the stub", after.get(".github/workflows/ci.yml") == CI)
+check(
+    "python: .sdlc/bin/sdlc is bin/sdlc-bootstrap, executable",
+    after.get(".sdlc/bin/sdlc") == BOOTSTRAP
+    and (repo / ".sdlc/bin/sdlc").stat().st_mode & EXECUTABLE == EXECUTABLE,
+)
+check(
+    "python: gourmand.yml, covered by the stub, is gone",
+    ".github/workflows/gourmand.yml" not in after,
+)
+check("python: gatehouse.yml is the stub", after[".github/workflows/gatehouse.yml"] == GATEHOUSE)
+check(
+    "python: publish.yml is kept, its image moved to quay.io/crunchtools/sdlc",
+    "podman pull quay.io/crunchtools/sdlc:0.8.0" in after[".github/workflows/publish.yml"]
+    and "quay.io/crunchtools/python-sdlc-extras" in after[".github/workflows/publish.yml"],
+)
+check(
+    "python: .specify is untouched",
+    after[".specify/memory/constitution.md"] == CONSTITUTION,
+)
+check(
+    "python: no hook repo is pinned at a rev",
+    all("rev" not in r for r in yaml.safe_load(after[".pre-commit-config.yaml"])["repos"]),
+)
+check(
+    "python: the stub runs `sdlc ci` by both readings",
+    runs_sdlc_ci(after[".github/workflows/ci.yml"]),
+)
+again = convert(repo)
+check(
+    "python: a second run finds nothing to do",
+    again.returncode == 0 and again.stdout == "",
+    again.stdout,
+)
+
+# ------------------------------------------------ a container-only repo
+
+repo = make_repo(
+    {
+        ".pre-commit-config.yaml": STANDALONE_HOOKS,
+        ".github/workflows/gourmand.yml": GOURMAND,
+        ".github/workflows/container.yml": (
+            "name: Container\non: push\njobs:\n  build:\n    uses: x/y/.github/workflows/c.yml@v1\n"
+        ),
+        "Containerfile": "FROM scratch\n",
+    }
+)
+done = convert(repo, apply=True)
+after = snapshot(repo)
+check("container: --apply exits 0", done.returncode == 0, done.stderr)
+check(
+    "container: the standalone hooks become the floating ones",
+    after[".pre-commit-config.yaml"] == HOOKS,
+)
+check("container: ci.yml is written", after.get(".github/workflows/ci.yml") == CI)
+check(
+    "container: gatehouse.yml is written", after.get(".github/workflows/gatehouse.yml") == GATEHOUSE
+)
+check("container: container.yml is kept", ".github/workflows/container.yml" in after)
+check("container: gourmand.yml is gone", ".github/workflows/gourmand.yml" not in after)
+
+# ------------------------------- an sdlc ci job sharing its workflow
+
+repo = make_repo(
+    {
+        ".pre-commit-config.yaml": PINNED_HOOKS,
+        ".github/workflows/tests.yml": MIXED,
+        ".github/workflows/gourmand.yml": GOURMAND,
+    }
+)
+done = convert(repo, apply=True)
+after = snapshot(repo)
+tests_yml = after[".github/workflows/tests.yml"]
+check("mixed: --apply exits 0", done.returncode == 0, done.stderr)
+check("mixed: no ci.yml stub beside it", ".github/workflows/ci.yml" not in after)
+check("mixed: the other job is kept", "make test" in tests_yml)
+check("mixed: gourmand.yml is kept, no stub took it", ".github/workflows/gourmand.yml" in after)
+check(
+    "mixed: the step floats, reading SDLC_IMAGE from the repository variable",
+    "\n          .sdlc/bin/sdlc ci\n" in tests_yml
+    and "SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}" in tests_yml
+    and "git clone" not in tests_yml,
+)
+check("mixed: it still runs `sdlc ci` by both readings", runs_sdlc_ci(tests_yml))
+check("mixed: the result is still YAML", isinstance(yaml.safe_load(tests_yml), dict))
+again = convert(repo)
+check(
+    "mixed: a second run finds nothing to do",
+    again.returncode == 0 and again.stdout == "",
+    again.stdout,
+)
+
+# ------------------------------------------------------ what it refuses
+
+repo = make_repo(
+    {
+        ".pre-commit-config.yaml": STANDALONE_HOOKS,
+        ".github/workflows/ci.yml": (
+            "name: CI\non: push\njobs:\n  build:\n    runs-on: x\n    steps:\n      - run: make\n"
+        ),
+    }
+)
+before = snapshot(repo)
+refused = convert(repo, apply=True)
+check(
+    "a ci.yml the stub cannot replace is refused (exit 2), and nothing is written",
+    refused.returncode == REFUSED
+    and "NOT CONVERTED" in refused.stderr
+    and snapshot(repo) == before,
+    refused.stderr,
+)
+
+repo = make_repo({".pre-commit-config.yaml": "repos: []\n"})
+refused = convert(repo)
+check(
+    "a hooks file with nothing to replace is refused (exit 2)",
+    refused.returncode == REFUSED,
+    refused.stderr,
+)
+
+custom = GATEHOUSE.replace(
+    "uses: crunchtools/gatehouse/.github/workflows/review.yml@v0",
+    "uses: crunchtools/gatehouse/.github/workflows/review.yml@v0\n    with:\n      blocking: true",
+)
+repo = make_repo(
+    {
+        ".pre-commit-config.yaml": RUFF_AND_STANDALONE,
+        ".github/workflows/gatehouse.yml": custom,
+    }
+)
+done = convert(repo, apply=True)
+after = snapshot(repo)
+hooks = yaml.safe_load(after[".pre-commit-config.yaml"])
+check("other hooks: --apply exits 0", done.returncode == 0, done.stderr)
+check(
+    "other hooks: ruff is kept, the standalone hooks are gone, the floating ones added",
+    [r["repo"] for r in hooks["repos"]] == ["https://github.com/astral-sh/ruff-pre-commit", "local"]
+    and [h["id"] for h in hooks["repos"][1]["hooks"]] == ["sdlc-commit", "sdlc-push"],
+)
+check(
+    "other hooks: both hook types are installed",
+    hooks.get("default_install_hook_types") == ["pre-commit", "pre-push"],
+)
+check(
+    "a gatehouse.yml that differs in more than comments is kept",
+    after[".github/workflows/gatehouse.yml"] == custom
+    and "kept: .github/workflows/gatehouse.yml" in done.stderr,
+)
+
+
+def main() -> int:
+    print()
+    if FAILED:
+        print(f"{len(FAILED)} FAILED")
+        return 1
+    print("all passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

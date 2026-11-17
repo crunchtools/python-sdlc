@@ -49,37 +49,56 @@ replace it.
 
 ## Wiring a repo
 
-`.pre-commit-config.yaml`, the whole file:
+A repo carries one file, `.sdlc/bin/sdlc` (this repo's `bin/sdlc-bootstrap`),
+and pins nothing. The launcher ships inside `quay.io/crunchtools/sdlc`; the
+bootstrap asks the image for it (`sdlc launcher <ref>`, which writes that ref
+into it) and runs it. So the launcher, the image and every tool inside it float
+together on `:latest`, for the laptop and CI both, and a release reaches every
+repo without a pull request.
+
+`.pre-commit-config.yaml` is
+[`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
+`language: system` hooks, `.sdlc/bin/sdlc commit` and `.sdlc/bin/sdlc push`.
+CI is [`examples/ci.yml`](examples/ci.yml), whose job is still named `sdlc ci`,
+so the required check does not change:
+
+```yaml
+      - name: sdlc ci
+        env:
+          SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}
+        run: .sdlc/bin/sdlc ci
+```
+
+`scripts/convert_repo.py <checkout>` converts a repo wired the old way -- the
+rev-pinned hooks below, or the standalone Gourmand and Gatehouse hooks -- and
+prints the diff; `--apply` writes it. It replaces a workflow only when the CI
+stub covers every job in it (`sdlc ci`, Gourmand), refreshes `gatehouse.yml`
+from [`examples/gatehouse.yml`](examples/gatehouse.yml) when it differs only in
+comments, keeps everything else (publish, release, container builds), and
+refuses with exit 2 a shape it would have to guess at.
+
+**An `sdlc` RPM, later.** It installs the same bootstrap as `/usr/bin/sdlc` on
+hosts and seats, so a person can type `sdlc tiers` anywhere. Nothing in a repo
+changes when it lands: the hooks keep starting the repo's own copy, which is
+identical, and the RPM never needs a release of its own, because the launcher
+it fetches floats with the image.
+
+The rev-pinned form still works, and is what a repo has until it converts:
 
 ```yaml
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
   - repo: https://github.com/crunchtools/python-sdlc
-    rev: v0.3.4
+    rev: v0.8.0
     hooks:
       - id: sdlc-commit
       - id: sdlc-push
 ```
 
-CI, one job, which reads the release from that same `rev:`:
-
-```yaml
-  sdlc:
-    name: sdlc ci
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: sdlc ci
-        run: |
-          rev=$(awk '/repo: https:\/\/github.com\/crunchtools\/python-sdlc/ {f=1; next}
-                     f && /rev:/ {print $2; exit}' .pre-commit-config.yaml)
-          git clone -q --depth 1 --branch "$rev" https://github.com/crunchtools/python-sdlc "$RUNNER_TEMP/sdlc"
-          $RUNNER_TEMP/sdlc/bin/sdlc ci
-```
-
-That `rev:` pins the launcher, the image and every tool inside it, for the
-laptop and CI both. One pin.
+with a CI step that clones this repo at that `rev:` and runs
+`$RUNNER_TEMP/sdlc/bin/sdlc ci`. That `rev:` pins the launcher, the image and
+every tool inside it.
 
 ### A project in a subdirectory
 
@@ -338,7 +357,9 @@ It is the digest the contract test ran against at `:<sha>`, read back after the
 copy, and it never moves back onto an older commit. Only a release moves `latest` and the version tags, and no
 pull request run touches a registry at all. The release is the gate.
 
-To run one on your machine, first matching wins:
+A floating repo opts its CI into `:main` with the repository variable
+`SDLC_IMAGE=main` -- a variable, not a line in a file, so a pull request cannot
+choose its own judge. To run one on your machine, first matching wins:
 
 | How | Value |
 |---|---|

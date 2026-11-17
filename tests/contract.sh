@@ -504,6 +504,32 @@ do
   fi
 done
 
+# ------------------------------------------- the launcher the image carries
+
+# A repo with no `rev:` runs the launcher this image prints, so the image must
+# carry THIS commit's bin/sdlc and write the ref it was asked for into it.
+printf '\n== the launcher\n\n'
+CLAUNCH=$(mktemp)
+if podman run --rm --network=none "$IMAGE" launcher quay.io/crunchtools/sdlc:latest > "$CLAUNCH" \
+   && sed "s|^LAUNCHED_FROM=\$|LAUNCHED_FROM='quay.io/crunchtools/sdlc:latest'|" bin/sdlc | cmp -s - "$CLAUNCH"; then
+  ok "sdlc launcher prints this commit's bin/sdlc, with the ref written in"
+else
+  bad "sdlc launcher does not print this commit's bin/sdlc"
+fi
+rm -f "$CLAUNCH"
+rc=0
+podman run --rm --network=none "$IMAGE" launcher "x'; id; '" > /dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "sdlc launcher refuses a ref that is not an image reference (exit 2)"
+else
+  bad "sdlc launcher took a ref with quotes in it (exit $rc)"
+fi
+if inside cat /usr/share/sdlc/bootstrap | cmp -s - bin/sdlc-bootstrap; then
+  ok "the image carries this commit's bin/sdlc-bootstrap"
+else
+  bad "/usr/share/sdlc/bootstrap is not this commit's bin/sdlc-bootstrap"
+fi
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
   printf 'contract test PASSED\n'

@@ -373,6 +373,7 @@ RESERVED = (
     "list",
     "versions",
     "stacks",
+    "launcher",
     "pytest-deps",
     "codeql-baseline",
     "scan-rootfs",
@@ -2168,6 +2169,33 @@ def t_stacks() -> int:
     return CLEAN
 
 
+# The host launcher, bin/sdlc, shipped inside the image that it starts. A repo
+# with no `rev:` to pin gets it from here (bin/sdlc-bootstrap), so the launcher
+# floats with the image tag exactly as every tool in the image does.
+LAUNCHER = Path("/usr/share/sdlc/launcher")
+LAUNCHED_FROM_LINE = "LAUNCHED_FROM=\n"
+
+
+def t_launcher(ref: str | None) -> int:
+    """Print the launcher, with the image it came from written into it.
+
+    The caller names the ref because only it knows which one it pulled: the
+    image cannot see its own tag. The ref is checked before it is written into
+    a shell script, and written single-quoted all the same.
+    """
+    if not ref:
+        cannot("launcher needs the image it is run from, e.g. quay.io/crunchtools/sdlc:latest")
+    ref = image_ref("launcher", "image", ref)
+    try:
+        text = LAUNCHER.read_text()
+    except OSError as exc:
+        cannot(f"this image ships no launcher at {LAUNCHER}: {exc}")
+    if text.count(LAUNCHED_FROM_LINE) != 1:
+        cannot(f"{LAUNCHER} has no single `LAUNCHED_FROM=` line to write the image into")
+    sys.stdout.write(text.replace(LAUNCHED_FROM_LINE, f"LAUNCHED_FROM='{ref}'\n", 1))
+    return CLEAN
+
+
 TOOL_COMMANDS = {
     "tiers": t_tiers,
     "list": t_list,
@@ -2189,6 +2217,8 @@ def main() -> int:
     ap.add_argument("arg", nargs="?", help="for plan: commit, push, ci or a check name")
     args = ap.parse_args()
 
+    if args.what == "launcher":
+        return t_launcher(args.arg)
     if args.what == "plan":
         if not args.arg:
             cannot("plan needs commit, push, ci or a check name")

@@ -55,3 +55,6 @@ max-complexity = 10
 # bytecode anywhere near it, and reading it any other way would not be a copy
 # of the behaviour under test.
 "tests/*" = ["S101", "PT018", "S302"]
+# Its fixtures are the fleet's files byte for byte, long lines included: the
+# script matches the pinned CI step exactly, so a wrapped copy tests nothing.
+"tests/test_convert_repo.py" = ["S101", "E501"]
