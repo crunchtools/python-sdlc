@@ -76,6 +76,10 @@ stub covers every job in it (`sdlc ci`, Gourmand), refreshes `gatehouse.yml`
 from [`examples/gatehouse.yml`](examples/gatehouse.yml) when it differs only in
 comments, keeps everything else (publish, release, container builds), and
 refuses with exit 2 a shape it would have to guess at.
+`scripts/fleet_wave.py` runs it across the org: a plan by default, one
+auto-merging pull request per repo with `--apply`, a TSV ledger either way.
+It reads `GH_TOKEN` from the environment for the GitHub API (required with
+`--apply`), and pushes with the credentials git already has.
 
 **What floating trusts.** Whoever can move `quay.io/crunchtools/sdlc:latest`
 now decides the host-side code every seat and runner runs, and that code is no
