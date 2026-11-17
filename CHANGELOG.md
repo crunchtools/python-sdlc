@@ -14,7 +14,9 @@ All notable changes to this project are documented here, following
   `.sdlc/bin/sdlc` -- pulls `quay.io/crunchtools/sdlc:${SDLC_IMAGE:-latest}`
   when newer, asks it for the launcher and runs it, so a repo's hooks and CI
   float with the image and a release needs no bump pull requests. An image
-  that cannot print its launcher is a 2. `examples/pre-commit-floating.yaml`
+  that cannot print its launcher is a 2. `SDLC_IMAGE` there may name only
+  `quay.io/crunchtools/sdlc` -- `main`, `latest`, `X.Y.Z` or `@sha256:<64
+  hex>` -- and anything else is refused with exit 2 before podman runs. `examples/pre-commit-floating.yaml`
   and `examples/ci.yml` are the hook and CI forms; the CI job keeps the name
   `sdlc ci`, and a repo opts its CI into `:main` with the repository variable
   `SDLC_IMAGE`.

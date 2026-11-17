@@ -910,15 +910,41 @@ else
   bad "bootstrap on main: $(last_run) / $(head -3 "$RUN/out")"
 fi
 
-log_mark
-SDLC_IMAGE=localhost/sdlc:dev boot tiers > "$RUN/out" 2>&1 || true
-log_since
-if grep -q -- '-- localhost/sdlc:dev launcher localhost/sdlc:dev$' "$RUN/podman.log" \
-   && last_run | grep -q -- ' localhost/sdlc:dev tiers$'; then
-  ok "a full SDLC_IMAGE ref is used as given, for the launcher and the run"
-else
-  bad "bootstrap on localhost: $(last_run)"
-fi
+# What the bootstrap runs is what it pulls, so it pulls from one repository:
+# quay.io/crunchtools/sdlc at main, latest, a release or a digest.
+D64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+for good in "0.9.0:quay.io/crunchtools/sdlc:0.9.0" \
+            "@sha256:$D64:quay.io/crunchtools/sdlc@sha256:$D64" \
+            "quay.io/crunchtools/sdlc:main:quay.io/crunchtools/sdlc:main" \
+            "quay.io/crunchtools/sdlc@sha256:$D64:quay.io/crunchtools/sdlc@sha256:$D64"; do
+  case "$good" in
+    @sha256:*|quay.io/crunchtools/sdlc@*) value=${good%:quay.io/*}; want=${good#"$value":} ;;
+    *) value=${good%%:quay.io/*}; want=${good#"$value":} ;;
+  esac
+  case "$good" in quay.io/crunchtools/sdlc:main:*) value=quay.io/crunchtools/sdlc:main; want=$value ;; esac
+  log_mark
+  SDLC_IMAGE=$value boot tiers > "$RUN/out" 2>&1 || true
+  log_since
+  if grep -q -- "-- $want launcher $want\$" "$RUN/podman.log" && last_run | grep -q -- " $want tiers\$"; then
+    ok "SDLC_IMAGE=$value pulls and runs $want"
+  else
+    bad "SDLC_IMAGE=$value: $(last_run) / $(tail -1 "$RUN/out")"
+  fi
+done
+for bad_ in localhost/sdlc:dev quay.io/evil/sdlc:latest quay.io/crunchtools/sdlcx:latest \
+            1.2 v1.2.3 1.2.3.4 1..3 @sha256:abc "@sha256:$(printf '%s' "$D64" | tr a G)" \
+            'main;id' '--privileged' quay.io/crunchtools/sdlc; do
+  log_mark
+  rc=0
+  SDLC_IMAGE=$bad_ boot tiers > "$RUN/out" 2>&1 || rc=$?
+  log_since
+  if [ "$rc" -eq 2 ] && grep -q 'is not main, latest, X.Y.Z or @sha256' "$RUN/out" \
+     && ! [ -s "$RUN/podman.log" ]; then
+    ok "SDLC_IMAGE='$bad_' is refused (exit 2) before podman runs"
+  else
+    bad "SDLC_IMAGE='$bad_' exited $rc"
+  fi
+done
 
 # Nothing printed must never become nothing run and exit 0.
 for case_ in fail empty; do

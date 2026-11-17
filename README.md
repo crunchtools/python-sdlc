@@ -392,8 +392,12 @@ planner runs inside whichever image was chosen.
 **Nothing built on a laptop or a seat is ever pushed.** To try a change to
 this image before it merges, build it locally (`podman build -t
 localhost/python-sdlc:dev .`) and run it with
-`SDLC_IMAGE=localhost/python-sdlc:dev`. `sdlc` has no push step, and only this
-repo's GitHub Actions on main publish to quay.io.
+`SDLC_IMAGE=localhost/python-sdlc:dev` through this clone's `bin/sdlc`. A
+converted repo's `.sdlc/bin/sdlc` will not take it: the bootstrap runs what it
+pulls, so it pulls only `quay.io/crunchtools/sdlc` at `main`, `latest`, a
+release `X.Y.Z` or `@sha256:<digest>`, and refuses anything else with exit 2.
+`sdlc` has no push step, and only this repo's GitHub Actions on main publish to
+quay.io.
 
 ## When :latest is broken
 
