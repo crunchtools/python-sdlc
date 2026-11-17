@@ -1,4 +1,5 @@
-# Build, test and publish quay.io/crunchtools/python-sdlc.
+# Build, test and publish quay.io/crunchtools/python-sdlc, and the same digest
+# as quay.io/crunchtools/sdlc, the fleet-wide name it is becoming.
 #
 # The shape is the Container Image profile's, and it is the same shape trentina
 # arrived at the hard way in #689: the build pushes ONLY the commit SHA tag, the
@@ -54,6 +55,11 @@ permissions: {}
 
 env:
   QUAY: quay.io/crunchtools/python-sdlc
+  # The fleet-wide name for the same image: one digest, two repositories, the
+  # same tags on both, until every consumer has moved and python-sdlc retires.
+  # It is never built or pushed separately -- it is a COPY of the digest pushed
+  # above, so the two names cannot disagree about what they hold.
+  SDLC: quay.io/crunchtools/sdlc
 
 jobs:
   build:
@@ -139,9 +145,15 @@ jobs:
           podman push "localhost/python-sdlc:$GITHUB_SHA" "$QUAY:$GITHUB_SHA"
           digest=$(skopeo inspect --format '{{.Digest}}' "docker://$QUAY:$GITHUB_SHA")
           [ -n "$digest" ] || { echo "the registry reported no digest" >&2; exit 1; }
+          # The fleet name gets the SAME manifest, copied rather than pushed a
+          # second time: a second podman push recompresses the layers and can
+          # produce a different digest, and then the two names hold two images.
+          skopeo copy --all --preserve-digests "docker://$QUAY@$digest" "docker://$SDLC:$GITHUB_SHA"
+          got=$(skopeo inspect --format '{{.Digest}}' "docker://$SDLC:$GITHUB_SHA")
+          [ "$got" = "$digest" ] || { echo "$SDLC:$GITHUB_SHA is $got, not $digest" >&2; exit 1; }
           echo "digest=$digest"            >> "$GITHUB_OUTPUT"
           echo "ref=$QUAY@$digest"         >> "$GITHUB_OUTPUT"
-          echo "pushed $QUAY@$digest"
+          echo "pushed $QUAY@$digest and $SDLC@$digest"
 
       # The tag path, in place of everything above. Nothing is built and nothing
       # is pushed: this reads the digest the main-branch run of this same commit
@@ -262,22 +274,30 @@ jobs:
           # RT#1550): --preserve-digests refuses a copy that would change the
           # manifest, and the read-back fails the job if the tag resolves to
           # anything but the digest that was tested.
+          #
+          # Every tag moves on BOTH names, python-sdlc and sdlc, to the same
+          # digest, and the guard reads both: either one ahead of this commit
+          # refuses the whole promotion rather than leaving them split.
           want=${REF#*@}
           promote() {
-            skopeo copy --all --preserve-digests "docker://$REF" "docker://$QUAY:$1"
-            got=$(skopeo inspect --format '{{.Digest}}' "docker://$QUAY:$1")
-            [ "$got" = "$want" ] || { echo ":$1 resolves to $got, not the tested $want" >&2; exit 1; }
+            for repo in "$QUAY" "$SDLC"; do
+              skopeo copy --all --preserve-digests "docker://$REF" "docker://$repo:$1"
+              got=$(skopeo inspect --format '{{.Digest}}' "docker://$repo:$1")
+              [ "$got" = "$want" ] || { echo "$repo:$1 resolves to $got, not the tested $want" >&2; exit 1; }
+            done
           }
           if [ -n "$floating" ]; then
-            current=$(skopeo inspect --format \
-              '{{ index .Labels "org.opencontainers.image.revision" }}' \
-              "docker://$QUAY:$floating" 2>/dev/null || true)
-            if [ -n "${current:-}" ] && [ "$current" != "$GITHUB_SHA" ]; then
-              if git merge-base --is-ancestor "$GITHUB_SHA" "$current" 2>/dev/null; then
-                echo "refusing: :$floating is $current, which already contains $GITHUB_SHA" >&2
-                exit 1
+            for repo in "$QUAY" "$SDLC"; do
+              current=$(skopeo inspect --format \
+                '{{ index .Labels "org.opencontainers.image.revision" }}' \
+                "docker://$repo:$floating" 2>/dev/null || true)
+              if [ -n "${current:-}" ] && [ "$current" != "$GITHUB_SHA" ]; then
+                if git merge-base --is-ancestor "$GITHUB_SHA" "$current" 2>/dev/null; then
+                  echo "refusing: $repo:$floating is $current, which already contains $GITHUB_SHA" >&2
+                  exit 1
+                fi
               fi
-            fi
+            done
             promote "$floating"
           fi
           case "$GITHUB_REF" in

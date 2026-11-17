@@ -6,6 +6,39 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- **Stacks.** One image for every kind of repo: the planner detects which
+  stacks a repo has from its files -- `pyproject.toml` is python, a root
+  `Containerfile` or `Dockerfile` is container, `package.json` is node, a
+  `bootc` base image is bootc, nothing is docs -- and runs each stack's checks
+  plus the ones every repo gets (Gourmand, Gatehouse, the constitution
+  validator, the hook check). `[tool.sdlc] stacks` adds a stack and
+  `skip-stacks` drops one; neither can name a command. `sdlc stacks` shows what
+  was detected and what runs. node, bootc and docs are named but not yet
+  checked, so a repo that has one is refused (exit 2) until it skips it, rather
+  than going green on checks that never ran.
+- **A Python repo that names no stacks runs exactly what it ran before**, with
+  or without a Containerfile. Proved by planning every public consumer's
+  `commit`, `push`, `ci` and `tiers` with v0.7.4 and with this image and
+  diffing the output.
+- **The container stack**: `containerfile-lint` (hadolint 2.14.0, in push and
+  ci) and, in ci only, `container-build`, `container-smoke` (the built image
+  either exits 0 or is still running after `seconds`, default 10, with no
+  network and no capabilities) and `container-scan` (grype 0.121.0 over the
+  built image's filesystem, failing on a fixable Critical by default; the
+  repo's `.grype.yaml` applies).
+- `sdlc.toml`: the same `[tool.sdlc]` tables, for a repo with no
+  `pyproject.toml`. Refused beside one.
+- The image is also published as `quay.io/crunchtools/sdlc`: the same digest
+  copied, never rebuilt, with the same tags as `python-sdlc`.
+
+### Fixed
+
+- `bin/sdlc`'s `run_host` kept its exit status and start time in `_rc` and
+  `_t0`, which `run_serial` also uses, so a host step could leak its own status
+  or shorten its check's recorded duration. It has its own names now.
+
 ## [0.7.5] - 2026-11-17
 
 ### Changed

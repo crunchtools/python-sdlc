@@ -118,6 +118,15 @@ case " \$* " in
   *" plan lanes-budget "*)
     printf 'p${TAB}one${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
     printf 'q${TAB}two${TAB}image-ro${TAB}quiet-ok\n' ;;
+  *" plan up-"*)
+    _secs=1; _what=\$_last
+    case "\$_last" in up-build) _what=build ;; up-noseconds) _secs=soon ;; esac
+    if [ "\$_what" = build ]; then
+      printf '%s${TAB}main${TAB}host-up${TAB}1${US}podman${US}build${US}-t${US}x${US}.\n' "\$_last"
+    else
+      printf '%s${TAB}main${TAB}host-up${TAB}%s${US}podman${US}run${US}--rm${US}localhost/x:sdlc${US}go-%s\n' \
+        "\$_last" "\$_secs" "\$_last"
+    fi ;;
   *" plan "*)
     if [ -f "$SHIM/defer-last" ]; then printf 'codeql${TAB}main${TAB}image-ro${TAB}rc-three\n'; exit 0; fi
     if [ -f "$SHIM/defer" ]; then printf 'codeql${TAB}main${TAB}image-ro${TAB}rc-three\n'; fi
@@ -131,6 +140,11 @@ case "\$_last" in
     printf 'START %s\n' "\$_last" >> "$SHIM/race.log"
     printf 'BEGIN %s\n' "\$_last"; sleep 1; printf 'END %s\n' "\$_last"
     printf 'DONE %s\n' "\$_last" >> "$SHIM/race.log" ;;
+  go-up-stays)    sleep 1; exit 255 ;;
+  go-up-dies-255) exit 255 ;;
+  go-up-dies-3)   exit 3 ;;
+  go-up-exits-0)  exit 0 ;;
+  go-up-podman)   exit 125 ;;
   rc-one)      printf 'RAN rc-one\n'; exit 1 ;;
   rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
   rc-three)    printf 'RAN rc-three\n'; exit 3 ;;
@@ -186,6 +200,33 @@ if [ ! -e "$SHIM/pwned" ]; then
   ok "a host step's words are never evaluated as shell"
 else
   bad "a host step's word was evaluated as shell"
+fi
+
+printf '\n== a run given time to stay up\n\n'
+
+# container-smoke's step: `host-up`, seconds and then a podman run. podman
+# reports its own --timeout kill as 255, which a crashing program can also
+# return, so the clock decides: 255 after the full time is a service that
+# stayed up, 255 before it is a crash.
+for case_ in up-stays:0 up-exits-0:0 up-dies-255:1 up-dies-3:1 up-podman:2 \
+             up-build:2 up-noseconds:2; do
+  name=${case_%:*}; want=${case_#*:}
+  log_mark
+  PATH="$SHIM" sh bin/sdlc "$name" > "$RUN/out" 2>&1 && rc=0 || rc=$?
+  log_since
+  if [ "$rc" -eq "$want" ]; then
+    ok "host-up $name exits $want"
+  else
+    bad "host-up $name exited $rc, want $want: $(tail -3 "$RUN/out")"
+  fi
+done
+log_mark
+PATH="$SHIM" sh bin/sdlc up-stays >/dev/null 2>&1 || true
+log_since
+if grep -q -- '--cap-drop=all .*--timeout 1 --rm localhost/x:sdlc go-up-stays' "$RUN/podman.log"; then
+  ok "host-up runs locked down, under --timeout"
+else
+  bad "host-up did not pass --timeout with the lock-down: $(grep up-stays "$RUN/podman.log" | tail -1)"
 fi
 
 printf '\n== a check deferred to CI\n\n'

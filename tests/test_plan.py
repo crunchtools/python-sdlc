@@ -68,12 +68,26 @@ check(
     "commit defaults",
     S.resolve(empty, "commit") == ["ruff-check", "ruff-format", "gourmand", "hooks-installed"],
 )
-check("push defaults", S.resolve(empty, "push") == S.DEFAULTS["push"])
+# Written out rather than read from DEFAULTS: DEFAULTS holds every stack's
+# checks, and this is the list a Python repo ran before stacks existed.
+PYTHON_PUSH = [
+    "lint",
+    "mypy",
+    "pytest",
+    "gourmand",
+    "gatehouse",
+    "semgrep",
+    "pip-audit",
+    "constitution",
+    "codeql",
+]
+check("push defaults", S.resolve(empty, "push") == PYTHON_PUSH, str(S.resolve(empty, "push")))
 ci = S.resolve(empty, "ci")
 check("ci leaves out the reviewers", "gourmand" not in ci and "gatehouse" not in ci, str(ci))
 check(
     "ci keeps the other push checks",
-    ci == [c for c in S.DEFAULTS["push"] if c not in S.CI_EXCLUDES],
+    ci == [c for c in PYTHON_PUSH if c not in S.CI_EXCLUDES],
+    str(ci),
 )
 
 # python-sdlc#48: the commit tier's ruff steps fix and pass, so without a
@@ -534,6 +548,197 @@ check(
     {r[1] for r in ci_rows} == {S.MAIN_LANE},
     str({r[1] for r in ci_rows}),
 )
+
+
+# ------------------------------------------------------------------ the stacks
+#
+# One image, several kinds of repo. Detection reads the tree; a config block may
+# add or drop a stack but never name a command. And the promise that makes it
+# safe to ship: a Python repo that says nothing about stacks plans EXACTLY what
+# it planned before stacks existed, Containerfile or not.
+
+
+def stacks_of(files: dict[str, str]) -> tuple[str, ...] | str:
+    """active_stacks() over a tree holding `files`, or the CannotRun message."""
+    with tempfile.TemporaryDirectory() as root:
+        for name, text in files.items():
+            Path(root, name).write_text(text)
+        S.REPO = Path(root)
+        try:
+            return S.active_stacks(S.config_document().get("tool", {}).get("sdlc", {}) or {})
+        except S.CannotRunError as exc:
+            return str(exc)
+
+
+PY = '[project]\nname = "fx"\nversion = "0.0.0"\n'
+CF = "FROM quay.io/hummingbird/python:3.14\n"
+check("a Python repo is the python stack", stacks_of({"pyproject.toml": PY}) == ("python",))
+check(
+    "a Python repo naming no stacks keeps python alone, Containerfile or not",
+    stacks_of({"pyproject.toml": PY, "Containerfile": CF, "package.json": "{}"}) == ("python",),
+)
+check(
+    "a Python repo that opts in gets what was detected and what it asked for",
+    stacks_of({"pyproject.toml": PY + '[tool.sdlc]\nstacks = ["container"]\n', "Containerfile": CF})
+    == ("python", "container"),
+)
+check(
+    "a Containerfile alone is the container stack",
+    stacks_of({"Containerfile": CF}) == ("container",),
+)
+check("a Dockerfile counts too", stacks_of({"Dockerfile": CF}) == ("container",))
+msg = stacks_of({"Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n"})
+check("a bootc Containerfile is not the container stack", "bootc" in str(msg), str(msg))
+msg = stacks_of({"package.json": "{}"})
+check("a stack this image cannot run yet is refused, not skipped", "node" in str(msg), str(msg))
+check(
+    "skip-stacks accepts running without it",
+    stacks_of({"package.json": "{}", "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["node"]\n'}) == (),
+)
+msg = stacks_of({"README.md": "x"})
+check("a repo with nothing detected is docs, which is not here yet", "docs" in str(msg), str(msg))
+msg = stacks_of({"Containerfile": CF, "sdlc.toml": '[tool.sdlc]\nstacks = ["rust"]\n'})
+check("an unknown stack is refused", "rust" in str(msg), str(msg))
+msg = stacks_of({"pyproject.toml": PY, "sdlc.toml": "[tool.sdlc]\n"})
+check("sdlc.toml beside a pyproject.toml is refused", "both exist" in str(msg), str(msg))
+
+check(
+    "the python stack plans push exactly as before stacks",
+    S.resolve(empty, "push", ("python",)) == PYTHON_PUSH,
+)
+check(
+    "the default stacks argument is the python stack",
+    S.resolve(empty, "ci") == S.resolve(empty, "ci", ("python",)),
+)
+check(
+    "the container stack alone pushes hadolint and the common checks",
+    S.resolve(empty, "push", ("container",))
+    == ["containerfile-lint", "gourmand", "gatehouse", "constitution"],
+)
+check(
+    "the container stack builds, smokes and scans in ci, after push's checks",
+    S.resolve(empty, "ci", ("container",))
+    == [
+        "containerfile-lint",
+        "constitution",
+        "container-build",
+        "container-smoke",
+        "container-scan",
+    ],
+)
+check(
+    "commit has nothing from the container stack",
+    S.resolve(empty, "commit", ("container",)) == ["gourmand", "hooks-installed"],
+)
+msg = cannot_run(S.resolve, {"ci": {"skip": ["containerfile-lint"]}}, "ci", ("container",))
+check("ci may not skip hadolint, a push verdict", msg is not None, str(msg))
+check(
+    "ci may skip the scan, which only ci runs",
+    "container-scan" not in S.resolve({"ci": {"skip": ["container-scan"]}}, "ci", ("container",)),
+)
+
+
+def container_plan(target: str, sdlc_toml: str = "", **env) -> list[list[str]]:
+    with tempfile.TemporaryDirectory() as root:
+        Path(root, "Containerfile").write_text(CF)
+        if sdlc_toml:
+            Path(root, "sdlc.toml").write_text(sdlc_toml)
+        S.REPO = Path(root)
+        saved = dict(os.environ)
+        os.environ.update(
+            {
+                "SDLC_HOST_REPO": root,
+                "SDLC_CACHE_VOLUME": "testvol",
+                "SDLC_PROJECT": "fx",
+                "SDLC_IMAGE": "quay.io/crunchtools/sdlc:9.9.9",
+                **env,
+            }
+        )
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                S.t_plan(target)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+    return [line.split("\t") for line in buf.getvalue().splitlines()]
+
+
+rows = container_plan("ci")
+by_check = {r[0]: r for r in rows}
+check("every container plan line has four fields", all(len(r) == PLAN_FIELDS for r in rows))
+check(
+    "build, smoke and scan are one lane, off the main lane",
+    len({by_check[c][1] for c in S.CI_DEFAULTS}) == 1
+    and by_check["container-build"][1] != S.MAIN_LANE,
+    str([(r[0], r[1]) for r in rows]),
+)
+build = by_check["container-build"][3].split(S.UNIT_SEPARATOR)
+check(
+    "container-build builds the root Containerfile at the default tag",
+    build[:4] == ["podman", "build", "-f", "Containerfile"] and "localhost/fx:sdlc" in build,
+    str(build),
+)
+smoke = by_check["container-smoke"]
+words = smoke[3].split(S.UNIT_SEPARATOR)
+check(
+    "container-smoke is host-up, its first word the seconds",
+    smoke[2] == "host-up" and words[0] == str(S.SMOKE_SECONDS) and words[1:3] == ["podman", "run"],
+    str(smoke),
+)
+check("container-smoke has no network by default", "--network" in words and "none" in words)
+check("container-smoke never pulls what it judges", "--pull=never" in words, str(words))
+scan = by_check["container-scan"][3].split(S.UNIT_SEPARATOR)
+check(
+    "container-scan mounts the built image and runs this image's scan-rootfs",
+    "type=image,source=localhost/fx:sdlc,destination=/scan,rw=false" in scan
+    and scan[-2:] == ["quay.io/crunchtools/sdlc:9.9.9", "scan-rootfs"],
+    str(scan),
+)
+check("container-scan fails on a fixable critical by default", "SDLC_SCAN_FAIL_ON=critical" in scan)
+rows = container_plan(
+    "ci",
+    '[tool.sdlc.ci.container-build]\ntag = "localhost/other:t"\n'
+    '[tool.sdlc.ci.container-smoke]\nseconds = 3\nargs = ["--version"]\nnetwork = true\n',
+)
+by_check = {r[0]: r for r in rows}
+words = by_check["container-smoke"][3].split(S.UNIT_SEPARATOR)
+check(
+    "smoke and scan follow container-build's tag",
+    "localhost/other:t" in words
+    and "type=image,source=localhost/other:t,destination=/scan,rw=false"
+    in by_check["container-scan"][3].split(S.UNIT_SEPARATOR),
+    str(words),
+)
+check(
+    "smoke takes its seconds, args and network from its table",
+    words[0] == "3" and words[-1] == "--version" and "none" not in words,
+    str(words),
+)
+for bad_cfg, why in (
+    ("seconds = 0", "seconds"),
+    ("seconds = true", "seconds"),
+    ('seconds = "10"', "seconds"),
+):
+    with tempfile.TemporaryDirectory():
+        try:
+            container_plan("ci", f"[tool.sdlc.ci.container-smoke]\n{bad_cfg}\n")
+            msg = None
+        except S.CannotRunError as exc:
+            msg = str(exc)
+    check(f"smoke refuses {bad_cfg}", msg is not None and why in msg, str(msg))
+try:
+    container_plan("ci", '[tool.sdlc.ci.container-scan]\nfail_on = "severe"\n')
+    msg = None
+except S.CannotRunError as exc:
+    msg = str(exc)
+check("scan refuses an unknown severity", msg is not None and "fail_on" in msg, str(msg))
+try:
+    container_plan("ci", '[tool.sdlc.ci.container-build]\nkind = "image-build"\n')
+    msg = None
+except S.CannotRunError as exc:
+    msg = str(exc)
+check("a built-in container check cannot set a kind", msg is not None and "built in" in msg)
 
 
 # ------------------------------------------------ arguments for a single check

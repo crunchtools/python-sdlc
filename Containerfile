@@ -18,11 +18,16 @@
 ARG GOURMAND_VERSION=1.0.0
 ARG GATEHOUSE_VERSION=0.29.1
 ARG UV_VERSION=0.13.7
+ARG HADOLINT_VERSION=2.14.0
+ARG GRYPE_VERSION=0.121.0
 
 FROM quay.io/crunchtools/gourmand:${GOURMAND_VERSION} AS gourmand
 FROM quay.io/crunchtools/gatehouse:${GATEHOUSE_VERSION} AS gatehouse
 # Distroless, binary only -- the documented way to get a pinned uv.
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+# The container stack's two tools, each a static binary in a scratch image.
+FROM ghcr.io/hadolint/hadolint:v${HADOLINT_VERSION} AS hadolint
+FROM docker.io/anchore/grype:v${GRYPE_VERSION} AS grype
 
 FROM quay.io/hummingbird/python:3.14-builder
 
@@ -30,6 +35,8 @@ FROM quay.io/hummingbird/python:3.14-builder
 ARG GOURMAND_VERSION=1.0.0
 ARG GATEHOUSE_VERSION=0.29.1
 ARG UV_VERSION=0.13.7
+ARG HADOLINT_VERSION=2.14.0
+ARG GRYPE_VERSION=0.121.0
 ARG RUFF_VERSION=0.17.1
 ARG SEMGREP_VERSION=1.177.0
 ARG PIP_AUDIT_VERSION=2.9.0
@@ -40,9 +47,9 @@ ARG CODEQL_BUNDLE=codeql-bundle-v2.27.4
 USER root
 
 LABEL maintainer="fatherlinux <scott.mccarty@crunchtools.com>"
-LABEL description="Every CrunchTools Python SDLC check in one image: ruff, mypy, pytest, Gourmand, Gatehouse, Semgrep, CodeQL, pip-audit and the constitution validator."
+LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest, Gourmand, Gatehouse, Semgrep, CodeQL, pip-audit, hadolint, grype and the constitution validator."
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/python-sdlc"
-LABEL org.opencontainers.image.description="Every CrunchTools Python SDLC check in one image."
+LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python and container repos."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 LABEL version="0.7.5"
 
@@ -55,6 +62,8 @@ LABEL com.crunchtools.sdlc.semgrep="${SEMGREP_VERSION}"
 LABEL com.crunchtools.sdlc.pip-audit="${PIP_AUDIT_VERSION}"
 LABEL com.crunchtools.sdlc.codeql="${CODEQL_BUNDLE}"
 LABEL com.crunchtools.sdlc.uv="${UV_VERSION}"
+LABEL com.crunchtools.sdlc.hadolint="${HADOLINT_VERSION}"
+LABEL com.crunchtools.sdlc.grype="${GRYPE_VERSION}"
 
 # The commit and build time. NOT optional, and the reason is a trap trentina hit
 # in #689: its promote job refuses a release unless it can read
@@ -77,7 +86,9 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
     SDLC_SEMGREP_VERSION=${SEMGREP_VERSION} \
     SDLC_PIP_AUDIT_VERSION=${PIP_AUDIT_VERSION} \
     SDLC_CODEQL_BUNDLE=${CODEQL_BUNDLE} \
-    SDLC_UV_VERSION=${UV_VERSION}
+    SDLC_UV_VERSION=${UV_VERSION} \
+    SDLC_HADOLINT_VERSION=${HADOLINT_VERSION} \
+    SDLC_GRYPE_VERSION=${GRYPE_VERSION}
 
 # git-core, not git: no perl, no tk, and nothing here runs `git send-email`.
 # tar and zstd are for the CodeQL bundle below.
@@ -132,6 +143,14 @@ RUN uv venv /opt/constitution-venv \
 # Gourmand is a single Rust binary -- 25 MB, linking only libc, libm and libgcc,
 # so it is portable out of its image. Verified before relying on it.
 COPY --from=gourmand /usr/local/sbin/gourmand /usr/local/bin/gourmand
+
+# The container stack. Both are static Go/Haskell binaries with no runtime, so
+# they copy out of their scratch images as Gourmand does. hadolint lints a
+# Containerfile; grype scans a built image's filesystem, which the launcher
+# mounts read-only with `podman run --mount type=image`, so neither needs a
+# container engine in here.
+COPY --from=hadolint /bin/hadolint /usr/local/bin/hadolint
+COPY --from=grype /grype /usr/local/bin/grype
 
 # Gatehouse is a Python app in a self-contained venv. Copying it works ONLY
 # because that image and this one are both Hummingbird with python3.14 at the

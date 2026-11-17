@@ -278,6 +278,7 @@ run_in_image() {
     -e PYTHONPYCACHEPREFIX=/tmp/pycache \
     -e SEMGREP_SETTINGS_FILE=/tmp/semgrep.yml \
     -e "SDLC_PROJECT=$PROJECT" \
+    -e "SDLC_IMAGE=$IMAGE" \
     -e "SDLC_JOBS=$GATE_CPUS" \
     -e "SDLC_MEMORY=$GATE_MEMORY" \
     -e "SDLC_DEFAULT_BRANCH=$(default_branch 2>/dev/null || :)" \
@@ -454,6 +455,8 @@ record_finish() {      # worst status
 #   image-ro | image-rw   `sdlc <payload>` in the image, the tree ro or rw
 #   local                 a check this file answers itself
 #   host                  a podman argv, words joined by the unit separator
+#   host-up               seconds, then a host argv: a run still going when
+#                         they are up passes (see run_host)
 #
 # A host line that does not start with `podman build` or `podman run` is
 # refused: the host contract is held here, by the launcher, not trusted to
@@ -464,7 +467,12 @@ record_finish() {      # worst status
 TAB=$(printf '\t')
 US=$(printf '\037')
 
-run_host() {
+run_host() {           # argv [seconds] -> the step's verdict
+  # With seconds, the step is a `podman run` that may be a service: it is given
+  # that long under --timeout, and still running when it is up is a pass, as
+  # is exiting 0. podman reports its own timeout kill as 255, which a crashing
+  # program can also return, so the clock decides which one it was.
+  _up=${2:-}
   _ifs=$IFS
   IFS=$US
   # shellcheck disable=SC2086  # splitting on the separator is the point
@@ -479,19 +487,40 @@ run_host() {
                         --memory "$GATE_MEMORY" "$@" ;;
     run)   set -- --events-backend=none run --log-driver=none \
                         --cap-drop=all --security-opt=no-new-privileges \
-                        --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 "$@" ;;
+                        --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
+                        ${_up:+--timeout "$_up"} "$@" ;;
     *)     die "a host step may only build or run; refused: podman $_sub" ;;
   esac
-  _rc=0
-  podman "$@" </dev/null || _rc=$?
+  [ -z "$_up" ] || [ "$_sub" = run ] || die "only a podman run can be given a time to stay up"
+  _ht0=$(now_s)
+  # Not `_rc` or `_t0`: shell variables are global, and run_serial reads its
+  # own after this returns. A service's 255 that this turns into a pass would
+  # survive into the caller as the step's failure, and a later start time would
+  # shorten the check's recorded duration.
+  _hrc=0
+  podman "$@" </dev/null || _hrc=$?
+  if [ -n "$_up" ]; then
+    case "$_hrc" in
+      0) return 0 ;;
+      125|126|127)
+        printf '%s: podman run exited %s; nothing was judged\n' "$ME" "$_hrc" >&2
+        return 2 ;;
+    esac
+    if [ "$_hrc" -eq 255 ] && [ $(( $(now_s) - _ht0 )) -ge "$_up" ]; then
+      printf 'still running after %ss: the image starts and stays up\n' "$_up"
+      return 0
+    fi
+    printf '%s: the container exited %s within %ss of starting\n' "$ME" "$_hrc" "$_up" >&2
+    return 1
+  fi
   # A failed build is a finding: the code does not produce an image. A run
   # that podman could not start (125-127) never ran, so it is a 2, and so is a
   # pytest status above 1 (interrupted, usage error, internal error, no tests).
-  case "$_sub:$_rc" in
+  case "$_sub:$_hrc" in
     *:0) return 0 ;;
     build:*) return 1 ;;
     run:1) return 1 ;;
-    *) printf '%s: podman %s exited %s; nothing was judged\n' "$ME" "$_sub" "$_rc" >&2; return 2 ;;
+    *) printf '%s: podman %s exited %s; nothing was judged\n' "$ME" "$_sub" "$_hrc" >&2; return 2 ;;
   esac
 }
 
@@ -520,6 +549,10 @@ _run_step() {
         *) die "the image asked for an unknown local check: $2" ;;
       esac ;;
     host) run_host "$2" ;;
+    host-up)
+      _secs=${2%%"$US"*}
+      case "$_secs" in ''|*[!0-9]*) die "a host-up step must start with a number of seconds" ;; esac
+      run_host "${2#*"$US"}" "$_secs" ;;
     *) die "the image asked for an unknown step mode: $1" ;;
   esac
 }
@@ -951,7 +984,7 @@ case "${1:---help}" in
     STATE_HINT=$(git rev-parse --git-path sdlc 2>/dev/null) || STATE_HINT=
     [ -n "$STATE_HINT" ] || STATE_HINT='<git-dir>/sdlc'
     cat <<EOF
-usage: $ME commit | push | ci | <check> | tiers | list | versions | codeql-baseline
+usage: $ME commit | push | ci | <check> | tiers | stacks | list | versions | codeql-baseline
 
   commit            the pre-commit hook: seconds, offline, free
   push              the pre-push hook: every verdict, no container builds
@@ -961,12 +994,14 @@ usage: $ME commit | push | ci | <check> | tiers | list | versions | codeql-basel
   <check> -- <args> one check, with arguments for the tool itself, as:
                       $ME pytest -- tests/test_x.py::test_y -n0
   tiers             what each command runs in this repo
+  stacks            which stacks this repo has: python, container, ...
   list              the built-in checks and the kinds
   versions          the exact tool versions the image carries
   codeql-baseline   accept every current CodeQL finding into the baseline
 
-Configure each command in pyproject.toml: [tool.sdlc.commit],
-[tool.sdlc.push], [tool.sdlc.ci]. Skip one check once: SDLC_SKIP=name.
+Configure each command in pyproject.toml, or in sdlc.toml in a repo without
+one: [tool.sdlc.commit], [tool.sdlc.push], [tool.sdlc.ci]. Skip one check
+once: SDLC_SKIP=name.
 Exit 2 means a check COULD NOT RUN and is never to be worked around.
 A push prints DEFERRED TO CI, and goes through, only when CodeQL itself broke
 and the repo's \`sdlc ci\` job will judge the same commit.
@@ -987,7 +1022,7 @@ which is only what happened on this machine last time.
 Image: $IMAGE
 EOF
     ;;
-  tiers|list|versions) run_in_image ro nostdin "$IMAGE" "$1" ;;
+  tiers|stacks|list|versions) run_in_image ro nostdin "$IMAGE" "$1" ;;
   codeql-baseline)     run_in_image rw nostdin "$IMAGE" "$1" ;;
   *)
     _target=$1

@@ -96,6 +96,53 @@ share. The constitution validator, Gourmand, Gatehouse, CodeQL and
 `ruff check .` stay repo-wide, and ruff's own config is hierarchical, so a
 nested `pyproject.toml` still applies to the files under it.
 
+## Stacks
+
+One image serves every kind of repo. A **stack** is the set of checks that
+only mean something for one kind of repo, and which stacks a repo has is read
+off its files:
+
+| File at the root | Stack | Status |
+|---|---|---|
+| `pyproject.toml` | python | checked |
+| `Containerfile` or `Dockerfile` | container | checked |
+| `package.json` | node | not yet |
+| a Containerfile whose `FROM` is a bootc image | bootc | not yet |
+| none of these | docs | not yet |
+
+Gourmand, Gatehouse, the constitution validator and `hooks-installed` belong to
+no stack and run everywhere. A repo can add or drop a stack, and nothing more:
+
+```toml
+[tool.sdlc]
+stacks = ["container"]
+skip-stacks = ["node"]
+```
+
+**A Python repo that names neither key runs the python stack alone**, exactly
+as python-sdlc always has, whatever else is in it. Turning the container stack
+on under 36 pinned repos is its own decision, not a side effect of a bump.
+`sdlc stacks` shows what was detected and what runs.
+
+A stack this image names but cannot check yet is refused with exit 2, not left
+out: a node-only repo judged by the constitution alone would go green on checks
+that never ran. `skip-stacks` is how a repo says it accepts that.
+
+A repo with no `pyproject.toml` writes the same `[tool.sdlc]` tables in
+`sdlc.toml`. A repo with one configures sdlc there, and `sdlc.toml` beside it is
+refused.
+
+### The container stack
+
+| Check | Command | What it does |
+|---|---|---|
+| `containerfile-lint` | push, ci | hadolint over the Containerfile; the repo's `.hadolint.yaml` applies, and without one the threshold is `warning` |
+| `container-build` | ci | `podman build`, at the tag the next two read |
+| `container-smoke` | ci | runs the built image with no network and no capabilities: exiting 0, or still running after `seconds`, passes |
+| `container-scan` | ci | grype over the built image's filesystem, mounted read-only by podman; fails on a fixable Critical by default, and the repo's `.grype.yaml` applies |
+
+Build, smoke and scan are one lane, beside everything else.
+
 ## What a repo gets with no config at all
 
 | Command | Runs |
@@ -244,6 +291,10 @@ tests = ["tests/image/"]
 | `codeql` | `config` (default `.github/codeql/codeql-config.yml`), `baseline` (default `.sdlc/codeql-baseline.json`) |
 | `constitution` | `manifest` (default `.specify/memory/constitution.md`) |
 | `ruff-check`, `ruff-format`, `lint`, `mypy`, `gourmand`, `gatehouse`, `pip-audit`, `hooks-installed` | none |
+| `containerfile-lint` | `containerfiles` (default: the root Containerfile or Dockerfile), `threshold` |
+| `container-build` | the `image-build` kind's settings; `containerfile` defaults to the root one |
+| `container-smoke` | `seconds` (default 10), `args`, `env`, `network` (default `false`), `image` |
+| `container-scan` | `fail_on` (default `critical`), `only_fixed` (default `true`), `image` |
 
 ### Kinds, for a repo's own checks
 
@@ -309,6 +360,7 @@ sees it. `sdlc codeql-baseline` writes it from the current findings. See
 | ruff, semgrep, pip-audit | this image |
 | Gourmand, Gatehouse | this image, copied from their official images |
 | CodeQL | this image (the Python-only bundle, 110 MB rather than 1.75 GB) |
+| hadolint, grype | this image, copied from their official images |
 | constitution validator | the repo — cloned at the release its own manifest names |
 | mypy, pytest | the repo's `uv.lock`, because they load the project's own plugins |
 
