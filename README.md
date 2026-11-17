@@ -74,8 +74,16 @@ rev-pinned hooks below, or the standalone Gourmand and Gatehouse hooks -- and
 prints the diff; `--apply` writes it. It replaces a workflow only when the CI
 stub covers every job in it (`sdlc ci`, Gourmand), refreshes `gatehouse.yml`
 from [`examples/gatehouse.yml`](examples/gatehouse.yml) when it differs only in
-comments, keeps everything else (publish, release, container builds), and
-refuses with exit 2 a shape it would have to guess at.
+comments or in the guard's script (an older guard that does not cover
+`.sdlc/`), keeps everything else (publish, release, container builds), and
+refuses with exit 2 a shape it would have to guess at. So that a converted repo
+never meets GATE CANNOT RUN on its first run, it also writes `skip-stacks` for
+a stack this image cannot check yet (node, bootc, docs), and `[tool.sdlc.ci]
+skip` for the three container checks when the Containerfile needs build
+secrets (`--mount=type=secret`, `subscription-manager`, RHSM) that `sdlc ci`
+is not given; the publish workflow keeps building those with its secrets. A
+Python repo that names no stacks is left alone, and an existing key that does
+not already say this is refused rather than rewritten.
 
 **What floating trusts.** Whoever can move `quay.io/crunchtools/sdlc:latest`
 now decides the host-side code every seat and runner runs, and that code is no
@@ -162,9 +170,9 @@ refused.
 
 | Check | Command | What it does |
 |---|---|---|
-| `containerfile-lint` | push, ci | hadolint over the Containerfile. Without a `.hadolint.yaml` the threshold is `error` and DL3007 (floating base tags) and DL3041 (unpinned dnf) are ignored, as fleet conventions; warnings such as DL3002 are printed and do not fail. A repo's `.hadolint.yaml` replaces all of that |
+| `containerfile-lint` | push, ci | hadolint over the Containerfile. Without a `.hadolint.yaml` the threshold is `error` and DL3007 (floating base tags) DL3041 (unpinned dnf) and SC1072 (raised on an exec-form `RUN ["python3", "-c", …]`) are ignored, as fleet conventions; warnings such as DL3002 are printed and do not fail. A repo's `.hadolint.yaml` replaces all of that. A Containerfile hadolint cannot parse (a `RUN` heredoc) is printed as ADVISORY and SKIPPED, not failed; `container-build` still builds it |
 | `container-build` | ci | `podman build`, at the tag the next two read |
-| `container-smoke` | ci | starts the built image detached, with no network and no capabilities, and reads its state from podman: still running after `seconds`, or exited 0, passes; any other exit, the OOM killer, or an entrypoint that cannot start (126/127) fails. An image whose PID 1 is systemd (`/sbin/init`, `systemd`) is SKIPPED with its reason: systemd needs privileges the run withholds |
+| `container-smoke` | ci | starts the built image detached, with no network and no capabilities, and reads its state from podman: still running after `seconds`, or exited 0, passes; any other exit, the OOM killer, or an entrypoint that cannot start (126/127) is a finding. **Advisory by default**: a finding is printed as `FOUND SOMETHING, ADVISORY` and does not fail the command; `gate = true` makes it gate. Exit 0 passes even when podman reports OOMKilled, which nested rootless podman does for any container; OOMKilled counts only beside a non-zero exit. Podman failing to create the container is still a 2. An image whose PID 1 is systemd (`/sbin/init`, `systemd`) is SKIPPED with its reason: systemd needs privileges the run withholds |
 | `container-scan` | ci | grype over the built image's filesystem, mounted read-only by podman; fails on a fixable Critical by default, and the repo's `.grype.yaml` applies |
 
 Build, smoke and scan are one lane, beside everything else.
@@ -251,8 +259,10 @@ $ jq -r '.checks[] | "\(.seconds)s \(.check) exit \(.exit)"' .git/sdlc/last-push
 ```
 
 A check's `exit` is its status: 0 passed, 1 found something, 2 could not run,
-3 deferred to CI, and 4 SKIPPED, which only `container-smoke` reports, for a
-systemd PID 1 it cannot boot. A 4 never decides the command's own exit.
+3 deferred to CI, 4 SKIPPED -- reported only by `container-smoke`, for a
+systemd PID 1 it cannot boot, and `containerfile-lint`, for a Containerfile
+hadolint cannot parse -- and 5 an ADVISORY finding from an ungated
+`container-smoke`. A 4 or a 5 never decides the command's own exit.
 
 The checks appear in the order they **finished**, which with lanes is not the
 order they were listed in. A check that streamed to your terminal has no log
@@ -323,7 +333,7 @@ tests = ["tests/image/"]
 | `ruff-check`, `ruff-format`, `lint`, `mypy`, `gourmand`, `gatehouse`, `pip-audit`, `hooks-installed` | none |
 | `containerfile-lint` | `containerfiles` (default: the root Containerfile or Dockerfile), `threshold` |
 | `container-build` | the `image-build` kind's settings; `containerfile` defaults to the root one |
-| `container-smoke` | `seconds` (default 10), `args`, `env`, `network` (default `false`), `image` |
+| `container-smoke` | `gate` (default `false`: findings are advisory), `seconds` (default 10), `args`, `env`, `network` (default `false`), `image` |
 | `container-scan` | `fail_on` (default `critical`), `only_fixed` (default `true`), `image` |
 
 ### Kinds, for a repo's own checks
