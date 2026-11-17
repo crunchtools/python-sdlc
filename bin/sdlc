@@ -575,6 +575,26 @@ check_image_word() {   # run-args -> dies unless the word after `--` is an image
   return 0
 }
 
+pid1_of() {            # run-args -> what the container would start as PID 1
+  # The image's entrypoint if it has one; else the run's first argument, which
+  # replaces CMD; else the CMD. Empty when podman cannot say, and then the run
+  # goes ahead and is judged as any other.
+  _pafter=
+  _pimg=
+  _parg=
+  for _pw in "$@"; do
+    if [ -n "$_pimg" ]; then _parg=$_pw; break; fi
+    if [ "$_pafter" = yes ]; then _pimg=$_pw; continue; fi
+    [ "$_pw" = -- ] && _pafter=yes
+  done
+  _pep=$(podman image inspect --format '{{range .Config.Entrypoint}}{{println .}}{{end}}' \
+         "$_pimg" 2>/dev/null | head -1)
+  if [ -n "$_pep" ]; then printf '%s' "$_pep"; return 0; fi
+  if [ -n "$_parg" ]; then printf '%s' "$_parg"; return 0; fi
+  podman image inspect --format '{{range .Config.Cmd}}{{println .}}{{end}}' \
+    "$_pimg" 2>/dev/null | head -1
+}
+
 run_up() {             # seconds run-args -> the smoke verdict
   # A `podman run` that may be a service. It starts detached, and its STATE is
   # asked once a second for up to <seconds>: still running at the end passes,
@@ -589,6 +609,17 @@ run_up() {             # seconds run-args -> the smoke verdict
   _upsecs=$1; shift
   case " $* " in *" -- "*) ;; *) die "a run given time to stay up must name its image after '--'" ;; esac
   check_image_word "$@"
+  # A systemd PID 1 (ubi-init, bootc) needs capabilities and a cgroup mount
+  # this run withholds on purpose, so it dies whatever the image is like. That
+  # is not judged: 4 is SKIPPED, printed as such, and never a pass. The build
+  # and the scan are separate checks and still run.
+  _pid1=$(pid1_of "$@")
+  case "$_pid1" in
+    /sbin/init|/usr/sbin/init|/lib/systemd/systemd|/usr/lib/systemd/systemd|init|systemd)
+      printf '%s: SKIPPED: the image starts %s as PID 1, and systemd PID 1 needs privileges smoke cannot grant\n' \
+        "$ME" "$_pid1" >&2
+      return 4 ;;
+  esac
   _cname=sdlc-smoke-$$-$(now_s)
   _uprc=0
   podman --events-backend=none run -d --name "$_cname" --log-driver=k8s-file \
@@ -685,6 +716,9 @@ run_step() {           # mode payload -> the step's exit status
   _run_step "$@" || _rs=$?
   # Only a push may defer to CI. Anything else that reports 3 could not run.
   if [ "$_rs" -eq 3 ] && [ "${SDLC_TIER:-}" != push ]; then return 2; fi
+  # Only run_up may skip, and only by its own decision. A tool inside a check
+  # exiting 4 found something, as it always has.
+  if [ "$_rs" -eq 4 ] && [ "$1" != host-up ]; then return 1; fi
   return "$_rs"
 }
 
@@ -718,6 +752,7 @@ _close_serial() {      # the open check is finished: footer and record
   # Only a PASS prints here. A failure has already said so, at the moment it
   # happened, rather than when the next check starts.
   [ "$_scur_rc" -eq 0 ] && printf '\n== %s passed in %ss\n' "$_scur" "$_scur_took"
+  [ "$_scur_rc" -eq 4 ] && printf '\n== %s SKIPPED, not judged, after %ss\n' "$_scur" "$_scur_took"
   record_check "$_scur" "$_scur_rc" "$_scur_took" ""
   _scur=
 }
@@ -760,6 +795,8 @@ run_serial() {         # the plan -> its worst step status
       _failed="$_failed $_check"
       _scur_rc=3
       deferred "$_check"
+    elif [ "$_rc" -eq 4 ]; then
+      _scur_rc=4
     elif [ "$_rc" -ne 0 ]; then
       _failed="$_failed $_check"
       _scur_rc=$_rc
@@ -825,6 +862,8 @@ _close_check() {       # the open check's block is complete
     # and then the run -- ended with two, the first of them "passed in 0s".
     if [ "$_cur_rc" -eq 0 ]; then
       printf '\n== %s passed in %ss\n' "$_cur_name" "$_cur_took" >> "$OUT/out.$_cur"
+    elif [ "$_cur_rc" -eq 4 ]; then
+      printf '\n== %s SKIPPED, not judged, after %ss\n' "$_cur_name" "$_cur_took" >> "$OUT/out.$_cur"
     elif [ "$_cur_rc" -eq 3 ]; then
       deferred "$_cur_name" 2>> "$OUT/out.$_cur"
     else
@@ -885,6 +924,8 @@ run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
     if [ "$_rc" -eq 3 ]; then
       _failed="$_failed $_check"
       _cur_rc=3
+    elif [ "$_rc" -eq 4 ]; then
+      _cur_rc=4
     elif [ "$_rc" -ne 0 ]; then
       _failed="$_failed $_check"
       _cur_rc=$_rc

@@ -80,6 +80,24 @@ else
   fi
 fi
 
+# A systemd PID 1 needs privileges a smoke run withholds, so the smoke check
+# is SKIPPED with its reason -- read from the built image by real podman --
+# while the build and the scan still run and judge it.
+fixture systemd '["/sbin/init"]'
+rc=0
+(cd "$WORK/systemd" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" ci) > "$WORK/systemd.out" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] \
+   && grep -q 'systemd PID 1 needs privileges smoke cannot grant' "$WORK/systemd.out" \
+   && grep -q '== container-smoke SKIPPED, not judged' "$WORK/systemd.out" \
+   && ! grep -q 'container-smoke passed' "$WORK/systemd.out" \
+   && grep -q 'container-build passed' "$WORK/systemd.out" \
+   && grep -q 'container-scan passed' "$WORK/systemd.out"; then
+  ok "a systemd image: smoke SKIPPED with its reason, build and scan still pass"
+else
+  bad "sdlc ci on a systemd image exited $rc"
+  tail -20 "$WORK/systemd.out" | sed 's/^/       /'
+fi
+
 # An image that declares a VOLUME gets an anonymous volume per run. The smoke
 # run must take it away with the container, or every run leaks one: a fleet
 # measurement once filled a seat's disk with 13 GB of them.

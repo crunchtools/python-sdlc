@@ -83,6 +83,17 @@ printf '%s\n' "\$*" >> "$LOG"
 for _last in "\$@"; do :; done
 # container-smoke: a detached run records which case it is, and inspect
 # answers that case's state as: Running ExitCode OOMKilled.
+# The image's own entrypoint and command, for the systemd PID 1 check: an
+# image named systemd-ep has ENTRYPOINT /sbin/init, one named systemd-cmd only
+# CMD /usr/lib/systemd/systemd, and any other image neither.
+case " \$* " in
+  *" image inspect "*)
+    case "\$*:\$_last" in
+      *Entrypoint*:*systemd-ep*) printf '/sbin/init\n' ;;
+      *Cmd*:*systemd-cmd*)       printf '/usr/lib/systemd/systemd\n--system\n' ;;
+    esac
+    exit 0 ;;
+esac
 case " \$* " in
   *" inspect "*)
     _st=\$(cat "$SHIM/upcase" 2>/dev/null)
@@ -160,6 +171,17 @@ case " \$* " in
     printf 'inject-comma${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}--${US}a,b\n' ;;
   *" plan inject-nodd "*)
     printf 'inject-nodd${TAB}main${TAB}host-up${TAB}5${US}podman${US}run${US}--privileged${US}img\n' ;;
+  *" plan up-systemd-ep "*)
+    printf 'up-systemd-ep${TAB}main${TAB}host-up${TAB}1${US}podman${US}run${US}--${US}localhost/systemd-ep:sdlc\n' ;;
+  *" plan up-systemd-cmd "*)
+    printf 'up-systemd-cmd${TAB}main${TAB}host-up${TAB}1${US}podman${US}run${US}--${US}localhost/systemd-cmd:sdlc\n' ;;
+  *" plan up-systemd-args "*)
+    printf 'up-systemd-args${TAB}main${TAB}host-up${TAB}1${US}podman${US}run${US}--${US}localhost/systemd-cmd:sdlc${US}go-up-stays\n' ;;
+  *" plan lanes-skip "*)
+    printf 'b${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
+    printf 'up-systemd-ep${TAB}two${TAB}host-up${TAB}1${US}podman${US}run${US}--${US}localhost/systemd-ep:sdlc\n' ;;
+  *" plan rc-four "*)
+    printf 'rc-four${TAB}main${TAB}image-ro${TAB}exit-four\n' ;;
   *" plan up-"*)
     _secs=1; _what=\$_last
     case "\$_last" in up-build) _what=build ;; up-noseconds) _secs=soon ;; esac
@@ -188,6 +210,7 @@ case "\$_last" in
   rc-one)      printf 'RAN rc-one\n'; exit 1 ;;
   rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
   rc-three)    printf 'RAN rc-three\n'; exit 3 ;;
+  exit-four)   printf 'RAN exit-four\n'; exit 4 ;;
   slow-rc-one) printf 'RAN slow-rc-one\n'; sleep 2; exit 1 ;;
   very-slow-rc-one) printf 'RAN very-slow-rc-one\n'; sleep 6; printf 'LAST LINE\n'; exit 1 ;;
   step-one) printf 'RAN step-one\n'; sleep 1 ;;
@@ -269,6 +292,47 @@ if grep -q -- 'run -d --name sdlc-smoke-[0-9-]* --log-driver=k8s-file --cap-drop
   ok "host-up runs detached and locked down, and removes the container and its volumes"
 else
   bad "host-up's run or cleanup is wrong: $(grep -E 'up-stays|rm -f' "$RUN/podman.log" | tail -2)"
+fi
+
+# A systemd PID 1 cannot boot under this run's lockdown, so container-smoke
+# says SKIPPED -- never "passed" -- and starts nothing. Not for an image whose
+# CMD a run argument replaces, and a 4 from anything else is still a finding.
+for case_ in up-systemd-ep up-systemd-cmd; do
+  log_mark
+  rc=0
+  PATH="$SHIM" sh bin/sdlc "$case_" > "$RUN/out" 2>&1 || rc=$?
+  log_since
+  if [ "$rc" -eq 0 ] && grep -q "SKIPPED: the image starts .* as PID 1, and systemd PID 1 needs privileges smoke cannot grant" "$RUN/out" \
+     && grep -q "== $case_ SKIPPED, not judged" "$RUN/out" && ! grep -q 'passed in' "$RUN/out" \
+     && ! grep -q ' run -d ' "$RUN/podman.log"; then
+    ok "$case_: a systemd PID 1 is SKIPPED with its reason, never run and never a pass"
+  else
+    bad "$case_ exited $rc: $(tail -3 "$RUN/out")"
+  fi
+done
+log_mark
+rc=0
+PATH="$SHIM" sh bin/sdlc up-systemd-args > "$RUN/out" 2>&1 || rc=$?
+log_since
+if [ "$rc" -eq 0 ] && grep -q ' run -d ' "$RUN/podman.log" && ! grep -q SKIPPED "$RUN/out"; then
+  ok "a run argument that replaces a systemd CMD is run and judged"
+else
+  bad "up-systemd-args exited $rc: $(tail -2 "$RUN/out")"
+fi
+rc=0
+PATH="$SHIM" SDLC_CPUS=4 sh bin/sdlc lanes-skip > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q '== up-systemd-ep SKIPPED, not judged' "$RUN/out" \
+   && grep -q '== b passed' "$RUN/out"; then
+  ok "in a lane, the skip is printed as SKIPPED and the run still exits 0"
+else
+  bad "lanes-skip exited $rc: $(tail -4 "$RUN/out")"
+fi
+rc=0
+PATH="$SHIM" sh bin/sdlc rc-four > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'rc-four FAILED' "$RUN/out" && ! grep -q SKIPPED "$RUN/out"; then
+  ok "a 4 from a check in the image is a finding, not a skip"
+else
+  bad "rc-four exited $rc: $(tail -2 "$RUN/out")"
 fi
 
 # Every smoke cleanup, whatever the case, takes the anonymous volumes with it.
