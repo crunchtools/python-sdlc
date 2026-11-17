@@ -261,6 +261,23 @@ check(
     again.stdout,
 )
 
+# An image reference in the repo's config moves too; a longer name that only
+# starts the same way does not.
+for config in ("pyproject.toml", "sdlc.toml"):
+    text = (
+        '[tool.sdlc.ci.tests]\nimage = "quay.io/crunchtools/python-sdlc:0.8.0"\n'
+        'other = "quay.io/crunchtools/python-sdlc-extras:1"\n'
+    )
+    repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, config: text})
+    convert(repo, apply=True)
+    moved = snapshot(repo)[config]
+    check(
+        f"{config}: the python-sdlc image moves to quay.io/crunchtools/sdlc, a longer name stays",
+        'image = "quay.io/crunchtools/sdlc:0.8.0"' in moved
+        and "quay.io/crunchtools/python-sdlc-extras:1" in moved,
+        moved,
+    )
+
 # ------------------------------------------------ a container-only repo
 
 repo = make_repo(
@@ -410,7 +427,13 @@ OWN_HOOK = """\
         pass_filenames: false
         stages: [pre-commit]
 """
-repo = make_repo({".pre-commit-config.yaml": STANDALONE_HOOKS.replace("    hooks:\n", "    hooks:\n" + OWN_HOOK, 1)})
+repo = make_repo(
+    {
+        ".pre-commit-config.yaml": STANDALONE_HOOKS.replace(
+            "    hooks:\n", "    hooks:\n" + OWN_HOOK, 1
+        )
+    }
+)
 done = convert(repo, apply=True)
 hooks = yaml.safe_load(snapshot(repo)[".pre-commit-config.yaml"])
 local = [[h["id"] for h in r["hooks"]] for r in hooks["repos"] if r["repo"] == "local"]
