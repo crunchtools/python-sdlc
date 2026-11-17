@@ -330,6 +330,33 @@ Values in `build_args`, `labels` and `env` may be `@project.version`,
 There is no shell kind. A repo that needs something these cannot express gets a
 new kind here, so the config stays something a person can read.
 
+## Running a pull request's image
+
+A pull request's image can be run before any release carries it. Every push to
+a pull request in this repo publishes the tested image as
+`quay.io/crunchtools/sdlc:pr-<N>`, and as `:beta` too when the pull request
+has the `beta` label. Whichever labelled pull request pushed last holds
+`:beta`. Only a release moves `latest`, `main` or a version tag.
+
+To run one, first matching wins:
+
+| How | Scope | Value |
+|---|---|---|
+| `SDLC_IMAGE=pr-59 git push` | this run, this machine | a tag of `quay.io/crunchtools/sdlc`, or a full image reference |
+| `[tool.sdlc] image = "beta"` | every run of this repo, CI included | a tag of `quay.io/crunchtools/sdlc` only, written on its own line under `[tool.sdlc]` |
+
+A run on anything but the pinned release says so at the top of every command,
+naming the image and what chose it. A registry tag is pulled when newer, so
+`:beta` is the current `:beta`, not whatever was cached. A repo's config can
+only name a tag of the fleet image, never an arbitrary image to judge itself
+with. Take `image` out before merging: CI would run it too.
+
+**Nothing built on a laptop or a seat is ever pushed.** `sdlc` builds images
+only to test them (`container-build` tags `localhost/<repo>:sdlc`) and has no
+push step. Run a local build of this image with
+`SDLC_IMAGE=localhost/python-sdlc:dev`. Only this repo's GitHub Actions
+publish to quay.io.
+
 ## Skipping a check
 
 `SDLC_SKIP=gatehouse git push` skips one check, once, for a false positive. The

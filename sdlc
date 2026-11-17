@@ -382,13 +382,14 @@ RESERVED = (
 def sdlc_config() -> dict:
     """`[tool.sdlc]`, checked for shape before anything trusts it."""
     cfg = config_document().get("tool", {}).get("sdlc", {}) or {}
-    stray = sorted(set(cfg) - set(COMMANDS) - {"project", "stacks", "skip-stacks"})
+    stray = sorted(set(cfg) - set(COMMANDS) - {"project", "stacks", "skip-stacks", "image"})
     if stray:
         cannot(
             f"[tool.sdlc] has {', '.join(stray)}; the only keys are "
             f"[tool.sdlc.commit], [tool.sdlc.push], [tool.sdlc.ci], `project`, "
-            f"`stacks` and `skip-stacks`"
+            f"`stacks`, `skip-stacks` and `image`"
         )
+    config_image(cfg)
     project_dir()  # validated here, so a bad path is caught on the next commit
     stacks = active_stacks(cfg)
     # The WHOLE config is checked whichever command runs, so a typo in the ci
@@ -397,6 +398,36 @@ def sdlc_config() -> dict:
         for check in resolve(cfg, command, stacks):
             kind_of(cfg, check)
     return cfg
+
+
+# `[tool.sdlc] image = "beta"` runs a tag of the fleet image instead of the
+# pinned release. bin/sdlc chooses the image before this script exists, so it
+# reads the key itself -- with awk, as one `image = "<tag>"` line under
+# [tool.sdlc] -- and passes what it read as SDLC_CONFIG_IMAGE. TOML has other
+# ways to write the same key, and a launcher that missed one would run the
+# pinned release while the repo believed it ran beta, so the two readings must
+# agree or nothing runs.
+IMAGE_TAG_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
+
+
+def config_image(cfg: dict) -> None:
+    if "image" not in cfg:
+        seen = os.environ.get("SDLC_CONFIG_IMAGE")
+        if "SDLC_HOST_REPO" in os.environ and seen:
+            cannot(f"bin/sdlc read [tool.sdlc] image = {seen!r} where TOML has none")
+        return
+    tag = cfg["image"]
+    if not isinstance(tag, str) or not IMAGE_TAG_RE.fullmatch(tag):
+        cannot(
+            "[tool.sdlc] image must be a tag of quay.io/crunchtools/sdlc, "
+            f"such as beta or pr-59; got {tag!r}"
+        )
+    if "SDLC_HOST_REPO" in os.environ and os.environ.get("SDLC_CONFIG_IMAGE") != tag:
+        cannot(
+            f"[tool.sdlc] image is {tag!r} but bin/sdlc could not read it, so it "
+            f"would have run the pinned release. Write it on its own line directly "
+            f'under [tool.sdlc]: image = "{tag}"'
+        )
 
 
 def block(cfg: dict, command: str) -> dict:
@@ -933,6 +964,11 @@ def check_container_smoke(cfg: dict, name: str, s: dict) -> list[tuple[str, str,
     return [(name, "host-up", payload)]
 
 
+# The gate's own image in a host argv. bin/sdlc replaces this word with the
+# image it is running, so a plan never has to be told which one that is.
+GATE_IMAGE = "@sdlc-image"
+
+
 def check_container_scan(cfg: dict, name: str, s: dict) -> list[tuple[str, str, str]]:
     """Scan the built image's filesystem with grype, in this image.
 
@@ -947,9 +983,8 @@ def check_container_scan(cfg: dict, name: str, s: dict) -> list[tuple[str, str, 
     """
     host = os.environ.get("SDLC_HOST_REPO")
     volume = os.environ.get("SDLC_CACHE_VOLUME")
-    gate = os.environ.get("SDLC_IMAGE")
-    if not host or not volume or not gate:
-        cannot(f"{name}: run through bin/sdlc, which supplies the host paths and the image")
+    if not host or not volume:
+        cannot(f"{name}: run through bin/sdlc, which supplies the host paths")
     fail_on = str(s.get("fail_on", "critical"))
     if fail_on not in GRYPE_SEVERITIES:
         cannot(f"{name}: fail_on must be one of {', '.join(GRYPE_SEVERITIES)}")
@@ -980,7 +1015,7 @@ def check_container_scan(cfg: dict, name: str, s: dict) -> list[tuple[str, str, 
         f"SDLC_SCAN_FAIL_ON={fail_on}",
         "-e",
         f"SDLC_SCAN_ONLY_FIXED={'1' if only_fixed else '0'}",
-        gate,
+        GATE_IMAGE,
         "scan-rootfs",
     ]
     return [host_step(name, argv)]

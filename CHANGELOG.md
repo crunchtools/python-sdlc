@@ -30,6 +30,13 @@ All notable changes to this project are documented here, following
   repo's `.grype.yaml` applies).
 - `sdlc.toml`: the same `[tool.sdlc]` tables, for a repo with no
   `pyproject.toml`. Refused beside one.
+- **A pull request's image, before a release.** Every push to a pull request
+  here publishes `quay.io/crunchtools/sdlc:pr-<N>`, and `:beta` when it has
+  the `beta` label; never `latest`, `main` or a version tag. `SDLC_IMAGE`
+  (a fleet tag such as `beta`, or any image reference) or
+  `[tool.sdlc] image = "<tag>"` runs one. Every run on anything but the pinned
+  release prints which image it is and what chose it, and a registry tag is
+  pulled when newer. With neither set, nothing changes.
 - The image is also published as `quay.io/crunchtools/sdlc`: the same digest
   copied, never rebuilt, with the same tags as `python-sdlc`.
 

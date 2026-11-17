@@ -23,7 +23,9 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # `labeled` too, so adding the `beta` label publishes `:beta` without a push.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   # Weekly, to pick up base-image errata. MANDATORY for this profile, and so is
   # bypassing the layer cache on it -- a cached `dnf install` layer is reused
   # while the Containerfile and base digest are unchanged, so a cached rebuild
@@ -135,6 +137,39 @@ jobs:
       - name: Container stack end to end
         if: env.IS_TAG != 'true'
         run: tests/test_container_stack.sh "localhost/python-sdlc:$GITHUB_SHA"
+
+      # The inner loop: a pull request's tested image, runnable before any
+      # release carries it, with SDLC_IMAGE=pr-<N> or [tool.sdlc] image. It
+      # goes to the fleet name only, as `:pr-<N>`, and as `:beta` when the PR
+      # carries the `beta` label -- whichever labelled PR pushed last holds it.
+      #
+      # These two tags and no others. `latest`, `main` and the version tags
+      # belong to `promote`, which never runs on a pull request; nothing here
+      # can reach them. A fork's pull request has no secrets and Dependabot's
+      # has its own, so both are skipped rather than failed.
+      - name: Publish the pull request's image
+        if: >-
+          github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && github.event.pull_request.user.login != 'dependabot[bot]'
+        env:
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_PASSWORD: ${{ secrets.QUAY_PASSWORD }}
+          PR: ${{ github.event.pull_request.number }}
+          BETA: ${{ contains(github.event.pull_request.labels.*.name, 'beta') }}
+        run: |
+          set -eu
+          podman login -u "$QUAY_USERNAME" -p "$QUAY_PASSWORD" quay.io
+          podman push "localhost/python-sdlc:$GITHUB_SHA" "$SDLC:pr-$PR"
+          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$SDLC:pr-$PR")
+          [ -n "$digest" ] || { echo "the registry reported no digest" >&2; exit 1; }
+          echo "published $SDLC:pr-$PR ($digest)"
+          if [ "$BETA" = true ]; then
+            skopeo copy --all --preserve-digests "docker://$SDLC@$digest" "docker://$SDLC:beta"
+            got=$(skopeo inspect --format '{{.Digest}}' "docker://$SDLC:beta")
+            [ "$got" = "$digest" ] || { echo "$SDLC:beta is $got, not $digest" >&2; exit 1; }
+            echo "published $SDLC:beta ($digest)"
+          fi
 
       - name: Log in to Quay
         if: github.event_name != 'pull_request'

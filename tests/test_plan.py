@@ -650,7 +650,6 @@ def container_plan(target: str, sdlc_toml: str = "", **env) -> list[list[str]]:
                 "SDLC_HOST_REPO": root,
                 "SDLC_CACHE_VOLUME": "testvol",
                 "SDLC_PROJECT": "fx",
-                "SDLC_IMAGE": "quay.io/crunchtools/sdlc:9.9.9",
                 **env,
             }
         )
@@ -692,7 +691,7 @@ scan = by_check["container-scan"][3].split(S.UNIT_SEPARATOR)
 check(
     "container-scan mounts the built image and runs this image's scan-rootfs",
     "type=image,source=localhost/fx:sdlc,destination=/scan,rw=false" in scan
-    and scan[-2:] == ["quay.io/crunchtools/sdlc:9.9.9", "scan-rootfs"],
+    and scan[-2:] == [S.GATE_IMAGE, "scan-rootfs"],
     str(scan),
 )
 check("container-scan fails on a fixable critical by default", "SDLC_SCAN_FAIL_ON=critical" in scan)
@@ -739,6 +738,44 @@ try:
 except S.CannotRunError as exc:
     msg = str(exc)
 check("a built-in container check cannot set a kind", msg is not None and "built in" in msg)
+
+
+# ------------------------------------------------------------- [tool.sdlc] image
+#
+# bin/sdlc reads the key with awk before this script runs. If TOML and awk
+# disagree, the repo believes it runs one image and the launcher ran another.
+
+
+def image_error(pyproject: str, launcher_read: str | None) -> str | None:
+    saved = dict(os.environ)
+    os.environ["SDLC_HOST_REPO"] = "/host"
+    os.environ.pop("SDLC_CONFIG_IMAGE", None)
+    if launcher_read is not None:
+        os.environ["SDLC_CONFIG_IMAGE"] = launcher_read
+    try:
+        return config_error(pyproject)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+check(
+    "image: the launcher and TOML agreeing is fine",
+    image_error('[tool.sdlc]\nimage = "beta"\n', "beta") is None,
+)
+msg = image_error('tool.sdlc.image = "beta"\n', None)
+check(
+    "image: a form the launcher could not read is refused",
+    msg is not None and "could not read" in msg,
+    str(msg),
+)
+msg = image_error('[tool.sdlc]\nimage = "a/b:c"\n', "a/b:c")
+check("image: only a tag of the fleet image", msg is not None and "must be a tag" in msg, str(msg))
+msg = image_error("[tool.sdlc]\nimage = 3\n", "3")
+check("image: a number is not a tag", msg is not None and "must be a tag" in msg, str(msg))
+msg = image_error("[tool.ruff]\n", "beta")
+check("image: a launcher reading one that TOML lacks is refused", msg is not None, str(msg))
+check("image: none set anywhere is fine", image_error("[tool.ruff]\n", None) is None)
 
 
 # -------------------------------------------------------------- scan-rootfs

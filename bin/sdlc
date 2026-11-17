@@ -44,9 +44,11 @@ step() { printf '\n== %s\n' "$*"; }
 IMAGE_TAG=$(tr -d ' \t\n\r' < "$HOOKS_DIR/IMAGE_TAG")
 [ -n "$IMAGE_TAG" ] || die "IMAGE_TAG is empty"
 # Read from the cloned hooks repo, so the `rev:` a repo pins fixes the launcher
-# and the image together and they cannot disagree. Overridable for development
-# of this repo itself, not for consumers.
-IMAGE=${SDLC_IMAGE:-quay.io/crunchtools/python-sdlc:$IMAGE_TAG}
+# and the image together and they cannot disagree. An override -- below, once
+# the repo is known -- replaces it for the inner loop, and says so every run.
+DEFAULT_IMAGE=quay.io/crunchtools/python-sdlc:$IMAGE_TAG
+# Where CI publishes a pull request's tested image, as `:pr-<N>` and `:beta`.
+FLEET_IMAGE=quay.io/crunchtools/sdlc
 
 # --------------------------------------------------------------- preconditions
 
@@ -64,6 +66,65 @@ REPO=$(git rev-parse --show-toplevel 2>/dev/null) \
   || die "not inside a git repository"
 cd "$REPO"
 PROJECT=$(basename "$REPO")
+
+# ------------------------------------------------------------- an image override
+#
+# The inner loop: run a pull request's image, `:pr-<N>`, or the one labelled
+# `beta`, before any release carries it. Two ways in, the first winning:
+#
+#   SDLC_IMAGE=<ref> | <tag>     this seat, this run. A bare tag means a tag of
+#                                quay.io/crunchtools/sdlc, so SDLC_IMAGE=beta.
+#   [tool.sdlc] image = "<tag>"  the repo, every run. A TAG of the fleet image
+#                                and nothing else: a repo's config must not be
+#                                able to name whatever image judges it.
+#
+# The image is the judge, so a run that is not on the pinned release says so on
+# every invocation, loudly. And a floating tag is pulled when newer: `missing`,
+# podman's default, is how a two-week-old reviewer once judged trentina.
+CONFIG_FILE=pyproject.toml
+[ -f "$CONFIG_FILE" ] || CONFIG_FILE=sdlc.toml
+config_image() {       # the `image` key of [tool.sdlc], or nothing
+  [ -f "$CONFIG_FILE" ] || return 0
+  awk '
+    /^[ \t]*\[/ { s = ($0 ~ /^[ \t]*\[tool\.sdlc\][ \t]*(#.*)?$/); next }
+    s && /^[ \t]*image[ \t]*=/ {
+      v = $0; sub(/^[^=]*=[ \t]*/, "", v)
+      if (v ~ /^"[^"]*"/) { sub(/^"/, "", v); sub(/".*$/, "", v) }
+      print v; exit
+    }' "$CONFIG_FILE"
+}
+fleet_tag() {          # value where -> the fleet image at that tag, or die
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*|[.-]*) die "$2 must be a tag of $FLEET_IMAGE such as beta or pr-59; got '$1'" ;;
+  esac
+  printf '%s:%s' "$FLEET_IMAGE" "$1"
+}
+SDLC_CONFIG_IMAGE=$(config_image)
+export SDLC_CONFIG_IMAGE
+IMAGE=$DEFAULT_IMAGE
+IMAGE_FROM=
+if [ -n "${SDLC_IMAGE:-}" ]; then
+  case "$SDLC_IMAGE" in
+    */*) IMAGE=$SDLC_IMAGE ;;
+    *)   IMAGE=$(fleet_tag "$SDLC_IMAGE" SDLC_IMAGE) ;;
+  esac
+  IMAGE_FROM=SDLC_IMAGE
+elif [ -n "$SDLC_CONFIG_IMAGE" ]; then
+  IMAGE=$(fleet_tag "$SDLC_CONFIG_IMAGE" "[tool.sdlc] image in $CONFIG_FILE")
+  IMAGE_FROM="[tool.sdlc] image in $CONFIG_FILE"
+fi
+PULL_NEWER=
+if [ "$IMAGE" != "$DEFAULT_IMAGE" ]; then
+  case "$IMAGE" in localhost/*) ;; *) PULL_NEWER=yes ;; esac
+  {
+    printf '%s: ************************************************************\n' "$ME"
+    printf '%s: NOT THE PINNED RELEASE. This run is judged by\n' "$ME"
+    printf '%s:   %s\n' "$ME" "$IMAGE"
+    printf '%s: set by %s, in place of\n' "$ME" "$IMAGE_FROM"
+    printf '%s:   %s\n' "$ME" "$DEFAULT_IMAGE"
+    printf '%s: ************************************************************\n' "$ME"
+  } >&2
+fi
 
 # ---------------------------------------------------------- the resource budget
 #
@@ -268,6 +329,7 @@ run_in_image() {
   # never hit it.
   set -- \
     --events-backend=none run --rm --log-driver=none \
+    ${PULL_NEWER:+--pull=newer} \
     --cap-drop=all --security-opt=no-new-privileges \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     -v "$REPO:/repo:$_mode,z" -w /repo \
@@ -278,7 +340,7 @@ run_in_image() {
     -e PYTHONPYCACHEPREFIX=/tmp/pycache \
     -e SEMGREP_SETTINGS_FILE=/tmp/semgrep.yml \
     -e "SDLC_PROJECT=$PROJECT" \
-    -e "SDLC_IMAGE=$IMAGE" \
+    ${SDLC_CONFIG_IMAGE:+-e SDLC_CONFIG_IMAGE} \
     -e "SDLC_JOBS=$GATE_CPUS" \
     -e "SDLC_MEMORY=$GATE_MEMORY" \
     -e "SDLC_DEFAULT_BRANCH=$(default_branch 2>/dev/null || :)" \
@@ -481,6 +543,14 @@ run_host() {           # argv [seconds] -> the step's verdict
   [ "${1:-}" = podman ] || die "a host step may only run podman; refused: ${1:-<empty>}"
   _sub=${2:-}
   shift 2
+  # `@sdlc-image` is this gate's own image, which only this script knows: a
+  # check that runs the gate image as a host step (container-scan) names it so.
+  # Replaced as a whole word only, after the split, so it is never shell.
+  for _w in "$@"; do
+    shift
+    [ "$_w" = @sdlc-image ] && _w=$IMAGE
+    set -- "$@" "$_w"
+  done
   # The budget is applied here so it is defined once, whatever the step.
   case "$_sub" in
     build) set -- build --cpu-period 100000 --cpu-quota "$(( GATE_CPUS * 100000 ))" \

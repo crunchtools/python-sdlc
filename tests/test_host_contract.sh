@@ -118,6 +118,8 @@ case " \$* " in
   *" plan lanes-budget "*)
     printf 'p${TAB}one${TAB}host${TAB}podman${US}build${US}-t${US}localhost/x:sdlc${US}.\n'
     printf 'q${TAB}two${TAB}image-ro${TAB}quiet-ok\n' ;;
+  *" plan gate-word "*)
+    printf 'gate-word${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}@sdlc-image${US}scan-rootfs\n' ;;
   *" plan up-"*)
     _secs=1; _what=\$_last
     case "\$_last" in up-build) _what=build ;; up-noseconds) _secs=soon ;; esac
@@ -661,6 +663,94 @@ if ! grep -q -- '-e SDLC_ARGS' "$RUN/podman.log"; then
   ok "an inherited SDLC_ARGS does not reach a tier"
 else
   bad "a tier forwarded SDLC_ARGS from the environment"
+fi
+
+printf '\n== an image other than the pinned release\n\n'
+
+# The inner loop runs a pull request's image. With no override, nothing about
+# the argv may change: no pull flag, the pinned image. With one, the image is
+# named on every run and a floating tag is pulled when newer.
+pinned="quay.io/crunchtools/python-sdlc:$(tr -d ' \t\n\r' < IMAGE_TAG)"
+last_run() { grep ' run --rm' "$RUN/podman.log" | tail -1; }
+
+log_mark
+PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- " $pinned tiers\$" && ! last_run | grep -q -- '--pull' \
+   && ! grep -q 'NOT THE PINNED RELEASE' "$RUN/out"; then
+  ok "no override: the pinned image, no pull flag, no banner"
+else
+  bad "no override changed the run: $(last_run)"
+fi
+
+log_mark
+SDLC_IMAGE=beta PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- '--pull=newer .* quay.io/crunchtools/sdlc:beta tiers$' \
+   && grep -q 'NOT THE PINNED RELEASE' "$RUN/out" && grep -q 'set by SDLC_IMAGE' "$RUN/out"; then
+  ok "SDLC_IMAGE=beta runs quay.io/crunchtools/sdlc:beta, pulled when newer, and says so"
+else
+  bad "SDLC_IMAGE=beta: $(last_run) / $(head -3 "$RUN/out")"
+fi
+
+log_mark
+SDLC_IMAGE=localhost/python-sdlc:dev PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- ' localhost/python-sdlc:dev tiers$' && ! last_run | grep -q -- '--pull'; then
+  ok "a local image is run as built, never pulled"
+else
+  bad "SDLC_IMAGE=localhost/...: $(last_run)"
+fi
+
+rc=0
+SDLC_IMAGE='beta;touch' PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "a bare SDLC_IMAGE that is not a tag is refused (exit 2)"
+else
+  bad "SDLC_IMAGE='beta;touch' exited $rc"
+fi
+
+CREPO=$(mktemp -d)
+git -C "$CREPO" init -q
+printf '[project]\nname = "x"\n\n[tool.sdlc]\nimage = "pr-59"\n' > "$CREPO/pyproject.toml"
+log_mark
+(cd "$CREPO" && PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- 'SDLC_CONFIG_IMAGE .*quay.io/crunchtools/sdlc:pr-59 tiers$' \
+   && grep -q 'set by \[tool.sdlc\] image in pyproject.toml' "$RUN/out"; then
+  ok "[tool.sdlc] image = \"pr-59\" runs that tag and tells the image what it read"
+else
+  bad "[tool.sdlc] image: $(last_run) / $(head -4 "$RUN/out")"
+fi
+log_mark
+(cd "$CREPO" && SDLC_IMAGE=beta PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- 'quay.io/crunchtools/sdlc:beta tiers$'; then
+  ok "SDLC_IMAGE beats [tool.sdlc] image"
+else
+  bad "SDLC_IMAGE did not beat the repo's image: $(last_run)"
+fi
+printf '[tool.sdlc]\nimage = "../../evil"\n' > "$CREPO/sdlc.toml"
+rm "$CREPO/pyproject.toml"
+rc=0
+(cd "$CREPO" && PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 2 ] && grep -q 'must be a tag of' "$RUN/out"; then
+  ok "a repo's image that is not a plain tag is refused (exit 2)"
+else
+  bad "[tool.sdlc] image = ../../evil exited $rc"
+fi
+rm -rf "$CREPO"
+
+# container-scan runs the gate's own image as a host step, and only the
+# launcher knows which image that is: the plan names it `@sdlc-image`.
+log_mark
+SDLC_IMAGE=beta PATH="$SHIM" sh bin/sdlc gate-word >/dev/null 2>&1 || true
+log_since
+if grep -q -- '--cap-drop=all .* quay.io/crunchtools/sdlc:beta scan-rootfs$' "$RUN/podman.log" \
+   && ! grep -q '@sdlc-image' "$RUN/podman.log"; then
+  ok "a host step's @sdlc-image is the image this run is on"
+else
+  bad "@sdlc-image was not replaced: $(grep scan-rootfs "$RUN/podman.log" | tail -1)"
 fi
 
 printf '\n== what the containers are given\n\n'
