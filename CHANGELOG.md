@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-17
+
+### Changed
+
+- gatehouse 0.29.1 -> 0.30.0.
+
 ### Fixed
 
 - **`convert_repo.py` floats a shared-file `sdlc ci` step to exactly
