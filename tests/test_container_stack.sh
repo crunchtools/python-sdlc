@@ -42,14 +42,24 @@ else
 fi
 
 fixture crashes '["python3", "-c", "import missing_module"]'
-(cd "$WORK/crashes" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-build) >/dev/null 2>&1 || :
+# The build has to succeed, and the failure has to be the entrypoint's: a
+# missing image is also a non-zero smoke run, and must not pass for this one.
 rc=0
-(cd "$WORK/crashes" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-smoke) > "$WORK/crashes.out" 2>&1 || rc=$?
-if [ "$rc" -eq 1 ]; then
-  ok "an image that dies on start fails container-smoke (exit 1)"
+(cd "$WORK/crashes" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-build) > "$WORK/build.out" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  bad "the crashing fixture did not build (exit $rc), so its smoke run proves nothing"
+  tail -10 "$WORK/build.out" | sed 's/^/       /'
 else
-  bad "container-smoke on a crashing image exited $rc, want 1"
-  tail -10 "$WORK/crashes.out" | sed 's/^/       /'
+  rc=0
+  (cd "$WORK/crashes" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-smoke) > "$WORK/crashes.out" 2>&1 || rc=$?
+  if [ "$rc" -eq 1 ] \
+     && grep -q "No module named 'missing_module'" "$WORK/crashes.out" \
+     && grep -q 'the container exited 1 within' "$WORK/crashes.out"; then
+    ok "an image that dies on start fails container-smoke (exit 1, its own error)"
+  else
+    bad "container-smoke on a crashing image exited $rc, want 1 from the entrypoint"
+    tail -10 "$WORK/crashes.out" | sed 's/^/       /'
+  fi
 fi
 
 printf '\n'
