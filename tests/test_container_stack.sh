@@ -62,6 +62,24 @@ else
   fi
 fi
 
+# An entrypoint that does not exist: podman's own 127. That is the image's
+# defect -- exactly what a smoke run is for -- so a finding, not a 2.
+fixture noentry '["/no/such/entrypoint"]'
+rc=0
+(cd "$WORK/noentry" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-build) > "$WORK/build.out" 2>&1 || rc=$?
+if [ "$rc" -ne 0 ]; then
+  bad "the missing-entrypoint fixture did not build (exit $rc)"
+else
+  rc=0
+  (cd "$WORK/noentry" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-smoke) > "$WORK/noentry.out" 2>&1 || rc=$?
+  if [ "$rc" -eq 1 ] && grep -q 'could not start its entrypoint' "$WORK/noentry.out"; then
+    ok "a missing entrypoint fails container-smoke (exit 1)"
+  else
+    bad "container-smoke on a missing entrypoint exited $rc, want 1"
+    tail -10 "$WORK/noentry.out" | sed 's/^/       /'
+  fi
+fi
+
 printf '\n'
 [ "$FAILED" -eq 0 ] && { printf 'container stack PASSED\n'; exit 0; }
 printf 'container stack FAILED: %s check(s)\n' "$FAILED"; exit 1

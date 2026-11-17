@@ -418,10 +418,7 @@ def config_image(cfg: dict) -> None:
         return
     tag = cfg["image"]
     if not isinstance(tag, str) or not IMAGE_TAG_RE.fullmatch(tag):
-        cannot(
-            "[tool.sdlc] image must be a tag of quay.io/crunchtools/sdlc, "
-            f"such as beta or pr-59; got {tag!r}"
-        )
+        cannot(f"[tool.sdlc] image must be a tag such as beta, pr-59 or 0.8.0; got {tag!r}")
     if "SDLC_HOST_REPO" in os.environ and os.environ.get("SDLC_CONFIG_IMAGE") != tag:
         cannot(
             f"[tool.sdlc] image is {tag!r} but bin/sdlc could not read it, so it "
@@ -954,7 +951,8 @@ def check_container_smoke(cfg: dict, name: str, s: dict) -> list[tuple[str, str,
         or not 1 <= seconds <= SMOKE_SECONDS_MAX
     ):
         cannot(f"{name}: seconds must be a whole number from 1 to {SMOKE_SECONDS_MAX}")
-    argv = ["podman", "run", "--rm", "--pull=never"]
+    # No --rm: bin/sdlc reads the stopped container's state, then removes it.
+    argv = ["podman", "run", "--pull=never"]
     if not s.get("network", False):
         argv += ["--network", "none"]
     for key, value in table(s, "env").items():

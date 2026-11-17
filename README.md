@@ -138,7 +138,7 @@ refused.
 |---|---|---|
 | `containerfile-lint` | push, ci | hadolint over the Containerfile; the repo's `.hadolint.yaml` applies, and without one the threshold is `warning` |
 | `container-build` | ci | `podman build`, at the tag the next two read |
-| `container-smoke` | ci | runs the built image with no network and no capabilities: exiting 0, or still running after `seconds`, passes |
+| `container-smoke` | ci | starts the built image detached, with no network and no capabilities, and reads its state from podman: still running after `seconds`, or exited 0, passes; any other exit, the OOM killer, or an entrypoint that cannot start (126/127) fails |
 | `container-scan` | ci | grype over the built image's filesystem, mounted read-only by podman; fails on a fixable Critical by default, and the repo's `.grype.yaml` applies |
 
 Build, smoke and scan are one lane, beside everything else.
@@ -333,23 +333,28 @@ new kind here, so the config stays something a person can read.
 ## Running a pull request's image
 
 A pull request's image can be run before any release carries it. Every push to
-a pull request in this repo publishes the tested image as
-`quay.io/crunchtools/sdlc:pr-<N>`, and as `:beta` too when the pull request
-has the `beta` label. Whichever labelled pull request pushed last holds
-`:beta`. Only a release moves `latest`, `main` or a version tag.
+a pull request in this repo publishes its tested image to a **staging**
+repository, `quay.io/crunchtools/sdlc-pr`, as `:pr-<N>`, and as `:beta` too
+when the pull request has the `beta` label. Whichever labelled pull request ran
+last holds `:beta`, and a re-run of an older run never moves either tag back.
+The robot that publishes them can write `sdlc-pr` and nothing else, so only a
+release moves `latest`, `main` or a version tag of the real images.
 
-To run one, first matching wins:
+To run one on your machine, first matching wins:
 
-| How | Scope | Value |
-|---|---|---|
-| `SDLC_IMAGE=pr-59 git push` | this run, this machine | a tag of `quay.io/crunchtools/sdlc`, or a full image reference |
-| `[tool.sdlc] image = "beta"` | every run of this repo, CI included | a tag of `quay.io/crunchtools/sdlc` only, written on its own line under `[tool.sdlc]` |
+| How | Value |
+|---|---|
+| `SDLC_IMAGE=pr-59 git push` | `beta` or `pr-<N>` is that tag of `sdlc-pr`; any other bare tag is a release of `quay.io/crunchtools/sdlc`; or a full image reference |
+| `[tool.sdlc] image = "beta"` | the same bare tags, written on its own line under `[tool.sdlc]` |
 
-A run on anything but the pinned release says so at the top of every command,
-naming the image and what chose it. A registry tag is pulled when newer, so
-`:beta` is the current `:beta`, not whatever was cached. A repo's config can
-only name a tag of the fleet image, never an arbitrary image to judge itself
-with. Take `image` out before merging: CI would run it too.
+Every command on anything but the pinned release prints which image it is and
+what chose it. A registry tag is pulled when newer, so `:beta` is the current
+`:beta`, not whatever was cached.
+
+**CI never honours `[tool.sdlc] image`.** Under `CI` or `GITHUB_ACTIONS`, and
+for `sdlc ci` anywhere, the key is refused with exit 2. A pull request must not
+choose the image that judges it, and only the launcher can enforce that: the
+planner runs inside whichever image was chosen.
 
 **Nothing built on a laptop or a seat is ever pushed.** `sdlc` builds images
 only to test them (`container-build` tags `localhost/<repo>:sdlc`) and has no

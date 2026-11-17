@@ -47,8 +47,11 @@ IMAGE_TAG=$(tr -d ' \t\n\r' < "$HOOKS_DIR/IMAGE_TAG")
 # and the image together and they cannot disagree. An override -- below, once
 # the repo is known -- replaces it for the inner loop, and says so every run.
 DEFAULT_IMAGE=quay.io/crunchtools/python-sdlc:$IMAGE_TAG
-# Where CI publishes a pull request's tested image, as `:pr-<N>` and `:beta`.
+# Releases are published as the fleet image. A pull request's tested image goes
+# to a staging repository instead, as `:pr-<N>` and `:beta`, written by a robot
+# that can write nothing else.
 FLEET_IMAGE=quay.io/crunchtools/sdlc
+STAGING_IMAGE=quay.io/crunchtools/sdlc-pr
 
 # --------------------------------------------------------------- preconditions
 
@@ -72,11 +75,14 @@ PROJECT=$(basename "$REPO")
 # The inner loop: run a pull request's image, `:pr-<N>`, or the one labelled
 # `beta`, before any release carries it. Two ways in, the first winning:
 #
-#   SDLC_IMAGE=<ref> | <tag>     this seat, this run. A bare tag means a tag of
-#                                quay.io/crunchtools/sdlc, so SDLC_IMAGE=beta.
-#   [tool.sdlc] image = "<tag>"  the repo, every run. A TAG of the fleet image
-#                                and nothing else: a repo's config must not be
-#                                able to name whatever image judges it.
+#   SDLC_IMAGE=<ref> | <tag>     this seat, this run. A bare `beta` or `pr-<N>`
+#                                is that tag of quay.io/crunchtools/sdlc-pr; any
+#                                other bare tag is a release of the fleet image.
+#   [tool.sdlc] image = "<tag>"  the repo, on a seat. The same bare tags and
+#                                nothing else, and REFUSED in CI and by `sdlc
+#                                ci`: a pull request must not choose the image
+#                                that judges it. The planner cannot enforce
+#                                that, because it runs inside the chosen image.
 #
 # The image is the judge, so a run that is not on the pinned release says so on
 # every invocation, loudly. And a floating tag is pulled when newer: `missing`,
@@ -93,14 +99,20 @@ config_image() {       # the `image` key of [tool.sdlc], or nothing
       print v; exit
     }' "$CONFIG_FILE"
 }
-fleet_tag() {          # value where -> the fleet image at that tag, or die
+fleet_tag() {          # value where -> the image that tag names, or die
   case "$1" in
-    ''|*[!A-Za-z0-9._-]*|[.-]*) die "$2 must be a tag of $FLEET_IMAGE such as beta or pr-59; got '$1'" ;;
+    ''|*[!A-Za-z0-9._-]*|[.-]*) die "$2 must be a tag such as beta, pr-59 or 0.8.0; got '$1'" ;;
+    beta|pr-[0-9]*) printf '%s:%s' "$STAGING_IMAGE" "$1" ;;
+    *) printf '%s:%s' "$FLEET_IMAGE" "$1" ;;
   esac
-  printf '%s:%s' "$FLEET_IMAGE" "$1"
 }
 SDLC_CONFIG_IMAGE=$(config_image)
 export SDLC_CONFIG_IMAGE
+if [ -n "$SDLC_CONFIG_IMAGE" ]; then
+  if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ "${1:-}" = ci ]; then
+    die "[tool.sdlc] image is for a developer's machine. CI and 'sdlc ci' run the pinned release, so a pull request cannot choose the image that judges it. Remove it from $CONFIG_FILE"
+  fi
+fi
 IMAGE=$DEFAULT_IMAGE
 IMAGE_FROM=
 if [ -n "${SDLC_IMAGE:-}" ]; then
@@ -529,11 +541,62 @@ record_finish() {      # worst status
 TAB=$(printf '\t')
 US=$(printf '\037')
 
+run_up() {             # seconds run-args -> the smoke verdict
+  # A `podman run` that may be a service. It starts detached, and its STATE is
+  # asked once a second for up to <seconds>: still running at the end passes,
+  # and so does exiting 0; any other exit, or the OOM killer, is a finding.
+  # Asked of podman, never inferred from a clock or from podman run's own
+  # status, because 255 is both podman's timeout kill and a program's crash,
+  # and a clock started before `podman run` counts creation as uptime.
+  #
+  # Not --rm: the state is read after the container stops. Removed here, by
+  # name, however it ended. A k8s-file log so its output can be shown, which
+  # --log-driver=none would discard.
+  _upsecs=$1; shift
+  _cname=sdlc-smoke-$$-$(now_s)
+  _uprc=0
+  podman --events-backend=none run -d --name "$_cname" --log-driver=k8s-file \
+    --cap-drop=all --security-opt=no-new-privileges \
+    --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
+    "$@" </dev/null >/dev/null || _uprc=$?
+  case "$_uprc" in
+    0) ;;
+    # 125 is podman itself: the container never existed, nothing was judged.
+    125) podman rm -f "$_cname" >/dev/null 2>&1 || :
+         printf '%s: podman could not create the container (exit 125); nothing was judged\n' "$ME" >&2
+         return 2 ;;
+    # 126/127 is the image: an entrypoint that is missing or cannot execute,
+    # which is exactly what a smoke run exists to catch.
+    *) podman logs "$_cname" 2>&1 || :
+       podman rm -f "$_cname" >/dev/null 2>&1 || :
+       printf '%s: the image could not start its entrypoint (exit %s)\n' "$ME" "$_uprc" >&2
+       return 1 ;;
+  esac
+  _upi=0
+  while [ "$_upi" -lt "$_upsecs" ]; do
+    _uprun=$(podman inspect --format '{{.State.Running}}' "$_cname" 2>/dev/null) || _uprun=gone
+    [ "$_uprun" = true ] || break
+    sleep 1
+    _upi=$((_upi + 1))
+  done
+  _upstate=$(podman inspect --format '{{.State.Running}} {{.State.ExitCode}} {{.State.OOMKilled}}' \
+             "$_cname" 2>/dev/null) || _upstate=
+  podman logs "$_cname" 2>&1 || :
+  podman rm -f "$_cname" >/dev/null 2>&1 || :
+  case "$_upstate" in
+    'true '*)      printf 'still running after %ss: the image starts and stays up\n' "$_upsecs"; return 0 ;;
+    *' true')      printf '%s: the container was killed for memory\n' "$ME" >&2; return 1 ;;
+    'false 0 '*)   return 0 ;;
+    'false '*)     printf '%s: the container exited %s within %ss of starting\n' "$ME" \
+                     "$(printf '%s' "$_upstate" | cut -d' ' -f2)" "$_upsecs" >&2; return 1 ;;
+    *)             printf '%s: podman could not report the container state; nothing was judged\n' "$ME" >&2
+                   return 2 ;;
+  esac
+}
+
 run_host() {           # argv [seconds] -> the step's verdict
-  # With seconds, the step is a `podman run` that may be a service: it is given
-  # that long under --timeout, and still running when it is up is a pass, as
-  # is exiting 0. podman reports its own timeout kill as 255, which a crashing
-  # program can also return, so the clock decides which one it was.
+  # With seconds, the step is a `podman run` that may be a service: run_up
+  # judges it by its state.
   _up=${2:-}
   _ifs=$IFS
   IFS=$US
@@ -551,38 +614,24 @@ run_host() {           # argv [seconds] -> the step's verdict
     [ "$_w" = @sdlc-image ] && _w=$IMAGE
     set -- "$@" "$_w"
   done
+  if [ -n "$_up" ]; then
+    [ "$_sub" = run ] || die "only a podman run can be given a time to stay up"
+    run_up "$_up" "$@"
+    return
+  fi
   # The budget is applied here so it is defined once, whatever the step.
   case "$_sub" in
     build) set -- build --cpu-period 100000 --cpu-quota "$(( GATE_CPUS * 100000 ))" \
                         --memory "$GATE_MEMORY" "$@" ;;
     run)   set -- --events-backend=none run --log-driver=none \
                         --cap-drop=all --security-opt=no-new-privileges \
-                        --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
-                        ${_up:+--timeout "$_up"} "$@" ;;
+                        --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 "$@" ;;
     *)     die "a host step may only build or run; refused: podman $_sub" ;;
   esac
-  [ -z "$_up" ] || [ "$_sub" = run ] || die "only a podman run can be given a time to stay up"
-  _ht0=$(now_s)
-  # Not `_rc` or `_t0`: shell variables are global, and run_serial reads its
-  # own after this returns. A service's 255 that this turns into a pass would
-  # survive into the caller as the step's failure, and a later start time would
-  # shorten the check's recorded duration.
+  # Not `_rc`: shell variables are global, and run_serial reads its own after
+  # this returns, so a status set here would survive into the caller.
   _hrc=0
   podman "$@" </dev/null || _hrc=$?
-  if [ -n "$_up" ]; then
-    case "$_hrc" in
-      0) return 0 ;;
-      125|126|127)
-        printf '%s: podman run exited %s; nothing was judged\n' "$ME" "$_hrc" >&2
-        return 2 ;;
-    esac
-    if [ "$_hrc" -eq 255 ] && [ $(( $(now_s) - _ht0 )) -ge "$_up" ]; then
-      printf 'still running after %ss: the image starts and stays up\n' "$_up"
-      return 0
-    fi
-    printf '%s: the container exited %s within %ss of starting\n' "$ME" "$_hrc" "$_up" >&2
-    return 1
-  fi
   # A failed build is a finding: the code does not produce an image. A run
   # that podman could not start (125-127) never ran, so it is a 2, and so is a
   # pytest status above 1 (interrupted, usage error, internal error, no tests).

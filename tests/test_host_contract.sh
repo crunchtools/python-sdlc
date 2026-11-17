@@ -81,6 +81,27 @@ cat > "$SHIM/podman" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$LOG"
 for _last in "\$@"; do :; done
+# container-smoke: a detached run records which case it is, and inspect
+# answers that case's state as: Running ExitCode OOMKilled.
+case " \$* " in
+  *" inspect "*)
+    _st=\$(cat "$SHIM/upcase" 2>/dev/null)
+    case "\$_st" in
+      go-up-stays)    _full='true 0 false' ;;
+      go-up-exits-0)  _full='false 0 false' ;;
+      go-up-dies-255) _full='false 255 false' ;;
+      go-up-dies-3)   _full='false 3 false' ;;
+      go-up-oom)      _full='false 137 true' ;;
+      *) exit 125 ;;
+    esac
+    case " \$* " in
+      *ExitCode*) printf '%s\n' "\$_full" ;;
+      *) printf '%s\n' "\${_full%% *}" ;;
+    esac
+    exit 0 ;;
+  *" logs "*) printf 'CONTAINER LOG\n'; exit 0 ;;
+  *" rm -f "*) exit 0 ;;
+esac
 case " \$* " in
   *" plan gatehouse-direct "*)
     printf 'gatehouse${TAB}main${TAB}local${TAB}gatehouse\n' ;;
@@ -126,7 +147,7 @@ case " \$* " in
     if [ "\$_what" = build ]; then
       printf '%s${TAB}main${TAB}host-up${TAB}1${US}podman${US}build${US}-t${US}x${US}.\n' "\$_last"
     else
-      printf '%s${TAB}main${TAB}host-up${TAB}%s${US}podman${US}run${US}--rm${US}localhost/x:sdlc${US}go-%s\n' \
+      printf '%s${TAB}main${TAB}host-up${TAB}%s${US}podman${US}run${US}localhost/x:sdlc${US}go-%s\n' \
         "\$_last" "\$_secs" "\$_last"
     fi ;;
   *" plan "*)
@@ -142,11 +163,9 @@ case "\$_last" in
     printf 'START %s\n' "\$_last" >> "$SHIM/race.log"
     printf 'BEGIN %s\n' "\$_last"; sleep 1; printf 'END %s\n' "\$_last"
     printf 'DONE %s\n' "\$_last" >> "$SHIM/race.log" ;;
-  go-up-stays)    sleep 1; exit 255 ;;
-  go-up-dies-255) exit 255 ;;
-  go-up-dies-3)   exit 3 ;;
-  go-up-exits-0)  exit 0 ;;
-  go-up-podman)   exit 125 ;;
+  go-up-*)
+    printf '%s\n' "\$_last" > "$SHIM/upcase"
+    case "\$_last" in go-up-podman) exit 125 ;; go-up-127) exit 127 ;; esac ;;
   rc-one)      printf 'RAN rc-one\n'; exit 1 ;;
   rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
   rc-three)    printf 'RAN rc-three\n'; exit 3 ;;
@@ -206,12 +225,13 @@ fi
 
 printf '\n== a run given time to stay up\n\n'
 
-# container-smoke's step: `host-up`, seconds and then a podman run. podman
-# reports its own --timeout kill as 255, which a crashing program can also
-# return, so the clock decides: 255 after the full time is a service that
-# stayed up, 255 before it is a crash.
-for case_ in up-stays:0 up-exits-0:0 up-dies-255:1 up-dies-3:1 up-podman:2 \
-             up-build:2 up-noseconds:2; do
+# container-smoke's step: `host-up`, seconds and then a podman run. The
+# container starts detached and its STATE decides: still running, or exited 0,
+# passes; any other exit, the OOM killer, or an entrypoint that cannot start
+# (126/127) is a finding; podman failing to create it (125) is a 2. A 255 is
+# just another exit -- no clock is consulted.
+for case_ in up-stays:0 up-exits-0:0 up-dies-255:1 up-dies-3:1 up-oom:1 up-127:1 \
+             up-podman:2 up-build:2 up-noseconds:2; do
   name=${case_%:*}; want=${case_#*:}
   log_mark
   PATH="$SHIM" sh bin/sdlc "$name" > "$RUN/out" 2>&1 && rc=0 || rc=$?
@@ -225,10 +245,11 @@ done
 log_mark
 PATH="$SHIM" sh bin/sdlc up-stays >/dev/null 2>&1 || true
 log_since
-if grep -q -- '--cap-drop=all .*--timeout 1 --rm localhost/x:sdlc go-up-stays' "$RUN/podman.log"; then
-  ok "host-up runs locked down, under --timeout"
+if grep -q -- 'run -d --name sdlc-smoke-[0-9-]* --log-driver=k8s-file --cap-drop=all --security-opt=no-new-privileges .* localhost/x:sdlc go-up-stays$' "$RUN/podman.log" \
+   && grep -q -- '^rm -f sdlc-smoke-' "$RUN/podman.log"; then
+  ok "host-up runs detached and locked down, and removes the container"
 else
-  bad "host-up did not pass --timeout with the lock-down: $(grep up-stays "$RUN/podman.log" | tail -1)"
+  bad "host-up's run or cleanup is wrong: $(grep -E 'up-stays|rm -f' "$RUN/podman.log" | tail -2)"
 fi
 
 printf '\n== a check deferred to CI\n\n'
@@ -686,9 +707,9 @@ fi
 log_mark
 SDLC_IMAGE=beta PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
 log_since
-if last_run | grep -q -- '--pull=newer .* quay.io/crunchtools/sdlc:beta tiers$' \
+if last_run | grep -q -- '--pull=newer .* quay.io/crunchtools/sdlc-pr:beta tiers$' \
    && grep -q 'NOT THE PINNED RELEASE' "$RUN/out" && grep -q 'set by SDLC_IMAGE' "$RUN/out"; then
-  ok "SDLC_IMAGE=beta runs quay.io/crunchtools/sdlc:beta, pulled when newer, and says so"
+  ok "SDLC_IMAGE=beta runs the staging quay.io/crunchtools/sdlc-pr:beta, pulled when newer, and says so"
 else
   bad "SDLC_IMAGE=beta: $(last_run) / $(head -3 "$RUN/out")"
 fi
@@ -714,30 +735,53 @@ CREPO=$(mktemp -d)
 git -C "$CREPO" init -q
 printf '[project]\nname = "x"\n\n[tool.sdlc]\nimage = "pr-59"\n' > "$CREPO/pyproject.toml"
 log_mark
-(cd "$CREPO" && PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
+(cd "$CREPO" && CI='' GITHUB_ACTIONS='' PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
 log_since
-if last_run | grep -q -- 'SDLC_CONFIG_IMAGE .*quay.io/crunchtools/sdlc:pr-59 tiers$' \
+if last_run | grep -q -- 'SDLC_CONFIG_IMAGE .*quay.io/crunchtools/sdlc-pr:pr-59 tiers$' \
    && grep -q 'set by \[tool.sdlc\] image in pyproject.toml' "$RUN/out"; then
   ok "[tool.sdlc] image = \"pr-59\" runs that tag and tells the image what it read"
 else
   bad "[tool.sdlc] image: $(last_run) / $(head -4 "$RUN/out")"
 fi
 log_mark
-(cd "$CREPO" && SDLC_IMAGE=beta PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
+(cd "$CREPO" && CI='' GITHUB_ACTIONS='' SDLC_IMAGE=beta PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
 log_since
-if last_run | grep -q -- 'quay.io/crunchtools/sdlc:beta tiers$'; then
+if last_run | grep -q -- 'quay.io/crunchtools/sdlc-pr:beta tiers$'; then
   ok "SDLC_IMAGE beats [tool.sdlc] image"
 else
   bad "SDLC_IMAGE did not beat the repo's image: $(last_run)"
 fi
+# The image is the judge, so a pull request must not pick it: CI and `sdlc ci`
+# refuse the repo's key outright. The planner cannot hold this line, because
+# it runs inside whichever image was chosen.
+for how in 'CI=true' 'GITHUB_ACTIONS=true' 'ci'; do
+  rc=0
+  case "$how" in
+    ci) (cd "$CREPO" && CI='' GITHUB_ACTIONS='' PATH="$SHIM" sh "$OLDPWD/bin/sdlc" ci) > "$RUN/out" 2>&1 || rc=$? ;;
+    *)  (cd "$CREPO" && CI='' GITHUB_ACTIONS='' env "$how" PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || rc=$? ;;
+  esac
+  if [ "$rc" -eq 2 ] && grep -q 'cannot choose the image that judges it' "$RUN/out"; then
+    ok "[tool.sdlc] image is refused under $how (exit 2)"
+  else
+    bad "[tool.sdlc] image under $how exited $rc"
+  fi
+done
+log_mark
+(cd "$CREPO" && CI='' GITHUB_ACTIONS='' SDLC_IMAGE=0.8.0 PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- 'quay.io/crunchtools/sdlc:0.8.0 tiers$'; then
+  ok "a bare release tag is the fleet image, not staging"
+else
+  bad "SDLC_IMAGE=0.8.0: $(last_run)"
+fi
 printf '[tool.sdlc]\nimage = "../../evil"\n' > "$CREPO/sdlc.toml"
 rm "$CREPO/pyproject.toml"
 rc=0
-(cd "$CREPO" && PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || rc=$?
-if [ "$rc" -eq 2 ] && grep -q 'must be a tag of' "$RUN/out"; then
+(cd "$CREPO" && CI='' GITHUB_ACTIONS='' PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 2 ] && grep -q 'must be a tag such as' "$RUN/out"; then
   ok "a repo's image that is not a plain tag is refused (exit 2)"
 else
-  bad "[tool.sdlc] image = ../../evil exited $rc"
+  bad "[tool.sdlc] image = ../../evil exited $rc: $(tail -2 "$RUN/out")"
 fi
 rm -rf "$CREPO"
 
@@ -746,7 +790,7 @@ rm -rf "$CREPO"
 log_mark
 SDLC_IMAGE=beta PATH="$SHIM" sh bin/sdlc gate-word >/dev/null 2>&1 || true
 log_since
-if grep -q -- '--cap-drop=all .* quay.io/crunchtools/sdlc:beta scan-rootfs$' "$RUN/podman.log" \
+if grep -q -- '--cap-drop=all .* quay.io/crunchtools/sdlc-pr:beta scan-rootfs$' "$RUN/podman.log" \
    && ! grep -q '@sdlc-image' "$RUN/podman.log"; then
   ok "a host step's @sdlc-image is the image this run is on"
 else

@@ -35,7 +35,7 @@ repos:
     hooks:
       - id: shellcheck
         name: shellcheck (bin/sdlc, the tests and scripts)
-        entry: podman --events-backend=none run --rm --log-driver=none -v .:/mnt:ro,z -w /mnt docker.io/koalaman/shellcheck:v0.11.0 bin/sdlc tests/contract.sh tests/test_host_contract.sh tests/test_container_stack.sh scripts/release-version.sh
+        entry: podman --events-backend=none run --rm --log-driver=none -v .:/mnt:ro,z -w /mnt docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d bin/sdlc tests/contract.sh tests/test_host_contract.sh tests/test_container_stack.sh scripts/release-version.sh
         language: system
         pass_filenames: false
         always_run: true

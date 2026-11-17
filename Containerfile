@@ -26,8 +26,10 @@ FROM quay.io/crunchtools/gatehouse:${GATEHOUSE_VERSION} AS gatehouse
 # Distroless, binary only -- the documented way to get a pinned uv.
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 # The container stack's two tools, each a static binary in a scratch image.
-FROM ghcr.io/hadolint/hadolint:v${HADOLINT_VERSION} AS hadolint
-FROM docker.io/anchore/grype:v${GRYPE_VERSION} AS grype
+# Pinned by digest as well as tag: the digest is what is fetched, the tag says
+# which release it is, and the contract test asserts the two agree.
+FROM ghcr.io/hadolint/hadolint:v${HADOLINT_VERSION}@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e AS hadolint
+FROM docker.io/anchore/grype:v${GRYPE_VERSION}@sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea AS grype
 
 FROM quay.io/hummingbird/python:3.14-builder
 
@@ -76,6 +78,10 @@ ARG REVISION=unknown
 ARG CREATED=unknown
 LABEL org.opencontainers.image.revision="${REVISION}"
 LABEL org.opencontainers.image.created="${CREATED}"
+# The Actions run that built it. A pull request's staging tags compare it to
+# refuse a re-run of an older run moving them backwards.
+ARG RUN_ID=unknown
+LABEL com.crunchtools.sdlc.run-id="${RUN_ID}"
 
 # The same values the labels carry, visible to the running script so `sdlc
 # versions` reports what is actually installed rather than a second list

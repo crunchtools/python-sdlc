@@ -24,27 +24,34 @@ All notable changes to this project are documented here, following
   diffing the output.
 - **The container stack**: `containerfile-lint` (hadolint 2.14.0, in push and
   ci) and, in ci only, `container-build`, `container-smoke` (the built image
-  either exits 0 or is still running after `seconds`, default 10, with no
-  network and no capabilities) and `container-scan` (grype 0.121.0 over the
+  starts detached with no network and no capabilities, and podman's report of
+  its state decides: still running after `seconds`, default 10, or exited 0,
+  passes; an entrypoint that cannot start fails) and `container-scan` (grype 0.121.0 over the
   built image's filesystem, failing on a fixable Critical by default; the
   repo's `.grype.yaml` applies).
 - `sdlc.toml`: the same `[tool.sdlc]` tables, for a repo with no
   `pyproject.toml`. Refused beside one.
 - **A pull request's image, before a release.** Every push to a pull request
-  here publishes `quay.io/crunchtools/sdlc:pr-<N>`, and `:beta` when it has
-  the `beta` label; never `latest`, `main` or a version tag. `SDLC_IMAGE`
-  (a fleet tag such as `beta`, or any image reference) or
-  `[tool.sdlc] image = "<tag>"` runs one. Every run on anything but the pinned
-  release prints which image it is and what chose it, and a registry tag is
-  pulled when newer. With neither set, nothing changes.
+  here publishes its tested image to the staging repository
+  `quay.io/crunchtools/sdlc-pr` as `:pr-<N>`, and `:beta` when it has the
+  `beta` label. A separate `publish-pr` job does this: it runs none of the
+  pull request's code, and its robot can write only `sdlc-pr`. A digest is
+  verified against the tested image before it is tagged, and a re-run of an
+  older run never moves a tag backwards. On a developer's machine,
+  `SDLC_IMAGE` or `[tool.sdlc] image = "<tag>"` runs one. CI and `sdlc ci`
+  refuse the repo key (exit 2). Every run on anything but the pinned release
+  prints which image it is and what chose it, and a registry tag is pulled
+  when newer. With neither set, nothing changes.
 - The image is also published as `quay.io/crunchtools/sdlc`: the same digest
   copied, never rebuilt, with the same tags as `python-sdlc`.
 
 ### Fixed
 
-- `bin/sdlc`'s `run_host` kept its exit status and start time in `_rc` and
-  `_t0`, which `run_serial` also uses, so a host step could leak its own status
-  or shorten its check's recorded duration. It has its own names now.
+- `bin/sdlc`'s `run_host` kept its exit status in `_rc`, which `run_serial`
+  also uses, so a host step could leak its own status. It has its own name now.
+- The hadolint, grype and shellcheck images are pinned by digest, and every
+  `actions/*` step in `container.yml`, `release.yml` and `update-tools.yml`
+  by commit SHA.
 
 ## [0.7.5] - 2026-11-17
 
