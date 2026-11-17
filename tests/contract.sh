@@ -374,6 +374,31 @@ case "$out" in
     bad "lint did not report both an F401 and a file to reformat"
     printf '%s\n' "$out" | sed 's/^/       /' | tail -12 ;;
 esac
+# One fault each, so a lint that judged only one tool, or turned a finding into
+# a 2, cannot pass. lint_case <what> <file body> <want> [ruff config line]
+lint_case() {
+  case_dir=$(mktemp -d)
+  printf '[project]\nname = "lint-case"\nversion = "0.0.0"\n\n[tool.ruff]\n%s\n' \
+    "${4:-}" > "$case_dir/pyproject.toml"
+  printf '%b' "$2" > "$case_dir/x.py"
+  before=$(cat "$case_dir/x.py")
+  podman run --rm -v "$case_dir:/repo:ro,z" -w /repo --entrypoint="" \
+    "$IMAGE" sdlc lint >/dev/null 2>&1 && rc=0 || rc=$?
+  after=$(cat "$case_dir/x.py")
+  rm -rf "$case_dir"
+  if [ "$rc" -eq "$3" ] && [ "$before" = "$after" ]; then
+    ok "lint exits $3 on $1"
+  else
+    bad "lint exited $rc on $1, want $3 and an untouched file"
+  fi
+}
+lint_case "a lint finding alone" 'import os\n' 1
+lint_case "a format finding alone" 'x = ( 1 )\n' 1
+lint_case "a syntax error (a finding, not a gate that cannot run)" 'def f(:\n' 1
+# A repo's fix-only silenced `--no-fix`: exit 0, nothing reported (#49 review).
+lint_case "an F821 under fix-only = true" 'def f():\n    return undefined_name\n' 1 \
+  'fix-only = true'
+
 if podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
      "$IMAGE" sdlc semgrep >/dev/null 2>&1; then
   bad "semgrep passed a file matching its own fixture rule"

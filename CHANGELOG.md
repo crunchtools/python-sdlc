@@ -18,6 +18,8 @@ All notable changes to this project are documented here, following
   clean and data-collector has one fixable I001. Fix with `sdlc commit`, or
   opt out with `[tool.sdlc.push] skip = ["lint"]`, which removes it from ci
   as well; `[tool.sdlc.ci] skip` may not name it.
+- README: `gatehouse` is no longer listed as exempt from python-sdlc; it runs
+  it as of gatehouse#134 (constitution#138).
 
 ### Fixed
 

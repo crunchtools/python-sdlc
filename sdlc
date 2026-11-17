@@ -881,12 +881,21 @@ def t_lint(s: dict) -> int:
     nothing, so it runs on a read-only tree in the main lane. Both always run,
     so one push reports both kinds of finding.
     `--no-cache` because the tree is read-only and `.ruff_cache` lives in it.
+
+    `--no-fix-only` because a repo's `[tool.ruff] fix-only = true` beats
+    `--no-fix`: ruff then reports nothing and exits 0, so lint would pass an
+    F821 without a word.
     """
     need_project()
     step("ruff check --no-fix .")
-    checked = run(["ruff", "check", "--no-fix", "--no-cache", "."])[0]
+    checked = run(["ruff", "check", "--no-fix", "--no-fix-only", "--no-cache", "."])[0]
     step("ruff format --check .")
     formatted = run(["ruff", "format", "--check", "--no-cache", "."])[0]
+    # A syntax error is a finding to `ruff check` (1) and unparsable to the
+    # formatter (2). It is the code that is wrong, not the gate, so a finding
+    # from either outranks the other's 2.
+    if FOUND in (checked, formatted):
+        return FOUND
     return max(checked, formatted)
 
 
