@@ -4,8 +4,8 @@ Every CrunchTools Python check in one container image, run the same way on a
 laptop and in CI.
 
 Constitution XII (v1.30.0) requires it for every Python repo — any repo with a
-`pyproject.toml` — except `gourmand`, `gatehouse` and this one, which build what
-the image contains.
+`pyproject.toml` — except `gourmand` and this one, which build what the image
+contains. `gatehouse` runs it too, as of gatehouse#134 (constitution#138).
 
 ## Three commands, three config blocks
 
