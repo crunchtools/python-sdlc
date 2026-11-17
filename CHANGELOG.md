@@ -6,6 +6,15 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `release.yml` no longer mistakes a failed `gh release view` (auth, network,
+  rate limit) for an unreleased version: only `release not found` counts, and
+  any other failure stops the job. The CHANGELOG heading check is a literal
+  match, so a version's dots no longer match any character. The decision now
+  lives in `scripts/release-version.sh`, tested by
+  `tests/test_release_version.py`.
+
 ## [0.7.3] - 2026-11-17
 
 ### Changed
