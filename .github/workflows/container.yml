@@ -23,9 +23,7 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-  # `labeled` too, so adding the `beta` label publishes `:beta` without a push.
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
   # Weekly, to pick up base-image errata. MANDATORY for this profile, and so is
   # bypassing the layer cache on it -- a cached `dnf install` layer is reused
   # while the Containerfile and base digest are unchanged, so a cached rebuild
@@ -109,7 +107,6 @@ jobs:
           # shellcheck disable=SC2086
           podman build $args -f Containerfile \
             --build-arg "REVISION=$GITHUB_SHA" \
-            --build-arg "RUN_ID=$GITHUB_RUN_ID" \
             --build-arg "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             -t "localhost/python-sdlc:$GITHUB_SHA" .
 
@@ -138,26 +135,6 @@ jobs:
       - name: Container stack end to end
         if: env.IS_TAG != 'true'
         run: tests/test_container_stack.sh "localhost/python-sdlc:$GITHUB_SHA"
-
-      # The inner loop's image leaves this job as a file, never as a push:
-      # this job has run the pull request's own code, so it holds no registry
-      # credential. `publish-pr` pushes it, running none of that code.
-      - name: Save the image for publish-pr
-        if: >-
-          github.event_name == 'pull_request'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-        run: podman save -o "$RUNNER_TEMP/sdlc-pr.tar" "localhost/python-sdlc:$GITHUB_SHA"
-      - name: Upload the image for publish-pr
-        if: >-
-          github.event_name == 'pull_request'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: sdlc-pr-image
-          path: ${{ runner.temp }}/sdlc-pr.tar
-          retention-days: 1
 
       - name: Log in to Quay
         if: github.event_name != 'pull_request'
@@ -213,95 +190,6 @@ jobs:
           echo "digest=$digest"    >> "$GITHUB_OUTPUT"
           echo "ref=$QUAY@$digest" >> "$GITHUB_OUTPUT"
           echo "promoting the already-built $QUAY@$digest"
-
-  # The inner loop: a pull request's tested image, runnable before any release
-  # carries it, with SDLC_IMAGE=pr-<N> or SDLC_IMAGE=beta on a developer's
-  # machine. It goes to a STAGING repository, quay.io/crunchtools/sdlc-pr, as
-  # `:pr-<N>`, and as `:beta` when the PR carries the `beta` label.
-  #
-  # A job of its own, because `build` ran the pull request's code, and code
-  # can leave things behind for later steps of its job (GITHUB_PATH, a podman
-  # or skopeo of its own). This job checks out nothing and runs nothing from
-  # the PR: it loads the image file `build` saved and pushes it. Its robot can
-  # write sdlc-pr and nothing else, so `latest`, `main` and the version tags of
-  # the real images are out of its reach, not merely out of its script.
-  #
-  # The pushed bytes are checked against the image `build` tested by config
-  # digest -- which is the image ID -- since running the contract test here
-  # would mean running the PR's code beside the credential. It goes to a
-  # scratch tag first and only a verified digest is tagged. A re-run of an
-  # older run is refused rather than moving a tag backwards: each image carries
-  # the run id that built it, and a re-run keeps its run's id.
-  publish-pr:
-    name: Publish the pull request's image
-    needs: build
-    if: >-
-      github.event_name == 'pull_request'
-      && github.event.pull_request.head.repo.full_name == github.repository
-      && github.event.pull_request.user.login != 'dependabot[bot]'
-    runs-on: ubuntu-latest
-    environment: sdlc-pr
-    permissions:
-      actions: read
-    env:
-      STAGE: quay.io/crunchtools/sdlc-pr
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: sdlc-pr-image
-          path: ${{ runner.temp }}
-
-      - name: Push, verify, then tag
-        env:
-          QUAY_PR_USERNAME: ${{ secrets.QUAY_PR_USERNAME }}
-          QUAY_PR_PASSWORD: ${{ secrets.QUAY_PR_PASSWORD }}
-          PR: ${{ github.event.pull_request.number }}
-          BETA: ${{ contains(github.event.pull_request.labels.*.name, 'beta') }}
-        run: |
-          set -eu
-          # Until the staging robot exists the image simply is not published.
-          # A warning rather than a failure: this is a convenience, not a gate.
-          if [ -z "$QUAY_PR_USERNAME" ] || [ -z "$QUAY_PR_PASSWORD" ]; then
-            echo "::warning::QUAY_PR_USERNAME / QUAY_PR_PASSWORD are not set for the sdlc-pr environment; $STAGE:pr-$PR was not published"
-            exit 0
-          fi
-          ref="localhost/python-sdlc:$GITHUB_SHA"
-          podman load -q -i "$RUNNER_TEMP/sdlc-pr.tar"
-          id=$(podman image inspect --format '{{.Id}}' "$ref")
-          built_by=$(podman image inspect --format '{{ index .Labels "com.crunchtools.sdlc.run-id" }}' "$ref")
-          [ "$built_by" = "$GITHUB_RUN_ID" ] \
-            || { echo "$ref was built by run $built_by, not this run ($GITHUB_RUN_ID)" >&2; exit 1; }
-          podman login -u "$QUAY_PR_USERNAME" -p "$QUAY_PR_PASSWORD" quay.io
-
-          # Never backwards: a tag built by a later run stays where it is.
-          guard() {
-            current=$(skopeo inspect --format '{{ index .Labels "com.crunchtools.sdlc.run-id" }}' \
-              "docker://$STAGE:$1" 2>/dev/null || true)
-            case "$current" in
-              ''|*[!0-9]*) return 0 ;;
-            esac
-            if [ "$current" -gt "$GITHUB_RUN_ID" ]; then
-              echo "refusing: $STAGE:$1 was built by run $current, later than this run ($GITHUB_RUN_ID)" >&2
-              exit 1
-            fi
-          }
-
-          scratch="pr-$PR-candidate"
-          podman push "$ref" "$STAGE:$scratch"
-          digest=$(skopeo inspect --format '{{.Digest}}' "docker://$STAGE:$scratch")
-          config=$(skopeo inspect --raw "docker://$STAGE@$digest" | jq -r .config.digest)
-          [ "$config" = "sha256:$id" ] \
-            || { echo "$STAGE@$digest holds config $config, not the tested image sha256:$id" >&2; exit 1; }
-
-          tag() {
-            guard "$1"
-            skopeo copy --all --preserve-digests "docker://$STAGE@$digest" "docker://$STAGE:$1"
-            got=$(skopeo inspect --format '{{.Digest}}' "docker://$STAGE:$1")
-            [ "$got" = "$digest" ] || { echo "$STAGE:$1 is $got, not $digest" >&2; exit 1; }
-            echo "published $STAGE:$1 ($digest)"
-          }
-          tag "pr-$PR"
-          if [ "$BETA" = true ]; then tag beta; fi
 
   # Re-runs the contract test against what is ACTUALLY on the registry, not
   # against the local build. The profile requires this on every trigger: a

@@ -78,10 +78,6 @@ ARG REVISION=unknown
 ARG CREATED=unknown
 LABEL org.opencontainers.image.revision="${REVISION}"
 LABEL org.opencontainers.image.created="${CREATED}"
-# The Actions run that built it. A pull request's staging tags compare it to
-# refuse a re-run of an older run moving them backwards.
-ARG RUN_ID=unknown
-LABEL com.crunchtools.sdlc.run-id="${RUN_ID}"
 
 # The same values the labels carry, visible to the running script so `sdlc
 # versions` reports what is actually installed rather than a second list

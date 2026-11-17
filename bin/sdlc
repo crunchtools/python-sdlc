@@ -47,11 +47,9 @@ IMAGE_TAG=$(tr -d ' \t\n\r' < "$HOOKS_DIR/IMAGE_TAG")
 # and the image together and they cannot disagree. An override -- below, once
 # the repo is known -- replaces it for the inner loop, and says so every run.
 DEFAULT_IMAGE=quay.io/crunchtools/python-sdlc:$IMAGE_TAG
-# Releases are published as the fleet image. A pull request's tested image goes
-# to a staging repository instead, as `:pr-<N>` and `:beta`, written by a robot
-# that can write nothing else.
+# The fleet image: releases at their version tags, and `:main`, which is what
+# has merged to main and not yet been released.
 FLEET_IMAGE=quay.io/crunchtools/sdlc
-STAGING_IMAGE=quay.io/crunchtools/sdlc-pr
 
 # --------------------------------------------------------------- preconditions
 
@@ -72,12 +70,11 @@ PROJECT=$(basename "$REPO")
 
 # ------------------------------------------------------------- an image override
 #
-# The inner loop: run a pull request's image, `:pr-<N>`, or the one labelled
-# `beta`, before any release carries it. Two ways in, the first winning:
+# The inner loop: run what has merged to main before a release carries it,
+# `:main`, or a seat's own local build. Two ways in, the first winning:
 #
-#   SDLC_IMAGE=<ref> | <tag>     this seat, this run. A bare `beta` or `pr-<N>`
-#                                is that tag of quay.io/crunchtools/sdlc-pr; any
-#                                other bare tag is a release of the fleet image.
+#   SDLC_IMAGE=<ref> | <tag>     this seat, this run. A bare tag is a tag of
+#                                quay.io/crunchtools/sdlc: main, or a release.
 #   [tool.sdlc] image = "<tag>"  the repo, on a seat. The same bare tags and
 #                                nothing else, and REFUSED in CI and by `sdlc
 #                                ci`: a pull request must not choose the image
@@ -101,10 +98,9 @@ config_image() {       # the `image` key of [tool.sdlc], or nothing
 }
 fleet_tag() {          # value where -> the image that tag names, or die
   case "$1" in
-    ''|*[!A-Za-z0-9._-]*|[.-]*) die "$2 must be a tag such as beta, pr-59 or 0.8.0; got '$1'" ;;
-    beta|pr-[0-9]*) printf '%s:%s' "$STAGING_IMAGE" "$1" ;;
-    *) printf '%s:%s' "$FLEET_IMAGE" "$1" ;;
+    ''|*[!A-Za-z0-9._-]*|[.-]*) die "$2 must be a tag such as main or 0.8.0; got '$1'" ;;
   esac
+  printf '%s:%s' "$FLEET_IMAGE" "$1"
 }
 SDLC_CONFIG_IMAGE=$(config_image)
 export SDLC_CONFIG_IMAGE

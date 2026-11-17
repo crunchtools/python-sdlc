@@ -400,12 +400,12 @@ def sdlc_config() -> dict:
     return cfg
 
 
-# `[tool.sdlc] image = "beta"` runs a tag of the fleet image instead of the
+# `[tool.sdlc] image = "main"` runs a tag of the fleet image instead of the
 # pinned release. bin/sdlc chooses the image before this script exists, so it
 # reads the key itself -- with awk, as one `image = "<tag>"` line under
 # [tool.sdlc] -- and passes what it read as SDLC_CONFIG_IMAGE. TOML has other
 # ways to write the same key, and a launcher that missed one would run the
-# pinned release while the repo believed it ran beta, so the two readings must
+# pinned release while the repo believed it ran main, so the two readings must
 # agree or nothing runs.
 IMAGE_TAG_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
 
@@ -418,7 +418,7 @@ def config_image(cfg: dict) -> None:
         return
     tag = cfg["image"]
     if not isinstance(tag, str) or not IMAGE_TAG_RE.fullmatch(tag):
-        cannot(f"[tool.sdlc] image must be a tag such as beta, pr-59 or 0.8.0; got {tag!r}")
+        cannot(f"[tool.sdlc] image must be a tag such as main or 0.8.0; got {tag!r}")
     if "SDLC_HOST_REPO" in os.environ and os.environ.get("SDLC_CONFIG_IMAGE") != tag:
         cannot(
             f"[tool.sdlc] image is {tag!r} but bin/sdlc could not read it, so it "

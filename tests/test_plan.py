@@ -761,9 +761,9 @@ def image_error(pyproject: str, launcher_read: str | None) -> str | None:
 
 check(
     "image: the launcher and TOML agreeing is fine",
-    image_error('[tool.sdlc]\nimage = "beta"\n', "beta") is None,
+    image_error('[tool.sdlc]\nimage = "main"\n', "main") is None,
 )
-msg = image_error('tool.sdlc.image = "beta"\n', None)
+msg = image_error('tool.sdlc.image = "main"\n', None)
 check(
     "image: a form the launcher could not read is refused",
     msg is not None and "could not read" in msg,
@@ -773,7 +773,7 @@ msg = image_error('[tool.sdlc]\nimage = "a/b:c"\n', "a/b:c")
 check("image: only a tag of the fleet image", msg is not None and "must be a tag" in msg, str(msg))
 msg = image_error("[tool.sdlc]\nimage = 3\n", "3")
 check("image: a number is not a tag", msg is not None and "must be a tag" in msg, str(msg))
-msg = image_error("[tool.ruff]\n", "beta")
+msg = image_error("[tool.ruff]\n", "main")
 check("image: a launcher reading one that TOML lacks is refused", msg is not None, str(msg))
 check("image: none set anywhere is fine", image_error("[tool.ruff]\n", None) is None)
 

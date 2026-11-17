@@ -31,17 +31,15 @@ All notable changes to this project are documented here, following
   repo's `.grype.yaml` applies).
 - `sdlc.toml`: the same `[tool.sdlc]` tables, for a repo with no
   `pyproject.toml`. Refused beside one.
-- **A pull request's image, before a release.** Every push to a pull request
-  here publishes its tested image to the staging repository
-  `quay.io/crunchtools/sdlc-pr` as `:pr-<N>`, and `:beta` when it has the
-  `beta` label. A separate `publish-pr` job does this: it runs none of the
-  pull request's code, and its robot can write only `sdlc-pr`. A digest is
-  verified against the tested image before it is tagged, and a re-run of an
-  older run never moves a tag backwards. On a developer's machine,
-  `SDLC_IMAGE` or `[tool.sdlc] image = "<tag>"` runs one. CI and `sdlc ci`
-  refuse the repo key (exit 2). Every run on anything but the pinned release
-  prints which image it is and what chose it, and a registry tag is pulled
-  when newer. With neither set, nothing changes.
+- **Main before a release, as `:main`.** Every push to main publishes its
+  tested image as `quay.io/crunchtools/sdlc:main`: the digest the contract
+  test ran against, read back after the copy, never moved onto an older
+  commit. No pull request run touches a registry. On a developer's machine,
+  `SDLC_IMAGE=main` (or any tag or image reference) or
+  `[tool.sdlc] image = "<tag>"` runs it; CI and `sdlc ci` refuse the repo key
+  (exit 2). Every run on anything but the pinned release prints which image
+  it is and what chose it, and a registry tag is pulled when newer. With
+  neither set, nothing changes.
 - The image is also published as `quay.io/crunchtools/sdlc`: the same digest
   copied, never rebuilt, with the same tags as `python-sdlc`.
 

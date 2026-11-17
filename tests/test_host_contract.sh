@@ -705,13 +705,13 @@ else
 fi
 
 log_mark
-SDLC_IMAGE=beta PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+SDLC_IMAGE=main PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
 log_since
-if last_run | grep -q -- '--pull=newer .* quay.io/crunchtools/sdlc-pr:beta tiers$' \
+if last_run | grep -q -- '--pull=newer .* quay.io/crunchtools/sdlc:main tiers$' \
    && grep -q 'NOT THE PINNED RELEASE' "$RUN/out" && grep -q 'set by SDLC_IMAGE' "$RUN/out"; then
-  ok "SDLC_IMAGE=beta runs the staging quay.io/crunchtools/sdlc-pr:beta, pulled when newer, and says so"
+  ok "SDLC_IMAGE=main runs quay.io/crunchtools/sdlc:main, pulled when newer, and says so"
 else
-  bad "SDLC_IMAGE=beta: $(last_run) / $(head -3 "$RUN/out")"
+  bad "SDLC_IMAGE=main: $(last_run) / $(head -3 "$RUN/out")"
 fi
 
 log_mark
@@ -724,29 +724,29 @@ else
 fi
 
 rc=0
-SDLC_IMAGE='beta;touch' PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || rc=$?
+SDLC_IMAGE='main;touch' PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || rc=$?
 if [ "$rc" -eq 2 ]; then
   ok "a bare SDLC_IMAGE that is not a tag is refused (exit 2)"
 else
-  bad "SDLC_IMAGE='beta;touch' exited $rc"
+  bad "SDLC_IMAGE='main;touch' exited $rc"
 fi
 
 CREPO=$(mktemp -d)
 git -C "$CREPO" init -q
-printf '[project]\nname = "x"\n\n[tool.sdlc]\nimage = "pr-59"\n' > "$CREPO/pyproject.toml"
+printf '[project]\nname = "x"\n\n[tool.sdlc]\nimage = "0.8.0"\n' > "$CREPO/pyproject.toml"
 log_mark
 (cd "$CREPO" && CI='' GITHUB_ACTIONS='' PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
 log_since
-if last_run | grep -q -- 'SDLC_CONFIG_IMAGE .*quay.io/crunchtools/sdlc-pr:pr-59 tiers$' \
+if last_run | grep -q -- 'SDLC_CONFIG_IMAGE .*quay.io/crunchtools/sdlc:0.8.0 tiers$' \
    && grep -q 'set by \[tool.sdlc\] image in pyproject.toml' "$RUN/out"; then
-  ok "[tool.sdlc] image = \"pr-59\" runs that tag and tells the image what it read"
+  ok "[tool.sdlc] image = \"0.8.0\" runs that tag and tells the image what it read"
 else
   bad "[tool.sdlc] image: $(last_run) / $(head -4 "$RUN/out")"
 fi
 log_mark
-(cd "$CREPO" && CI='' GITHUB_ACTIONS='' SDLC_IMAGE=beta PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
+(cd "$CREPO" && CI='' GITHUB_ACTIONS='' SDLC_IMAGE=main PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
 log_since
-if last_run | grep -q -- 'quay.io/crunchtools/sdlc-pr:beta tiers$'; then
+if last_run | grep -q -- 'quay.io/crunchtools/sdlc:main tiers$'; then
   ok "SDLC_IMAGE beats [tool.sdlc] image"
 else
   bad "SDLC_IMAGE did not beat the repo's image: $(last_run)"
@@ -766,14 +766,6 @@ for how in 'CI=true' 'GITHUB_ACTIONS=true' 'ci'; do
     bad "[tool.sdlc] image under $how exited $rc"
   fi
 done
-log_mark
-(cd "$CREPO" && CI='' GITHUB_ACTIONS='' SDLC_IMAGE=0.8.0 PATH="$SHIM" sh "$OLDPWD/bin/sdlc" tiers) > "$RUN/out" 2>&1 || true
-log_since
-if last_run | grep -q -- 'quay.io/crunchtools/sdlc:0.8.0 tiers$'; then
-  ok "a bare release tag is the fleet image, not staging"
-else
-  bad "SDLC_IMAGE=0.8.0: $(last_run)"
-fi
 printf '[tool.sdlc]\nimage = "../../evil"\n' > "$CREPO/sdlc.toml"
 rm "$CREPO/pyproject.toml"
 rc=0
@@ -788,9 +780,9 @@ rm -rf "$CREPO"
 # container-scan runs the gate's own image as a host step, and only the
 # launcher knows which image that is: the plan names it `@sdlc-image`.
 log_mark
-SDLC_IMAGE=beta PATH="$SHIM" sh bin/sdlc gate-word >/dev/null 2>&1 || true
+SDLC_IMAGE=main PATH="$SHIM" sh bin/sdlc gate-word >/dev/null 2>&1 || true
 log_since
-if grep -q -- '--cap-drop=all .* quay.io/crunchtools/sdlc-pr:beta scan-rootfs$' "$RUN/podman.log" \
+if grep -q -- '--cap-drop=all .* quay.io/crunchtools/sdlc:main scan-rootfs$' "$RUN/podman.log" \
    && ! grep -q '@sdlc-image' "$RUN/podman.log"; then
   ok "a host step's @sdlc-image is the image this run is on"
 else

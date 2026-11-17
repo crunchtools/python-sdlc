@@ -330,37 +330,35 @@ Values in `build_args`, `labels` and `env` may be `@project.version`,
 There is no shell kind. A repo that needs something these cannot express gets a
 new kind here, so the config stays something a person can read.
 
-## Running a pull request's image
+## Running main before a release
 
-A pull request's image can be run before any release carries it. Every push to
-a pull request in this repo publishes its tested image to a **staging**
-repository, `quay.io/crunchtools/sdlc-pr`, as `:pr-<N>`, and as `:beta` too
-when the pull request has the `beta` label. Whichever labelled pull request ran
-last holds `:beta`, and a re-run of an older run never moves either tag back.
-The robot that publishes them can write `sdlc-pr` and nothing else, so only a
-release moves `latest`, `main` or a version tag of the real images.
+Every push to main publishes its tested image as `quay.io/crunchtools/sdlc:main`,
+the same name git and Gourmand use: what has merged and not yet been released.
+It is the digest the contract test ran against at `:<sha>`, read back after the
+copy, and it never moves back onto an older commit. Only a release moves `latest` and the version tags, and no
+pull request run touches a registry at all. The release is the gate.
 
 To run one on your machine, first matching wins:
 
 | How | Value |
 |---|---|
-| `SDLC_IMAGE=pr-59 git push` | `beta` or `pr-<N>` is that tag of `sdlc-pr`; any other bare tag is a release of `quay.io/crunchtools/sdlc`; or a full image reference |
-| `[tool.sdlc] image = "beta"` | the same bare tags, written on its own line under `[tool.sdlc]` |
+| `SDLC_IMAGE=main git push` | a bare tag of `quay.io/crunchtools/sdlc` (`main`, or a release such as `0.8.0`), or a full image reference |
+| `[tool.sdlc] image = "main"` | a bare tag only, written on its own line under `[tool.sdlc]` |
 
 Every command on anything but the pinned release prints which image it is and
-what chose it. A registry tag is pulled when newer, so `:beta` is the current
-`:beta`, not whatever was cached.
+what chose it. A registry tag is pulled when newer, so `:main` is the current
+`:main`, not whatever was cached.
 
 **CI never honours `[tool.sdlc] image`.** Under `CI` or `GITHUB_ACTIONS`, and
 for `sdlc ci` anywhere, the key is refused with exit 2. A pull request must not
 choose the image that judges it, and only the launcher can enforce that: the
 planner runs inside whichever image was chosen.
 
-**Nothing built on a laptop or a seat is ever pushed.** `sdlc` builds images
-only to test them (`container-build` tags `localhost/<repo>:sdlc`) and has no
-push step. Run a local build of this image with
-`SDLC_IMAGE=localhost/python-sdlc:dev`. Only this repo's GitHub Actions
-publish to quay.io.
+**Nothing built on a laptop or a seat is ever pushed.** To try a change to
+this image before it merges, build it locally (`podman build -t
+localhost/python-sdlc:dev .`) and run it with
+`SDLC_IMAGE=localhost/python-sdlc:dev`. `sdlc` has no push step, and only this
+repo's GitHub Actions on main publish to quay.io.
 
 ## Skipping a check
 
