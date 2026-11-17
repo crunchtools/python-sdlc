@@ -1066,13 +1066,22 @@ HOST_CHECKS = {
 }
 
 
+# What the fleet does on purpose, so hadolint is told not to call it a defect.
+# DL3007: base tags float, because the Container Image profile rebuilds every
+# week to pick up errata through them. DL3041: dnf installs are not pinned to a
+# package version, for the same reason.
+HADOLINT_FLEET_IGNORES = ("DL3007", "DL3041")
+
+
 def t_containerfile_lint(s: dict) -> int:
     """hadolint over the Containerfile, with the repo's own `.hadolint.yaml`.
 
-    Without a config the threshold is `warning`: hadolint's own default fails
-    on style notes, and a gate that fails on taste is a gate people skip. A
-    repo with a config file sets its own threshold there, and `threshold` in
-    this check's table beats both.
+    Without a config the threshold is `error` and the fleet's deliberate
+    choices (HADOLINT_FLEET_IGNORES) are not reported: a warning such as
+    DL3002, a root last USER, is printed and does not fail, because a gate that
+    fails on taste is a gate people skip. A repo with a config file sets its
+    own rules there and gets none of these defaults, and `threshold` in this
+    check's table beats both.
     """
     files = names(s.get("containerfiles"), "containerfile-lint.containerfiles")
     if not files:
@@ -1083,8 +1092,10 @@ def t_containerfile_lint(s: dict) -> int:
     files = [in_repo("containerfile-lint", "containerfiles", f) for f in files]
     cmd = ["hadolint", "--no-color"]
     threshold = s.get("threshold")
-    if threshold is None and not any((REPO / c).is_file() for c in HADOLINT_CONFIGS):
-        threshold = "warning"
+    if not any((REPO / c).is_file() for c in HADOLINT_CONFIGS):
+        threshold = threshold or "error"
+        for rule in HADOLINT_FLEET_IGNORES:
+            cmd += ["--ignore", rule]
     if threshold is not None:
         if threshold not in HADOLINT_THRESHOLDS:
             cannot(f"containerfile-lint: threshold must be one of {', '.join(HADOLINT_THRESHOLDS)}")

@@ -459,14 +459,37 @@ else
   bad "containerfile-lint failed on a clean fixture Containerfile"
   printf '%s\n' "$out" | sed 's/^/       /' | tail -8
 fi
-printf 'FROM quay.io/hummingbird/python\nRUN cd /tmp && ls\n' > "$CFIX/Containerfile"
+lint() { podman run --rm -v "$CFIX:/repo:ro,z" -w /repo --entrypoint="" "$IMAGE" sdlc containerfile-lint 2>&1; }
+# The fleet's own conventions: a floating base tag (DL3007), dnf without
+# package versions (DL3041), and root as the last USER (DL3002, a warning).
+printf 'FROM registry.access.redhat.com/ubi10/ubi-init:latest\nRUN dnf install -y less && dnf clean all\nUSER root\n' \
+  > "$CFIX/Containerfile"
 rc=0
-podman run --rm -v "$CFIX:/repo:ro,z" -w /repo --entrypoint="" \
-  "$IMAGE" sdlc containerfile-lint >/dev/null 2>&1 || rc=$?
-if [ "$rc" -eq 1 ]; then
-  ok "containerfile-lint finds an untagged FROM and a cd (exit 1)"
+out=$(lint) || rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q DL3002 \
+   && ! printf '%s' "$out" | grep -q 'DL3007\|DL3041'; then
+  ok "containerfile-lint passes the fleet's conventions, ignores DL3007/DL3041, still prints DL3002"
 else
-  bad "containerfile-lint on a bad Containerfile exited $rc, want 1"
+  bad "containerfile-lint on the fleet's conventions exited $rc"
+  printf '%s\n' "$out" | sed 's/^/       /' | tail -6
+fi
+printf 'FROM quay.io/hummingbird/python:3.14\nWORKDIR app\n' > "$CFIX/Containerfile"
+rc=0
+lint >/dev/null || rc=$?
+if [ "$rc" -eq 1 ]; then
+  ok "containerfile-lint fails on an error-level rule, a relative WORKDIR (exit 1)"
+else
+  bad "containerfile-lint on a relative WORKDIR exited $rc, want 1"
+fi
+# A repo's own .hadolint.yaml takes the defaults away: here it asks for warnings.
+printf 'FROM registry.access.redhat.com/ubi10/ubi-init:latest\n' > "$CFIX/Containerfile"
+printf 'failure-threshold: warning\n' > "$CFIX/.hadolint.yaml"
+rc=0
+out=$(lint) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q DL3007; then
+  ok "a repo's .hadolint.yaml overrides the stack defaults (DL3007 fails at warning)"
+else
+  bad "containerfile-lint with a .hadolint.yaml exited $rc, want 1 on DL3007"
 fi
 rm -rf "$CFIX"
 

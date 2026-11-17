@@ -155,9 +155,9 @@ refused.
 
 | Check | Command | What it does |
 |---|---|---|
-| `containerfile-lint` | push, ci | hadolint over the Containerfile; the repo's `.hadolint.yaml` applies, and without one the threshold is `warning` |
+| `containerfile-lint` | push, ci | hadolint over the Containerfile. Without a `.hadolint.yaml` the threshold is `error` and DL3007 (floating base tags) and DL3041 (unpinned dnf) are ignored, as fleet conventions; warnings such as DL3002 are printed and do not fail. A repo's `.hadolint.yaml` replaces all of that |
 | `container-build` | ci | `podman build`, at the tag the next two read |
-| `container-smoke` | ci | starts the built image detached, with no network and no capabilities, and reads its state from podman: still running after `seconds`, or exited 0, passes; any other exit, the OOM killer, or an entrypoint that cannot start (126/127) fails |
+| `container-smoke` | ci | starts the built image detached, with no network and no capabilities, and reads its state from podman: still running after `seconds`, or exited 0, passes; any other exit, the OOM killer, or an entrypoint that cannot start (126/127) fails. An image whose PID 1 is systemd (`/sbin/init`, `systemd`) is SKIPPED with its reason: systemd needs privileges the run withholds |
 | `container-scan` | ci | grype over the built image's filesystem, mounted read-only by podman; fails on a fixable Critical by default, and the repo's `.grype.yaml` applies |
 
 Build, smoke and scan are one lane, beside everything else.
@@ -242,6 +242,10 @@ worktree:
 ```
 $ jq -r '.checks[] | "\(.seconds)s \(.check) exit \(.exit)"' .git/sdlc/last-push.json
 ```
+
+A check's `exit` is its status: 0 passed, 1 found something, 2 could not run,
+3 deferred to CI, and 4 SKIPPED, which only `container-smoke` reports, for a
+systemd PID 1 it cannot boot. A 4 never decides the command's own exit.
 
 The checks appear in the order they **finished**, which with lanes is not the
 order they were listed in. A check that streamed to your terminal has no log

@@ -24,6 +24,20 @@ All notable changes to this project are documented here, following
   `--apply`; keeps every workflow the stubs do not cover; never touches
   `.specify/`; refuses with exit 2 a shape it would have to guess at.
 
+- `container-smoke` SKIPS an image whose PID 1 is systemd (`/sbin/init`,
+  `/usr/sbin/init`, `systemd`, as in ubi-init and bootc images): systemd needs
+  privileges the smoke run withholds on purpose. The run says why and prints
+  `SKIPPED, not judged`, never `passed`; the build and the scan still run. The
+  check's record carries exit 4. Only the smoke run can skip: a 4 from a tool
+  in the image is still a finding.
+
+### Changed
+
+- `containerfile-lint` without a `.hadolint.yaml` now fails at `error`, not
+  `warning`, and ignores DL3007 (floating base tags) and DL3041 (unpinned dnf
+  packages), which the fleet does on purpose. Warnings such as DL3002 are
+  printed and do not fail. A repo's `.hadolint.yaml` replaces these defaults.
+
 ### Fixed
 
 - `container-smoke` removes the smoke container with `-v`, so an image that
