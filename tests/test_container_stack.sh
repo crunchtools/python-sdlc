@@ -29,6 +29,10 @@ fixture() {           # name entrypoint-json
   git -C "$WORK/$1" -c user.email=t@t -c user.name=t commit -qm fixture
 }
 
+gate() {               # name: opt the fixture's smoke run into gating
+  printf '[tool.sdlc.ci.container-smoke]\ngate = true\n' >> "$WORK/$1/sdlc.toml"
+}
+
 fixture serves '["python3", "-m", "http.server", "8080"]'
 rc=0
 (cd "$WORK/serves" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" ci) > "$WORK/serves.out" 2>&1 || rc=$?
@@ -50,12 +54,24 @@ if [ "$rc" -ne 0 ]; then
   bad "the crashing fixture did not build (exit $rc), so its smoke run proves nothing"
   tail -10 "$WORK/build.out" | sed 's/^/       /'
 else
+  # Ungated, the smoke run is advisory: the finding is printed, the exit is 0.
+  rc=0
+  (cd "$WORK/crashes" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-smoke) > "$WORK/crashes.out" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ] \
+     && grep -q "No module named 'missing_module'" "$WORK/crashes.out" \
+     && grep -q '== container-smoke FOUND SOMETHING, ADVISORY' "$WORK/crashes.out"; then
+    ok "ungated, an image that dies on start is an advisory finding (exit 0, printed)"
+  else
+    bad "advisory container-smoke on a crashing image exited $rc, want 0 with ADVISORY"
+    tail -10 "$WORK/crashes.out" | sed 's/^/       /'
+  fi
+  gate crashes
   rc=0
   (cd "$WORK/crashes" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-smoke) > "$WORK/crashes.out" 2>&1 || rc=$?
   if [ "$rc" -eq 1 ] \
      && grep -q "No module named 'missing_module'" "$WORK/crashes.out" \
      && grep -q 'the container exited 1 within' "$WORK/crashes.out"; then
-    ok "an image that dies on start fails container-smoke (exit 1, its own error)"
+    ok "gated, an image that dies on start fails container-smoke (exit 1, its own error)"
   else
     bad "container-smoke on a crashing image exited $rc, want 1 from the entrypoint"
     tail -10 "$WORK/crashes.out" | sed 's/^/       /'
@@ -70,6 +86,7 @@ rc=0
 if [ "$rc" -ne 0 ]; then
   bad "the missing-entrypoint fixture did not build (exit $rc)"
 else
+  gate noentry
   rc=0
   (cd "$WORK/noentry" && SDLC_IMAGE=$IMAGE "$HERE/bin/sdlc" container-smoke) > "$WORK/noentry.out" 2>&1 || rc=$?
   if [ "$rc" -eq 1 ] && grep -q 'could not start its entrypoint' "$WORK/noentry.out"; then

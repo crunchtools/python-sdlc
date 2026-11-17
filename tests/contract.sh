@@ -481,6 +481,29 @@ if [ "$rc" -eq 1 ]; then
 else
   bad "containerfile-lint on a relative WORKDIR exited $rc, want 1"
 fi
+# Exec-form RUN with a quoted script: hadolint's ShellCheck pass raises SC1072
+# on it (about 13 mcp-* repos), so the defaults ignore SC1072.
+printf 'FROM quay.io/hummingbird/python:3.14\nRUN ["python3", "-c", "import sys; print(sys.version)"]\n' \
+  > "$CFIX/Containerfile"
+rc=0
+out=$(lint) || rc=$?
+if [ "$rc" -eq 0 ] && ! printf '%s' "$out" | grep -q SC1072; then
+  ok "containerfile-lint ignores SC1072 on an exec-form RUN"
+else
+  bad "containerfile-lint on an exec-form RUN exited $rc"
+  printf '%s\n' "$out" | sed 's/^/       /' | tail -6
+fi
+# A RUN heredoc hadolint cannot parse: advisory, printed, not a finding.
+printf 'FROM quay.io/hummingbird/python:3.14\nRUN python3 - <<'"'"'EOF'"'"'\nprint(1)\nEOF\nRUN true\n' \
+  > "$CFIX/Containerfile"
+rc=0
+out=$(lint) || rc=$?
+if [ "$rc" -eq 4 ] && printf '%s' "$out" | grep -q 'ADVISORY: hadolint could not parse'; then
+  ok "a Containerfile hadolint cannot parse is advisory (exit 4, printed)"
+else
+  bad "containerfile-lint on an unparsable Containerfile exited $rc, want 4"
+  printf '%s\n' "$out" | sed 's/^/       /' | tail -6
+fi
 # A repo's own .hadolint.yaml takes the defaults away: here it asks for warnings.
 printf 'FROM registry.access.redhat.com/ubi10/ubi-init:latest\n' > "$CFIX/Containerfile"
 printf 'failure-threshold: warning\n' > "$CFIX/.hadolint.yaml"

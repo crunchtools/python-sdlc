@@ -103,6 +103,7 @@ case " \$* " in
       go-up-dies-255) _full='false 255 false' ;;
       go-up-dies-3)   _full='false 3 false' ;;
       go-up-oom)      _full='false 137 true' ;;
+      go-up-exit0-oom) _full='false 0 true' ;;
       *) exit 125 ;;
     esac
     case " \$* " in
@@ -180,6 +181,17 @@ case " \$* " in
   *" plan lanes-skip "*)
     printf 'b${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
     printf 'up-systemd-ep${TAB}two${TAB}host-up${TAB}1${US}podman${US}run${US}--${US}localhost/systemd-ep:sdlc\n' ;;
+  *" plan up-adv-dies "*)
+    printf 'up-adv-dies${TAB}main${TAB}host-up-advisory${TAB}1${US}podman${US}run${US}--${US}localhost/x:sdlc${US}go-up-dies-255\n' ;;
+  *" plan up-adv-podman "*)
+    printf 'up-adv-podman${TAB}main${TAB}host-up-advisory${TAB}1${US}podman${US}run${US}--${US}localhost/x:sdlc${US}go-up-podman\n' ;;
+  *" plan lanes-adv "*)
+    printf 'b${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
+    printf 'up-adv-dies${TAB}two${TAB}host-up-advisory${TAB}1${US}podman${US}run${US}--${US}localhost/x:sdlc${US}go-up-dies-255\n' ;;
+  *" plan lint-unparsed "*)
+    printf 'containerfile-lint${TAB}main${TAB}image-ro${TAB}containerfile-lint\n' ;;
+  *" plan rc-five "*)
+    printf 'rc-five${TAB}main${TAB}image-ro${TAB}exit-five\n' ;;
   *" plan rc-four "*)
     printf 'rc-four${TAB}main${TAB}image-ro${TAB}exit-four\n' ;;
   *" plan up-"*)
@@ -211,6 +223,8 @@ case "\$_last" in
   rc-two)      printf 'RAN rc-two\n'; exit 2 ;;
   rc-three)    printf 'RAN rc-three\n'; exit 3 ;;
   exit-four)   printf 'RAN exit-four\n'; exit 4 ;;
+  exit-five)   printf 'RAN exit-five\n'; exit 5 ;;
+  containerfile-lint) printf 'ADVISORY: hadolint could not parse\n'; exit 4 ;;
   slow-rc-one) printf 'RAN slow-rc-one\n'; sleep 2; exit 1 ;;
   very-slow-rc-one) printf 'RAN very-slow-rc-one\n'; sleep 6; printf 'LAST LINE\n'; exit 1 ;;
   step-one) printf 'RAN step-one\n'; sleep 1 ;;
@@ -272,7 +286,7 @@ printf '\n== a run given time to stay up\n\n'
 # passes; any other exit, the OOM killer, or an entrypoint that cannot start
 # (126/127) is a finding; podman failing to create it (125) is a 2. A 255 is
 # just another exit -- no clock is consulted.
-for case_ in up-stays:0 up-exits-0:0 up-dies-255:1 up-dies-3:1 up-oom:1 up-127:1 \
+for case_ in up-stays:0 up-exits-0:0 up-exit0-oom:0 up-dies-255:1 up-dies-3:1 up-oom:1 up-127:1 \
              up-podman:2 up-build:2 up-noseconds:2; do
   name=${case_%:*}; want=${case_#*:}
   log_mark
@@ -333,6 +347,47 @@ if [ "$rc" -eq 1 ] && grep -q 'rc-four FAILED' "$RUN/out" && ! grep -q SKIPPED "
   ok "a 4 from a check in the image is a finding, not a skip"
 else
   bad "rc-four exited $rc: $(tail -2 "$RUN/out")"
+fi
+
+# container-smoke is advisory unless a repo gates it: a finding is printed as
+# FOUND SOMETHING, ADVISORY -- never "passed" -- and does not fail the command.
+# Podman failing to create the container is still a 2.
+rc=0
+PATH="$SHIM" sh bin/sdlc up-adv-dies > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q '== up-adv-dies FOUND SOMETHING, ADVISORY: not gating' "$RUN/out" \
+   && grep -q 'gate = true in \[tool.sdlc.ci.up-adv-dies\]' "$RUN/out" && ! grep -q 'passed in' "$RUN/out"; then
+  ok "an advisory smoke finding is printed as ADVISORY and the command exits 0"
+else
+  bad "up-adv-dies exited $rc: $(tail -3 "$RUN/out")"
+fi
+rc=0
+PATH="$SHIM" sh bin/sdlc up-adv-podman > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "an advisory smoke run podman could not create is still a 2"
+else
+  bad "up-adv-podman exited $rc, want 2"
+fi
+rc=0
+PATH="$SHIM" SDLC_CPUS=4 sh bin/sdlc lanes-adv > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q '== up-adv-dies FOUND SOMETHING, ADVISORY' "$RUN/out" \
+   && grep -q '== b passed' "$RUN/out"; then
+  ok "in a lane, an advisory finding is printed as ADVISORY and the run exits 0"
+else
+  bad "lanes-adv exited $rc: $(tail -4 "$RUN/out")"
+fi
+rc=0
+PATH="$SHIM" sh bin/sdlc rc-five > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 1 ] && ! grep -q ADVISORY "$RUN/out"; then
+  ok "a 5 from a check in the image is a finding, not advisory"
+else
+  bad "rc-five exited $rc: $(tail -2 "$RUN/out")"
+fi
+rc=0
+PATH="$SHIM" sh bin/sdlc lint-unparsed > "$RUN/out" 2>&1 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q '== containerfile-lint SKIPPED, not judged' "$RUN/out"; then
+  ok "containerfile-lint may report SKIPPED when hadolint cannot parse"
+else
+  bad "lint-unparsed exited $rc: $(tail -2 "$RUN/out")"
 fi
 
 # Every smoke cleanup, whatever the case, takes the anonymous volumes with it.
