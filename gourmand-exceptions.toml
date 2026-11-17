@@ -38,3 +38,20 @@ justification = """
   values explicitly so that raising one would be a visible change.
 """
 classification = "by_design"
+
+# A shape match, not a copy. CH012 pairs convert_hooks (rewrites the hooks
+# file) with fleet_wave.py's verify (checks a conversion after --apply): no
+# line, call or name is shared, only a run of assign/if/return statements of
+# similar length. Reshaping verify to dodge it was tried and changed nothing.
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "scripts/convert_repo.py"
+classification = "gourmand_bug"
+justification = """
+  convert_hooks and scripts/fleet_wave.py's verify share no line, call or \
+  identifier: one rewrites .pre-commit-config.yaml text, the other runs the \
+  converter a second time and inspects the git index. The match is a run of \
+  nine assign/if/return statements, which is the shape of most short Python \
+  functions, not duplicated logic. Two restructurings of verify left it in \
+  place, so there is no shared helper to extract.
+"""
