@@ -1057,13 +1057,16 @@ def t_scan_rootfs() -> int:
     env = dict(os.environ)
     env.update({"GRYPE_DB_CACHE_DIR": str(GRYPE_DB), "GRYPE_CHECK_FOR_APP_UPDATE": "false"})
     step(f"grype, failing on a {'fixable ' if '--only-fixed' in cmd else ''}{fail_on} or worse")
+    # Only the cache is guarded here. A grype that cannot start is run()'s to
+    # report, in its own words.
     try:
         GRYPE_DB.mkdir(parents=True, exist_ok=True)
-        with (GRYPE_DB / ".lock").open("w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            rc = run(cmd, env=env)[0]
+        lock = (GRYPE_DB / ".lock").open("w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
     except OSError as exc:
         cannot(f"cannot use grype's database cache at {GRYPE_DB}: {exc}")
+    with lock:
+        rc = run(cmd, env=env)[0]
     if rc == 0:
         return CLEAN
     if rc == 2:  # noqa: PLR2004 -- grype's own "above the threshold"
