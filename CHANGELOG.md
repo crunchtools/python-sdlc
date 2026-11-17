@@ -6,6 +6,21 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- **`sdlc push` and `sdlc ci` now run `lint`**: `ruff check --no-fix .` and
+  `ruff format --check .`, read-only, first in push (#48). Ruff lived only in
+  the commit tier, where it runs with `--fix` and passes anything fixable, so
+  `sdlc ci` judged no lint at all and a `--no-verify` commit reached a green
+  required check unlinted. **This can turn a consumer's CI red** on its next
+  bump: a tree that ruff would change now fails. Measured against the 36
+  consuming repos' default branches with this image's ruff 0.17.1: 35 are
+  clean and data-collector has one fixable I001. Fix with `sdlc commit`, or
+  opt out with `[tool.sdlc.push] skip = ["lint"]`, which removes it from ci
+  as well; `[tool.sdlc.ci] skip` may not name it.
+- README: `gatehouse` is no longer listed as exempt from python-sdlc; it runs
+  it as of gatehouse#134 (constitution#138).
+
 ### Fixed
 
 - `sdlc-validate` now says "cannot read the constitution checkout" when the

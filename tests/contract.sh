@@ -262,12 +262,23 @@ for target in ruff-check ruff-format semgrep; do
   fi
 done
 
+# lint is the verdict half of those two, and it runs on a READ-ONLY tree: push
+# and ci mount it that way, so a ruff that tried to write .ruff_cache would be a
+# check that cannot run.
+if out=$(podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo \
+           --entrypoint="" "$IMAGE" sdlc lint 2>&1); then
+  ok "lint runs clean on a read-only fixture project"
+else
+  bad "lint failed on a clean, read-only fixture project"
+  printf '%s\n' "$out" | sed 's/^/       /' | tail -8
+fi
+
 # The plan the launcher reads must name every default check, in order, and
 # resolve a repo's own setting. This is the seam between the TOML the image
 # reads and the shell that acts on it, so it is checked on the real image.
 plan=$(podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
          "$IMAGE" sdlc plan push 2>&1 | cut -f1 | tr '\n' ' ')
-want="mypy pytest gourmand gatehouse semgrep pip-audit constitution codeql "
+want="lint mypy pytest gourmand gatehouse semgrep pip-audit constitution codeql "
 if [ "$plan" = "$want" ]; then
   ok "sdlc plan push lists the push defaults in order"
 else
@@ -346,6 +357,48 @@ if podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
 else
   ok "ruff-check fails on broken code"
 fi
+# A finding ruff could fix is still a finding here -- that is the whole of #48.
+# Both tools must report: a lint that stopped at the first failure would hide
+# the formatter's findings behind the linter's.
+out=$(podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
+        "$IMAGE" sdlc lint 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 1 ]; then
+  ok "lint fails on code ruff would fix, without fixing it"
+else
+  bad "lint exited $rc on unused imports and bad formatting, want 1"
+fi
+case "$out" in
+  *F401*"1 file would be reformatted"*)
+    ok "lint reports the linter's and the formatter's findings in one run" ;;
+  *)
+    bad "lint did not report both an F401 and a file to reformat"
+    printf '%s\n' "$out" | sed 's/^/       /' | tail -12 ;;
+esac
+# One fault each, so a lint that judged only one tool, or turned a finding into
+# a 2, cannot pass. lint_case <what> <file body> <want> [ruff config line]
+lint_case() {
+  case_dir=$(mktemp -d)
+  printf '[project]\nname = "lint-case"\nversion = "0.0.0"\n\n[tool.ruff]\n%s\n' \
+    "${4:-}" > "$case_dir/pyproject.toml"
+  printf '%b' "$2" > "$case_dir/x.py"
+  before=$(cat "$case_dir/x.py")
+  podman run --rm -v "$case_dir:/repo:ro,z" -w /repo --entrypoint="" \
+    "$IMAGE" sdlc lint >/dev/null 2>&1 && rc=0 || rc=$?
+  after=$(cat "$case_dir/x.py")
+  rm -rf "$case_dir"
+  if [ "$rc" -eq "$3" ] && [ "$before" = "$after" ]; then
+    ok "lint exits $3 on $1"
+  else
+    bad "lint exited $rc on $1, want $3 and an untouched file"
+  fi
+}
+lint_case "a lint finding alone" 'import os\n' 1
+lint_case "a format finding alone" 'x = ( 1 )\n' 1
+lint_case "a syntax error (a finding, not a gate that cannot run)" 'def f(:\n' 1
+# A repo's fix-only silenced `--no-fix`: exit 0, nothing reported (#49 review).
+lint_case "an F821 under fix-only = true" 'def f():\n    return undefined_name\n' 1 \
+  'fix-only = true'
+
 if podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
      "$IMAGE" sdlc semgrep >/dev/null 2>&1; then
   bad "semgrep passed a file matching its own fixture rule"

@@ -76,6 +76,26 @@ check(
     ci == [c for c in S.DEFAULTS["push"] if c not in S.CI_EXCLUDES],
 )
 
+# python-sdlc#48: the commit tier's ruff steps fix and pass, so without a
+# non-mutating verdict in push, ci ran no ruff at all.
+check("ci renders the ruff verdict", "lint" in ci, str(ci))
+check(
+    "lint reads the tree, never writes it",
+    S.plan_lines(empty, "lint") == [("lint", "image-ro", "lint")],
+)
+push_lanes = S.lane_of(empty, S.resolve(empty, "push"))
+check(
+    "lint keeps push's lanes",
+    "lint" not in S.WRITES_TREE and set(push_lanes.values()) == {S.MAIN_LANE, S.REVIEW_LANE},
+    str(push_lanes),
+)
+msg = cannot_run(S.resolve, {"ci": {"skip": ["lint"]}}, "ci")
+check("ci may not skip lint", msg is not None and "lint" in msg, str(msg))
+check(
+    "push skip of lint takes it out of ci too",
+    "lint" not in S.resolve({"push": {"skip": ["lint"]}}, "ci"),
+)
+
 cfg = {"push": {"skip": ["codeql"]}, "ci": {"checks": ["image"], "image": {"kind": "image-build"}}}
 check("push skip removes a default", "codeql" not in S.resolve(cfg, "push"))
 check("a push skip carries into ci", "codeql" not in S.resolve(cfg, "ci"))

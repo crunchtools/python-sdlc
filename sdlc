@@ -177,7 +177,13 @@ DEFAULTS = {
     # Everything that renders a verdict, once, over origin/<default>...HEAD.
     # Never a container build: that is minutes, and a push you wait minutes for
     # is a push people stop making.
+    #
+    # `lint` is ruff's VERDICT: the commit tier's two ruff steps fix what they
+    # can and pass, so ci -- which is push minus the reviewers -- had no ruff at
+    # all, and a `--no-verify` commit reached a green required check unlinted
+    # (python-sdlc#48). First, because it is the cheapest thing here to fail.
     "push": [
+        "lint",
         "mypy",
         "pytest",
         "gourmand",
@@ -865,6 +871,32 @@ def t_ruff_format(s: dict) -> int:
     need_project()
     step("ruff format .")
     return run(["ruff", "format", "."])[0]
+
+
+def t_lint(s: dict) -> int:
+    """What ruff-check and ruff-format would change, as a finding rather than a fix.
+
+    The commit tier's ruff steps rewrite the tree, so a fixable violation passes
+    there -- which is right on a laptop and useless as a verdict. This changes
+    nothing, so it runs on a read-only tree in the main lane. Both always run,
+    so one push reports both kinds of finding.
+    `--no-cache` because the tree is read-only and `.ruff_cache` lives in it.
+
+    `--no-fix-only` because a repo's `[tool.ruff] fix-only = true` beats
+    `--no-fix`: ruff then reports nothing and exits 0, so lint would pass an
+    F821 without a word.
+    """
+    need_project()
+    step("ruff check --no-fix .")
+    checked = run(["ruff", "check", "--no-fix", "--no-fix-only", "--no-cache", "."])[0]
+    step("ruff format --check .")
+    formatted = run(["ruff", "format", "--check", "--no-cache", "."])[0]
+    # A syntax error is a finding to `ruff check` (1) and unparsable to the
+    # formatter (2). It is the code that is wrong, not the gate, so a finding
+    # from either outranks the other's 2.
+    if FOUND in (checked, formatted):
+        return FOUND
+    return max(checked, formatted)
 
 
 def t_mypy(s: dict) -> int:
@@ -1581,6 +1613,7 @@ def t_codeql_baseline() -> int:
 BUILTINS = {
     "ruff-check": t_ruff_check,
     "ruff-format": t_ruff_format,
+    "lint": t_lint,
     "mypy": t_mypy,
     "pytest": t_pytest,
     "gourmand": t_gourmand,
