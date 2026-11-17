@@ -33,17 +33,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -1)
-          [ -n "$v" ] || { echo "pyproject.toml names no version" >&2; exit 1; }
-          if gh release view "v$v" >/dev/null 2>&1; then
-            echo "v$v is already released"
-            echo "tag=" >> "$GITHUB_OUTPUT"
-          elif grep -q "^## \[$v\]" CHANGELOG.md; then
-            echo "tag=v$v" >> "$GITHUB_OUTPUT"
-          else
-            echo "v$v has no CHANGELOG heading; not releasing" >&2
-            exit 1
-          fi
+          tag=$(scripts/release-version.sh)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       # The App's token, because a tag created with GITHUB_TOKEN does not start
       # container.yml, and the release would never be promoted.
