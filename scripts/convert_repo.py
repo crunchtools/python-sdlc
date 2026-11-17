@@ -297,9 +297,16 @@ def is_covered_step(step: object) -> bool:
     rest = PINNED_STEP.sub("", run, count=1).replace("set -eu\n", "", 1).strip()
     pinned = PINNED_STEP.search(run) is not None and not rest
     floating = run.strip() == FLOATING_CI_LINE
-    return set(step) <= {"name", "run", "env"} and (pinned or floating)
+    # examples/ci.yml's step carries one env entry; any other would be dropped.
+    env_kept = (step.get("env") or {}) in ({}, FLOATING_ENV)
+    return set(step) <= {"name", "run", "env"} and env_kept and (pinned or floating)
 
 
+FLOATING_ENV = {"SDLC_IMAGE": "${{ vars.SDLC_IMAGE }}"}
+GOURMAND_JOB_NAME = "Code Quality (Gourmand)"  # a required check: never renamed by this
+# Events that run with secrets on code a pull request controls. The bootstrap
+# now comes from the checkout, so a step running it there would run PR code.
+PRIVILEGED_EVENTS = {"pull_request_target", "workflow_run"}
 READ_ONLY = {"contents": "read"}
 # The events examples/ci.yml answers. A workflow that also runs on a schedule, a
 # release, another branch or a path filter would lose that by being replaced.
@@ -309,7 +316,7 @@ STUB_BRANCHES = {"main", "master"}
 def is_covered_job(job: object) -> bool:
     """A job examples/ci.yml has in full, so replacing it loses nothing."""
     if is_gourmand_job(job):
-        return set(job) <= COVERED_GOURMAND_KEYS
+        return set(job) <= COVERED_GOURMAND_KEYS and job.get("name") == GOURMAND_JOB_NAME
     return (
         is_sdlc_job(job)
         and set(job) <= COVERED_SDLC_KEYS
@@ -391,6 +398,14 @@ def convert_workflows(repo: Path, planned: dict[Path, str | None], notes: list[s
         # The `sdlc ci` job stays where it is, beside jobs examples/ci.yml does not
         # have; writing ci.yml as well would run it twice. Nothing is deleted.
         for path in mixed:
+            on = parse(path.name, path.read_text())
+            on = on.get("on", on.get(True))
+            events = set(on) if isinstance(on, (dict, list)) else {on}
+            if events & PRIVILEGED_EVENTS:
+                raise RefusedError(
+                    f"{rel(repo, path)} runs on {', '.join(sorted(events & PRIVILEGED_EVENTS))}; "
+                    f"its `sdlc ci` step would run the pull request's .sdlc/bin/sdlc with secrets"
+                )
             planned[path] = float_sdlc_step(rel(repo, path), path.read_text())
             notes.append(f"floated: {rel(repo, path)} (its `sdlc ci` job shares the file)")
         notes += [f"kept: {rel(repo, p)} (no ci.yml stub to take its jobs)" for p in covered]
@@ -492,6 +507,14 @@ def verify(repo: Path, planned: dict[Path, str | None]) -> None:
         for p in (sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else [])
         if p not in planned
     }
+    # Nothing may still clone python-sdlc at the hooks file's rev: the rev is
+    # gone, so such a step would exit 2 on every run from now on.
+    for path, text in texts.items():
+        if PINNED_STEP.search(text) or "github.com/crunchtools/python-sdlc" in text:
+            raise RefusedError(
+                f"{rel(repo, path)} still fetches python-sdlc by the rev this removes; "
+                f"convert that step by hand"
+            )
     floating = re.compile(rf"^\s*{re.escape(FLOATING_CI_LINE)}\s*$", re.M)
     if not any(
         is_sdlc_job(job)

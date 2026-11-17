@@ -77,6 +77,13 @@ from [`examples/gatehouse.yml`](examples/gatehouse.yml) when it differs only in
 comments, keeps everything else (publish, release, container builds), and
 refuses with exit 2 a shape it would have to guess at.
 
+**What floating trusts.** Whoever can move `quay.io/crunchtools/sdlc:latest`
+now decides the host-side code every seat and runner runs, and that code is no
+longer read in git at a pinned rev before it runs. Only this repo's release
+workflow, after the contract test, moves the tag, and never backwards. Signing
+the image and verifying it on pull (a `policy.json` sigstore entry for
+`quay.io/crunchtools/sdlc`) would close the rest, and is not done yet.
+
 **An `sdlc` RPM, later.** It installs the same bootstrap as `/usr/bin/sdlc` on
 hosts and seats, so a person can type `sdlc tiers` anywhere. Nothing in a repo
 changes when it lands: the hooks keep starting the repo's own copy, which is
@@ -362,8 +369,11 @@ copy, and it never moves back onto an older commit. Only a release moves `latest
 pull request run touches a registry at all. The release is the gate.
 
 A floating repo opts its CI into `:main` with the repository variable
-`SDLC_IMAGE=main` -- a variable, not a line in a file, so a pull request cannot
-choose its own judge. To run one on your machine, first matching wins:
+`SDLC_IMAGE=main` -- a setting only an admin can change, rather than a one-line
+edit a pull request could slip in. It is not a wall: a pull request from a
+branch can still edit `ci.yml` or `.sdlc/bin/sdlc` themselves, as it always
+could edit its workflows; an org ruleset's required workflow is what would
+close that. To run one on your machine, first matching wins:
 
 | How | Value |
 |---|---|

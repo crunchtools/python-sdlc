@@ -515,6 +515,57 @@ for label, old_text, new_text in (
         done.stderr,
     )
 
+# The review's nits: what a replacement would silently change, or break.
+renamed = OLD_CI.replace("    name: Code Quality (Gourmand)\n", "    name: Gourmand\n")
+repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": renamed})
+done = convert(repo, apply=True)
+check(
+    "a Gourmand job under another name keeps its workflow (its required check name)",
+    done.returncode == 0 and "    name: Gourmand\n" in snapshot(repo)[".github/workflows/ci.yml"],
+    done.stderr,
+)
+with_env = OLD_CI.replace(
+    "      - name: sdlc ci\n", "      - name: sdlc ci\n        env:\n          FOO: bar\n"
+)
+repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": with_env})
+before = snapshot(repo)
+refused = convert(repo, apply=True)
+check(
+    "an sdlc ci step with its own env is not replaced; it is refused, nothing written",
+    refused.returncode == REFUSED and snapshot(repo) == before,
+    refused.stderr,
+)
+for event in ("pull_request_target", "workflow_run"):
+    privileged = MIXED.replace("on:\n  pull_request:\n", f"on:\n  {event}:\n")
+    repo = make_repo(
+        {".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/tests.yml": privileged}
+    )
+    before = snapshot(repo)
+    refused = convert(repo, apply=True)
+    check(
+        f"an sdlc ci step under {event} is refused, nothing written",
+        refused.returncode == REFUSED and snapshot(repo) == before,
+        refused.stderr,
+    )
+orphan = PUBLISH.replace(
+    "      - run: echo quay.io/crunchtools/python-sdlc-extras\n",
+    '      - run: git clone --branch "$rev" https://github.com/crunchtools/python-sdlc x\n',
+)
+repo = make_repo(
+    {
+        ".pre-commit-config.yaml": PINNED_HOOKS,
+        ".github/workflows/ci.yml": OLD_CI,
+        ".github/workflows/publish.yml": orphan,
+    }
+)
+before = snapshot(repo)
+refused = convert(repo, apply=True)
+check(
+    "a kept workflow still cloning python-sdlc by rev is refused, nothing written",
+    refused.returncode == REFUSED and snapshot(repo) == before and "publish.yml" in refused.stderr,
+    refused.stderr,
+)
+
 # ------------------------------------------------------------- symlinks
 
 # --apply writes, deletes and chmods. A checkout whose planned paths link
