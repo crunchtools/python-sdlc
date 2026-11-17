@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-17
+
+### Changed
+
+- gatehouse 0.26.0 -> 0.27.0.
+
 ### Fixed
 
 - `sdlc ci` and `sdlc tiers` now name the push verdicts a repo took out of
