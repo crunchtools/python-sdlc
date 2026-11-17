@@ -37,8 +37,10 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 try:
@@ -377,6 +379,28 @@ def float_sdlc_step(name: str, text: str) -> str:
     return PINNED_STEP.sub(lambda m: f"{m.group('i')}{FLOATING_CI_LINE}\n", text, count=1)
 
 
+def same_gatehouse(current: dict, canonical: dict) -> bool:
+    """`current` is examples/gatehouse.yml in all but comments and the guard's script.
+
+    The guard's script is the one part gatehouse has changed since the fleet
+    copied it (gatehouse#150: it now refuses a fork's change to .sdlc/ too), so
+    an older copy differing only there is brought up to date, not kept.
+    """
+
+    def without_guard_script(doc: dict) -> dict:
+        jobs = dict(doc.get("jobs") or {})
+        guard = jobs.get("guard")
+        if isinstance(guard, dict):
+            steps = [
+                {k: v for k, v in step.items() if k != "run"} if isinstance(step, dict) else step
+                for step in guard.get("steps") or []
+            ]
+            jobs["guard"] = {**guard, "steps": steps}
+        return {**doc, "jobs": jobs}
+
+    return without_guard_script(current) == without_guard_script(canonical)
+
+
 def classify(files: list[Path]) -> tuple[list[Path], list[Path]]:
     """Workflows the CI stub covers whole, and ones that share an `sdlc ci` job."""
     covered: list[Path] = []
@@ -426,7 +450,7 @@ def convert_workflows(repo: Path, planned: dict[Path, str | None], notes: list[s
     gatehouse = wf_dir / "gatehouse.yml"
     canonical = GATEHOUSE_TEMPLATE.read_text()
     current = gatehouse.read_text() if gatehouse.exists() else canonical
-    if parse(gatehouse.name, current) == parse(GATEHOUSE_TEMPLATE.name, canonical):
+    if same_gatehouse(parse(gatehouse.name, current), parse(GATEHOUSE_TEMPLATE.name, canonical)):
         planned[gatehouse] = canonical
     else:
         notes.append(f"kept: {rel(repo, gatehouse)} (differs from the stub in more than comments)")
@@ -460,6 +484,116 @@ def refuse_links(repo: Path, paths: list[Path]) -> None:
                 raise RefusedError(f"{rel(repo, part)} is a symlink; this script writes no links")
 
 
+# ---------------------------------------------------------------- the config
+#
+# A converted repo must never meet "GATE CANNOT RUN" on its first run. Two
+# shapes would: a stack this image names but has no checks for yet, and a
+# Containerfile that CI cannot build without secrets. The planner's own rules,
+# mirrored here, decide which repos those are.
+
+PLANNED_STACKS = ("node", "bootc", "docs")
+CONTAINERFILES = ("Containerfile", "Dockerfile")
+CONTAINER_CI = ["container-build", "container-smoke", "container-scan"]
+# A build that needs a secret CI does not hand `sdlc ci`: a BuildKit secret
+# mount, or Red Hat subscription content. The publish workflow keeps building
+# these with the secrets it has.
+BUILD_SECRETS = re.compile(r"--mount=type=secret|subscription-manager|\brhsm\b", re.I)
+SKIP_STACKS_NOTE = (
+    "# Written by python-sdlc's scripts/convert_repo.py: the image has no checks\n"
+    "# for these stacks yet, and a stack it cannot check makes every run exit 2.\n"
+)
+SKIP_BUILD_NOTE = (
+    "# Written by python-sdlc's scripts/convert_repo.py: the Containerfile needs\n"
+    "# build secrets (a secret mount, or RHSM) that `sdlc ci` is not given. The\n"
+    "# publish workflow still builds it, with them.\n"
+)
+
+
+def needs_build_secrets(text: str) -> bool:
+    """A secret mount or RHSM in an instruction; a comment saying "no RHSM" is not one."""
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    return BUILD_SECRETS.search(code) is not None
+
+
+def detected_stacks(repo: Path) -> list[str]:
+    """The planner's detect_stacks(), over a checkout."""
+    found = ["python"] if (repo / "pyproject.toml").is_file() else []
+    cf = next((repo / f for f in CONTAINERFILES if (repo / f).is_file()), None)
+    bootc = cf is not None and any(
+        line.split()[0].upper() == "FROM" and "bootc" in line.lower()
+        for line in cf.read_text(errors="replace").splitlines()
+        if line.strip()
+    )
+    if cf is not None and not bootc:
+        found.append("container")
+    if (repo / "package.json").is_file():
+        found.append("node")
+    if bootc:
+        found.append("bootc")
+    return found or ["docs"]
+
+
+def with_key(text: str, table: str, key: str, value: list[str], note: str) -> str:
+    """`text` with `key = value` set in `[table]`, written by line, not by a TOML writer."""
+    line = note + f"{key} = {json.dumps(value)}\n"
+    header = re.search(rf"^\[{re.escape(table)}\][ \t]*(#.*)?$\n?", text, re.M)
+    if header is None:
+        return text.rstrip("\n") + ("\n\n" if text.strip() else "") + f"[{table}]\n{line}"
+    return text[: header.end()] + line + text[header.end() :]
+
+
+def convert_config(repo: Path, planned: dict[Path, str | None], notes: list[str]) -> None:
+    pyproject = repo / "pyproject.toml"
+    path = pyproject if pyproject.is_file() else repo / "sdlc.toml"
+    text = planned.get(path) or (path.read_text() if path.is_file() else "")
+    try:
+        cfg = tomllib.loads(text).get("tool", {}).get("sdlc", {})
+    except tomllib.TOMLDecodeError as exc:
+        raise RefusedError(f"{rel(repo, path)} is not TOML: {exc}") from exc
+    if pyproject.is_file() and "stacks" not in cfg and "skip-stacks" not in cfg:
+        return  # a Python repo naming no stacks runs the python stack alone
+    drop = set(cfg.get("skip-stacks") or [])
+    active = [s for s in [*detected_stacks(repo), *(cfg.get("stacks") or [])] if s not in drop]
+    unbuilt = sorted({s for s in active if s in PLANNED_STACKS})
+    ci = cfg.get("ci") or {}
+    cf = next((repo / f for f in CONTAINERFILES if (repo / f).is_file()), None)
+    secrets = (
+        "container" in active
+        and cf is not None
+        and needs_build_secrets(cf.read_text(errors="replace"))
+        and "container-build" not in (ci.get("skip") or [])
+    )
+    if unbuilt:
+        if "skip-stacks" in cfg:
+            raise RefusedError(
+                f"{rel(repo, path)} skip-stacks does not name {', '.join(unbuilt)}, "
+                f"which this image cannot check yet; add them by hand"
+            )
+        text = with_key(text, "tool.sdlc", "skip-stacks", unbuilt, SKIP_STACKS_NOTE)
+        notes.append(f"skip-stacks: {', '.join(unbuilt)} in {rel(repo, path)} (not checked yet)")
+    if secrets:
+        if "skip" in ci:
+            raise RefusedError(
+                f"{rel(repo, path)} [tool.sdlc.ci] skip exists; the Containerfile needs build "
+                f"secrets, so add {', '.join(CONTAINER_CI)} to it by hand"
+            )
+        text = with_key(text, "tool.sdlc.ci", "skip", CONTAINER_CI, SKIP_BUILD_NOTE)
+        notes.append(f"skip in ci: the container checks, in {rel(repo, path)} (build secrets)")
+    if not (unbuilt or secrets):
+        return
+    # Read back what was written: the stacks and the skips must be the ones
+    # meant, in a file that is still TOML, or nothing is written at all.
+    try:
+        after = tomllib.loads(text).get("tool", {}).get("sdlc", {})
+    except tomllib.TOMLDecodeError as exc:
+        raise RefusedError(f"{rel(repo, path)} would not be TOML: {exc}") from exc
+    if not set(unbuilt) <= set(after.get("skip-stacks") or []) or (
+        secrets and not set(CONTAINER_CI) <= set((after.get("ci") or {}).get("skip") or [])
+    ):
+        raise RefusedError(f"{rel(repo, path)}: the keys written did not read back as meant")
+    planned[path] = text
+
+
 def plan(repo: Path) -> tuple[dict[Path, str | None], list[str]]:
     """Every file the conversion writes (None: deletes), and what it kept."""
     planned: dict[Path, str | None] = {repo / BOOTSTRAP_AT: BOOTSTRAP.read_text()}
@@ -469,6 +603,7 @@ def plan(repo: Path) -> tuple[dict[Path, str | None], list[str]]:
     refuse_links(repo, [hooks, *planned, wf_dir, repo / "pyproject.toml", repo / "sdlc.toml"])
     planned[hooks] = convert_hooks(hooks.read_text() if hooks.exists() else "")
     convert_workflows(repo, planned, notes)
+    convert_config(repo, planned, notes)
     notes.append(f"writes: {BOOTSTRAP_AT}, executable (python-sdlc's bin/sdlc-bootstrap)")
     # An image reference in anything that survives, and in the repo's config.
     candidates = [repo / "pyproject.toml", repo / "sdlc.toml"]
@@ -486,6 +621,28 @@ def plan(repo: Path) -> tuple[dict[Path, str | None], list[str]]:
     return planned, notes
 
 
+def parse_back(repo: Path, planned: dict[Path, str | None]) -> None:
+    """Refuse a plan with a YAML or TOML file that would not load."""
+    for path, text in planned.items():
+        if text is not None and path.suffix in (".yml", ".yaml"):
+            parse(rel(repo, path), text)
+        if text is not None and path.suffix == ".toml":
+            try:
+                tomllib.loads(text)
+            except tomllib.TOMLDecodeError as exc:
+                raise RefusedError(f"{rel(repo, path)} would not be TOML: {exc}") from exc
+
+
+def verify_hooks(text: str) -> None:
+    """Refuse a hooks file that does not install both types and float."""
+    hooks = parse(".pre-commit-config.yaml", text)
+    types = hooks.get("default_install_hook_types") or []
+    if not (isinstance(types, list) and {"pre-commit", "pre-push"} <= set(types)):
+        raise RefusedError("the converted hooks file does not install both hook types")
+    if not is_floating(hooks.get("repos") or []):
+        raise RefusedError("the converted hooks file does not run .sdlc/bin/sdlc as its only sdlc")
+
+
 def verify(repo: Path, planned: dict[Path, str | None]) -> None:
     """Refuse a plan whose files do not load, or do not wire what they should.
 
@@ -493,15 +650,8 @@ def verify(repo: Path, planned: dict[Path, str | None]) -> None:
     wiring itself -- the floating hooks, both hook types, a job named `sdlc ci`
     running the bootstrap -- rather than to how the text was produced.
     """
-    for path, text in planned.items():
-        if text is not None and path.suffix in (".yml", ".yaml"):
-            parse(rel(repo, path), text)
-    hooks = parse(".pre-commit-config.yaml", planned[repo / ".pre-commit-config.yaml"] or "")
-    types = hooks.get("default_install_hook_types") or []
-    if not (isinstance(types, list) and {"pre-commit", "pre-push"} <= set(types)):
-        raise RefusedError("the converted hooks file does not install both hook types")
-    if not is_floating(hooks.get("repos") or []):
-        raise RefusedError("the converted hooks file does not run .sdlc/bin/sdlc as its only sdlc")
+    parse_back(repo, planned)
+    verify_hooks(planned[repo / ".pre-commit-config.yaml"] or "")
     if planned[repo / BOOTSTRAP_AT] != BOOTSTRAP.read_text():
         raise RefusedError(f"{BOOTSTRAP_AT} would not be bin/sdlc-bootstrap")
     wf_dir = repo / ".github" / "workflows"
