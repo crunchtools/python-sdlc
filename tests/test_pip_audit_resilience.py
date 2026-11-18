@@ -177,8 +177,24 @@ def cases() -> bool:
     return ok
 
 
+def bad_lock() -> bool:
+    """A lock that cannot be read is a 2 before pip-audit runs, never a guess."""
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp)
+        h = Harness(project, [])
+        ok &= check(outcome(lambda: _SDLC.t_pip_audit({})) == "cannot", "no uv.lock is a 2")
+        (project / "uv.lock").write_text("[[package]\nname = ", encoding="utf-8")
+        ok &= check(
+            outcome(lambda: _SDLC.t_pip_audit({})) == "cannot" and not h.calls,
+            "a malformed uv.lock is a 2, and pip-audit never ran",
+        )
+    return ok
+
+
 def main() -> int:
     ok = cases()
+    ok &= bad_lock()
     print("pip-audit resilience PASSED" if ok else "pip-audit resilience FAILED")
     return 0 if ok else 1
 
