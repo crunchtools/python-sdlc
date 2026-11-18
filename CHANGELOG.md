@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-18
+
+### Changed
+
+- gourmand 1.0.0 -> 1.1.0.
+
 ## [0.10.1] - 2026-11-18
 
 ### Changed
