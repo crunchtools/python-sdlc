@@ -17,7 +17,9 @@ All notable changes to this project are documented here, following
   retries as exit 2, COULD NOT RUN. A package that uv.lock takes from PyPI and
   pip-audit calls "not found" counts as a failed lookup, not as unauditable.
   A real vulnerability is still a 1, at once, with no retry.
-  `tests/test_pip_audit_resilience.py` covers each case.
+  pip-audit is now pinned to the image's own version (`--with pip-audit==2.9.0`)
+  instead of whatever PyPI's newest is. `tests/test_pip_audit_resilience.py`
+  covers each case.
 
 ## [0.9.1] - 2026-11-17
 

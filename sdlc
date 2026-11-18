@@ -1609,7 +1609,15 @@ def pypi_locked(lock: Path) -> set[str]:
 
 
 def pip_audit_once(env: dict[str, str]) -> tuple[int, str, list[str]]:
-    """One pip-audit run: (its status, its output, what it skipped as not found)."""
+    """One pip-audit run: (its status, its output, what it skipped as not found).
+
+    It runs inside the project venv, so it comes from `--with` rather than the
+    image's own tool install -- pinned to that install's version, because the
+    network-failure patterns above are read from that version's code.
+    """
+    version = BAKED["pip-audit"]
+    if version == "unknown":
+        cannot("SDLC_PIP_AUDIT_VERSION is not set, so pip-audit has no version to pin")
     rc, out = run(
         [
             "uv",
@@ -1617,7 +1625,7 @@ def pip_audit_once(env: dict[str, str]) -> tuple[int, str, list[str]]:
             "--locked",
             "--all-extras",
             "--with",
-            "pip-audit",
+            f"pip-audit=={version}",
             "pip-audit",
             "--timeout",
             str(PIP_AUDIT_TIMEOUT),

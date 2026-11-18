@@ -105,6 +105,7 @@ class Harness:
         _SDLC.project_dir = lambda: project
         _SDLC.run = self.run
         _SDLC.time.sleep = self.slept.append
+        _SDLC.BAKED["pip-audit"] = "2.9.0"
 
     def run(self, cmd: list[str], **_: object) -> tuple[int, str]:
         self.calls.append(cmd)
@@ -135,6 +136,10 @@ def cases() -> bool:
                 h.calls[0][-4:-2] == ["--timeout", str(_SDLC.PIP_AUDIT_TIMEOUT)]
                 and _SDLC.PIP_AUDIT_TIMEOUT > PIP_AUDIT_DEFAULT_TIMEOUT,
                 "pip-audit runs with a longer timeout than its 15s default",
+            )
+            ok &= check(
+                "pip-audit==2.9.0" in h.calls[0],
+                "pip-audit is pinned to the version the image bakes",
             )
 
             attempts = len(_SDLC.PIP_AUDIT_BACKOFF) + 1
@@ -192,9 +197,21 @@ def bad_lock() -> bool:
     return ok
 
 
+def unpinned() -> bool:
+    """With no baked version there is nothing to pin, and that is a 2."""
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp)
+        (project / "uv.lock").write_text(LOCK, encoding="utf-8")
+        h = Harness(project, [])
+        _SDLC.BAKED["pip-audit"] = "unknown"
+        got = outcome(lambda: _SDLC.t_pip_audit({}))
+        return check(got == "cannot" and not h.calls, "no baked pip-audit version is a 2")
+
+
 def main() -> int:
     ok = cases()
     ok &= bad_lock()
+    ok &= unpinned()
     print("pip-audit resilience PASSED" if ok else "pip-audit resilience FAILED")
     return 0 if ok else 1
 
