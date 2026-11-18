@@ -298,7 +298,7 @@ def is_gourmand_job(job: object) -> bool:
 # and steps that are only the checkout and the `sdlc ci` step. Anything more --
 # another step, a service, an env, a matrix -- is something ci.yml would
 # drop, so that workflow keeps its place and only its step is rewritten.
-COVERED_SDLC_KEYS = {"name", "runs-on", "steps", "permissions"}
+COVERED_SDLC_KEYS = {"name", "runs-on", "steps", "permissions", "timeout-minutes"}
 COVERED_GOURMAND_KEYS = {"name", "uses"}
 COVERED_WORKFLOW_KEYS = {"name", True, "on", "permissions", "jobs"}  # YAML 1.1 reads on: as True
 CHECKOUT = re.compile(r"^actions/checkout@")

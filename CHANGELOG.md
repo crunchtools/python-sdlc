@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- `examples/ci.yml`'s `sdlc ci` job times out after 30 minutes rather than
+  GitHub's 6 hours, so a hung job cannot hold a runner; `convert_repo.py` still
+  treats a job carrying `timeout-minutes` as one the stub covers.
+
 ## [0.10.2] - 2026-11-18
 
 ### Changed
