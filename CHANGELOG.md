@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-18
+
 ### Fixed
 
 - **pip-audit reports what happened on the network, not a verdict it never
