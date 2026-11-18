@@ -41,6 +41,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -1571,17 +1572,85 @@ def t_semgrep(s: dict) -> int:
     )[0]
 
 
+# pip-audit's own --timeout is pip's 15s socket default. On a runner whose cores
+# are all busy that is too short for a read that PyPI answers in well under a
+# second when idle, so the timeout is raised and a network failure is retried
+# before it is reported. The delays are the pauses BETWEEN attempts.
+PIP_AUDIT_TIMEOUT = 60
+PIP_AUDIT_BACKOFF = (10, 30)
+
+# What pip-audit, or the `uv run --with pip-audit` that fetches it, prints when
+# the network failed rather than the scan. pip-audit 2.9.0 turns a connect
+# timeout into "Could not connect ..." and lets a READ timeout, a reset or a
+# 5xx escape as a raw requests traceback -- every one of them exit 1, which is
+# the same status as "found a vulnerability". None of these is a verdict.
+_PIP_AUDIT_NETWORK = re.compile(
+    r"ReadTimeout|ConnectTimeout|ConnectionError|ProxyError|SSLError"
+    r"|Max retries exceeded|Could not connect to PyPI|PyPI is not redirecting"
+    r"|requests\.exceptions\.HTTPError|Failed to fetch|error sending request"
+)
+
+
+def pypi_locked(lock: Path) -> set[str]:
+    """Normalised names of the packages uv.lock resolves from PyPI itself.
+
+    These all have a PyPI record by construction, so pip-audit reporting one of
+    them "not found on PyPI" means the lookup failed, not that it is unauditable.
+    """
+    try:
+        data = tomllib.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        cannot(f"cannot read {lock}: {exc}")
+    return {
+        re.sub(r"[-_.]+", "-", str(pkg.get("name", ""))).lower()
+        for pkg in data.get("package", [])
+        if "pypi.org" in str((pkg.get("source") or {}).get("registry", ""))
+    }
+
+
+def pip_audit_once(env: dict[str, str]) -> tuple[int, str, list[str]]:
+    """One pip-audit run: (its status, its output, what it skipped as not found)."""
+    rc, out = run(
+        [
+            "uv",
+            "run",
+            "--locked",
+            "--all-extras",
+            "--with",
+            "pip-audit",
+            "pip-audit",
+            "--timeout",
+            str(PIP_AUDIT_TIMEOUT),
+            "--progress-spinner",
+            "off",
+        ],
+        env=env,
+        cwd=project_dir(),
+        tee=True,
+    )
+    unaudited = sorted(
+        {
+            line.split("could not be audited:")[-1].strip()
+            for line in out.splitlines()
+            if "could not be audited" in line
+        }
+    )
+    return rc, out, unaudited
+
+
 def t_pip_audit(s: dict) -> int:
     """Audit the project's locked dependencies, and GATE on it.
 
     17 repos in the fleet run this as `pip-audit … || true`, which means the
     scan cannot fail and has never once blocked anything. This one returns the
-    tool's verdict.
+    tool's verdict -- and only the tool's verdict. A network failure is retried,
+    and one that outlasts the retries is a 2, never a 1 that reads as a finding
+    and never a 0 that reads as a pass.
     """
     need_project()
     env = project_env()
     sync_project(env)
-    step("pip-audit")
+    pypi = pypi_locked(project_dir() / "uv.lock")
     # NOT --strict. A local path dependency is legitimately absent from PyPI --
     # trentina vendors `petit-plus` from tests/fixtures -- and --strict turns
     # "could not audit this one" into a failed gate. The fleet's own
@@ -1589,23 +1658,35 @@ def t_pip_audit(s: dict) -> int:
     # than CI trains people to skip the local gate.
     #
     # The cost is that an unauditable package passes quietly, so it is reported
-    # explicitly below rather than left in the log for nobody.
-    rc, out = run(
-        ["uv", "run", "--locked", "--all-extras", "--with", "pip-audit", "pip-audit"],
-        env=env,
-        cwd=project_dir(),
-        tee=True,
-    )
-    unaudited = [
-        line.split("could not be audited:")[-1].strip()
-        for line in out.splitlines()
-        if "could not be audited" in line
-    ]
+    # explicitly below rather than left in the log for nobody. A package the
+    # lock takes from PyPI cannot be unauditable, though: "not found" for one of
+    # those is a lookup that failed -- an egress proxy answering 404 skips every
+    # package and exits 0 -- so it is retried with the network failures.
+    attempts = len(PIP_AUDIT_BACKOFF) + 1
+    for attempt in range(1, attempts + 1):
+        step(f"pip-audit (attempt {attempt} of {attempts})" if attempt > 1 else "pip-audit")
+        rc, out, unaudited = pip_audit_once(env)
+        lost = [u for u in unaudited if re.sub(r"[-_.]+", "-", u.split(" (")[0]).lower() in pypi]
+        if lost:
+            why = f"PyPI answered 'not found' for {len(lost)} package(s) uv.lock takes from PyPI"
+        elif rc != CLEAN and _PIP_AUDIT_NETWORK.search(out):
+            why = "the PyPI lookup failed on the network"
+        else:
+            break
+        if attempt == attempts:
+            cannot(
+                f"pip-audit could not run: {why}, on all {attempts} attempts "
+                f"(timeout {PIP_AUDIT_TIMEOUT}s). Nothing was audited, so this is "
+                f"neither a pass nor a finding."
+            )
+        delay = PIP_AUDIT_BACKOFF[attempt - 1]
+        print(f"\npip-audit: {why}; retrying in {delay}s.", flush=True)
+        time.sleep(delay)
     if unaudited:
         print(
             "\nNOT AUDITED -- no PyPI record, so these were skipped rather than "
             "cleared:\n  "
-            + "\n  ".join(sorted(set(unaudited)))
+            + "\n  ".join(unaudited)
             + "\nA local path or vendored dependency is expected here. Anything "
             "else in this list is a real gap in the scan."
         )
