@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-11-18
+
 ### Changed
 
 - `examples/ci.yml`'s `sdlc ci` job times out after 30 minutes rather than
