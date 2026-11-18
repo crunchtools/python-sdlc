@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- `examples/gatehouse.yml`: the `guard` job ("Protect workflows") runs on
+  `vars.UNCACHED_RUNNER_LABEL` in private repos, so they no longer depend on
+  GitHub Actions billing. Public repos stay on `ubuntu-latest`.
+
 ## [0.10.0] - 2026-11-18
 
 ### Fixed
