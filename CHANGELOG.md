@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-18
+
+### Changed
+
+- gatehouse 0.30.0 -> 0.31.0.
+
 ### Changed
 
 - `examples/gatehouse.yml`: the `guard` job ("Protect workflows") runs on
