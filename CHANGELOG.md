@@ -6,6 +6,25 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- **pip-audit reports what happened on the network, not a verdict it never
+  reached.** pip-audit 2.9.0 exits 1 for a PyPI read timeout, which `sdlc ci`
+  printed as a failed gate on the busy self-hosted runners; and an egress path
+  that answers 404 makes it skip every package and exit 0, which read as a
+  pass. pip-audit now runs with `--timeout 60` (was 15), retries a network
+  failure twice with 10s then 30s backoff, and reports one that outlasts the
+  retries as exit 2, COULD NOT RUN. A package that uv.lock takes from PyPI and
+  pip-audit calls "not found" counts as a failed lookup, not as unauditable.
+  So is a run that skipped every registry package installed in the venv,
+  which covers a mirror whose packages are not from PyPI at all. A real
+  vulnerability is still a 1, at once, with no retry: pip-audit's
+  `Found N known vulnerabilities` line is checked first, so a finding beside
+  a skipped package or uv's own network noise is never retried into a 2.
+  pip-audit is now pinned to the image's own version (`--with pip-audit==2.9.0`)
+  instead of whatever PyPI's newest is. `tests/test_pip_audit_resilience.py`
+  covers each case.
+
 ## [0.9.1] - 2026-11-17
 
 ### Changed

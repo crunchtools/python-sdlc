@@ -41,6 +41,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -1571,17 +1572,115 @@ def t_semgrep(s: dict) -> int:
     )[0]
 
 
+# pip-audit's own --timeout is pip's 15s socket default. On a runner whose cores
+# are all busy that is too short for a read that PyPI answers in well under a
+# second when idle, so the timeout is raised and a network failure is retried
+# before it is reported. The delays are the pauses BETWEEN attempts.
+PIP_AUDIT_TIMEOUT = 60
+PIP_AUDIT_BACKOFF = (10, 30)
+
+# What pip-audit, or the `uv run --with pip-audit` that fetches it, prints when
+# the network failed rather than the scan. pip-audit 2.9.0 turns a connect
+# timeout into "Could not connect ..." and lets a READ timeout, a reset or a
+# 5xx escape as a raw requests traceback -- every one of them exit 1, which is
+# the same status as "found a vulnerability". None of these is a verdict.
+_PIP_AUDIT_NETWORK = re.compile(
+    r"ReadTimeout|ConnectTimeout|ConnectionError|ProxyError|SSLError"
+    r"|Max retries exceeded|Could not connect to PyPI|PyPI is not redirecting"
+    r"|requests\.exceptions\.HTTPError|Failed to fetch|error sending request"
+)
+
+
+# pip-audit's summary when it finished auditing and found something
+# (_cli.py:607 in 2.9.0). It is printed only after every lookup came back, so a
+# run that printed it reached a verdict, whatever else is in its output.
+_PIP_AUDIT_FOUND = re.compile(r"^Found \d+ known vulnerabilit", re.MULTILINE)
+
+
+def _dist(name: str) -> str:
+    """A distribution name normalised as PEP 503 does, so lock, venv and pip-audit agree."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def locked_registry(lock: Path) -> tuple[set[str], set[str]]:
+    """Packages uv.lock resolves from a registry: (from PyPI itself, from any registry).
+
+    The PyPI ones all have a PyPI record by construction, so pip-audit reporting
+    one of them "not found on PyPI" means the lookup failed, not that it is
+    unauditable.
+    """
+    try:
+        data = tomllib.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        cannot(f"cannot read {lock}: {exc}")
+    registry = {
+        _dist(str(pkg.get("name", ""))): str((pkg.get("source") or {}).get("registry", ""))
+        for pkg in data.get("package", [])
+        if (pkg.get("source") or {}).get("registry")
+    }
+    return {n for n, url in registry.items() if "pypi.org" in url}, set(registry)
+
+
+def installed(env: dict[str, str]) -> set[str]:
+    """Distributions installed in the project venv, which is what pip-audit audits."""
+    venv = Path(env.get("UV_PROJECT_ENVIRONMENT", ""))
+    return {
+        _dist(d.name.removesuffix(".dist-info").rsplit("-", 1)[0])
+        for d in venv.glob("lib/python*/site-packages/*.dist-info")
+    }
+
+
+def pip_audit_once(env: dict[str, str]) -> tuple[int, str, list[str]]:
+    """One pip-audit run: (its status, its output, what it skipped as not found).
+
+    It runs inside the project venv, so it comes from `--with` rather than the
+    image's own tool install -- pinned to that install's version, because the
+    network-failure patterns above are read from that version's code.
+    """
+    version = BAKED["pip-audit"]
+    if version == "unknown":
+        cannot("SDLC_PIP_AUDIT_VERSION is not set, so pip-audit has no version to pin")
+    rc, out = run(
+        [
+            "uv",
+            "run",
+            "--locked",
+            "--all-extras",
+            "--with",
+            f"pip-audit=={version}",
+            "pip-audit",
+            "--timeout",
+            str(PIP_AUDIT_TIMEOUT),
+            "--progress-spinner",
+            "off",
+        ],
+        env=env,
+        cwd=project_dir(),
+        tee=True,
+    )
+    unaudited = sorted(
+        {
+            line.split("could not be audited:")[-1].strip()
+            for line in out.splitlines()
+            if "could not be audited" in line
+        }
+    )
+    return rc, out, unaudited
+
+
 def t_pip_audit(s: dict) -> int:
     """Audit the project's locked dependencies, and GATE on it.
 
     17 repos in the fleet run this as `pip-audit … || true`, which means the
     scan cannot fail and has never once blocked anything. This one returns the
-    tool's verdict.
+    tool's verdict -- and only the tool's verdict. A network failure is retried,
+    and one that outlasts the retries is a 2, never a 1 that reads as a finding
+    and never a 0 that reads as a pass.
     """
     need_project()
     env = project_env()
     sync_project(env)
-    step("pip-audit")
+    pypi, registry = locked_registry(project_dir() / "uv.lock")
     # NOT --strict. A local path dependency is legitimately absent from PyPI --
     # trentina vendors `petit-plus` from tests/fixtures -- and --strict turns
     # "could not audit this one" into a failed gate. The fleet's own
@@ -1589,23 +1688,46 @@ def t_pip_audit(s: dict) -> int:
     # than CI trains people to skip the local gate.
     #
     # The cost is that an unauditable package passes quietly, so it is reported
-    # explicitly below rather than left in the log for nobody.
-    rc, out = run(
-        ["uv", "run", "--locked", "--all-extras", "--with", "pip-audit", "pip-audit"],
-        env=env,
-        cwd=project_dir(),
-        tee=True,
-    )
-    unaudited = [
-        line.split("could not be audited:")[-1].strip()
-        for line in out.splitlines()
-        if "could not be audited" in line
-    ]
+    # explicitly below rather than left in the log for nobody. A package the
+    # lock takes from PyPI cannot be unauditable, though: "not found" for one of
+    # those is a lookup that failed -- an egress proxy answering 404 skips every
+    # package and exits 0 -- so it is retried with the network failures. So is
+    # a run that skipped every registry package it should have audited, which
+    # is the same failure behind a mirror, where none of them is from PyPI.
+    attempts = len(PIP_AUDIT_BACKOFF) + 1
+    for attempt in range(1, attempts + 1):
+        step(f"pip-audit (attempt {attempt} of {attempts})" if attempt > 1 else "pip-audit")
+        rc, out, unaudited = pip_audit_once(env)
+        # A verdict is a verdict: a finding next to a skipped package or uv's
+        # own network noise is still a finding, and retrying it would turn a 1
+        # into a 2 on every run.
+        if _PIP_AUDIT_FOUND.search(out):
+            break
+        skipped = {_dist(u.split(" (")[0]) for u in unaudited}
+        auditable = installed(env) & registry
+        lost = skipped & pypi
+        if lost:
+            why = f"PyPI answered 'not found' for {len(lost)} package(s) uv.lock takes from PyPI"
+        elif auditable and auditable <= skipped:
+            why = f"every one of the {len(auditable)} registry packages was skipped"
+        elif rc != CLEAN and _PIP_AUDIT_NETWORK.search(out):
+            why = "the PyPI lookup failed on the network"
+        else:
+            break
+        if attempt == attempts:
+            cannot(
+                f"pip-audit could not run: {why}, on all {attempts} attempts "
+                f"(timeout {PIP_AUDIT_TIMEOUT}s). The audit never completed, so this is "
+                f"neither a pass nor a finding."
+            )
+        delay = PIP_AUDIT_BACKOFF[attempt - 1]
+        print(f"\npip-audit: {why}; retrying in {delay}s.", flush=True)
+        time.sleep(delay)
     if unaudited:
         print(
             "\nNOT AUDITED -- no PyPI record, so these were skipped rather than "
             "cleared:\n  "
-            + "\n  ".join(sorted(set(unaudited)))
+            + "\n  ".join(unaudited)
             + "\nA local path or vendored dependency is expected here. Anything "
             "else in this list is a real gap in the scan."
         )
