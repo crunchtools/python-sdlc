@@ -1591,20 +1591,42 @@ _PIP_AUDIT_NETWORK = re.compile(
 )
 
 
-def pypi_locked(lock: Path) -> set[str]:
-    """Normalised names of the packages uv.lock resolves from PyPI itself.
+# pip-audit's summary when it finished auditing and found something
+# (_cli.py:607 in 2.9.0). It is printed only after every lookup came back, so a
+# run that printed it reached a verdict, whatever else is in its output.
+_PIP_AUDIT_FOUND = re.compile(r"^Found \d+ known vulnerabilit", re.MULTILINE)
 
-    These all have a PyPI record by construction, so pip-audit reporting one of
-    them "not found on PyPI" means the lookup failed, not that it is unauditable.
+
+def _dist(name: str) -> str:
+    """A distribution name normalised as PEP 503 does, so lock, venv and pip-audit agree."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def locked_registry(lock: Path) -> tuple[set[str], set[str]]:
+    """Packages uv.lock resolves from a registry: (from PyPI itself, from any registry).
+
+    The PyPI ones all have a PyPI record by construction, so pip-audit reporting
+    one of them "not found on PyPI" means the lookup failed, not that it is
+    unauditable.
     """
     try:
         data = tomllib.loads(lock.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         cannot(f"cannot read {lock}: {exc}")
-    return {
-        re.sub(r"[-_.]+", "-", str(pkg.get("name", ""))).lower()
+    registry = {
+        _dist(str(pkg.get("name", ""))): str((pkg.get("source") or {}).get("registry", ""))
         for pkg in data.get("package", [])
-        if "pypi.org" in str((pkg.get("source") or {}).get("registry", ""))
+        if (pkg.get("source") or {}).get("registry")
+    }
+    return {n for n, url in registry.items() if "pypi.org" in url}, set(registry)
+
+
+def installed(env: dict[str, str]) -> set[str]:
+    """Distributions installed in the project venv, which is what pip-audit audits."""
+    venv = Path(env.get("UV_PROJECT_ENVIRONMENT", ""))
+    return {
+        _dist(d.name.removesuffix(".dist-info").rsplit("-", 1)[0])
+        for d in venv.glob("lib/python*/site-packages/*.dist-info")
     }
 
 
@@ -1658,7 +1680,7 @@ def t_pip_audit(s: dict) -> int:
     need_project()
     env = project_env()
     sync_project(env)
-    pypi = pypi_locked(project_dir() / "uv.lock")
+    pypi, registry = locked_registry(project_dir() / "uv.lock")
     # NOT --strict. A local path dependency is legitimately absent from PyPI --
     # trentina vendors `petit-plus` from tests/fixtures -- and --strict turns
     # "could not audit this one" into a failed gate. The fleet's own
@@ -1669,14 +1691,25 @@ def t_pip_audit(s: dict) -> int:
     # explicitly below rather than left in the log for nobody. A package the
     # lock takes from PyPI cannot be unauditable, though: "not found" for one of
     # those is a lookup that failed -- an egress proxy answering 404 skips every
-    # package and exits 0 -- so it is retried with the network failures.
+    # package and exits 0 -- so it is retried with the network failures. So is
+    # a run that skipped every registry package it should have audited, which
+    # is the same failure behind a mirror, where none of them is from PyPI.
     attempts = len(PIP_AUDIT_BACKOFF) + 1
     for attempt in range(1, attempts + 1):
         step(f"pip-audit (attempt {attempt} of {attempts})" if attempt > 1 else "pip-audit")
         rc, out, unaudited = pip_audit_once(env)
-        lost = [u for u in unaudited if re.sub(r"[-_.]+", "-", u.split(" (")[0]).lower() in pypi]
+        # A verdict is a verdict: a finding next to a skipped package or uv's
+        # own network noise is still a finding, and retrying it would turn a 1
+        # into a 2 on every run.
+        if _PIP_AUDIT_FOUND.search(out):
+            break
+        skipped = {_dist(u.split(" (")[0]) for u in unaudited}
+        auditable = installed(env) & registry
+        lost = skipped & pypi
         if lost:
             why = f"PyPI answered 'not found' for {len(lost)} package(s) uv.lock takes from PyPI"
+        elif auditable and auditable <= skipped:
+            why = f"every one of the {len(auditable)} registry packages was skipped"
         elif rc != CLEAN and _PIP_AUDIT_NETWORK.search(out):
             why = "the PyPI lookup failed on the network"
         else:
@@ -1684,7 +1717,7 @@ def t_pip_audit(s: dict) -> int:
         if attempt == attempts:
             cannot(
                 f"pip-audit could not run: {why}, on all {attempts} attempts "
-                f"(timeout {PIP_AUDIT_TIMEOUT}s). Nothing was audited, so this is "
+                f"(timeout {PIP_AUDIT_TIMEOUT}s). The audit never completed, so this is "
                 f"neither a pass nor a finding."
             )
         delay = PIP_AUDIT_BACKOFF[attempt - 1]

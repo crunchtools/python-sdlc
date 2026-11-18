@@ -16,7 +16,11 @@ All notable changes to this project are documented here, following
   failure twice with 10s then 30s backoff, and reports one that outlasts the
   retries as exit 2, COULD NOT RUN. A package that uv.lock takes from PyPI and
   pip-audit calls "not found" counts as a failed lookup, not as unauditable.
-  A real vulnerability is still a 1, at once, with no retry.
+  So is a run that skipped every registry package installed in the venv,
+  which covers a mirror whose packages are not from PyPI at all. A real
+  vulnerability is still a 1, at once, with no retry: pip-audit's
+  `Found N known vulnerabilities` line is checked first, so a finding beside
+  a skipped package or uv's own network noise is never retried into a 2.
   pip-audit is now pinned to the image's own version (`--with pip-audit==2.9.0`)
   instead of whatever PyPI's newest is. `tests/test_pip_audit_resilience.py`
   covers each case.

@@ -39,34 +39,87 @@ version = "2.32.3"
 source = { registry = "https://pypi.org/simple" }
 
 [[package]]
+name = "urllib3"
+version = "1.26.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
 name = "petit-plus"
 version = "0.1.0"
 source = { directory = "tests/fixtures/petit-plus" }
 """
 
-# What pip-audit 2.9.0 actually prints for each case.
+LOCK_MIRROR = """\
+version = 1
+
+[[package]]
+name = "requests"
+version = "2.32.3"
+source = { registry = "https://mirror.example/simple" }
+
+[[package]]
+name = "idna"
+version = "3.10"
+source = { registry = "https://mirror.example/simple" }
+"""
+
+
+def skip_table(*rows: tuple[str, str]) -> str:
+    """pip-audit's skipped-dependency table, as ColumnsFormat lays it out."""
+    lines = [
+        (n, f"Dependency not found on PyPI and could not be audited: {n} ({v})") for n, v in rows
+    ]
+    width = max(len("Name"), *(len(n) for n, _ in lines))
+    reason = max(len(r) for _, r in lines)
+    return "".join(
+        [
+            f"{'Name'.ljust(width)} Skip Reason\n",
+            f"{'-' * width} {'-' * reason}\n",
+            *(f"{n.ljust(width)} {r}\n" for n, r in lines),
+        ]
+    )
+
+
+# What pip-audit 2.9.0 prints for each case, stderr and stdout merged as tee=True
+# captures them: the summary on stderr first, then the tables on stdout.
 READ_TIMEOUT = (
     "Traceback (most recent call last):\n"
+    '  File "/tmp/venv/lib/python3.14/site-packages/requests/adapters.py", line 713, in send\n'
     "urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='pypi.org', port=443): "
     "Read timed out. (read timeout=15)\n"
+    "\nDuring handling of the above exception, another exception occurred:\n\n"
     "requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='pypi.org', port=443): "
     "Read timed out. (read timeout=15)\n"
 )
-CLEAN_RUN = "No known vulnerabilities found, 1 dependency was skipped\n" + (
-    "Name       Skip Reason\n"
-    "---------- -----------\n"
-    "petit-plus Dependency not found on PyPI and could not be audited: petit-plus (0.1.0)\n"
-)
+CLEAN_RUN = "No known vulnerabilities found\n" + skip_table(("petit-plus", "0.1.0"))
 VULNERABLE = (
     "Found 1 known vulnerability in 1 package\n"
     "Name     Version ID                  Fix Versions\n"
-    "requests 2.32.3  GHSA-xxxx-xxxx-xxxx 2.32.4\n"
+    "-------- ------- ------------------- ------------\n"
+    "requests 2.32.3  GHSA-9hjg-9r4m-mvj7 2.32.4\n"
 )
+# A real finding beside a version PyPI no longer has, and beside uv's own noise.
+VULNERABLE_AND_404 = VULNERABLE + skip_table(("urllib3", "1.26.0"))
+VULNERABLE_AND_UV_NOISE = (
+    "warning: Failed to fetch: `https://pypi.org/simple/pip-audit/`, retrying\n" + VULNERABLE
+)
+PROXY_404 = "No known vulnerabilities found\n" + skip_table(
+    ("petit-plus", "0.1.0"), ("requests", "2.32.3")
+)
+MIRROR_ALL_SKIPPED = "No known vulnerabilities found\n" + skip_table(
+    ("idna", "3.10"), ("requests", "2.32.3")
+)
+MIRROR_ONE_SKIPPED = "No known vulnerabilities found\n" + skip_table(("idna", "3.10"))
+
 # The other ways the network fails, one representative line each: pip-audit's own
 # connect-timeout message, the requests exceptions it lets escape, and uv failing
 # to fetch pip-audit itself.
 OTHER_NETWORK = {
-    "connect timeout": "ERROR:pip_audit._cli:Could not connect to PyPI's vulnerability feed\n",
+    "connect timeout": (
+        "ERROR:pip_audit._cli:Could not connect to PyPI's vulnerability feed\n"
+        "ERROR:pip_audit._cli:Tip: your network may be blocking this service. "
+        "Try another service with `-s SERVICE`\n"
+    ),
     "redirect loop": "ERROR:pip_audit._cli:PyPI is not redirecting properly\n",
     "connection reset": "requests.exceptions.ConnectionError: ('Connection aborted.')\n",
     "proxy": "requests.exceptions.ProxyError: HTTPSConnectionPool(host='pypi.org')\n",
@@ -82,10 +135,6 @@ OTHER_NETWORK = {
 PIP_AUDIT_DEFAULT_TIMEOUT = 15
 ONE_RETRY = 2
 
-PROXY_404 = "No known vulnerabilities found, 1 dependency was skipped\n" + (
-    "requests Dependency not found on PyPI and could not be audited: requests (2.32.3)\n"
-)
-
 
 def check(ok: bool, what: str) -> bool:
     print(f"{'ok  ' if ok else 'FAIL'} {what}")
@@ -100,7 +149,11 @@ class Harness:
         self.calls: list[list[str]] = []
         self.slept: list[float] = []
         _SDLC.need_project = lambda: None
-        _SDLC.project_env = dict
+        venv = project / "venv"
+        site = venv / "lib" / "python3.14" / "site-packages"
+        for dist in ("requests-2.32.3", "idna-3.10", "petit_plus-0.1.0"):
+            (site / f"{dist}.dist-info").mkdir(parents=True, exist_ok=True)
+        _SDLC.project_env = lambda: {"UV_PROJECT_ENVIRONMENT": str(venv)}
         _SDLC.sync_project = lambda _env: None
         _SDLC.project_dir = lambda: project
         _SDLC.run = self.run
@@ -109,7 +162,8 @@ class Harness:
 
     def run(self, cmd: list[str], **_: object) -> tuple[int, str]:
         self.calls.append(cmd)
-        return self.answers.pop(0)
+        # The last answer repeats, so an extra call shows up as a count, not a crash.
+        return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
 
 
 def outcome(fn: Callable[[], int]) -> int | str:
@@ -176,6 +230,31 @@ def cases() -> bool:
             ok &= check(
                 got == 1 and len(h.calls) == 1 and not h.slept,
                 "a real vulnerability is a 1, at once, with no retry",
+            )
+
+            for what, text in {
+                "a version PyPI no longer has": VULNERABLE_AND_404,
+                "uv's own network noise": VULNERABLE_AND_UV_NOISE,
+            }.items():
+                h = Harness(project, [(1, text)])
+                got = outcome(lambda: _SDLC.t_pip_audit({}))
+                ok &= check(
+                    got == 1 and len(h.calls) == 1 and not h.slept,
+                    f"a real finding beside {what} is a 1, with no retry",
+                )
+
+            (project / "uv.lock").write_text(LOCK_MIRROR, encoding="utf-8")
+            h = Harness(project, [(0, MIRROR_ALL_SKIPPED)] * attempts)
+            got = outcome(lambda: _SDLC.t_pip_audit({}))
+            ok &= check(
+                got == "cannot" and len(h.calls) == attempts,
+                "behind a mirror, every registry package skipped is a 2, not a pass",
+            )
+            h = Harness(project, [(0, MIRROR_ONE_SKIPPED)])
+            got = outcome(lambda: _SDLC.t_pip_audit({}))
+            ok &= check(
+                got == 0 and len(h.calls) == 1,
+                "behind a mirror, one package skipped while others were audited is a pass",
             )
         finally:
             _SDLC.time.sleep = real_sleep
