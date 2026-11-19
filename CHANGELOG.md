@@ -6,6 +6,11 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- Gatehouse triage is passed `review_result: ${{ needs.review.result }}`, so a PR
+  whose review job died before posting is held (gatehouse v0.32.0).
+
 ## [0.10.4] - 2026-11-19
 
 ### Changed
