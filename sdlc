@@ -1443,7 +1443,14 @@ def t_lint(s: dict) -> int:
 
 
 def t_mypy(s: dict) -> int:
-    """Type check what `[tool.mypy] files` names. mypy's own exit 2 is ours too."""
+    """Type check what `[tool.mypy] files` names. mypy's own exit 2 is ours too.
+
+    `--show-traceback` because a mypy crash is an exit 2 whose only clue is
+    the traceback, and without the flag mypy prints a note asking for it
+    instead. A crash that happens on one runner pool and not on a rerun cannot
+    be asked again (mcp-trove#132). mypy reads the flag only when it crashes,
+    and it is not one of the options that key its cache.
+    """
     need_project()
     need_lock_dep("mypy")
     env = project_env()
@@ -1456,6 +1463,7 @@ def t_mypy(s: dict) -> int:
             "--locked",
             "--all-extras",
             "mypy",
+            "--show-traceback",
             "--cache-dir",
             str(CACHE / "mypy" / project_name()),
         ],

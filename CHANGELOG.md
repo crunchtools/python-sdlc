@@ -6,6 +6,13 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- `sdlc mypy` runs mypy with `--show-traceback`, so a mypy crash (its
+  INTERNAL ERROR, exit 2) leaves the traceback naming its cause in the CI log
+  rather than only COULD NOT RUN. The flag changes nothing unless mypy crashes
+  and does not key mypy's cache (#75).
+
 ## [0.10.3] - 2026-11-18
 
 ### Changed

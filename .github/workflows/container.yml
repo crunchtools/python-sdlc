@@ -127,7 +127,8 @@ jobs:
           for t in tests/test_plan.py tests/test_codeql_globs.py \
                    tests/test_pycache_prefix.py tests/test_gourmand_sidecar.py \
                    tests/test_codeql_resilience.py tests/test_convert_repo.py \
-                   tests/test_fleet_wave.py tests/test_pip_audit_resilience.py; do
+                   tests/test_fleet_wave.py tests/test_pip_audit_resilience.py \
+                   tests/test_mypy_traceback.py; do
             podman run --rm -v "$PWD:/src:ro,z" -w /src \
               --entrypoint /opt/constitution-venv/bin/python3 \
               "localhost/python-sdlc:$GITHUB_SHA" "$t"
