@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-11-19
+
 ### Changed
 
 - `sdlc mypy` runs mypy with `--show-traceback`, so a mypy crash (its
