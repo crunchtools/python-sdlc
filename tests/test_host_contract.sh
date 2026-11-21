@@ -1160,7 +1160,7 @@ printf '\n== gatehouse: only a crunchtools GitHub push is reviewed\n\n'
 # out of bin/sdlc and run with a shell function standing in for git, which is
 # how the remote lookup is pinned without a remote.
 GH_FUNCS="$RUN/gh-funcs.sh"
-sed -n '/^push_remote_url()/,/^t_gatehouse()/p' bin/sdlc | sed '$d' > "$GH_FUNCS"
+sed -n '/^gatehouse_remote_url()/,/^t_gatehouse()/p' bin/sdlc | sed '$d' > "$GH_FUNCS"
 
 matches() {            # URL -> 0 when it is a crunchtools GitHub repo
   sh -c '. "$1"; is_crunchtools_github "$2"' sh "$GH_FUNCS" "$1"

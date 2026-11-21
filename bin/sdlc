@@ -433,7 +433,7 @@ default_branch() {
 # runs on the host, so both are already in the environment -- nothing is
 # plumbed into the image. Otherwise: the current branch's upstream remote, then
 # `origin`.
-push_remote_url() {
+gatehouse_remote_url() {
   if [ -n "${PRE_COMMIT_REMOTE_URL:-}" ]; then
     printf '%s' "$PRE_COMMIT_REMOTE_URL"; return
   fi
@@ -514,7 +514,7 @@ gatehouse_skipped() {
     printf '%s: GATEHOUSE GUARD OVERRIDDEN: SDLC_GATEHOUSE_ANY_REMOTE=1, so the diff goes to an external model whatever the remote\n' "$ME"
     return 1
   fi
-  _url=$(push_remote_url)
+  _url=$(gatehouse_remote_url)
   if [ -z "$_url" ]; then
     printf '%s: GATEHOUSE SKIPPED: no remote URL found (no PRE_COMMIT_REMOTE_URL, upstream or origin), so it cannot be shown to be a crunchtools GitHub repo\n' "$ME"
     return 0

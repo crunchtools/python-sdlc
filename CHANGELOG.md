@@ -15,7 +15,7 @@ All notable changes to this project are documented here, following
   verdict, not a 2. The remote is `PRE_COMMIT_REMOTE_URL`, else the branch's
   upstream remote, else `origin`. The URL is parsed strictly (see the README):
   `#`, `?`, `%`, a backslash, whitespace or control characters reject it, and
-  host, owner and repo are compared exactly. The printed URL has its userinfo
+  scheme and host are compared exactly, the owner case-insensitively, and the repo against an allowlist. The printed URL has its userinfo
   masked and non-printable bytes replaced.
 - `SDLC_GATEHOUSE_ANY_REMOTE=1` (exactly `1`) overrides the guard for a
   deliberate hand run against another remote and prints
