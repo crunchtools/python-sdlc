@@ -432,18 +432,36 @@ be pinned this way: it exits 2.
 Rolling back works only once two releases carry `launcher` -- the broken one
 and a good one before it.
 
-## Gatehouse at push
+## Gatehouse and the remote
 
-Gatehouse sends the diff to an external model, so at the push tier it runs only
-when the push goes to a crunchtools repo on GitHub: `https://github.com/crunchtools/<repo>`,
-`git@github.com:crunchtools/<repo>`, `ssh://git@github.com/crunchtools/<repo>`, or
-the Trentina proxy form `http(s)://<host>/proxy/git/github/crunchtools/<repo>` on
-the gateway's own hosts, `trentina` and `trentina.crunchtools.com`
-(owner case-insensitive, `.git` optional). Any other remote, or none found,
-prints one `GATEHOUSE SKIPPED` line naming the remote URL (credentials
-stripped) and passes; it is not a failure and not a 2. The remote is
-`PRE_COMMIT_REMOTE_URL` from pre-commit, else the branch's upstream remote, else
-`origin`. `sdlc gatehouse` run by hand is unchanged.
+Gatehouse sends the diff to an external model, so in every tier, and when run by
+hand as `sdlc gatehouse`, it runs only when the remote is a crunchtools repo on
+GitHub. The accepted forms, each with an optional `.git` and one trailing
+slash, the owner `crunchtools` in any case, and the repo one `[A-Za-z0-9._-]`
+segment (not `.` or `..`):
+
+- `https://github.com/crunchtools/<repo>`
+- `ssh://git@github.com/crunchtools/<repo>`
+- `git@github.com:crunchtools/<repo>`
+- `http(s)://trentina[:port]/proxy/git/github/crunchtools/<repo>`, and the same
+  on `trentina.crunchtools.com`, the gateway's own names
+
+Scheme and host are lower-cased and compared exactly; https and ssh may carry
+one `user[:pass]@` and a digits-only port. A URL containing `#`, `?`, `%`, a
+backslash, whitespace or a control character is rejected. Any other remote, or
+none found, prints one `GATEHOUSE SKIPPED` line naming the remote (userinfo
+masked) and exits 0: a policy verdict, not a failure and not a 2. The remote is
+`PRE_COMMIT_REMOTE_URL` from pre-commit, else the branch's upstream remote,
+else `origin`.
+
+`SDLC_GATEHOUSE_ANY_REMOTE=1` (exactly `1`) overrides the guard for a deliberate
+hand run against another remote, and prints `GATEHOUSE GUARD OVERRIDDEN`. No
+hook sets it; do not set it in one.
+
+This is a cooperative client-side guard against accidents, not a security
+boundary. The scp and ssh forms trust the literal host `github.com`, which
+`~/.ssh/config` can redirect, and the remote's name says nothing about where the
+server really is.
 
 ## Skipping a check
 

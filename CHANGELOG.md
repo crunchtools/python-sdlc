@@ -8,13 +8,18 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
-- At the push tier Gatehouse runs only when the push goes to a crunchtools repo
-  on GitHub (https, ssh, scp, or the Trentina git proxy form on the gateway's own hosts). Any other remote,
-  or none found, skips it with one `GATEHOUSE SKIPPED` line naming the remote
-  URL without credentials -- not a failure, not exit 2 -- because Gatehouse
-  sends the diff to an external model and a pre-push diff can be a Red Hat
-  repo. The remote is `PRE_COMMIT_REMOTE_URL`, else the branch's upstream
-  remote, else `origin`. `sdlc gatehouse` run by hand is unchanged.
+- Gatehouse runs, in every tier and by hand as `sdlc gatehouse`, only when the
+  remote is a crunchtools repo on GitHub, because it sends the diff to an
+  external model and the diff can be a Red Hat repo's. Any other remote, or
+  none found, skips it with one `GATEHOUSE SKIPPED` line -- exit 0, a policy
+  verdict, not a 2. The remote is `PRE_COMMIT_REMOTE_URL`, else the branch's
+  upstream remote, else `origin`. The URL is parsed strictly (see the README):
+  `#`, `?`, `%`, a backslash, whitespace or control characters reject it, and
+  host, owner and repo are compared exactly. The printed URL has its userinfo
+  masked and non-printable bytes replaced.
+- `SDLC_GATEHOUSE_ANY_REMOTE=1` (exactly `1`) overrides the guard for a
+  deliberate hand run against another remote and prints
+  `GATEHOUSE GUARD OVERRIDDEN`. No hook sets it.
 
 ### Changed
 

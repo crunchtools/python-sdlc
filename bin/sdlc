@@ -421,16 +421,18 @@ default_branch() {
   die "cannot determine the default branch; no origin/HEAD, origin/main or origin/master"
 }
 
-# Gatehouse sends the diff to an external model (OpenRouter). A pre-push diff on
-# some seats is a Red Hat repo, which must never leave, so at the push tier the
-# review runs only when the push goes to a crunchtools repo on GitHub. Run by
-# hand as `sdlc gatehouse`, it is a single check you asked for and is unchanged.
+# Gatehouse sends the diff to an external model (OpenRouter). Some seats push
+# Red Hat repos, which must never leave, so in every tier -- push, commit, or
+# `sdlc gatehouse` by hand -- the review runs only when the remote is a
+# crunchtools repo on GitHub. This is a cooperative client-side guard against
+# accidents, not a security boundary: the scp and ssh forms trust the literal
+# host `github.com`, which ~/.ssh/config can point anywhere.
 #
 # The remote is the host's to find, as the diff is: pre-commit exports
 # PRE_COMMIT_REMOTE_NAME and PRE_COMMIT_REMOTE_URL to a pre-push hook, and this
 # runs on the host, so both are already in the environment -- nothing is
-# plumbed into the image. By hand there are neither, so: the current branch's
-# upstream remote, then `origin`.
+# plumbed into the image. Otherwise: the current branch's upstream remote, then
+# `origin`.
 push_remote_url() {
   if [ -n "${PRE_COMMIT_REMOTE_URL:-}" ]; then
     printf '%s' "$PRE_COMMIT_REMOTE_URL"; return
@@ -447,48 +449,78 @@ push_remote_url() {
     || :
 }
 
-# The URL with any user[:password]@ dropped, for printing and for matching.
+# The URL as shown to a person: userinfo replaced by ***, anything outside
+# printable ASCII (a newline, an escape) replaced by ?, so a hostile URL cannot
+# forge a second line or leak a token into the log.
 strip_url_creds() {
-  printf '%s' "$1" | sed -e 's#^\([A-Za-z][A-Za-z0-9+.-]*://\)[^/@]*@#\1#' \
-                         -e 's#^[^/@:]*@\([^/@:]*:\)#\1#'
+  printf '%s' "$1" | sed -e 's#^\([A-Za-z][A-Za-z0-9+.-]*://\)[^/]*@#\1***@#' \
+                         -e 's#^[^/@:]*@\([^/@:]*:\)#\1#' \
+    | LC_ALL=C tr -c '!-~' '?'
 }
 
-# Is this a crunchtools repo on GitHub? Owner matches case-insensitively, the
-# repo is any single name, a .git suffix is optional. The forms: github.com over
-# https, ssh or scp syntax, and the Trentina gateway's git proxy
-# under its own names (trentina, trentina.crunchtools.com; any port).
+lc() { printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'; }
+
+# Is this a crunchtools repo on GitHub? Parsed, not globbed: a URL is rejected
+# outright if it holds # ? % a backslash or anything but printable ASCII, since
+# each one lets a different parser read a different host. Scheme and host are
+# lower-cased and compared exactly. The forms, each with an optional .git and
+# one trailing slash, owner case-insensitive, repo one [A-Za-z0-9._-] segment:
+#   https://github.com/crunchtools/<repo>    ssh://git@github.com/crunchtools/<repo>
+#   git@github.com:crunchtools/<repo>
+#   http(s)://trentina[.crunchtools.com][:port]/proxy/git/github/crunchtools/<repo>
+# https and ssh may carry one user[:pass]@ and a digits-only :port.
 is_crunchtools_github() {
-  _u=$(strip_url_creds "$1" | tr '[:upper:]' '[:lower:]')
-  _u=${_u%/}; _u=${_u%.git}
+  _u=$1
+  case "$_u" in ''|*'#'*|*'?'*|*'%'*|*"\\"*) return 1 ;; esac
+  # tr deletes the printable characters; any byte left over (space, tab,
+  # newline, control) is a reject. Counted, as $(...) would eat a final newline.
+  [ "$(printf '%s' "$_u" | LC_ALL=C tr -d '!-~' | wc -c)" -eq 0 ] || return 1
   case "$_u" in
-    https://github.com/crunchtools/*)     _repo=${_u#https://github.com/crunchtools/} ;;
-    ssh://github.com/crunchtools/*)       _repo=${_u#ssh://github.com/crunchtools/} ;;
-    github.com:crunchtools/*)             _repo=${_u#github.com:crunchtools/} ;;
-    http://*|https://*)
-      # Only the gateway's own names: the path alone proves nothing, since any
-      # host can serve /proxy/git/github/crunchtools/ and take the diff.
-      _rest=${_u#*://}; _host=${_rest%%/*}; _path=/${_rest#*/}
-      case "${_host%:*}" in trentina|trentina.crunchtools.com) ;; *) return 1 ;; esac
-      case "$_path" in
-        /proxy/git/github/crunchtools/*) _repo=${_path#/proxy/git/github/crunchtools/} ;;
+    *://*)
+      _scheme=$(lc "${_u%%://*}"); _rest=${_u#*://}
+      case "$_rest" in */*) ;; *) return 1 ;; esac
+      _auth=${_rest%%/*}; _path=/${_rest#*/}
+      # Userinfo is genuine only as the one @ in the authority, which ends at
+      # the first /; a second @ is how a URL smuggles a host past a glob.
+      case "$_auth" in *@*) case "${_auth%@*}" in *@*) return 1 ;; esac ;; esac
+      _hp=${_auth##*@}; _host=$(lc "${_hp%%:*}")
+      case "$_hp" in *:*) case "${_hp#*:}" in ''|*[!0-9]*) return 1 ;; esac ;; esac
+      case "$_scheme:$_host" in
+        https:github.com|ssh:github.com) _p=${_path#/} ;;
+        http:trentina|https:trentina|http:trentina.crunchtools.com|https:trentina.crunchtools.com)
+          # Only the gateway's own names: any host can serve this path and
+          # take the diff.
+          case "$_path" in /proxy/git/github/*) _p=${_path#/proxy/git/github/} ;; *) return 1 ;; esac ;;
         *) return 1 ;;
       esac ;;
+    git@*:*)
+      _hp=${_u#git@}
+      [ "$(lc "${_hp%%:*}")" = github.com ] || return 1
+      _p=${_hp#*:} ;;
     *) return 1 ;;
   esac
-  case "$_repo" in ''|*/*) return 1 ;; esac
+  case "$_p" in */*) ;; *) return 1 ;; esac
+  [ "$(lc "${_p%%/*}")" = crunchtools ] || return 1
+  _repo=${_p#*/}; _repo=${_repo%/}; _repo=${_repo%.git}
+  case "$_repo" in ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
   return 0
 }
 
-# Returns 0 after printing why when Gatehouse must not run on this push.
+# Returns 0 after printing why when Gatehouse must not run. SDLC_GATEHOUSE_ANY_REMOTE=1
+# (exactly 1) is the one override, for a deliberate hand run against another
+# remote; it is loud, and no hook sets it.
 gatehouse_skipped() {
-  [ "${SDLC_TIER:-}" = push ] || return 1
+  if [ "${SDLC_GATEHOUSE_ANY_REMOTE:-}" = 1 ]; then
+    printf '%s: GATEHOUSE GUARD OVERRIDDEN: SDLC_GATEHOUSE_ANY_REMOTE=1, so the diff goes to an external model whatever the remote\n' "$ME"
+    return 1
+  fi
   _url=$(push_remote_url)
   if [ -z "$_url" ]; then
-    printf '%s: GATEHOUSE SKIPPED: no push remote URL found (no PRE_COMMIT_REMOTE_URL, upstream or origin), so it cannot be shown to be a crunchtools GitHub repo\n' "$ME"
+    printf '%s: GATEHOUSE SKIPPED: no remote URL found (no PRE_COMMIT_REMOTE_URL, upstream or origin), so it cannot be shown to be a crunchtools GitHub repo\n' "$ME"
     return 0
   fi
   is_crunchtools_github "$_url" && return 1
-  printf '%s: GATEHOUSE SKIPPED: push remote %s is not a crunchtools repo on GitHub, and Gatehouse sends the diff to an external model\n' "$ME" "$(strip_url_creds "$_url")"
+  printf '%s: GATEHOUSE SKIPPED: remote %s is not a crunchtools repo on GitHub, and Gatehouse sends the diff to an external model\n' "$ME" "$(strip_url_creds "$_url")"
   return 0
 }
 
