@@ -421,7 +421,79 @@ default_branch() {
   die "cannot determine the default branch; no origin/HEAD, origin/main or origin/master"
 }
 
+# Gatehouse sends the diff to an external model (OpenRouter). A pre-push diff on
+# some seats is a Red Hat repo, which must never leave, so at the push tier the
+# review runs only when the push goes to a crunchtools repo on GitHub. Run by
+# hand as `sdlc gatehouse`, it is a single check you asked for and is unchanged.
+#
+# The remote is the host's to find, as the diff is: pre-commit exports
+# PRE_COMMIT_REMOTE_NAME and PRE_COMMIT_REMOTE_URL to a pre-push hook, and this
+# runs on the host, so both are already in the environment -- nothing is
+# plumbed into the image. By hand there are neither, so: the current branch's
+# upstream remote, then `origin`.
+push_remote_url() {
+  if [ -n "${PRE_COMMIT_REMOTE_URL:-}" ]; then
+    printf '%s' "$PRE_COMMIT_REMOTE_URL"; return
+  fi
+  _name=${PRE_COMMIT_REMOTE_NAME:-}
+  if [ -z "$_name" ]; then
+    _br=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || _br=
+    [ -z "$_br" ] || _name=$(git config --get "branch.$_br.remote" 2>/dev/null) || _name=
+    # "." is a branch tracking another local branch, which is no remote.
+    case "$_name" in ''|.) _name=origin ;; esac
+  fi
+  git remote get-url --push "$_name" 2>/dev/null \
+    || git remote get-url "$_name" 2>/dev/null \
+    || :
+}
+
+# The URL with any user[:password]@ dropped, for printing and for matching.
+strip_url_creds() {
+  printf '%s' "$1" | sed -e 's#^\([A-Za-z][A-Za-z0-9+.-]*://\)[^/@]*@#\1#' \
+                         -e 's#^[^/@:]*@\([^/@:]*:\)#\1#'
+}
+
+# Is this a crunchtools repo on GitHub? Owner matches case-insensitively, the
+# repo is any single name, a .git suffix is optional. The forms: github.com over
+# https, ssh or scp syntax, and the Trentina gateway's git proxy
+# under its own names (trentina, trentina.crunchtools.com; any port).
+is_crunchtools_github() {
+  _u=$(strip_url_creds "$1" | tr '[:upper:]' '[:lower:]')
+  _u=${_u%/}; _u=${_u%.git}
+  case "$_u" in
+    https://github.com/crunchtools/*)     _repo=${_u#https://github.com/crunchtools/} ;;
+    ssh://github.com/crunchtools/*)       _repo=${_u#ssh://github.com/crunchtools/} ;;
+    github.com:crunchtools/*)             _repo=${_u#github.com:crunchtools/} ;;
+    http://*|https://*)
+      # Only the gateway's own names: the path alone proves nothing, since any
+      # host can serve /proxy/git/github/crunchtools/ and take the diff.
+      _rest=${_u#*://}; _host=${_rest%%/*}; _path=/${_rest#*/}
+      case "${_host%:*}" in trentina|trentina.crunchtools.com) ;; *) return 1 ;; esac
+      case "$_path" in
+        /proxy/git/github/crunchtools/*) _repo=${_path#/proxy/git/github/crunchtools/} ;;
+        *) return 1 ;;
+      esac ;;
+    *) return 1 ;;
+  esac
+  case "$_repo" in ''|*/*) return 1 ;; esac
+  return 0
+}
+
+# Returns 0 after printing why when Gatehouse must not run on this push.
+gatehouse_skipped() {
+  [ "${SDLC_TIER:-}" = push ] || return 1
+  _url=$(push_remote_url)
+  if [ -z "$_url" ]; then
+    printf '%s: GATEHOUSE SKIPPED: no push remote URL found (no PRE_COMMIT_REMOTE_URL, upstream or origin), so it cannot be shown to be a crunchtools GitHub repo\n' "$ME"
+    return 0
+  fi
+  is_crunchtools_github "$_url" && return 1
+  printf '%s: GATEHOUSE SKIPPED: push remote %s is not a crunchtools repo on GitHub, and Gatehouse sends the diff to an external model\n' "$ME" "$(strip_url_creds "$_url")"
+  return 0
+}
+
 t_gatehouse() {
+  gatehouse_skipped && return 0
   _env=${GATEHOUSE_ENV:-$HOME/.config/mcp-env/gatehouse.env}
   [ -f "$_env" ] || die "$_env is missing; Gatehouse has no API key"
 

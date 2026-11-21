@@ -6,6 +6,16 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- At the push tier Gatehouse runs only when the push goes to a crunchtools repo
+  on GitHub (https, ssh, scp, or the Trentina git proxy form on the gateway's own hosts). Any other remote,
+  or none found, skips it with one `GATEHOUSE SKIPPED` line naming the remote
+  URL without credentials -- not a failure, not exit 2 -- because Gatehouse
+  sends the diff to an external model and a pre-push diff can be a Red Hat
+  repo. The remote is `PRE_COMMIT_REMOTE_URL`, else the branch's upstream
+  remote, else `origin`. `sdlc gatehouse` run by hand is unchanged.
+
 ### Changed
 
 - Gatehouse triage is passed `review_result: ${{ needs.review.result }}`, so a PR

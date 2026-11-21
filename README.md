@@ -432,6 +432,19 @@ be pinned this way: it exits 2.
 Rolling back works only once two releases carry `launcher` -- the broken one
 and a good one before it.
 
+## Gatehouse at push
+
+Gatehouse sends the diff to an external model, so at the push tier it runs only
+when the push goes to a crunchtools repo on GitHub: `https://github.com/crunchtools/<repo>`,
+`git@github.com:crunchtools/<repo>`, `ssh://git@github.com/crunchtools/<repo>`, or
+the Trentina proxy form `http(s)://<host>/proxy/git/github/crunchtools/<repo>` on
+the gateway's own hosts, `trentina` and `trentina.crunchtools.com`
+(owner case-insensitive, `.git` optional). Any other remote, or none found,
+prints one `GATEHOUSE SKIPPED` line naming the remote URL (credentials
+stripped) and passes; it is not a failure and not a 2. The remote is
+`PRE_COMMIT_REMOTE_URL` from pre-commit, else the branch's upstream remote, else
+`origin`. `sdlc gatehouse` run by hand is unchanged.
+
 ## Skipping a check
 
 `SDLC_SKIP=gatehouse git push` skips one check, once, for a false positive. The

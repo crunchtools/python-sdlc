@@ -1152,6 +1152,104 @@ else
 fi
 rm -rf "$CLONESHIM" "$CLONECACHE"
 
+printf '\n== gatehouse: only a crunchtools GitHub push is reviewed\n\n'
+
+# Gatehouse sends the diff to an external model, so at the push tier it runs
+# only when the remote is a crunchtools repo on GitHub. The functions are lifted
+# out of bin/sdlc and run with a shell function standing in for git, which is
+# how the remote lookup is pinned without a remote.
+GH_FUNCS="$RUN/gh-funcs.sh"
+sed -n '/^push_remote_url()/,/^t_gatehouse()/p' bin/sdlc | sed '$d' > "$GH_FUNCS"
+
+matches() {            # URL -> 0 when it is a crunchtools GitHub repo
+  sh -c '. "$1"; is_crunchtools_github "$2"' sh "$GH_FUNCS" "$1"
+}
+for url in \
+  https://github.com/crunchtools/python-sdlc \
+  https://github.com/crunchtools/python-sdlc.git \
+  https://github.com/CrunchTools/python-sdlc \
+  https://user:token@github.com/crunchtools/python-sdlc \
+  git@github.com:crunchtools/python-sdlc \
+  git@github.com:crunchtools/python-sdlc.git \
+  ssh://git@github.com/crunchtools/python-sdlc \
+  http://trentina:8019/proxy/git/github/crunchtools/developer \
+  https://trentina.crunchtools.com/proxy/git/github/crunchtools/josui
+do
+  if matches "$url"; then ok "crunchtools: $url"; else bad "not matched, should be: $url"; fi
+done
+for url in \
+  git@gitlab.cee.redhat.com:foo/bar \
+  https://gitlab.com/redhat/hummingbird/containers.git \
+  ssh://breetai/~/Projects/MarketLens \
+  https://github.com/someoneelse/x \
+  https://github.com/crunchtools-fork/x \
+  https://github.com/crunchtools/x/y \
+  https://github.com/crunchtools \
+  https://github.com@evil.example/crunchtools/x \
+  http://trentina:8019/proxy/git/gitlab/crunchtools/x \
+  https://attacker.example/proxy/git/github/crunchtools/x \
+  http://trentina.evil.example:8019/proxy/git/github/crunchtools/x \
+  https://trentina.crunchtools.com/x/proxy/git/github/crunchtools/y \
+  git@github.com:someoneelse/crunchtools
+do
+  if matches "$url"; then bad "matched, should not be: $url"; else ok "not crunchtools: $url"; fi
+done
+
+# The decision, with git faked: $GH_UPSTREAM is the branch's remote, and a
+# remote named in $GH_REMOTES resolves to its URL.
+decide() {             # TIER -> exit status; output in $RUN/gh-out
+  SDLC_TIER=$1 sh -c '
+    . "$1"; ME=sdlc
+    git() {
+      case "$*" in
+        "symbolic-ref --quiet --short HEAD") echo topic ;;
+        "config --get branch.topic.remote") [ -z "$GH_UPSTREAM" ] || echo "$GH_UPSTREAM" ;;
+        "remote get-url --push origin") [ -z "$GH_ORIGIN" ] || echo "$GH_ORIGIN" ;;
+        "remote get-url --push fork")   [ -z "$GH_FORK" ] || echo "$GH_FORK" ;;
+        *) return 1 ;;
+      esac
+    }
+    gatehouse_skipped
+  ' sh "$GH_FUNCS" > "$RUN/gh-out" 2>&1
+}
+
+unset PRE_COMMIT_REMOTE_URL PRE_COMMIT_REMOTE_NAME GH_UPSTREAM GH_ORIGIN GH_FORK
+export GH_UPSTREAM GH_ORIGIN GH_FORK
+
+PRE_COMMIT_REMOTE_URL=https://github.com/crunchtools/x decide push && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "a crunchtools remote is reviewed at the push tier"; else bad "crunchtools push was skipped"; fi
+
+PRE_COMMIT_REMOTE_URL=https://u:pw@gitlab.com/redhat/x.git decide push && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'GATEHOUSE SKIPPED' "$RUN/gh-out" \
+   && grep -q 'https://gitlab.com/redhat/x.git' "$RUN/gh-out" && ! grep -q 'pw' "$RUN/gh-out"; then
+  ok "another remote is skipped, loudly, with its credentials stripped"
+else
+  bad "a non-crunchtools push was not skipped loudly (rc=$rc)"; sed 's/^/       /' "$RUN/gh-out"
+fi
+
+PRE_COMMIT_REMOTE_URL=git@gitlab.cee.redhat.com:foo/bar decide gatehouse && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "sdlc gatehouse run by hand is not skipped"; else bad "a single-check gatehouse was skipped"; fi
+
+# By hand: no pre-commit variables, so the upstream remote, then origin.
+GH_UPSTREAM=fork GH_FORK=git@github.com:crunchtools/x decide push && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "no URL given: the branch's upstream remote decides"; else bad "upstream remote was not used"; fi
+
+GH_UPSTREAM=fork GH_FORK=git@gitlab.com:a/b GH_ORIGIN=https://github.com/crunchtools/x decide push && rc=0 || rc=$?
+if [ "$rc" -eq 0 ]; then ok "the upstream remote wins over origin"; else bad "origin was used over the upstream"; fi
+
+GH_ORIGIN=https://github.com/crunchtools/x decide push && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "no upstream: origin decides"; else bad "origin was not used"; fi
+
+PRE_COMMIT_REMOTE_NAME=fork GH_FORK=https://gitlab.com/a/b decide push && rc=0 || rc=$?
+if [ "$rc" -eq 0 ]; then ok "pre-commit's remote name is looked up when its URL is absent"; else bad "remote name ignored"; fi
+
+decide push && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'GATEHOUSE SKIPPED: no push remote URL' "$RUN/gh-out"; then
+  ok "no URL anywhere is a loud skip, not a failure"
+else
+  bad "no remote found did not skip loudly (rc=$rc)"; sed 's/^/       /' "$RUN/gh-out"
+fi
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
   printf 'host contract PASSED\n'; exit 0
