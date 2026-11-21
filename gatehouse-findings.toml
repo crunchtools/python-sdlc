@@ -71,3 +71,19 @@ a release back with the repository variable SDLC_IMAGE. The constitution's \
 XII wording still describes the rev pin; amending it is the constitution \
 repo's change, flagged with this work rather than made here.
 """
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "bin/sdlc"
+evidence = "gatehouse_skipped && return 0"
+status = "not-a-bug"
+reason = """
+A skip here is a policy verdict, not a check that could not run. The fleet \
+operator decided (a813) that Gatehouse must not send a diff to an external \
+model unless the remote is a crunchtools repo on GitHub, so for any other \
+remote there is nothing Gatehouse is meant to review. That is the same shape \
+as `nothing to review: HEAD matches origin/main`, which already returns 0. \
+Exit 2 would fail every such push and push people toward SDLC_SKIP, which is \
+the workaround the contract forbids. The skip prints one loud line instead.
+"""

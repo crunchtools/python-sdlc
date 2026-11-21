@@ -6,6 +6,21 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- Gatehouse runs, in every tier and by hand as `sdlc gatehouse`, only when the
+  remote is a crunchtools repo on GitHub, because it sends the diff to an
+  external model and the diff can be a Red Hat repo's. Any other remote, or
+  none found, skips it with one `GATEHOUSE SKIPPED` line -- exit 0, a policy
+  verdict, not a 2. The remote is `PRE_COMMIT_REMOTE_URL`, else the branch's
+  upstream remote, else `origin`. The URL is parsed strictly (see the README):
+  `#`, `?`, `%`, a backslash, whitespace or control characters reject it, and
+  scheme and host are compared exactly, the owner case-insensitively, and the repo against an allowlist. The printed URL has its userinfo
+  masked and non-printable bytes replaced.
+- `SDLC_GATEHOUSE_ANY_REMOTE=1` (exactly `1`) overrides the guard for a
+  deliberate hand run against another remote and prints
+  `GATEHOUSE GUARD OVERRIDDEN`. No hook sets it.
+
 ### Changed
 
 - Gatehouse triage is passed `review_result: ${{ needs.review.result }}`, so a PR

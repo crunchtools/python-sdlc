@@ -695,6 +695,7 @@ cat > "$GITSHIM/git" <<EOF
 #!/bin/sh
 case "\$*" in
   *--show-toplevel*) pwd ;;
+  *"remote get-url"*) echo https://github.com/crunchtools/x ;;
   *symbolic-ref*) echo refs/remotes/origin/main ;;
   *"diff --quiet"*) exit 1 ;;
   *diff*) echo "+a change" ;;
@@ -1151,6 +1152,160 @@ else
   bad "the constitution mount source is '${_mnt:-absent}', not a resolved directory"
 fi
 rm -rf "$CLONESHIM" "$CLONECACHE"
+
+printf '\n== gatehouse: only a crunchtools GitHub push is reviewed\n\n'
+
+# Gatehouse sends the diff to an external model, so at the push tier it runs
+# only when the remote is a crunchtools repo on GitHub. The functions are lifted
+# out of bin/sdlc and run with a shell function standing in for git, which is
+# how the remote lookup is pinned without a remote.
+GH_FUNCS="$RUN/gh-funcs.sh"
+sed -n '/^gatehouse_remote_url()/,/^t_gatehouse()/p' bin/sdlc | sed '$d' > "$GH_FUNCS"
+
+matches() {            # URL -> 0 when it is a crunchtools GitHub repo
+  sh -c '. "$1"; is_crunchtools_github "$2"' sh "$GH_FUNCS" "$1"
+}
+for url in \
+  https://github.com/crunchtools/python-sdlc \
+  https://github.com/crunchtools/python-sdlc.git \
+  https://github.com/CrunchTools/python-sdlc \
+  https://user:token@github.com/crunchtools/python-sdlc \
+  git@github.com:crunchtools/python-sdlc \
+  git@github.com:crunchtools/python-sdlc.git \
+  ssh://git@github.com/crunchtools/python-sdlc \
+  http://trentina:8019/proxy/git/github/crunchtools/developer \
+  https://trentina.crunchtools.com/proxy/git/github/crunchtools/josui \
+  HTTPS://GITHUB.COM/crunchtools/x \
+  https://github.com/crunchtools/x/ \
+  https://github.com/crunchtools/x.git/ \
+  https://Trentina.CrunchTools.com/proxy/git/github/crunchtools/x
+do
+  if matches "$url"; then ok "crunchtools: $url"; else bad "not matched, should be: $url"; fi
+done
+for url in \
+  git@gitlab.cee.redhat.com:foo/bar \
+  https://gitlab.com/redhat/hummingbird/containers.git \
+  ssh://breetai/~/Projects/MarketLens \
+  https://github.com/someoneelse/x \
+  https://github.com/crunchtools-fork/x \
+  https://github.com/crunchtools/x/y \
+  https://github.com/crunchtools \
+  https://github.com@evil.example/crunchtools/x \
+  http://trentina:8019/proxy/git/gitlab/crunchtools/x \
+  https://attacker.example/proxy/git/github/crunchtools/x \
+  http://trentina.evil.example:8019/proxy/git/github/crunchtools/x \
+  https://trentina.crunchtools.com/x/proxy/git/github/crunchtools/y \
+  git@github.com:someoneelse/crunchtools \
+  'https://evil.example#@github.com/crunchtools/x' \
+  'http://evil.example?@trentina/proxy/git/github/crunchtools/x' \
+  'http://trentina:8019/proxy/git/github/crunchtools/..%2fother%2fx' \
+  https://github.com/crunchtools/.. \
+  https://github.com/crunchtools/. \
+  'https://github.com/crunchtools/x%2fy' \
+  https://github.com:evil/crunchtools/x \
+  'https://trentina:80x/proxy/git/github/crunchtools/x' \
+  https://user@evil.example@github.com/crunchtools/x \
+  'https://github.com/crunchtools/x\y' \
+  'https://github.com/crunchtools/x y' \
+  https://github.com/crunchtools/x// \
+  https://github.com/crunchtools/.git \
+  git@evil.example:crunchtools/x \
+  git@github.com:/crunchtools/x \
+  http://github.com/crunchtools/x
+do
+  if matches "$url"; then bad "matched, should not be: $url"; else ok "not crunchtools: $url"; fi
+done
+NL='
+'
+for url in "https://github.com/crunchtools/x${NL}" "https://evil.example/${NL}https://github.com/crunchtools/x" \
+           "https://github.com/crunchtools/x$(printf '\t')"
+do
+  if matches "$url"; then bad "matched with a newline or tab in it"; else ok "not crunchtools: URL with an embedded newline or tab"; fi
+done
+
+# The decision, with git faked: $GH_UPSTREAM is the branch's remote, and a
+# remote named in $GH_REMOTES resolves to its URL.
+decide() {             # [TIER] -> exit status; output in $RUN/gh-out
+  SDLC_TIER=${1:-} sh -c '
+    . "$1"; ME=sdlc
+    git() {
+      case "$*" in
+        "symbolic-ref --quiet --short HEAD") echo topic ;;
+        "config --get branch.topic.remote") [ -z "$GH_UPSTREAM" ] || echo "$GH_UPSTREAM" ;;
+        "remote get-url --push origin") [ -z "$GH_ORIGIN" ] || echo "$GH_ORIGIN" ;;
+        "remote get-url --push fork")   [ -z "$GH_FORK" ] || echo "$GH_FORK" ;;
+        *) return 1 ;;
+      esac
+    }
+    gatehouse_skipped
+  ' sh "$GH_FUNCS" > "$RUN/gh-out" 2>&1
+}
+
+unset PRE_COMMIT_REMOTE_URL PRE_COMMIT_REMOTE_NAME GH_UPSTREAM GH_ORIGIN GH_FORK
+export GH_UPSTREAM GH_ORIGIN GH_FORK
+
+PRE_COMMIT_REMOTE_URL=https://github.com/crunchtools/x decide push && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "a crunchtools remote is reviewed at the push tier"; else bad "crunchtools push was skipped"; fi
+
+PRE_COMMIT_REMOTE_URL=https://u:pw@gitlab.com/redhat/x.git decide push && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'GATEHOUSE SKIPPED' "$RUN/gh-out" \
+   && grep -q 'https://\*\*\*@gitlab.com/redhat/x.git' "$RUN/gh-out" && ! grep -q 'pw' "$RUN/gh-out"; then
+  ok "another remote is skipped, loudly, with its credentials stripped"
+else
+  bad "a non-crunchtools push was not skipped loudly (rc=$rc)"; sed 's/^/       /' "$RUN/gh-out"
+fi
+
+# Every tier is guarded, a hand run included.
+unset SDLC_GATEHOUSE_ANY_REMOTE
+GH_ORIGIN=git@gitlab.cee.redhat.com:foo/bar decide && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'GATEHOUSE SKIPPED' "$RUN/gh-out"; then
+  ok "a hand run against a non-crunchtools remote skips, loudly"
+else
+  bad "a hand run was not skipped (rc=$rc)"
+fi
+GH_ORIGIN=https://github.com/crunchtools/x decide && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "a hand run against crunchtools runs"; else bad "a hand run against crunchtools was skipped"; fi
+for tier in commit pre-commit gatehouse; do
+  GH_ORIGIN=git@gitlab.com:a/b decide "$tier" && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then ok "tier $tier is guarded too"; else bad "tier $tier was not guarded"; fi
+done
+
+PRE_COMMIT_REMOTE_URL=https://github.com/crunchtools/x GH_ORIGIN=git@gitlab.com:a/b decide && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "PRE_COMMIT_REMOTE_URL wins over origin (crunchtools)"; else bad "origin beat PRE_COMMIT_REMOTE_URL"; fi
+PRE_COMMIT_REMOTE_URL=git@gitlab.com:a/b GH_ORIGIN=https://github.com/crunchtools/x decide && rc=0 || rc=$?
+if [ "$rc" -eq 0 ]; then ok "PRE_COMMIT_REMOTE_URL wins over origin (other)"; else bad "origin beat PRE_COMMIT_REMOTE_URL"; fi
+
+# The override: exactly 1, loud, never anything else.
+SDLC_GATEHOUSE_ANY_REMOTE=1 GH_ORIGIN=git@gitlab.com:a/b decide && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'GATEHOUSE GUARD OVERRIDDEN' "$RUN/gh-out"; then
+  ok "SDLC_GATEHOUSE_ANY_REMOTE=1 runs it, loudly"
+else
+  bad "the override did not apply loudly (rc=$rc)"
+fi
+for v in 0 true yes 11 ' 1' ''; do
+  SDLC_GATEHOUSE_ANY_REMOTE=$v GH_ORIGIN=git@gitlab.com:a/b decide && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then ok "SDLC_GATEHOUSE_ANY_REMOTE='$v' is not the override"; else bad "override accepted '$v'"; fi
+done
+
+# By hand: no pre-commit variables, so the upstream remote, then origin.
+GH_UPSTREAM=fork GH_FORK=git@github.com:crunchtools/x decide push && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "no URL given: the branch's upstream remote decides"; else bad "upstream remote was not used"; fi
+
+GH_UPSTREAM=fork GH_FORK=git@gitlab.com:a/b GH_ORIGIN=https://github.com/crunchtools/x decide push && rc=0 || rc=$?
+if [ "$rc" -eq 0 ]; then ok "the upstream remote wins over origin"; else bad "origin was used over the upstream"; fi
+
+GH_ORIGIN=https://github.com/crunchtools/x decide push && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "no upstream: origin decides"; else bad "origin was not used"; fi
+
+PRE_COMMIT_REMOTE_NAME=fork GH_FORK=https://gitlab.com/a/b decide push && rc=0 || rc=$?
+if [ "$rc" -eq 0 ]; then ok "pre-commit's remote name is looked up when its URL is absent"; else bad "remote name ignored"; fi
+
+decide push && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'GATEHOUSE SKIPPED: no remote URL' "$RUN/gh-out"; then
+  ok "no URL anywhere is a loud skip, not a failure"
+else
+  bad "no remote found did not skip loudly (rc=$rc)"; sed 's/^/       /' "$RUN/gh-out"
+fi
 
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
