@@ -584,15 +584,80 @@ def needs_build_secrets(text: str) -> bool:
     return BUILD_SECRETS.search(code) is not None
 
 
+# Mirrors the planner's final_base() in `sdlc`: this file does not import it.
+BUILD_VAR = re.compile(r"\$(?:\{(?P<braced>\w+)(?::?-(?P<default>[^}]*))?\}|(?P<bare>\w+))")
+FROM_AS_WORDS = 3  # image, AS, name
+
+
+def logical_lines(text: str) -> list[str]:
+    """Containerfile instructions: continuations joined, comment lines dropped."""
+    lines, buf = [], ""
+    for raw in text.splitlines():
+        if raw.lstrip().startswith("#"):
+            continue  # a comment, even inside a continuation, is not an instruction
+        if raw.rstrip().endswith("\\"):
+            buf += raw.rstrip()[:-1] + " "
+            continue
+        lines.append((buf + raw).strip())
+        buf = ""
+    if buf.strip():
+        lines.append(buf.strip())
+    return lines
+
+
+def build_stages(text: str) -> tuple[dict[str, str], list[tuple[str, str | None]]]:
+    """The global ARG defaults, and each stage's (image word, lowercased AS name)."""
+    args: dict[str, str] = {}
+    stages: list[tuple[str, str | None]] = []
+    for words in (line.split() for line in logical_lines(text)):
+        op = words[0].upper() if words else ""
+        if op == "ARG" and not stages:
+            for name, eq, value in (w.partition("=") for w in words[1:]):
+                if eq:
+                    args[name] = value.strip("\"'")
+        elif op == "FROM":
+            rest = [w for w in words[1:] if not w.startswith("--")]
+            is_aliased = len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS"
+            if rest:
+                stages.append((rest[0], rest[2].lower() if is_aliased else None))
+    return args, stages
+
+
+def final_base(text: str) -> str | None:
+    """The image the FINAL stage of a Containerfile is built on, or None.
+
+    Substring-matching every FROM line called a bootc builder stage under a plain
+    runtime image bootc, and missed `ARG BASE=...-bootc` + `FROM ${BASE}`. What
+    ships is the last stage, so resolve that: fill $X, ${X} and ${X:-d} from the
+    global ARG defaults, and follow a `FROM <earlier-stage>` back to its own
+    base. An unset variable gives None.
+    """
+    args, stages = build_stages(text)
+    index = len(stages) - 1
+    seen: set[int] = set()
+    while index >= 0 and index not in seen:
+        seen.add(index)
+        image = stages[index][0]
+        names = [m["braced"] or m["bare"] for m in BUILD_VAR.finditer(image)]
+        defaults = [m["default"] for m in BUILD_VAR.finditer(image)]
+        if any(n not in args and d is None for n, d in zip(names, defaults, strict=True)):
+            return None
+        image = BUILD_VAR.sub(
+            lambda m: args.get(m["braced"] or m["bare"], m["default"] or ""), image
+        )
+        earlier = [i for i in range(index) if stages[i][1] == image.lower()]
+        if not earlier:
+            return image or None
+        index = earlier[-1]
+    return None
+
+
 def detected_stacks(repo: Path) -> list[str]:
     """The planner's detect_stacks(), over a checkout."""
     found = ["python"] if (repo / "pyproject.toml").is_file() else []
     cf = next((repo / f for f in CONTAINERFILES if (repo / f).is_file()), None)
-    bootc = cf is not None and any(
-        line.split()[0].upper() == "FROM" and "bootc" in line.lower()
-        for line in cf.read_text(errors="replace").splitlines()
-        if line.strip()
-    )
+    base = final_base(cf.read_text(errors="replace")) if cf is not None else None
+    bootc = base is not None and "bootc" in base.lower()
     if cf is not None and not bootc:
         found.append("container")
     if (repo / "package.json").is_file():

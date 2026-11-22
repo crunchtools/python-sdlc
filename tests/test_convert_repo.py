@@ -847,6 +847,7 @@ def sdlc_cfg(repo: Path, name: str = "sdlc.toml") -> dict:
 for label, files in (
     ("node", {"package.json": "{}\n"}),
     ("bootc", {"Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n"}),
+    ("bootc via ARG", {"Containerfile": "ARG B=quay.io/x/fedora-bootc\nFROM ${B}\n"}),
     ("docs", {"README.md": "# hi\n"}),
 ):
     repo = make_repo({**HOOKED, **files})
