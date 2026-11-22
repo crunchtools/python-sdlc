@@ -563,6 +563,7 @@ def stacks_of(files: dict[str, str]) -> tuple[str, ...] | str:
     """active_stacks() over a tree holding `files`, or the CannotRun message."""
     with tempfile.TemporaryDirectory() as root:
         for name, text in files.items():
+            Path(root, name).parent.mkdir(parents=True, exist_ok=True)
             Path(root, name).write_text(text)
         S.REPO = Path(root)
         try:
@@ -729,6 +730,89 @@ check(
         {"frontend/package.json": "{}", "backend/package.json": "{}"},
     )
     is None,
+)
+
+
+def node_plan(
+    target: str, remote: str | None, files: dict[str, str] | None = None
+) -> list[list[str]]:
+    """`sdlc plan <target>` over a node repo whose origin is `remote`."""
+    with tempfile.TemporaryDirectory() as root:
+        for rel, body in (files or {"package.json": "{}", "package-lock.json": "{}"}).items():
+            Path(root, rel).parent.mkdir(parents=True, exist_ok=True)
+            Path(root, rel).write_text(body)
+        subprocess.run(["git", "init", "-q", root], check=True)
+        if remote:
+            subprocess.run(["git", "-C", root, "remote", "add", "origin", remote], check=True)
+        S.REPO = Path(root)
+        saved = dict(os.environ)
+        os.environ.update(
+            {"SDLC_HOST_REPO": root, "SDLC_CACHE_VOLUME": "testvol", "SDLC_PROJECT": "fx"}
+        )
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                S.t_plan(target)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+    return [line.split("\t") for line in buf.getvalue().splitlines()]
+
+
+_rows = node_plan("ci", "https://github.com/crunchtools/rotv.git")
+_node = [r for r in _rows if r[0].startswith("npm-")]
+check(
+    "each node check is two host steps: npm-install, then the check",
+    [(r[0], r[2]) for r in _node]
+    == [
+        (c, "host")
+        for c in ("npm-lint", "npm-lint", "npm-test", "npm-test", "npm-audit", "npm-audit")
+    ]
+    and all(r[3].split(S.UNIT_SEPARATOR)[-2:] == ["npm-install", r[0]] for r in _node[::2])
+    and all(r[3].split(S.UNIT_SEPARATOR)[-1] == r[0] for r in _node[1::2]),
+    str(_node),
+)
+_words = [r[3].split(S.UNIT_SEPARATOR) for r in _node]
+check(
+    "every node step mounts the repo's own volume, keyed on owner/repo",
+    all("sdlc-node-crunchtools-rotv:/node" in w for w in _words),
+    str(_words[0]),
+)
+check(
+    "no node step mounts the shared cache volume",
+    not any(w2.startswith("testvol") for w in _words for w2 in w),
+)
+check(
+    "the repo is read-only in every node step",
+    all(f"{w[w.index('-v') + 1]}".endswith(":/repo:ro,z") for w in _words),
+)
+check(
+    "npm-install and npm-audit have the network; npm-lint and npm-test do not",
+    ["none" if "--network" in w else "net" for w in _words]
+    == ["net", "none", "net", "none", "net", "net"],
+    str([w[-1] for w in _words]),
+)
+check(
+    "two repos with one basename are two volumes",
+    S.NODE_VOLUME_PREFIX + "a-app" != S.NODE_VOLUME_PREFIX + "b-app"
+    and "sdlc-node-alice-app:/node" in node_plan("npm-lint", "git@github.com:alice/app.git")[0][3]
+    and "sdlc-node-bob-app:/node" in node_plan("npm-lint", "https://github.com/bob/app")[0][3],
+)
+_local = node_plan("npm-lint", None)[0][3]
+check("no origin remote: a volume keyed on the host path", "sdlc-node-local-" in _local, _local)
+check(
+    "a package.json only in a subdirectory is the node stack, not docs",
+    stacks_of({"web/package.json": "{}", "README.md": "# x"}) == ("node",),
+)
+check(
+    "a package.json under node_modules is not",
+    stacks_of({"node_modules/x/package.json": "{}", "README.md": "# x"}) == ("docs",),
+)
+msg = node_repo_msg({}, {"web/package.json": "{}", "api/package.json": "{}"})
+check(
+    "the default packages, with only nested package.json files, names them and refuses",
+    "no package.json at the repo root" in str(msg) and '["api", "web"]' in str(msg),
+    str(msg),
 )
 
 # `npm audit --json`, as npm 10 prints it, trimmed to what the classifier reads.

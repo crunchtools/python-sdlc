@@ -174,6 +174,27 @@ else
   show ignored
 fi
 
+# A config the tool cannot read is the tool failing, not the docs: 2, never a
+# finding and never a pass.
+fixture badconfig
+printf 'MD013: [unclosed\n' > "$WORK/badconfig/.markdownlint.yaml"
+printf 'max_concurrency = "lots"\n' > "$WORK/badconfig/lychee.toml"
+commit badconfig
+sdlc_in badconfig markdown-lint
+if [ "$rc" -eq 2 ]; then
+  ok "an unparseable .markdownlint.yaml is CANNOT_RUN (exit 2)"
+else
+  bad "markdown-lint with a broken config exited $rc, want 2"
+  show badconfig
+fi
+sdlc_in badconfig link-check
+if [ "$rc" -eq 2 ]; then
+  ok "an unreadable lychee.toml is CANNOT_RUN (exit 2)"
+else
+  bad "link-check with a broken lychee.toml exited $rc, want 2"
+  show badconfig
+fi
+
 printf '\n'
 [ "$FAILED" -eq 0 ] && { printf 'docs stack PASSED\n'; exit 0; }
 printf 'docs stack FAILED: %s check(s)\n' "$FAILED"; exit 1

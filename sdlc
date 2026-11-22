@@ -398,11 +398,51 @@ def detect_stacks() -> list[str]:
     cf = containerfile()
     if cf and not is_bootc(cf):
         found.append("container")
-    if (REPO / "package.json").is_file():
+    if (REPO / "package.json").is_file() or package_dirs():
         found.append("node")
     if cf and is_bootc(cf):
         found.append("bootc")
     return found or ["docs"]
+
+
+def package_dirs() -> list[str]:
+    """Directories below the root holding a package.json of the repo's own.
+
+    A package.json only in `frontend/` is still a node project. Without this a
+    repo with no other stack fell through to docs and went green with its code
+    never linted, tested or audited. It is detected as node, and node_packages
+    then refuses the default `packages = ["."]` with these directories named,
+    so the repo says which ones are its packages rather than the gate guessing.
+
+    Asked of git, which knows what is ignored; a tree that is not a checkout is
+    walked. Never anything under node_modules.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "safe.directory=*", "ls-files", "-co", "--exclude-standard"],
+            cwd=REPO,
+            capture_output=True,
+            check=False,
+        )
+        listed = (
+            proc.stdout.decode("utf-8", "surrogateescape").splitlines()
+            if proc.returncode == 0
+            else None
+        )
+    except OSError:
+        listed = None
+    if listed is None:
+        listed = []
+        for root, dirs, files in os.walk(REPO):
+            dirs[:] = [d for d in dirs if d not in (".git", "node_modules")]
+            listed += [str((Path(root) / f).relative_to(REPO)) for f in files]
+    return sorted(
+        str(Path(f).parent)
+        for f in listed
+        if Path(f).name == "package.json"
+        and Path(f).parent != Path()
+        and "node_modules" not in Path(f).parts
+    )
 
 
 def stack_names(value: object, where: str) -> list[str]:
@@ -1405,6 +1445,14 @@ def node_packages(name: str, s: dict) -> list[str]:
     for item in raw:
         rel = in_repo(name, "packages", item)
         if not (REPO / rel / "package.json").is_file():
+            nested = package_dirs() if rel == "." else []
+            if nested:
+                cannot(
+                    f"{name}: there is no package.json at the repo root, but there is in "
+                    f"{', '.join(nested)}. Say which are this repo's packages, in each node "
+                    f"check's table: [tool.sdlc.push.{name}] packages = "
+                    f'{json.dumps(nested)}; or [tool.sdlc] skip-stacks = ["node"] if none is'
+                )
             cannot(f"{name}: packages entry {item!r} has no package.json")
         if rel not in found:
             found.append(rel)

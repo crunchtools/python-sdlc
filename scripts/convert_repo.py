@@ -660,7 +660,11 @@ def detected_stacks(repo: Path) -> list[str]:
     bootc = base is not None and "bootc" in base.lower()
     if cf is not None and not bootc:
         found.append("container")
-    if (repo / "package.json").is_file():
+    nested = any(
+        "node_modules" not in f.relative_to(repo).parts and ".git" not in f.relative_to(repo).parts
+        for f in repo.glob("*/**/package.json")
+    )
+    if (repo / "package.json").is_file() or nested:
         found.append("node")
     if bootc:
         found.append("bootc")
