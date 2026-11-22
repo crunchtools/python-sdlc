@@ -829,7 +829,18 @@ check(
     "refs/heads/master" in read(repo, RELEASE_PATH) and "--base master" in read(repo, RELEASE_PATH),
 )
 
-# rotv's shape: the router already in, and the full template beside it.
+# rotv's and mcp-slack's shape: the router already in, no release.yml.
+repo, result = run({CALLER_PATH: CALLER}, target=ROUTED, label="open, already routed")
+check(
+    "open: a repo already on the router, with no release.yml, gets the open-only one",
+    read(repo, CALLER_PATH) == CALLER
+    and read(repo, RELEASE_PATH) == OPEN
+    and one_tag_path(repo)
+    and not any(c.startswith("ashigaru:") for c in result.changed),
+    str(result.changed),
+)
+
+# The router already in, and the full template beside it.
 repo, result = run(
     {**PUBLISHES, CALLER_PATH: CALLER, RELEASE_PATH: TEMPLATE}, target=TARGET, label="open, rotv"
 )
