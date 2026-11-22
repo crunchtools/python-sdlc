@@ -406,6 +406,7 @@ RESERVED = (
     "pytest-deps",
     "codeql-baseline",
     "scan-rootfs",
+    "npm-install",
 )
 
 
@@ -1272,19 +1273,29 @@ def t_scan_rootfs() -> int:
 # bring an opinion about eslint or vitest, it runs `npm run lint` and `npm test`
 # the way the repo's CI does, so a verdict here is the verdict there.
 #
-# WHERE node_modules LIVES. The repo is mounted read-only for these checks, and
-# even where it is not, `npm ci` writing node_modules into a developer's tree is
-# the wrong side effect for a gate: it is gigabytes, it is the host's
-# architecture's binaries, and a later `git clean` would make the gate pay for
-# it again. So the gate keeps a WORKSPACE in the cache volume,
-# CACHE/node/<project>/tree: a copy of the repo's source (what git tracks, plus
-# what it does not ignore) that the scripts run in, with its own node_modules
-# that survives from run to run. Source files are synced over it every time --
-# stale ones removed, node_modules left alone -- and `npm ci` runs again only
-# when the package's lockfile, package.json or the node major changed. npm's
-# download cache is CACHE/npm, so even that reinstall is mostly local.
+# WHERE node_modules LIVES, AND WHO CAN TOUCH IT. The repo is mounted
+# read-only, and `npm ci` writing node_modules into a developer's tree is the
+# wrong side effect for a gate anyway: it is gigabytes of the host
+# architecture's binaries. So each repo gets a WORKSPACE: a copy of its source
+# (what git tracks, plus what it does not ignore) at /node/tree, synced over on
+# every run with node_modules left alone, and npm's download cache beside it at
+# /node/npm. `npm ci` runs again only when a package's lockfile, package.json or
+# the node major changed.
 #
-# Two consequences, both deliberate. Tests run at /cache/node/..., not /repo, so
+# /node is a podman volume of the repo's OWN, `sdlc-node-<owner>-<repo>`, and
+# these checks run as host steps that mount that volume and nothing else of the
+# gate's -- not the shared cache volume every other check uses. That is the
+# point. An install runs the dependencies' lifecycle scripts and a test runs the
+# repo's code, both with a writable workspace; in a shared volume, repo A's
+# postinstall could rewrite repo B's node_modules, and B's next green run would
+# be A's code. The volume is keyed on the origin remote's owner/repo, not the
+# directory name, so two different repos called `app` are not one workspace.
+#
+# Each check is two steps. `npm-install` syncs the tree and runs `npm ci`, with
+# the network. Then npm-lint and npm-test run with NO network -- what they need
+# is installed -- and npm-audit with it, because the registry is what it asks.
+#
+# Two consequences, both deliberate. Tests run at /node/tree, not /repo, so
 # one that reads `.git` or a path outside its package sees the workspace (no
 # .git) -- the same constraint a CI checkout with a shallow clone puts on it.
 # And the three checks share the workspace and the one install step, which is
@@ -1295,7 +1306,7 @@ def t_scan_rootfs() -> int:
 # native addons) and make this gate disagree with the repo's CI, which runs
 # them. The trust it extends is no wider than the check's own: `npm test` then
 # executes those same dependencies. The container is still the boundary --
-# no capabilities, no host mounts beyond the tree and the cache.
+# no capabilities, the tree read-only, and no volume but the repo's own.
 #
 # NO LOCKFILE, NO CHECK. `npm ci` needs package-lock.json and refuses without
 # one; `npm install` would resolve whatever is newest today and bless a tree
@@ -1345,13 +1356,113 @@ def npm_scripts(rel: str) -> dict:
     return scripts if isinstance(scripts, dict) else {}
 
 
+NODE_WORK_ENV = "SDLC_NODE_WORK"
+NODE_WORK = "/node"
+NODE_VOLUME_PREFIX = "sdlc-node-"
+_VOLUME_WORD = re.compile(r"[^a-z0-9_.-]+")
+
+
+def node_work() -> Path:
+    """The repo's own workspace volume, which only the node host steps mount."""
+    work = os.environ.get(NODE_WORK_ENV)
+    if not work:
+        cannot(
+            "the node checks run through bin/sdlc, which mounts the repo's own "
+            "workspace volume; there is none here"
+        )
+    return Path(work)
+
+
+def node_volume() -> str:
+    """`sdlc-node-<owner>-<repo>` from the origin remote; a hash of the host path without one.
+
+    The owner is in the name because a basename is not an identity: two repos
+    that share a name would otherwise share one workspace -- the cross-repo
+    write this volume exists to prevent.
+    """
+    url = ""
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "safe.directory=*", "remote", "get-url", "origin"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        url = proc.stdout.strip() if proc.returncode == 0 else ""
+    except OSError:
+        pass
+    parts = [p for p in re.split(r"[/:]", url.removesuffix(".git").rstrip("/")) if p]
+    if len(parts) >= 2:  # noqa: PLR2004 -- owner and repo
+        key = f"{parts[-2]}-{parts[-1]}"
+    else:
+        host = os.environ.get("SDLC_HOST_REPO", str(REPO))
+        key = "local-" + hashlib.sha256(host.encode()).hexdigest()[:16]
+    return NODE_VOLUME_PREFIX + (_VOLUME_WORD.sub("-", key.lower()).strip("-.") or "repo")
+
+
+def node_step(name: str, s: dict, command: list[str], *, network: bool) -> tuple[str, str, str]:
+    """A host step running `sdlc <command>` in this image over the repo's own volume."""
+    host = os.environ.get("SDLC_HOST_REPO")
+    if not host:
+        cannot(f"{name}: run through bin/sdlc, which supplies the host paths")
+    argv = [
+        "podman",
+        "run",
+        "--rm",
+        "--pull=never",
+        "-v",
+        f"{host}:/repo:ro,z",
+        "-w",
+        "/repo",
+        "-v",
+        f"{node_volume()}:{NODE_WORK}",
+        "--tmpfs",
+        "/tmp:rw,exec,size=4g,mode=1777",
+        "-e",
+        "HOME=/tmp",
+        "-e",
+        f"{NODE_WORK_ENV}={NODE_WORK}",
+        "-e",
+        f"SDLC_PROJECT={project_name()}",
+        # By name: podman copies the launcher's value when it has one, so
+        # `sdlc npm-test -- --grep x` reaches the script without its
+        # separator-joined words ever being written into a plan line.
+        "-e",
+        "SDLC_ARGS",
+    ]
+    if not network:
+        argv += ["--network", "none"]
+    return host_step(name, [*argv, "--", GATE_IMAGE, *command])
+
+
+def check_node(cfg: dict, name: str, s: dict) -> list[tuple[str, str, str]]:
+    """Install with the network, then judge: lint and test offline, the audit online."""
+    node_packages(name, s)  # refused at plan time, not halfway through a tier
+    return [
+        node_step(name, s, ["npm-install", name], network=True),
+        node_step(name, s, [name], network=name == "npm-audit"),
+    ]
+
+
+def t_npm_install(check: str | None) -> int:
+    """The install step of a node check: sync the workspace and `npm ci` what changed."""
+    if check not in ("npm-lint", "npm-test", "npm-audit"):
+        cannot("npm-install takes the node check it installs for")
+    node_install(check, node_packages(check, check_settings(sdlc_config(), check)))
+    return CLEAN
+
+
+HOST_CHECKS.update({"npm-lint": check_node, "npm-test": check_node, "npm-audit": check_node})
+
+
 def node_env() -> dict[str, str]:
     env = dict(os.environ)
     env.update(
         {
             # HOME is where npm wants its logs and config, and the tree is read-only.
             "HOME": "/tmp",
-            "npm_config_cache": str(CACHE / "npm"),
+            "npm_config_cache": str(node_work() / "npm"),
             "npm_config_update_notifier": "false",
             "npm_config_fund": "false",
         }
@@ -1445,7 +1556,7 @@ def node_install(name: str, packages: list[str]) -> Path:
                 f"(npm install --package-lock-only), and installing without one would "
                 f"test whatever is newest today rather than what the repo pinned"
             )
-    base = CACHE / "node" / project_name()
+    base = node_work()
     tree = base / "tree"
     node_sync(tree)
     env = node_env()
@@ -3106,6 +3217,8 @@ def main() -> int:
 
     if args.what == "launcher":
         return t_launcher(args.arg)
+    if args.what == "npm-install":
+        return t_npm_install(args.arg)
     if args.what == "plan":
         if not args.arg:
             cannot("plan needs commit, push, ci or a check name")

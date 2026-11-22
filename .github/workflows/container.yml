@@ -148,19 +148,19 @@ jobs:
 
       - name: Node stack end to end
         if: env.IS_TAG != 'true'
-        run: tests/test_node_stack.sh "localhost/python-sdlc:$GITHUB_SHA"
+        run: tests/test_node_stack.sh "localhost/sdlc:$GITHUB_SHA"
 
       # The bootc stack the same way: `bootc container lint` inside a real
       # bootc image, under the launcher's dropped capabilities.
       - name: Bootc stack end to end
         if: env.IS_TAG != 'true'
-        run: tests/test_bootc_stack.sh "localhost/python-sdlc:$GITHUB_SHA"
+        run: tests/test_bootc_stack.sh "localhost/sdlc:$GITHUB_SHA"
 
       # The docs stack the same way: markdownlint-cli2 and lychee, read-only
       # and offline, each failing on the defect it owns.
       - name: Docs stack end to end
         if: env.IS_TAG != 'true'
-        run: tests/test_docs_stack.sh "localhost/python-sdlc:$GITHUB_SHA"
+        run: tests/test_docs_stack.sh "localhost/sdlc:$GITHUB_SHA"
 
       - name: Log in to Quay
         if: github.event_name != 'pull_request'
