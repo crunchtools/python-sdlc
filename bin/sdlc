@@ -249,11 +249,13 @@ budget() {
   printf '%s' "$_half"
 }
 
-_cgroup_memory_ceiling() {      # memory.max from leaf to root, in MB; 0 for none
-  _dir=$(awk -F: '$2=="" {print $3; exit}' /proc/self/cgroup 2>/dev/null) || _dir=
+# The files are arguments only so the tests can hand it a cgroup tree of their own.
+_cgroup_memory_ceiling() {      # [proc-cgroup [cgroup-root]] -> memory.max leaf to root, in MB; 0 for none
+  _root=${2:-/sys/fs/cgroup}
+  _dir=$(awk -F: '$2=="" {print $3; exit}' "${1:-/proc/self/cgroup}" 2>/dev/null) || _dir=
   # The same namespace-root rule, and the same bounded walk, as the CPU ceiling.
   case "$_dir" in /|/..|/../*|*/../*|*/..) _dir= ;; esac
-  _path="/sys/fs/cgroup${_dir%/}"
+  _path="$_root${_dir%/}"
   _best=0
   while :; do
     if [ -r "$_path/memory.max" ]; then
@@ -265,7 +267,7 @@ _cgroup_memory_ceiling() {      # memory.max from leaf to root, in MB; 0 for non
       esac
     fi
     case "$_path" in
-      /sys/fs/cgroup/*) _path=$(dirname "$_path") ;;
+      "$_root"/*) _path=$(dirname "$_path") ;;
       *) break ;;
     esac
   done
@@ -286,10 +288,10 @@ _cgroup_memory_ceiling() {      # memory.max from leaf to root, in MB; 0 for non
 # in it: on a seat that is the agent driving this run. MemTotal is taken as it
 # is -- the kernel's own reservation is already off it, and a dedicated runner
 # has nothing else to keep.
-memory_available() {
-  _total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo 2>/dev/null) || _total=
+memory_available() {   # [meminfo [proc-cgroup [cgroup-root]]] -> MB
+  _total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' "${1:-/proc/meminfo}" 2>/dev/null) || _total=
   case "$_total" in ''|*[!0-9]*) _total=0 ;; esac
-  _cg=$(_cgroup_memory_ceiling)
+  _cg=$(_cgroup_memory_ceiling "${2:-}" "${3:-}")
   if [ "${_cg:-0}" -gt 0 ] 2>/dev/null && { [ "$_total" -eq 0 ] || [ "$_cg" -lt "$_total" ]; }; then
     _keep=$(( _cg / 4 ))
     [ "$_keep" -lt 512 ] && _keep=512
@@ -300,11 +302,15 @@ memory_available() {
 }
 
 _size_mb() {                    # 8g | 4096m | 4194304k | bytes -> MB
+  _v=${1%[kKmMgG]}
+  # In base 10: `$(( ))` reads a leading 0 as octal, so 010g was 8g and 08g
+  # aborted the script. podman reads them as 10g and 8g.
+  while [ "${_v#0}" != "$_v" ] && [ -n "${_v#0}" ]; do _v=${_v#0}; done
   case "$1" in
-    *[gG]) printf '%s' $(( ${1%?} * 1024 )) ;;
-    *[mM]) printf '%s' "${1%?}" ;;
-    *[kK]) printf '%s' $(( ${1%?} / 1024 )) ;;
-    *)     printf '%s' $(( $1 / 1048576 )) ;;
+    *[gG]) printf '%s' $(( _v * 1024 )) ;;
+    *[mM]) printf '%s' "$_v" ;;
+    *[kK]) printf '%s' $(( _v / 1024 )) ;;
+    *)     printf '%s' $(( _v / 1048576 )) ;;
   esac
 }
 
@@ -1385,7 +1391,10 @@ run_plan() {           # commit | push | ci | <check>
     run_serial "$_plan" || _plan_rc=$?
   elif [ "${_oncpu:-0}" -eq 1 ]; then
     run_split "$_plan" || _plan_rc=$?
-  elif [ "$(lane_memory "$_oncpu" "${MEM_AVAILABLE:-0}" "$GATE_MEMORY_MB")" -eq 0 ]; then
+  # Two or more, because lanes with no container between them (_oncpu 0) have
+  # nothing to divide memory between, and lane_memory would divide by it.
+  elif [ "$_oncpu" -ge 2 ] \
+       && [ "$(lane_memory "$_oncpu" "${MEM_AVAILABLE:-0}" "$GATE_MEMORY_MB")" -eq 0 ]; then
     # Two containers that cannot both fit are not faster side by side: the
     # kernel kills one, and a killed CodeQL is a gate that could not run.
     printf '%s: %s lanes do not fit in the %sm this machine has; running them in turn\n' \

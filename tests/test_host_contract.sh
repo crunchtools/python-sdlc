@@ -160,6 +160,9 @@ case " \$* " in
   *" plan lanes-stall "*)
     printf 'f${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
     printf 's${TAB}two${TAB}image-ro${TAB}very-slow-rc-one\n' ;;
+  *" plan lanes-all-local "*)
+    printf 'gatehouse${TAB}one${TAB}local${TAB}gatehouse\n'
+    printf 'gatehouse${TAB}two${TAB}local${TAB}gatehouse\n' ;;
   *" plan lanes-review "*)
     printf 'x${TAB}main${TAB}image-ro${TAB}tick-x\n'
     printf 'rev${TAB}review${TAB}local${TAB}gatehouse\n' ;;
@@ -532,6 +535,51 @@ mem 6144 8g 12288 2 "a smaller machine divides what it has between the lanes"
 mem 1024 1g 3072  2 "a budget set below the minimum is the floor asked for"
 mem 8192 8g 0     2 "memory that cannot be read changes nothing"
 mem 4096 4096m 30000 3 "megabytes are read as megabytes"
+mem 8192 08g 30000 2 "a leading zero is decimal, not a shell error"
+mem 10240 010g 30000 2 "a leading zero is decimal, not octal"
+
+# The ceiling itself, read from a cgroup tree and meminfo of the test's own.
+# What a seat, a runner and a v1 host look like, without needing to be one.
+CGSH="$RUN/cgroup.sh"
+{
+  sed -n '/^_cgroup_memory_ceiling()/,/^}$/p' bin/sdlc
+  sed -n '/^memory_available()/,/^}$/p' bin/sdlc
+  # shellcheck disable=SC2016  # source for the generated script, not expanded here
+  echo 'memory_available "$@"'
+} > "$CGSH"
+CG="$RUN/cg"
+echo 'MemTotal:       16365980 kB' > "$RUN/meminfo"
+cgtree() {             # proc-cgroup-line root-max mid-max leaf-max
+  rm -rf "$CG"
+  mkdir -p "$CG/a/b"
+  printf '%s\n' "$1" > "$RUN/proc-cgroup"
+  [ -n "$2" ] && printf '%s\n' "$2" > "$CG/memory.max"
+  [ -n "$3" ] && printf '%s\n' "$3" > "$CG/a/memory.max"
+  [ -n "$4" ] && printf '%s\n' "$4" > "$CG/a/b/memory.max"
+  return 0
+}
+avail() {              # expected meminfo description
+  _got=$(sh "$CGSH" "$2" "$RUN/proc-cgroup" "$CG")
+  if [ "$_got" = "$1" ]; then ok "$3 ($_got)"; else bad "$3: got $_got, want $1"; fi
+}
+cgtree 0::/ 4294967296 '' ''
+avail 3072  "$RUN/meminfo" "a 4g seat at its namespace root keeps a quarter for the agent"
+cgtree 0::/a/b max max 7516192768
+avail 5376  "$RUN/meminfo" "a 7g leaf is read under an unlimited parent"
+cgtree 0::/a/b max 4294967296 max
+avail 3072  "$RUN/meminfo" "the smallest ceiling on the way to the root wins"
+cgtree 0::/a/b max max max
+avail 15982 "$RUN/meminfo" "max everywhere is MemTotal, taken whole"
+cgtree 0::/a/b max 25769803776 max
+avail 15982 "$RUN/meminfo" "a slice larger than the machine changes nothing"
+cgtree 0::/a/b '' '' ''
+avail 15982 "$RUN/meminfo" "no memory.max files is MemTotal"
+cgtree 4:memory:/a/b '' '' 4294967296
+avail 15982 "$RUN/meminfo" "cgroup v1, with no unified line, is MemTotal"
+cgtree 0::/../a max max 4294967296
+avail 15982 "$RUN/meminfo" "a path outside the namespace is not walked"
+cgtree 0::/a/b max max max
+avail 0     "$RUN/no-such-meminfo" "nothing readable is 0, which changes nothing"
 
 printf '\n== the lanes\n\n'
 
@@ -751,6 +799,13 @@ if [ "$rc" -eq 0 ]; then
   ok "a passing review after a non-empty diff reports success"
 else
   bad "a passing review after a non-empty diff exited $rc"
+fi
+# Two lanes with no container between them have no memory to divide (a999).
+PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" sh bin/sdlc lanes-all-local > "$RUN/out" 2>&1 && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && ! grep -q 'division' "$RUN/out"; then
+  ok "lanes with no container in them run without dividing by zero"
+else
+  bad "lanes-all-local exited $rc: $(tail -2 "$RUN/out")"
 fi
 
 printf '\n== a lane that is not on a CPU\n\n'
