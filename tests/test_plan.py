@@ -592,6 +592,40 @@ check(
     "a bootc Containerfile is the bootc stack, not the container stack",
     stacks_of({"Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n"}) == ("bootc",),
 )
+for label, cf, want in (
+    ("an ARG default via $X", "ARG B=quay.io/x/fedora-bootc:42\nFROM $B\n", "bootc"),
+    ("an ARG default via ${X}", "ARG B='quay.io/x/fedora-bootc:42'\nFROM ${B}\n", "bootc"),
+    ("a ${X:-default}", "FROM ${B:-quay.io/x/fedora-bootc:42}\n", "bootc"),
+    (
+        "a bootc builder under a plain final stage",
+        "FROM x-bootc AS build\nFROM ubi9\n",
+        "container",
+    ),
+    (
+        "a plain builder under a bootc final stage",
+        "FROM golang AS build\nFROM x/rhel-bootc\n",
+        "bootc",
+    ),
+    ("a final stage chaining to a bootc stage", "FROM x/rhel-bootc AS base\nFROM base\n", "bootc"),
+    ("a --platform flag", "FROM --platform=linux/amd64 x/rhel-bootc:10\n", "bootc"),
+    (
+        "a continuation line",
+        "ARG B=\\\nx/fedora-bootc\nFROM \\\n  --platform=linux/amd64 \\\n  $B AS x\n",
+        "container",
+    ),
+    (
+        "a FROM split by a continuation",
+        "FROM \\\n  --platform=linux/amd64 \\\n  x/rhel-bootc\n",
+        "bootc",
+    ),
+    ("an unresolvable ARG", "ARG B\nFROM $B\n", "container"),
+    ("a commented-out bootc FROM", "# FROM x/rhel-bootc\nFROM ubi9\n", "container"),
+):
+    check(
+        f"bootc detection: {label}",
+        stacks_of({"Containerfile": cf}) == (want,),
+        str(stacks_of({"Containerfile": cf})),
+    )
 check("a package.json is the node stack", stacks_of({"package.json": "{}"}) == ("node",))
 check(
     "skip-stacks accepts running without it",
