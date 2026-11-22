@@ -158,6 +158,12 @@ off its files:
 | a Containerfile whose `FROM` is a bootc image | bootc | not yet |
 | none of these | docs | not yet |
 
+Gatehouse takes its settings from `~/.config/mcp-env/gatehouse.env` (or
+`GATEHOUSE_ENV`), passed as `--env-file`. When that file sets
+`OPENROUTER_API_KEY_FILE` to an absolute path, the file is mounted read-only at
+the same path, so the key stays a file and never enters the container's
+environment.
+
 Gourmand, Gatehouse, the constitution validator and `hooks-installed` belong to
 no stack and run everywhere. A repo can add or drop a stack, and nothing more:
 

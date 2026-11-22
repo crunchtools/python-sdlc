@@ -716,6 +716,48 @@ else
   bad "a passing review after a non-empty diff exited $rc"
 fi
 
+# a968: a key named by OPENROUTER_API_KEY_FILE is mounted read-only at its own
+# path, so it stays a file inside the container and never an environment value.
+KEYFILE="$GITSHIM/gatehouse-openrouter-key"
+printf 'sk-or-v1-test\n' > "$KEYFILE"
+printf 'GATEHOUSE_LLM_BASE_URL=https://openrouter.ai/api/v1\nOPENROUTER_API_KEY_FILE=%s\n' \
+  "$KEYFILE" > "$GITSHIM/keyfile.env"
+log_mark
+PATH="$GITSHIM" GATEHOUSE_ENV="$GITSHIM/keyfile.env" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 \
+  && rc=0 || rc=$?
+log_since
+if [ "$rc" -eq 0 ] && grep -qF -- "-v $KEYFILE:$KEYFILE:ro,z" "$RUN/podman.log" \
+    && grep -qF -- "--env-file $GITSHIM/keyfile.env" "$RUN/podman.log" \
+    && ! grep -q 'sk-or-v1-test' "$RUN/podman.log"; then
+  ok "a key file named in gatehouse.env is mounted read-only, not passed as a value"
+else
+  bad "a key file named in gatehouse.env was not mounted (exit $rc)"
+  sed 's/^/       /' "$RUN/podman.log"
+fi
+
+log_mark
+PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 || :
+log_since
+if grep -q 'gatehouse' "$RUN/podman.log" && ! grep -q -- ' -v .*:ro,z -i ' "$RUN/podman.log"; then
+  ok "without OPENROUTER_API_KEY_FILE nothing extra is mounted"
+else
+  bad "a gatehouse.env with no key file still mounted one"
+  sed 's/^/       /' "$RUN/podman.log"
+fi
+
+for bad_path in relative/key "$GITSHIM/missing-key" "$GITSHIM/a:b"; do
+  printf 'OPENROUTER_API_KEY_FILE=%s\n' "$bad_path" > "$GITSHIM/keyfile.env"
+  log_mark
+  PATH="$GITSHIM" GATEHOUSE_ENV="$GITSHIM/keyfile.env" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 \
+    && rc=0 || rc=$?
+  log_since
+  if [ "$rc" -ne 0 ] && ! grep -q ' gatehouse$' "$RUN/podman.log"; then
+    ok "OPENROUTER_API_KEY_FILE=$bad_path is refused before Gatehouse runs"
+  else
+    bad "OPENROUTER_API_KEY_FILE=$bad_path reached Gatehouse (exit $rc)"
+  fi
+done
+
 printf '\n== a lane that is not on a CPU\n\n'
 
 # A reviewer waiting on an API is not competing for the machine, so it runs
