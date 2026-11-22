@@ -26,7 +26,6 @@ import os
 import re
 import subprocess
 import sys
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,9 +49,24 @@ def semver(text: str) -> tuple[int, int, int]:
     return major, minor, patch
 
 
+# Seconds for one registry lookup. The weekly job retries tomorrow; a lookup
+# that hangs must not hold the runner until Actions' own timeout.
+HTTP_TIMEOUT = 30
+
+
 def http_json(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 - fixed https URLs
-        return json.load(resp)
+    """A registry's JSON answer, through curl like gh_api goes through gh.
+
+    curl rather than urllib: --proto keeps it to https whatever the URL says,
+    and a failed status is an error (-f) rather than a body to parse.
+    """
+    out = subprocess.run(
+        ["curl", "-fsSL", "--proto", "=https", "--max-time", str(HTTP_TIMEOUT), url],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return json.loads(out)
 
 
 def gh_api(path: str, *extra: str) -> str:
@@ -91,8 +105,10 @@ def latest_lychee() -> str:
 
 def lychee_digest(version: str) -> str:
     """The manifest-list digest Docker Hub holds for lychee:<version>."""
-    data = http_json(f"https://hub.docker.com/v2/repositories/lycheeverse/lychee/tags/{version}")
-    digest = data.get("digest")
+    tag_record = http_json(
+        f"https://hub.docker.com/v2/repositories/lycheeverse/lychee/tags/{version}"
+    )
+    digest = tag_record.get("digest")
     if not isinstance(digest, str) or not DIGEST.match(digest):
         raise ValueError(f"lychee:{version} has no usable digest on Docker Hub: {digest!r}")
     return digest

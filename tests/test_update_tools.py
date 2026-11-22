@@ -201,4 +201,5 @@ check("real Containerfile: markdownlint ARG x1", real.count("ARG MARKDOWNLINT_CL
 
 shutil.rmtree(REPO / "scripts" / "__pycache__", ignore_errors=True)
 print(f"{failures} failure(s)")
-sys.exit(1 if failures else 0)
+if __name__ == "__main__":
+    sys.exit(1 if failures else 0)
