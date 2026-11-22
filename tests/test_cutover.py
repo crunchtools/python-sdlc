@@ -412,6 +412,24 @@ for line, hand in (
         str(result.hand),
     )
 
+# A flow-style job is valid YAML that signed_job cannot edit by line: the repo
+# gets a hand note and the workflow is left as it was, not a crash.
+FLOW = (
+    "name: C\non:\n  push:\njobs:\n  build: {uses: "
+    "crunchtools/constitution/.github/workflows/container-release.yml@v1, "
+    "with: {image: quay.io/crunchtools/app}}\n"
+)
+repo, result = run({".github/workflows/container.yml": FLOW}, label="signing, flow style")
+check(
+    "signing: a flow-style job is left unchanged",
+    read(repo, ".github/workflows/container.yml") == FLOW,
+)
+check(
+    "signing: and named for a human",
+    any(h.startswith("signing:") and "by hand" in h for h in result.hand),
+    str(result.hand),
+)
+
 # ---------------------------------------------------------------- schedule
 
 ON_FULL = release_job(QUAY).replace("@v1.59.0", f"@{REF}")

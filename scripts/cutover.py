@@ -240,6 +240,8 @@ def signed_job(lines: list[str], job_id: str) -> list[str]:
     if span is None:
         raise ValueError(f"no job `{job_id}` under `jobs:`")
     start, end, indent = span
+    if lines[start].split(":", 1)[1].split("#", 1)[0].strip():
+        raise ValueError(f"job `{job_id}` is not a block mapping")
     key = indent + 2
     lines = list(lines)
     # Secrets first: they sit below `with:`, so its indices stay put.
@@ -263,6 +265,8 @@ def signed_job(lines: list[str], job_id: str) -> list[str]:
     note = "".join(f"{' ' * (key + 2)}{line}\n" for line in SIGN_NOTE.splitlines())
     if at is None:
         uses = find_key(lines, "uses", key, start + 1, end)
+        if uses is None:
+            raise ValueError(f"job `{job_id}` has no `uses:` line at its keys' indent")
         lines[uses + 1 : uses + 1] = [f"{' ' * key}with:\n", note, f"{' ' * (key + 2)}sign: true\n"]
         return lines
     stop = block_end(lines, at, key)
