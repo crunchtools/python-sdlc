@@ -3,7 +3,7 @@
 # request that merges itself when CI is green.
 #
 #   1. this workflow      new tool release -> PR moving the pin here
-#   2. release.yml        that PR merges -> python-sdlc vX.Y.Z is released
+#   2. release.yml        that PR merges -> sdlc vX.Y.Z is released
 #   3. container.yml      the release is promoted to sdlc:latest, which every
 #                         converted repo floats on: no pull request per repo
 #
@@ -64,8 +64,8 @@ jobs:
           branch="chore/tools-$VERSION"
           git switch -c "$branch"
           git -c user.name=crunchtools-ci -c user.email=ci@crunchtools.com \
-            commit -qam "chore: python-sdlc $VERSION ($SUMMARY)"
+            commit -qam "chore: sdlc $VERSION ($SUMMARY)"
           git push -q -u origin "$branch"
-          url=$(gh pr create --head "$branch" --title "chore: python-sdlc $VERSION" \
-            --body "Moves the baked tool pins: $SUMMARY. Merging releases python-sdlc $VERSION, which opens a bump PR in every repo that pins it.")
+          url=$(gh pr create --head "$branch" --title "chore: sdlc $VERSION" \
+            --body "Moves the baked tool pins: $SUMMARY. Merging releases sdlc $VERSION, which opens a bump PR in every repo that pins it.")
           gh pr merge "$url" --auto --merge

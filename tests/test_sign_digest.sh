@@ -19,8 +19,8 @@ W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 mkdir "$W/bin"
 D=sha256:$(printf 'c%.0s' $(seq 64))
-A=quay.io/crunchtools/python-sdlc
-B=quay.io/crunchtools/sdlc
+A=quay.io/crunchtools/sdlc
+B=quay.io/crunchtools/python-sdlc
 sed -n '/^-----BEGIN PUBLIC KEY-----$/,/^-----END PUBLIC KEY-----$/p' bin/sdlc-bootstrap > "$W/fleet.pub"
 
 # The fake cosign. `public-key` prints $W/secret.pub; a reference is signed

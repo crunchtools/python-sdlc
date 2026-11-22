@@ -1,4 +1,4 @@
-# python-sdlc Constitution
+# sdlc Constitution
 
 > **Version:** 0.1.0
 > **Ratified:** 2026-11-04

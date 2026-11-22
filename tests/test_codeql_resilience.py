@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A CodeQL that cannot run must not be what teaches people `--no-verify`.
 
-python-sdlc#33: on josui-skills a killed run left a half-built database that a
+#33: on josui-skills a killed run left a half-built database that a
 person had to delete by hand, the evaluator was sized by CodeQL's own guess
 rather than the container's budget, and an analysis that died blocked every
 push with no door but `--no-verify` -- which skips every gate, not the broken

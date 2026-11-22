@@ -1,4 +1,4 @@
-# CodeQL in python-sdlc
+# CodeQL in sdlc
 
 ## Why it fits at all
 
@@ -123,6 +123,6 @@ ships Python 3.14. The Containerfile installs `which` for exactly this reason.
 
 The CodeQL CLI and its query packs are redistributed here under GitHub's
 [CodeQL CLI terms](https://github.com/github/codeql-cli-binaries/blob/main/LICENSE.md),
-which permit use for analysing software. python-sdlc uses it to analyse
-CrunchTools repositories, which is within those terms. python-sdlc's own code is
+which permit use for analysing software. sdlc uses it to analyse
+CrunchTools repositories, which is within those terms. sdlc's own code is
 AGPL-3.0-or-later; the bundled CodeQL is not, and keeps its own licence.

@@ -1,7 +1,7 @@
 #!/opt/constitution-venv/bin/python3
 """The in-image half of the CrunchTools Python SDLC gate.
 
-Runs inside quay.io/crunchtools/python-sdlc with the repo mounted at /repo.
+Runs inside quay.io/crunchtools/sdlc with the repo mounted at /repo.
 `bin/sdlc` on the host is what starts it; everything that needs the host's git
 or network identity stays there, and everything that needs a tool stays here.
 
@@ -17,7 +17,7 @@ CodeQL at the push tier, when the analysis itself broke and the repo's CI runs
 `sdlc ci`. It is not a pass. It is a loud "nothing was judged here, CI is the
 judge", which the launcher lets through instead of refusing the push -- because
 refusing left `--no-verify` as the only door, and that door skips every other
-gate too (python-sdlc#33).
+gate too (#33).
 
 2 is never to be worked around. A gate that cannot run and reports 0 is worse
 than no gate, because the pipeline goes green and nobody looks again. The
@@ -214,7 +214,7 @@ DEFAULTS = {
     # `lint` is ruff's VERDICT: the commit tier's two ruff steps fix what they
     # can and pass, so ci -- which is push minus the reviewers -- had no ruff at
     # all, and a `--no-verify` commit reached a green required check unlinted
-    # (python-sdlc#48). First, because it is the cheapest thing here to fail.
+    # (#48). First, because it is the cheapest thing here to fail.
     "push": [
         "lint",
         "containerfile-lint",
@@ -250,7 +250,7 @@ CI_DEFAULTS = ["container-build", "container-smoke", "container-scan"]
 #   skip-stacks = ["node"]      drop one they do
 #
 # A Python repo whose config says neither keeps exactly the python stack, as
-# every python-sdlc release before this one ran it. That is not detection
+# every release before this one ran it. That is not detection
 # failing, it is a promise: 36 repos pin this tool and gate merges on `sdlc
 # ci`, and most of them carry a Containerfile. Turning the container stack on
 # under them is a decision with its own release note, not a side effect of an
@@ -507,7 +507,7 @@ def push_skips(cfg: dict, stacks: tuple[str, ...] = COMPAT_STACKS) -> list[str]:
 
     That skip is the only way a repo takes a verdict out of ci, and a verdict
     that is not run is otherwise just absent: a green `sdlc ci` read the same
-    whether the repo ran lint or opted out of it (python-sdlc#50).
+    whether the repo ran lint or opted out of it (#50).
     """
     drop = set(names(block(cfg, "push").get("skip"), "[tool.sdlc.push] skip"))
     ci = resolve(cfg, "ci", stacks)
@@ -1773,7 +1773,7 @@ def t_codeql(s: dict) -> int:
     # worktree's basename, so two checkouts that share one -- or a push retried
     # while the last is still running -- used ONE directory: each deleted the
     # other's database mid-run, which left half-built caches and analyses dying
-    # with nothing to read (python-sdlc#33).
+    # with nothing to read (#33).
     lock_codeql(db)
     # Compiled query plans, kept between runs. CodeQL's default is ~/.codeql,
     # which is /tmp in this image and gone when the container exits, so every
@@ -1992,7 +1992,7 @@ def codeql_ram_mb() -> int:
     Left to itself CodeQL does not look at the container at all. `codeql
     resolve ram` gave a 1509 MB heap in a container with 8g and in one with 2g
     alike, and 1253 MB on josui-skills' dataset -- where analyze then died with
-    status 70 (python-sdlc#33). The 8g the launcher budgets was never used.
+    status 70 (#33). The 8g the launcher budgets was never used.
 
     The quarter left over is for the JVM outside its heap, file-backed maps of
     the dataset, and /tmp, which is a tmpfs and so is charged to this same
@@ -2048,7 +2048,7 @@ def runs_sdlc_ci(text: str, default_branch: str) -> bool:
     - trentina carries `VERIFIER_JOB: sdlc ci` as a job name and `sdlc ci`
       inside an error message. So the invocation is looked for in parsed
       `steps[].run` scripts only -- never in a comment, a `name:`, an `env:`
-      value or an echoed string (python-sdlc#34).
+      value or an echoed string (#34).
     - a job or step behind an `if:` may be skipped on this very commit, so a
       conditional one grants nothing.
     - a workflow triggered only by `workflow_dispatch` or `schedule` judges
@@ -2329,7 +2329,7 @@ def t_stacks() -> int:
     if active == COMPAT_STACKS and "stacks" not in cfg and "skip-stacks" not in cfg:
         print(
             "\nA Python repo that names no stacks runs the python stack alone, as "
-            "python-sdlc always has.\nTo run what was detected, add "
+            "sdlc always has.\nTo run what was detected, add "
             "[tool.sdlc] stacks = [...] with the ones you want."
         )
     print(f"\nthis image checks: {', '.join(STACKS)}; not yet: {', '.join(PLANNED_STACKS)}")

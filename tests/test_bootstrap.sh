@@ -1,7 +1,7 @@
 #!/bin/sh
 # bin/sdlc-bootstrap against a fake podman: nothing from the image runs before
 # the fleet key's signature on its digest is verified, and everything after
-# runs by that digest (python-sdlc#81). The real cosign and quay.io are what
+# runs by that digest (#81). The real cosign and quay.io are what
 # container.yml's promote step proves; this pins the order and the exits.
 #
 # Usage: tests/test_bootstrap.sh

@@ -267,10 +267,10 @@ api = FakeApi(
         bumping="main",
         floating="main",
         noexec="main",
-        **{"python-sdlc": "main"},
+        **{"python-sdlc": "main", "sdlc": "main"},
     ),
 )
-names = ["pinned", "old", "odd", "bumping", "floating", "noexec", "python-sdlc", "gone"]
+names = ["pinned", "old", "odd", "bumping", "floating", "noexec", "python-sdlc", "sdlc", "gone"]
 counts, ledger, out = wave_run(api, base, names, apply=False)
 got = rows(ledger)
 check("dry run: a pinned repo would open", got["pinned"][1] == "would-open", str(got["pinned"]))
@@ -303,6 +303,11 @@ check(
     str(got["noexec"]),
 )
 check("dry run: the converter's own repo is skipped", got["python-sdlc"][1] == "skipped")
+check(
+    "dry run: the converter's own repo under its new name is skipped",
+    got["sdlc"][1] == "skipped" and "converter's own repo" in got["sdlc"][3],
+    str(got["sdlc"]),
+)
 check("dry run: a name not in the org is skipped", got["gone"][1] == "skipped")
 check("dry run: only reads", all(m == "GET" for m, _, _ in api.calls), str(api.calls))
 check(
@@ -322,7 +327,7 @@ check(
 )  # pinned, old, floating, noexec
 check(
     "re-run: refused and skipped repos are tried again",
-    counts.get("refused") == 1 and counts.get("skipped") == 3,
+    counts.get("refused") == 1 and counts.get("skipped") == 4,
     str(counts),
 )
 

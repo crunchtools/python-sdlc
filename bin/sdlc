@@ -13,7 +13,7 @@
 #   - the resource budget, because a pre-commit `entry:` is a static string and
 #     cannot read one
 #
-# Everything else is one `podman run` into quay.io/crunchtools/python-sdlc.
+# Everything else is one `podman run` into quay.io/crunchtools/sdlc.
 #
 # EXIT CODES, and they are the contract:
 #   0  ran, found nothing
@@ -21,7 +21,7 @@
 #   2  COULD NOT RUN -- never to be worked around
 #   3  COULD NOT RUN, deferred to CI -- push only, granted by the image when
 #      CodeQL itself broke and `sdlc ci` will judge the same commit. Printed
-#      loudly, recorded, and not a refusal (python-sdlc#33). Anywhere but a
+#      loudly, recorded, and not a refusal (#33). Anywhere but a
 #      push it is a 2.
 #
 # Podman's own 125/126/127 mean the container never started, so they map to 2.
@@ -36,7 +36,7 @@ ME=$(basename "$0")
 # The image this file came from, when it came from one. `sdlc launcher <ref>`,
 # run inside quay.io/crunchtools/sdlc, prints this file with the ref written on
 # the next line; that is how a repo with no `rev:` gets its launcher
-# (bin/sdlc-bootstrap). Empty in a clone of python-sdlc, which pins by IMAGE_TAG.
+# (bin/sdlc-bootstrap). Empty in a clone of this repo, which pins by IMAGE_TAG.
 LAUNCHED_FROM=
 
 die()  { printf '%s: GATE CANNOT RUN: %s\n' "$ME" "$*" >&2; exit 2; }
@@ -62,7 +62,7 @@ else
   # launcher and the image together and they cannot disagree. An override --
   # below, once the repo is known -- replaces it for the inner loop, and says
   # so every run.
-  DEFAULT_IMAGE=quay.io/crunchtools/python-sdlc:$IMAGE_TAG
+  DEFAULT_IMAGE=$FLEET_IMAGE:$IMAGE_TAG
   RELEASE_IMAGE=$DEFAULT_IMAGE
 fi
 
@@ -299,7 +299,7 @@ host_constitution() {
                 exit
               }' "$_manifest")
   [ -n "$_tag" ] || return 0
-  _root=${XDG_CACHE_HOME:-$HOME/.cache}/python-sdlc/constitution
+  _root=${XDG_CACHE_HOME:-$HOME/.cache}/sdlc/constitution
   _dir=$_root/$_tag
   if [ ! -f "$_dir/constitution.md" ]; then
     mkdir -p "$_root" 2>/dev/null || return 0
