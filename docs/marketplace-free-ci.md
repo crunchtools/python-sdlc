@@ -4,169 +4,234 @@ Design for a1051. Nothing here is implemented: it is the target that
 `convert_repo.py` and `cutover.py` will be changed to write, and the list of
 `sdlc` internals that have to exist first.
 
-## The file: 68 lines, six jobs, every repo
+## The file: 76 lines, seven jobs, every repo
 
 Every repo carries exactly this `.github/workflows/ci.yml`, byte for byte,
-whatever kind of repo it is. It is 68 lines without comments, and it contains
+whatever kind of repo it is. It is 76 lines without comments, and it contains
 no `uses:` of any kind: no `actions/checkout`, no reusable-workflow call and no
-third-party action. Every job runs the sdlc image and the one command
-`sdlc event`. That command reads `GITHUB_EVENT_NAME`, the event payload and
-`GITHUB_JOB`, and runs whatever that trust level does for that event in this
-repo.
+third-party action. Every job runs one image, the sdlc **bootstrap**, by a
+literal digest, and one command, `sdlc event`. That command reads
+`GITHUB_EVENT_NAME`, the event payload and `GITHUB_JOB`, and runs whatever
+that trust level does for that event in this repo.
 
 ```yaml
-# One file, every repo, copied unchanged. A job is a trust level, not a task:
-# `sdlc event` reads the event and GITHUB_JOB and runs what applies.
+# One file, every repo, copied unchanged. A job is a trust level; `sdlc event`
+# routes inside it. The only version here is the bootstrap's digest: it
+# cosign-verifies the current sdlc release (key and minimum version baked in)
+# and runs it through the runner's container socket, so repo code only ever
+# runs in a nested container with no token, no socket and no network.
 name: CI
 on:
   push: { branches: [main] }
   pull_request:
   pull_request_target: { types: [opened, synchronize, reopened, closed] }  # zizmor: ignore[dangerous-triggers]
-  pull_request_review_comment:
+  pull_request_review_comment: { types: [created, edited, deleted] }
   issues: { types: [opened, labeled, reopened] }
-  workflow_run: { workflows: [CI], types: [completed] }  # zizmor: ignore[dangerous-triggers]
   release: { types: [published] }
-  repository_dispatch:
+  repository_dispatch: { types: [parent-image-updated] }
   schedule: [{ cron: "17 6 * * 1" }]
   workflow_dispatch: { inputs: { version: { type: string } } }
 permissions: {}
 jobs:
-  check:  # read-only, no secrets: safe on a fork's pull request
+  check:  # no secret, read token: the one level a fork's PR runs, and the only one on self-hosted
     name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
     if: contains(fromJSON('["push","pull_request","release","schedule","repository_dispatch","workflow_dispatch"]'), github.event_name)
     runs-on: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name == github.repository && vars.CACHED_RUNNER_LABEL || 'ubuntu-latest') || vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
-    container: { image: "${{ vars.SDLC_REF || 'quay.io/crunchtools/sdlc:latest' }}", options: --privileged }
+    container: &boot { image: "quay.io/crunchtools/sdlc-boot@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, security-events: write }
     outputs: { result: "${{ steps.e.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}" }
     steps: &event [{ id: e, run: sdlc event }]
-  ai:  # model keys, read-only token, no App key; hands a patch or verdict on
+  ai:  # model keys and a read token, never an App key; hands its result on in 128 KiB chunks
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target' && github.event.action != 'closed'
-    runs-on: &runner ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
-    container: &sdlc { image: "${{ vars.SDLC_REF }}" }
+    runs-on: &hosted ${{ github.event.repository.private && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
+    container: *boot
     permissions: { contents: read, issues: read, pull-requests: read }
-    outputs: { result: "${{ steps.e.outputs.result }}" }
+    outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", OPENROUTER_API_KEY: "${{ secrets.OPENROUTER_API_KEY }}" }
     steps: *event
-  write:  # the App key, no model: comments, labels, PRs, pushes, release PR and tag, retriage
+  write:  # the Ashigaru App key, no model: comments, labels, PRs, pushes, release PR and tag, retriage
     needs: [check, ai]
-    if: >-
-      always() && !cancelled() && !contains(fromJSON('["push","pull_request","repository_dispatch"]'), github.event_name)
-      && (github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request_review_comment')
-    runs-on: *runner
-    container: *sdlc
-    permissions: { actions: write }
-    env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", SDLC_IN: "${{ toJSON(needs) }}", VERSION: "${{ inputs.version }}" }
+    if: always() && !cancelled() && contains(fromJSON('["pull_request_target","pull_request_review_comment","issues","workflow_dispatch","schedule"]'), github.event_name)
+    concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}" }
+    runs-on: *hosted
+    container: *boot
+    permissions: {}
+    env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
+           SDLC_AI_0: "${{ needs.ai.outputs.p0 }}", SDLC_AI_1: "${{ needs.ai.outputs.p1 }}", SDLC_AI_2: "${{ needs.ai.outputs.p2 }}", SDLC_AI_3: "${{ needs.ai.outputs.p3 }}" }
     steps: *event
-  gate:  # required: workflow guard and every finding answered; base definition, no secrets
+  gate:  # required: workflow guard and every finding answered; base definition, no secret
     name: sdlc / gate (${{ github.event_name }})  # required as "(pull_request_target)"
     needs: write
     if: always() && github.event_name == 'pull_request_target' && github.event.action != 'closed'
-    runs-on: *runner
-    container: *sdlc
+    runs-on: *hosted
+    container: *boot
     permissions: { contents: read, pull-requests: write }
     env: { GITHUB_TOKEN: "${{ github.token }}" }
     steps: *event
-  image:  # builds and gates the candidate, pushes it by digest; privileged, registry creds
+  image:  # builds the merged Containerfile through the socket, gates it, pushes gated-<sha> by digest
     needs: check
-    if: fromJSON(needs.check.outputs.result || '{}').image && github.event_name != 'pull_request' && !inputs.version
-    runs-on: *runner
-    container: { image: "${{ vars.SDLC_REF }}", options: --privileged }
+    if: github.event_name != 'pull_request' && !inputs.version && fromJSON(needs.check.outputs.result || '{}').image
+    runs-on: *hosted
+    container: *boot
     permissions: { contents: read }
     outputs: { result: "${{ steps.e.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", QUAY_USERNAME: "${{ secrets.QUAY_USERNAME }}", QUAY_PASSWORD: "${{ secrets.QUAY_PASSWORD }}" }
     steps: *event
-  release:  # signs and promotes the digest, publishes to PyPI by OIDC; never builds
-    needs: [check, image]
-    if: always() && !cancelled() && (needs.image.result == 'success' || github.event_name == 'release')
-    runs-on: ubuntu-latest
+  promote:  # the cosign key: signs, attests and moves tags on a digest it did not build
+    needs: image
+    concurrency: { group: "promote-${{ github.repository }}" }
+    runs-on: *hosted
     environment: cosign-signing
-    container: *sdlc
+    container: *boot
+    permissions: { contents: read }
+    env: { SDLC_IMAGE_RESULT: "${{ needs.image.outputs.result }}", QUAY_USERNAME: "${{ secrets.QUAY_USERNAME }}", QUAY_PASSWORD: "${{ secrets.QUAY_PASSWORD }}", COSIGN_PRIVATE_KEY: "${{ secrets.COSIGN_PRIVATE_KEY }}", COSIGN_PASSWORD: "${{ secrets.COSIGN_PASSWORD }}" }
+    steps: *event
+  pypi:  # OIDC only, in the tag-restricted pypi environment
+    needs: check
+    if: github.event_name == 'release' && fromJSON(needs.check.outputs.result || '{}').publish == 'pypi'
+    runs-on: ubuntu-latest
+    environment: pypi
+    container: *boot
     permissions: { contents: read, id-token: write }
-    env: { SDLC_IN: "${{ toJSON(needs) }}", QUAY_USERNAME: "${{ secrets.QUAY_USERNAME }}", QUAY_PASSWORD: "${{ secrets.QUAY_PASSWORD }}", COSIGN_PRIVATE_KEY: "${{ secrets.COSIGN_PRIVATE_KEY }}", COSIGN_PASSWORD: "${{ secrets.COSIGN_PASSWORD }}" }
+    env: { GITHUB_TOKEN: "${{ github.token }}" }
     steps: *event
 ```
 
-**Why 68 lines and not 20.** GitHub makes a separate job only where the
-permissions, the secrets, the OIDC grant or the runner differ. The table below
-shows six such trust levels. Each job needs its `if`, `runs-on`, `container`,
-`permissions`, `env` and `steps` lines, which comes to about 7 lines a job, and
-`on:` needs 11 more. So 68 lines is close to the floor for six trust levels.
-Merging any two jobs would put a secret or a write grant somewhere the design
-says it must not be. Every version and every task is already out of the file:
-the image digest is `vars.SDLC_REF`, and the routing is `sdlc event`. YAML
-anchors (`&event`, `&sdlc`, `&runner`) save the repeats. GitHub accepts anchors
-but not merge keys (`<<`), and it rejects unknown top-level keys. That is why
-the anchors are defined inside the first job that uses them, and why `env:` is
-written out in each job.
+**Why 76 lines and not 20.** GitHub makes a separate job only where the
+permissions, the secrets, the OIDC grant or the runner differ. Seven levels
+differ (see below), and each job needs its `if`, `runs-on`, `container`,
+`permissions`, `env` and `steps` lines. Merging any two jobs would put a
+secret, a write grant or the signing key somewhere the design says it must not
+be. Everything else is already out of the file:
+- **Versions:** the only one is the bootstrap's digest.
+- **Tasks:** all routing is `sdlc event`.
+- **Repo kind:** nothing here depends on it.
+
+YAML anchors (`&boot`, `&event`, `&hosted`) save the repeats. GitHub accepts
+anchors but not merge keys (`<<`), and it rejects unknown top-level keys, so
+the anchors are defined in the first job that uses them, and `env:` is written
+out in each job.
 
 **The image-only repo (ubi10-core) runs the same file.** Its `check` reports
-`image: true` and `publish: false`, so `image` and `release` build, sign and
-promote, and nothing is sent to PyPI. A Python library reports the reverse. A
-docs repo reports neither, and those two jobs are skipped without starting. A
-`parent-image-updated` dispatch arrives as `repository_dispatch`, which `check`
-routes to a rebuild. Nothing about a repo's kind lives in the file, so
-`convert_repo.py` never edits it and the fleet cannot drift.
+`image: true`, so `image` and `promote` run. A Python library reports
+`publish: "pypi"`, so `pypi` runs on its releases. A docs repo reports
+neither, and those jobs are skipped without starting. A parent image's promote
+sends `parent-image-updated`, which `check` routes to a rebuild. Nothing about
+a repo's kind lives in the file, so `convert_repo.py` never edits it and the
+fleet cannot drift.
 
 **Bottom line.** Of the 70 org repos, 69 have workflows today. Every one of
-them carries at least one third-party pin (`actions/checkout`, at least), and
-most carry 7 to 9 workflow files. Under this design all 69 carry one file and
-no `uses:`. That depends on three things:
-- the hard cases below are accepted as designed;
+them carries at least one third-party pin, and most carry 7 to 9 workflow
+files. Under this design all 69 carry this one file and no `uses:`. Two
+conditions:
 - mcp-atlassian deletes the two upstream workflows its fork carries;
 - spike #103 passes.
 
-The constitution holds the policy and the sdlc image holds every tool and
-version. Renovate bumps those versions in ordinary files in this repo
-(`Containerfile`, `uv.lock`, `package-lock.json`), so it never needs the
-GitHub App **Workflows** permission.
+The constitution holds the policy, and the sdlc image holds every tool and
+version. Renovate bumps those versions in ordinary files in this repo, so it
+never needs the GitHub App **Workflows** permission. The bootstrap digest is
+the one exception. It is edited fleet-wide by Josui Prime, and only when the
+bootstrap itself changes, which is rarely.
+
+## The trust root: a bootstrap pinned by digest
+
+The file names `quay.io/crunchtools/sdlc-boot@sha256:<digest>`. That is a
+literal in the file, so only a reviewed commit to `ci.yml` can change it. A
+variable cannot change it: anyone with write access can set a repo variable,
+and an org variable can be overridden that way too. The bootstrap is
+`bin/sdlc-bootstrap` grown into an image: busybox-sized, holding cosign
+v2.6.5, the fleet public key and a minimum sdlc version, all baked in. In every
+job it does the following, in order:
+
+1. **Resolve.** It resolves `quay.io/crunchtools/sdlc:latest` to a digest,
+   through the runner's container socket.
+2. **Verify.** It checks that digest's cosign signature against the baked key
+   (`--insecure-ignore-tlog`, as today), and refuses with a 2 if the signature
+   does not verify.
+3. **Check the version.** It reads the `version` label and refuses one below
+   the baked minimum. Signing an old release and moving `:latest` back onto it
+   fails here.
+4. **Run.** It runs `sdlc event` from that digest, as a sibling container on
+   the socket.
+5. **Nest for repo code.** That container runs repo code (tests, builds, the
+   model) in nested containers of its own, as `run_in_image` does today:
+   `--cap-drop=all`, `--network=none` where the check allows, and never a
+   token, a secret or the socket.
+
+So **an sdlc release needs no `ci.yml` edit**: promote signs and moves
+`:latest`, and the next job runs it. Rollback is moving `:latest` back to a
+signed release that is still at or above the minimum. To raise the minimum, or
+to change the key or cosign, the bootstrap changes, and its new digest goes
+out as one fleet edit by Josui Prime. Laptops keep `.sdlc/bin/sdlc`, which
+does the same verification on the host.
 
 ## Jobs are trust levels
 
 | Job | Check name | Holds | Runs on | Never holds |
 |---|---|---|---|---|
-| `check` | `sdlc / check (pull_request)` (required) | read token, `security-events` | push, pull_request (forks too), release, schedule, dispatch | any secret |
-| `ai` | (not a check anyone requires) | Claude and OpenRouter keys, read token | issues; `pull_request_target` (not closed) | an App key, a write token |
-| `write` | | Ashigaru App key (sdlc mints the token), `actions: write` | after `check`/`ai`: `pull_request_target`, issues, release-PR dispatch, schedule, the reply doorbell (`workflow_run` of a review-comment run) | a model |
-| `gate` | `sdlc / gate (pull_request_target)` (required) | `pull-requests: write` | `pull_request_target` (not closed), after `write` | any secret, the PR's code |
-| `image` | | quay credentials, `--privileged` | after a green `check` that reports an image, on anything but a pull request | the cosign key |
-| `release` | | cosign key (`cosign-signing` environment), `id-token: write` | after `image`, or on `release` | a build: it promotes a digest someone else built |
+| `check` | `sdlc / check (pull_request)` (required) | read token, `security-events`, the socket | push, pull_request (forks too), release, schedule, dispatch; self-hosted allowed | any secret |
+| `ai` | | Claude and OpenRouter keys, read token | issues; `pull_request_target` not closed; GitHub-hosted (private: uncached) | an App key, a write token |
+| `write` | | Ashigaru App key (sdlc mints and revokes the token) | `pull_request_target`, review comments, issues, release dispatch, schedule; GitHub-hosted | a model |
+| `gate` | `sdlc / gate (pull_request_target)` (required) | `pull-requests: write` | `pull_request_target` not closed, after `write`; GitHub-hosted | any secret |
+| `image` | | quay credentials | after a green `check` that reports an image, never on a PR; GitHub-hosted | the cosign key |
+| `promote` | | cosign key in `cosign-signing`; one at a time per repo | after `image` | a build: it signs a digest it did not make |
+| `pypi` | | `id-token: write` in `pypi` (tag-restricted) | `release`, when `check` reports `publish: pypi`; GitHub-hosted | anything else |
 
-The splits that are forced:
-- **`ai` / `write`:** this is the security split, "the credential that can
-  write never shares a machine with the LLM" (crunchtools/ashigaru,
-  `.github/workflows/code.yml`). `ai` passes its result (a verdict, review
-  comments, or a patch, gzip and base64) to `write` as a job output, which is
-  capped at 1 MB.
-- **`gate`:** it must come from the base definition under
-  `pull_request_target` and hold no secret, so it can be required.
-- **`image` / `release`:** they keep the signing key off the machine that runs
-  a Containerfile's `RUN` lines.
-- **`check`:** it is the only job a fork's pull request can run.
+**Runners.** Only `check`, which holds no secret, may run on the self-hosted
+runners: cached for a same-repo pull request, uncached for pushes and
+schedules. A fork's pull request always gets `ubuntu-latest`. Every job that
+holds a secret or runs a model runs on `ubuntu-latest`. The one exception is a
+private repo, which uses the uncached runner exactly as today (`&hosted`).
+
+**Allowlists are in `if:`, not in sdlc.** Secrets reach a job's environment
+before `sdlc event` decides anything. So each job's `if:` names the events
+that job may run on. `sdlc event` then picks the task within those events, and
+an event outside the list never starts the job.
+
+**The splits are forced.**
+- **`ai` / `write`:** "the credential that can write never shares a machine
+  with the LLM" (crunchtools/ashigaru `.github/workflows/code.yml`).
+- **`gate`:** it must come from the base definition and hold no secret, so it
+  can be required.
+- **`image` / `promote`:** the signing key never shares a job with a
+  Containerfile build.
+- **`promote` / `pypi`:** a job has one `environment`, and each environment
+  restricts its own secrets and refs.
+
+**What crosses between jobs.** `ai` passes its result (a verdict, review
+comments, a patch) to `write`. sdlc gzips and base64-encodes it, then splits
+it into four outputs of at most 128 KiB each. 128 KiB is the most one
+environment variable can carry into a process (Linux `MAX_ARG_STRLEN`), and
+`write` reads the four as `SDLC_AI_0..3`. That gives a 512 KiB cap after
+compression. A result over the cap is refused in `ai`, as too large to
+review. An empty or missing result when `ai` succeeded is an error in
+`write`, never "nothing to do". `image` passes only a digest to `promote`, and
+`check` passes only a small JSON plan.
 
 ## What `sdlc event` runs
 
 This is sdlc's routing table, not the file's. It is listed by job, then event.
+Tool and category names are kept, so the Security tab's history carries over:
+CodeQL uploads as `/language:python`, and zizmor as `zizmor`.
 
 | Job | Event | Runs | Was |
 |---|---|---|---|
-| check | push, pull_request | `ci` (CodeQL SARIF uploaded on the default branch), `gourmand`, `constitution` with zizmor (SARIF uploaded) | ci.yml, constitution.yml, security.yml CodeQL |
-| check | schedule, push to default | `audit`; findings go out as output for `write` to raise the alert issue | dependency-audit.yml |
-| check | release, schedule, dispatch, repository_dispatch | plans the image build and publish (`result.image`, `result.publish`) | container.yml `resolve` |
-| ai | pull_request_target | Gatehouse review of the diff (read through the API, never checked out). On an `ashigaru/` branch in this repo it also runs Ashigaru `fix`, which answers this review's findings and the open ones from earlier rounds, up to five rounds | review.yml, fix.yml |
-| ai | issues | Ashigaru `triage`, then `code` when the verdict is ready-to-code, in the same job | triage.yml, code.yml |
-| write | pull_request_target | posts the review; pushes the fix and its answers; opens nothing | review.yml / fix.yml publish |
+| check | pull_request, push | `ci` with CodeQL (SARIF uploaded on the default branch), `gourmand`, `constitution` with zizmor (SARIF uploaded). A repo with an image also builds and gates the PR's Containerfile through the socket, with no credential and nothing pushed | ci.yml, constitution.yml, security.yml CodeQL, container-release build on a PR |
+| check | schedule, push | `audit`; the findings go out in `result` for `write` | dependency-audit.yml |
+| check | release, schedule, dispatch, parent-image-updated | plans `image` and `publish` | container.yml `resolve` |
+| ai | pull_request_target | Gatehouse review of the diff, read through the API and never checked out. On an `ashigaru/` branch in this repo it also runs Ashigaru `fix` over this review's findings and the open ones left from earlier rounds, five rounds at most | review.yml, fix.yml agent |
+| ai | issues | Ashigaru `triage`, then `code` when the verdict is ready-to-code | triage.yml classify, code.yml agent |
+| write | pull_request_target | posts the review; pushes the fix commit and its finding answers | review.yml, fix.yml publish |
 | write | pull_request_target closed, merged `ashigaru/release-*` from this repo | tags the merge and publishes the GitHub Release | release-tag.yml |
-| write | issues | labels, and opens the `ashigaru/issue-N` pull request | triage.yml apply, code.yml publish |
+| write | pull_request_review_comment | retriage: finds this PR's latest `pull_request_target` run and re-runs its `gate` job with the App token (`POST /actions/jobs/{id}/rerun`) | gatehouse-retriage.yml |
+| write | issues | labels; opens the `ashigaru/issue-N` pull request | triage.yml apply, code.yml publish |
 | write | workflow_dispatch with `version` | opens the release pull request from `chore/release-X.Y.Z` | release.yml open |
-| write | workflow_run of a review-comment run | re-runs `gate` in that PR's `pull_request_target` run | gatehouse-retriage.yml |
 | write | schedule | keeps the audit alert issue | dependency-audit.yml |
-| gate | pull_request_target | workflow guard (it fails, and comments, if a fork touches `.github/workflows/` or `.sdlc/`), then Gatehouse triage | gatehouse.yml guard, triage.yml |
-| image | not a PR | `podman build`, the container gates, push to `gated-<sha>` by digest | container-release build, gates, mark |
-| release | after image, or release | sign, attest, move tags, write nothing else; and on `release`, `uv build` + `uv publish` by OIDC | container-release promote, publish.yml |
-
-Merging review, triage, code and fix into one `ai` job is safe because every
-one of them already held the same thing: a model key and a read-only token.
+| gate | pull_request_target | the workflow guard: fails, and comments, when a fork touches `.github/workflows/` or `.sdlc/`. Then Gatehouse triage | gatehouse.yml guard, triage.yml |
+| image | push, schedule, dispatch, parent-image-updated, release | builds through the socket, runs the container gates, pushes `gated-<sha>` by digest | container-release build, gates, mark |
+| promote | after image | signs, attests, moves tags, never backwards; dispatches `parent-image-updated` downstream | container-release promote |
+| pypi | release | `uv build` in a nested container, then `uv publish` by OIDC from the job | publish.yml |
 
 ## Required checks: from five to two
 
@@ -175,42 +240,66 @@ one of them already held the same thing: a model key and a read-only token.
 | `sdlc ci`, `Code Quality (Gourmand) / Code Quality (Gourmand)`, `Constitution / Validate constitution` | `sdlc / check (pull_request)` |
 | `Protect workflows`, `Gatehouse triage / Gatehouse triage` | `sdlc / gate (pull_request_target)` |
 
-**The event is part of the name, and that is load-bearing.** A job that its
-`if:` skips still reports a check, and a skipped check counts as passing. In
-one file every run of every event carries every job, so a `pull_request` run
-would post a skipped `sdlc / gate` on the same head commit, and a
-`pull_request_target` run a skipped `sdlc / check`. Either would satisfy a
-required check that never ran. With the event in `name:`, the skipped `gate`
-in a `pull_request` run is `sdlc / gate (pull_request)`, which nothing
-requires. `jobs.<id>.name` may read the `github` context
-([contexts](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts)).
-If GitHub does not expand the expression for a skipped job, the literal text
-still differs from the required name, so the guarantee holds either way. Only
-a `pull_request` run can produce the one required name, and only a
-`pull_request_target` run the other. Within its own event, neither job can
-reach a no-op: `check` always runs `sdlc ci`, and `gate` always runs the guard
-and triage. Exedore 1 is checking how GitHub chooses between check runs of the
-same name, and the spike (#103) confirms the rest.
+The ruleset requires both names with **GitHub Actions** pinned as the source
+app.
 
-The ruleset edit is made at cutover, in the same sitting as the wave. Until a
-repo has converted, its old check names keep it mergeable. Required checks are
-per name, so both sets can be required while the fleet is half moved, as long
-as each list is in its own ruleset, targeted at the repos that produce it.
-Running two rulesets during the wave is the safe order. The non-required checks
-that go away are `CodeQL Analysis`, `Dependency CVE Scan`, the container jobs,
-Ashigaru's jobs and `Dependabot`.
+**No skipped or no-op job can carry a required name.** A job that its `if:`
+skips still reports a check, and a skipped check counts as passing. In one
+file every run carries every job. So, without the event in the name, a
+`pull_request` run would post a skipped `sdlc / gate` on the PR's head commit,
+and a `pull_request_target` run would post a skipped `sdlc / check`. With the
+event in `name:` (`jobs.<id>.name` may read the `github` context,
+[contexts](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts)),
+those skipped checks are `sdlc / gate (pull_request)` and
+`sdlc / check (pull_request_target)`, which nothing requires. GitHub might
+show a skipped job's name unevaluated. Then it shows the literal
+`(${{ github.event_name }})`, which also differs from the required name.
+Spike #103 checks which happens. Within its own event, neither required job
+can reach a no-op: `check` always runs `sdlc ci`, and `gate` always runs the
+guard and triage.
 
-One thing that is true today and stays true: a fork's `pull_request` run
-executes the fork's copy of `ci.yml`, so it could add a job named
-`sdlc / gate (pull_request_target)`. The fork-run approval setting ("Require approval for all
-outside collaborators") is what stops a fork's workflow from running at all
-until a maintainer has read it. Check that it is on org-wide. This design adds
-no new exposure.
+**Where I differ from "required names only from `pull_request` and `push`":**
+the gate has to stay on `pull_request_target`. A `pull_request` run executes
+the PR's copy of `ci.yml`, so a fork could edit the guard out of the very run
+that judges it. `pull_request_target` runs "in the context of the default
+branch of the base repository", and that is the whole reason `Protect
+workflows` and Gatehouse triage are required from there today. Naming by event
+gives the same safety on that event: the required name can come only from a
+`pull_request_target` run, and only the base definition produces one.
 
-**One more cutover step.** PyPI's trusted publisher names the workflow file
-and the environment. Each of the 22 PyPI projects has to be re-pointed from
-`publish.yml` to `ci.yml`, environment `cosign-signing`, before its first
-release after cutover. Otherwise that upload is refused.
+A fork's `pull_request` run could still add a job literally named
+`sdlc / gate (pull_request_target)`. That is true today with
+`Protect workflows`, and this design adds nothing to it. What stops it is the
+org's fork-run approval setting ("Require approval for all outside
+collaborators"), which should be confirmed on.
+
+**Cutover order for the rulesets.** A new ruleset, targeting converted repos
+by name, requires the two new checks. The old one keeps the five for repos not
+yet converted. `cutover.py` moves each repo from the old target list to the
+new one in the run that merges its pull request. Once the wave is done, the
+old ruleset is deleted.
+
+## PyPI: re-registering 22 trusted publishers
+
+This is a human step, for Scott. A PyPI trusted publisher names the
+repository, the workflow file and, optionally, the environment. Today's name
+`publish.yml` with no environment, and after cutover it must be `ci.yml` with
+environment `pypi`.
+
+1. **Before the wave.** In each repo with a PyPI publish, create the
+   environment `pypi` with a deployment rule for tags `v*` only. `cutover.py`
+   lists the 22 repos and can create the environments through the API with an
+   admin token.
+2. **On PyPI, per project**, at pypi.org/manage/project/<name>/settings/publishing:
+   add a **new** trusted publisher with owner `crunchtools`, the repo, workflow
+   `ci.yml` and environment `pypi`. Keep the old `publish.yml` publisher
+   until the repo has converted. PyPI accepts several publishers per project,
+   so there is no window in which a release cannot publish.
+3. **After a repo converts**, its first release publishes through `ci.yml`.
+   Once it shows on PyPI, remove the old `publish.yml` publisher.
+4. **The check.** `cutover.py` prints the 22 projects with their PyPI URLs,
+   and the wave report marks each repo whose last release has not yet
+   published through `ci.yml`.
 
 ## What GitHub will not let us do this way
 
@@ -245,35 +334,37 @@ to a specific branch"
 keys are `image`, `credentials`, `env`, `ports`, `volumes` and `options`, and
 none of them is a signature policy
 ([docs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/run-jobs-in-a-container)).
-*Instead:* name the image by digest. `jobs.<id>.container` may read `vars`
-([contexts](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts)),
-so `SDLC_REF` is a signed digest that only promote writes. See "Signature
-verification" below.
+*Instead:* the file names a literal digest, and that bootstrap verifies the
+real image itself. See "The trust root" above.
 
-**5. `workflow_run` is the only way to run privileged work after a fork's
-reply.** "The workflow started by the `workflow_run` event is able to access
-secrets and write tokens, even if the previous workflow was not"
-([events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run)).
-A fork's `pull_request_review_comment` run is read-only, and its result does not
-count toward the ruleset (gatehouse#50, quoted in `retriage.yml`). In one file,
-`workflow_run` has to name the file's own workflow, `CI`. The docs neither allow
-nor forbid that. They cap chains: "You can't use `workflow_run` to chain
-together more than three levels of workflows". The cost is real: every
-completed CI run starts one more CI run in which every job is skipped, up to
-that cap. `write`'s `if` makes those runs start no job, so the cost is run
-records, not runner time. **This needs a spike before the template ships**
-(#103). If GitHub refuses the self-reference, the doorbell becomes a second
-file, `retriage.yml`, with one job that runs `sdlc event` and still no
-`uses:`. That is the one place the one-file rule might bend.
+**5. A fork's reply cannot re-run triage.** A `pull_request_review_comment`
+run uses the PR's copy of the workflow. For a fork's PR it gets a read-only
+token and no secrets ([events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)),
+and its checks do not count toward the ruleset (gatehouse#50, quoted in
+`retriage.yml`). Today `gatehouse-retriage.yml` listens on `workflow_run`,
+which "is able to access secrets and write tokens, even if the previous
+workflow was not". The new file has no `workflow_run`: neither a second file
+nor a self-reference. Instead, on a review comment, `write` mints the App
+token and re-runs `gate` inside the PR's `pull_request_target` run. That
+works wherever `write` gets the App key, which means every same-repo pull
+request, including all of Ashigaru's. **On a fork's pull request it cannot**,
+because no secret reaches that run. A fork contributor's reply is then
+re-triaged at their next push, or when a maintainer re-runs `gate`. That is a
+real regression, kept because forks are rare here. Two things for spike #103:
+- the Ashigaru App needs **Actions: write** for the re-run;
+- confirm that a re-run started by an App token updates the check the
+  ruleset reads, as a re-run of the same job did in gatehouse#50.
 
 **6. Who runs an event's workflow.**
 - `pull_request_target` runs "in the context of the default branch of the base
   repository", so its jobs are the base's definitions. That is why `ai`,
   `write` and `gate` run there, and never under `pull_request`.
+- `issues` and `release` run the default branch's definition.
 - `pull_request` and `pull_request_review_comment` run the merge commit's copy
   of `ci.yml` ([events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)).
   So a fork can edit the jobs in its own run, as it can today. `gate` refuses
-  the change, and only `check` runs under `pull_request`, holding nothing.
+  the change, `check` holds nothing, and `write`'s review-comment path gets no
+  secret on a fork.
 
 Nothing changes here. Moving into one file does not move the boundary.
 
@@ -284,12 +375,12 @@ in this repo only, and answers that review's findings and the open ones left
 from earlier rounds. That is one trigger fewer, and the bound of five rounds
 stays in sdlc.
 
-**8. Fork pull requests may not see `vars`.** GitHub's docs do not say whether
-an org variable reaches a fork's `pull_request` run, and a community thread
-says it does not. `check`, the only job a fork's `pull_request` runs, falls back to
-`quay.io/crunchtools/sdlc:latest`, so a fork's run still starts, on the
-unverified tag. That run holds no secret and no write token, so the fallback
-costs a verification and grants nothing. The spike checks it.
+**8. No variable chooses code.** A repo variable can be written by anyone
+with write access to the repo, and it overrides the org's. So the image is a
+literal digest in the file, never `vars.*`. The runner labels still come from
+variables, as they do today, but only `check`, which holds nothing, reads the
+self-hosted ones. The other jobs read `UNCACHED_RUNNER_LABEL` only for a
+private repo, where there is no GitHub-hosted alternative.
 
 **9. Check names.** A required check is matched by name, and a plain job's
 check takes the job's `name:`. The constitution records that a reusable
@@ -360,8 +451,9 @@ Every item below is an ordinary pinned version in this repo's `Containerfile`,
 permission alone. `scripts/update_tools.py` and `update-tools.yml` are retired
 in favour of Renovate `customManagers` on the `ARG` lines.
 
-- **podman, buildah, skopeo**: Hummingbird RPMs, for `sdlc image`, the RPM
-  matrices and `podman login`.
+- **The podman remote client and skopeo**: for driving the runner's socket
+  (builds, nested runs, `podman login`) and for copying by digest. There is
+  no engine inside the image: the socket is the engine.
 - **cosign v2.6.5** (copied from its digest-pinned image), and **syft**: for
   `sdlc image promote`. They do what `scripts/sign-digest.sh` and
   `scripts/attest-digest.sh` already do in sdlc's own `container.yml`.
@@ -370,6 +462,10 @@ in favour of Renovate `customManagers` on the `ARG` lines.
 - **claude**: the CLI from npm, at an exact version, under its own prefix as
   markdownlint-cli2 is.
 - **cryptography** (or PyJWT): in an isolated venv, for App tokens.
+- **The bootstrap** is a second, separate image (`sdlc-boot`), built from
+  this repo. It holds cosign, the fleet public key, the minimum version and
+  a podman remote client, and nothing else. It changes rarely, and each
+  change is a fleet edit of one digest.
 - **gh** is not needed: sdlc calls the REST API itself, as `release_publish.py`
   and `update_tools.py` already do.
 
@@ -379,10 +475,8 @@ in favour of Renovate `customManagers` on the `ARG` lines.
 hand-offs, and what each becomes:
 
 - **Ashigaru agent → publish** (`change.patch` plus `result.json`; KBs of
-  text). This becomes a job output: gzip, then base64, then
-  `$GITHUB_OUTPUT`. The output is capped at 1 MB per job. A model's change that
-  is still over 1 MB compressed is refused as too large to review, which it
-  is. The split between the two jobs stays.
+  text). This becomes four job outputs of at most 128 KiB each (see "What
+  crosses between jobs"). The split between the two jobs stays.
 - **container-release build → gates** (`image.tar`, 100 MB–1 GB). This only
   happens on the path where `pushed == false`, a pull request with no registry
   credentials. With Dependabot gone, that is a fork's pull request alone. In
@@ -390,13 +484,14 @@ hand-offs, and what each becomes:
   gates the image in place (the container stack of `sdlc ci`), holding no
   credential, so there is nothing to hand on. Outside pull requests, `image`
   pushes the candidate to quay by digest, and `needs.image.outputs` carries
-  that digest to `release`.
+  that digest to `promote`.
 - **RPM build → publish** (ashigaru, claude-agent, petit; a few MB per
   distro). The split exists to keep `contents: write` off the job that runs
   `build.sh`. On a pull request, the build job holds nothing and publishes
   nothing. On a `release` event the code being built is the merged,
-  Gatehouse-reviewed tag, so build and upload run in one job with
-  `contents: write`, and sdlc uploads the release assets through the REST API.
+  Gatehouse-reviewed tag. The build runs in a nested container that holds no
+  token, and then `write` uploads the RPMs as release assets through the REST
+  API. Repo code and the write token never share a container.
 - **trentina `l2-train`** (a model file). This becomes one job, or a push to
   ghcr as an OCI artifact, chosen when that workflow is converted. It is
   trentina-specific and is not part of the fleet template.
@@ -423,36 +518,29 @@ neither can run from a `run:` step. The repo moves its Pages source to
 with the job's token (`contents: write`, on release or push to the default
 branch only). That is a one-time setting change on that repo.
 
-**`container:` jobs on gha-runner.** They already work: the runner points
-`/var/run/docker.sock` at its rootless podman API (gha-runner README, "Job
-containers and services"). The two things that are new:
-1. **Jobs that need a container engine inside the job container**
-   (`check` and `image`). These carry `options: --privileged`. On GitHub-hosted runners that
-   is Docker's privileged mode on a throwaway VM. On gha-runner it is rootless
-   podman, privileged only within the runner user's namespace, and inside it
-   the same nested-podman setup the runner image already proves. This needs a
-   spike on both runner kinds before the template ships. The fallback is to
-   run those jobs on the host with the existing launcher.
-2. **Per-check sandboxing.** Today the launcher runs each check in its own
-   container with `--network=none --cap-drop=all`. In a job container the
-   checks are processes. sdlc keeps `pytest` offline with
-   `unshare --net` where the job is privileged, and otherwise says plainly in
-   the log that the check ran with the network on. This is a real loss of
-   isolation on GitHub-hosted runners. It is acceptable because the job
-   container is itself a throwaway, but it is a loss.
+**`container:` jobs and the socket.** Every job mounts the runner's container
+socket, and nothing runs `--privileged`.
+- **On gha-runner** this already works: the runner points
+  `/var/run/docker.sock` at its rootless podman API (gha-runner README, "Job
+  containers and services").
+- **On GitHub-hosted runners** it is Docker's socket, on a VM thrown away
+  after the job.
 
-**Signature verification moves from pull time to promote time.** The bootstrap
-checks the cosign signature before it runs anything. A `container:` image is
-pulled by the runner, and nothing verifies it. So CI names the image by
-**digest**. The org variable `SDLC_REF` is
-`quay.io/crunchtools/sdlc@sha256:…`, and only sdlc's promote job writes it,
-after it signs that digest. The runner then pulls exactly the bytes that were
-verified. Rollback is setting the variable back. A repo holds itself back with
-a repo variable of the same name, which GitHub gives precedence. Writing an
-org variable needs an App with organization **Variables: write**, which
-belongs to the CRUNCHTOOLS_CI app rather than a person. Laptops keep the
-bootstrap, `:latest` and verification. Promote moves `:latest` and `SDLC_REF`
-together, so a green `sdlc push` still predicts a green `sdlc ci`.
+The bootstrap and `sdlc event` drive the socket. Repo code (tests, a
+Containerfile build, the model) runs only in the nested containers they
+start: `--cap-drop=all`, `--network=none` where the check allows, no token,
+no secret, and never the socket itself. That is today's `run_in_image`, moved
+from the host into a job container.
+
+Two things are new and go in spike #103:
+1. **Path mapping.** A container started through the socket mounts paths on
+   the host, not on the job container. sdlc finds the host path of
+   `$GITHUB_WORKSPACE` by inspecting its own container through the socket, and
+   it mounts only that.
+2. **Holding the socket is holding the runner.** On GitHub-hosted runners the
+   Docker socket is root on the VM. A job with a secret also has that socket,
+   but it runs no repo code beside it, only the verified sdlc image. The
+   socket is never passed down to repo code.
 
 ## What stays as `uses:`
 
@@ -471,9 +559,9 @@ Nothing, in any repo. The four kinds that exist today all go:
 - **`docker://` steps**: none exist.
 - **Composite actions**: none exist, and none are needed.
 
-The one thing left in a workflow that selects code is `${{ vars.SDLC_REF }}`.
-It is a variable, which only an org or repo admin (or promote's App) can set,
-and no pull request can change it.
+The one thing left in a workflow that selects code is the bootstrap's digest.
+It is a literal, so only a reviewed commit can change it, and it is the only
+version in the file.
 
 ## Per-repo files that can go
 
@@ -532,7 +620,7 @@ exist in the repo:
 
 - **What goes.** `move_constitution` loses its workflow pins, since there are
   no calls (it still moves `Inherits:` and the hook `rev:`). `sign()` goes:
-  the `release` job always signs, and the cosign secrets are named in the
+  the `promote` job always signs, and the cosign secrets are named in the
   file. `add_release_flow`, `open_release`, `tagged_release`,
   `write_template` and `recopy_caller` go: release and Ashigaru run inside
   `write`, so there is one tag path by construction and `tag_paths` has
@@ -554,8 +642,9 @@ exist in the repo:
 
 **Order.** The order is the same one every move in this repo follows.
 1. sdlc grows `sdlc event` and the tools it needs, and releases.
-2. Promote starts writing `SDLC_REF`.
-3. The privileged-container spike passes on both runner kinds.
-4. Three canary repos convert: mcp-wordpress, ubi10-core and acquacotta.
-5. The fleet wave runs.
-6. The reusables are deprecated a release later.
+2. The bootstrap image ships, with its digest recorded.
+3. Spike #103 passes on both runner kinds.
+4. The PyPI environments and new trusted publishers are in place (Scott).
+5. Three canary repos convert: mcp-wordpress, ubi10-core and acquacotta.
+6. The fleet wave runs.
+7. The reusables are deprecated a release later.
