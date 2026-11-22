@@ -726,6 +726,7 @@ log_mark
 PATH="$GITSHIM" GATEHOUSE_ENV="$GITSHIM/keyfile.env" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 \
   && rc=0 || rc=$?
 log_since
+KEY_MOUNTS=$(grep ' gatehouse$' "$RUN/podman.log" | grep -o ' -v ' | wc -l)
 if [ "$rc" -eq 0 ] && grep -qF -- "-v $KEYFILE:$KEYFILE:ro,z" "$RUN/podman.log" \
     && grep -qF -- "--env-file $GITSHIM/keyfile.env" "$RUN/podman.log" \
     && ! grep -q 'sk-or-v1-test' "$RUN/podman.log"; then
@@ -738,14 +739,17 @@ fi
 log_mark
 PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 || :
 log_since
-if grep -q 'gatehouse' "$RUN/podman.log" && ! grep -q -- ' -v .*:ro,z -i ' "$RUN/podman.log"; then
+# Counted against the key-file run: exactly one -v fewer, whatever it was.
+PLAIN_MOUNTS=$(grep ' gatehouse$' "$RUN/podman.log" | grep -o ' -v ' | wc -l)
+if [ "$PLAIN_MOUNTS" -gt 0 ] && [ "$KEY_MOUNTS" -eq $((PLAIN_MOUNTS + 1)) ]; then
   ok "without OPENROUTER_API_KEY_FILE nothing extra is mounted"
 else
   bad "a gatehouse.env with no key file still mounted one"
   sed 's/^/       /' "$RUN/podman.log"
 fi
 
-for bad_path in relative/key "$GITSHIM/missing-key" "$GITSHIM/a:b"; do
+: > "$GITSHIM/a,b"
+for bad_path in relative/key "$GITSHIM/missing-key" "$GITSHIM/a:b" "$GITSHIM/a,b"; do
   printf 'OPENROUTER_API_KEY_FILE=%s\n' "$bad_path" > "$GITSHIM/keyfile.env"
   log_mark
   PATH="$GITSHIM" GATEHOUSE_ENV="$GITSHIM/keyfile.env" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 \
