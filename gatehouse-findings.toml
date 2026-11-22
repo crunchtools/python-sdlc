@@ -87,3 +87,18 @@ as `nothing to review: HEAD matches origin/main`, which already returns 0. \
 Exit 2 would fail every such push and push people toward SDLC_SKIP, which is \
 the workaround the contract forbids. The skip prints one loud line instead.
 """
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "bin/sdlc-bootstrap"
+evidence = "[ -z \"$seen\" ] || { mkdir -p \"$seen\" && : > \"$seen/$hex\"; } 2> /dev/null || :"
+status = "not-a-bug"
+reason = """
+The verified-digest marker is not a check's cache and decides no verdict. \
+It is written only after cosign has verified the digest, and the only thing \
+it changes is whether a seat re-verifies that same digest next run. An \
+unwritable cache means the seat verifies again next time, which is the safe \
+direction; failing the gate on it would turn a read-only HOME into a gate \
+that cannot run for no gain. CI never writes or reads it.
+"""

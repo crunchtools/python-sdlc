@@ -141,11 +141,20 @@ PULL_NEWER=
 if [ "$IMAGE" != "$DEFAULT_IMAGE" ]; then
   case "$IMAGE" in localhost/*) ;; *) PULL_NEWER=yes ;; esac
 fi
-if [ "$IMAGE" != "$RELEASE_IMAGE" ]; then
+# The bootstrap runs the image by the digest whose signature it verified, so
+# what it was asked for is a name it resolved: SDLC_VERIFIED_FROM. The banner
+# asks about that name, or every run on :latest would call itself unpinned.
+ASKED=$IMAGE
+if [ -n "$LAUNCHED_FROM" ] && [ "$IMAGE" = "$LAUNCHED_FROM" ] \
+   && [ -n "${SDLC_VERIFIED_FROM:-}" ]; then
+  ASKED=$SDLC_VERIFIED_FROM
+fi
+if [ "$ASKED" != "$RELEASE_IMAGE" ]; then
   {
     printf '%s: ************************************************************\n' "$ME"
     printf '%s: NOT THE PINNED RELEASE. This run is judged by\n' "$ME"
-    printf '%s:   %s\n' "$ME" "$IMAGE"
+    printf '%s:   %s\n' "$ME" "$ASKED"
+    [ "$ASKED" = "$IMAGE" ] || printf '%s:   verified as %s\n' "$ME" "$IMAGE"
     printf '%s: set by %s, in place of\n' "$ME" "$IMAGE_FROM"
     printf '%s:   %s\n' "$ME" "$RELEASE_IMAGE"
     printf '%s: ************************************************************\n' "$ME"

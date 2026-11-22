@@ -6,6 +6,25 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Security
+
+- `bin/sdlc-bootstrap` verifies the image before it runs anything from it
+  (#81). It resolves the tag to a digest and checks that digest's cosign
+  signature against the fleet key, which it carries inline. cosign v2.6.5 runs
+  from a digest-pinned image, so the host still needs only podman. The
+  launcher and every check then run by that digest. An unsigned or
+  wrongly-signed image is exit 2, GATE CANNOT RUN. A verified digest is
+  remembered in `${XDG_CACHE_HOME:-~/.cache}/sdlc/verified/`, so an offline
+  seat keeps working. The bootstrap's sha256 changes, so the constitution's
+  `sdlc_bootstrap_sha256` needs the new hash, and converted repos need the
+  new `.sdlc/bin/sdlc`.
+- `container.yml`'s promote job signs the tested digest in both
+  `quay.io/crunchtools/python-sdlc` and `quay.io/crunchtools/sdlc` before any
+  tag moves. It uses the fleet key from the `cosign-signing` environment and
+  checks it against the key the bootstrap trusts (`scripts/sign-digest.sh`,
+  tested by `tests/test_sign_digest.sh`). Release tags from before
+  this change are unsigned, and the new bootstrap refuses them.
+
 ### Fixed
 
 - Gatehouse runs, in every tier and by hand as `sdlc gatehouse`, only when the
@@ -25,6 +44,9 @@ All notable changes to this project are documented here, following
 
 - Gatehouse triage is passed `review_result: ${{ needs.review.result }}`, so a PR
   whose review job died before posting is held (gatehouse v0.32.0).
+- The launcher's not-the-release banner asks about the name the bootstrap
+  resolved (`SDLC_VERIFIED_FROM`), not the digest it runs by, so `:latest`
+  does not call itself unpinned.
 
 ## [0.10.4] - 2026-11-19
 
