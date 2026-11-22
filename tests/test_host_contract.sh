@@ -75,6 +75,9 @@ done
 # begin `lanes-` exercise the parallel executor: their steps print markers,
 # sleep and exit on command, so a test can pin what the launcher does with a
 # lane that fails, a lane that is slow, and two lanes writing one terminal.
+# The digest every pulled tag resolves to, which the bootstrap then verifies
+# and runs by.
+DIG64=feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface
 TAB=$(printf '\t')
 US=$(printf '\037')
 cat > "$SHIM/podman" <<EOF
@@ -89,6 +92,7 @@ for _last in "\$@"; do :; done
 case " \$* " in
   *" image inspect "*)
     case "\$*:\$_last" in
+      *.Digest*) printf 'sha256:%s\n' "$DIG64" ;;
       *Entrypoint*:*systemd-ep*) printf '/sbin/init\n' ;;
       *Cmd*:*systemd-cmd*)       printf '/usr/lib/systemd/systemd\n--system\n' ;;
     esac
@@ -942,15 +946,20 @@ printf '\n== the floating launcher, from the image (bin/sdlc-bootstrap)\n\n'
 # A repo with no `rev:` runs the launcher the image prints. The bootstrap is the
 # whole of what such a repo carries, so it is held to the same host contract:
 # this PATH has podman and POSIX utilities and nothing else.
-boot() { PATH="$SHIM" sh "$PWD/bin/sdlc-bootstrap" "$@"; }
+# It verifies each digest's signature before it runs anything from it, and
+# runs by that digest (tests/test_bootstrap.sh); this fake podman says every
+# digest is signed. The cache of verified digests is this test's own.
+boot() { PATH="$SHIM" XDG_CACHE_HOME="$RUN/cache" sh "$PWD/bin/sdlc-bootstrap" "$@"; }
+PINNED=quay.io/crunchtools/sdlc@sha256:$DIG64
 
 log_mark
 boot tiers > "$RUN/out" 2>&1 || true
 log_since
-if grep -q -- '--security-opt=no-new-privileges --pull=newer -- quay.io/crunchtools/sdlc:latest launcher quay.io/crunchtools/sdlc:latest$' "$RUN/podman.log" \
-   && last_run | grep -q -- ' quay.io/crunchtools/sdlc:latest tiers$' && ! last_run | grep -q -- '--pull' \
+if grep -q -- " verify --key /fleet.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
+   && grep -q -- "--security-opt=no-new-privileges --pull=never -- $PINNED launcher $PINNED\$" "$RUN/podman.log" \
+   && last_run | grep -q -- " $PINNED tiers\$" && ! last_run | grep -q -- '--pull' \
    && ! grep -q 'NOT THE PINNED RELEASE' "$RUN/out"; then
-  ok "no SDLC_IMAGE: the launcher from :latest runs :latest, no banner"
+  ok "no SDLC_IMAGE: :latest is verified and runs by its digest, no banner"
 else
   bad "bootstrap on :latest: $(last_run) / $(head -3 "$RUN/out")"
 fi
@@ -958,10 +967,11 @@ fi
 log_mark
 SDLC_IMAGE=main boot tiers > "$RUN/out" 2>&1 || true
 log_since
-if grep -q -- '-- quay.io/crunchtools/sdlc:main launcher quay.io/crunchtools/sdlc:main$' "$RUN/podman.log" \
-   && last_run | grep -q -- ' quay.io/crunchtools/sdlc:main tiers$' \
-   && grep -q 'NOT THE PINNED RELEASE' "$RUN/out"; then
-  ok "SDLC_IMAGE=main: main's own launcher runs main, and says it is not the release"
+if grep -q -- "-- $PINNED launcher $PINNED\$" "$RUN/podman.log" \
+   && last_run | grep -q -- " $PINNED tiers\$" \
+   && grep -q 'NOT THE PINNED RELEASE' "$RUN/out" \
+   && grep -q 'quay.io/crunchtools/sdlc:main$' "$RUN/out"; then
+  ok "SDLC_IMAGE=main: main's own launcher runs main by digest, and says it is not the release"
 else
   bad "bootstrap on main: $(last_run) / $(head -3 "$RUN/out")"
 fi
@@ -969,15 +979,15 @@ fi
 # What the bootstrap runs is what it pulls, so it pulls from one repository:
 # quay.io/crunchtools/sdlc at main, latest, a release or a digest.
 D64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-for good in "0.9.0:quay.io/crunchtools/sdlc:0.9.0" \
+for good in "0.9.0:$PINNED" \
             "@sha256:$D64:quay.io/crunchtools/sdlc@sha256:$D64" \
-            "quay.io/crunchtools/sdlc:main:quay.io/crunchtools/sdlc:main" \
+            "quay.io/crunchtools/sdlc:main:$PINNED" \
             "quay.io/crunchtools/sdlc@sha256:$D64:quay.io/crunchtools/sdlc@sha256:$D64"; do
   case "$good" in
     @sha256:*|quay.io/crunchtools/sdlc@*) value=${good%:quay.io/*}; want=${good#"$value":} ;;
     *) value=${good%%:quay.io/*}; want=${good#"$value":} ;;
   esac
-  case "$good" in quay.io/crunchtools/sdlc:main:*) value=quay.io/crunchtools/sdlc:main; want=$value ;; esac
+  case "$good" in quay.io/crunchtools/sdlc:main:*) value=quay.io/crunchtools/sdlc:main; want=$PINNED ;; esac
   log_mark
   SDLC_IMAGE=$value boot tiers > "$RUN/out" 2>&1 || true
   log_since

@@ -56,6 +56,15 @@ into it) and runs it. So the launcher, the image and every tool inside it float
 together on `:latest`, for the laptop and CI both, and a release reaches every
 repo without a pull request.
 
+Before it runs anything from the image, the bootstrap checks that the digest
+the tag resolves to is signed by the crunchtools fleet key, which it carries
+inline, using cosign v2 from a digest-pinned image. Then it runs the launcher
+and every check by that digest. An unsigned image is a 2, GATE CANNOT RUN.
+Promote signs every digest before a tag moves onto it, so `:latest`, `:main`
+and every release since python-sdlc#81 are signed. Older release tags are not,
+so `SDLC_IMAGE=<old release>` is refused. A digest verified once is remembered in
+`~/.cache/sdlc/verified/`, so an offline seat keeps working.
+
 `.pre-commit-config.yaml` is
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
 `language: system` hooks, `.sdlc/bin/sdlc commit` and `.sdlc/bin/sdlc push`.
