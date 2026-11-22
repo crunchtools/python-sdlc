@@ -5,12 +5,20 @@ The wave is the last fleet-wide one, so what it does to a repo is pinned:
 
   - a dry run converts and verifies in a throwaway clone and writes nothing
     anywhere else: no push, no pull request, no API call but reads
-  - the default branch is the one the API names, master included
+  - the default branch is the one the API names, master included; a repo the
+    anonymous listing does not show is cloned at its HEAD, and with a token a
+    name not in the listing is skipped
   - a refusal, a no-op, an earlier wave's open PR and a bad SDLC_IMAGE are
     each skipped with a reason, and the run goes on
-  - --apply commits the canonical message, pushes chore/sdlc-floating with
-    the bootstrap executable, opens the PR with the fixed body, queues a
-    squash auto-merge -- and updates the PR already open rather than a second
+  - --apply commits the templated message (commit_message), pushes
+    chore/fleet-cutover with the bootstrap executable, opens the PR with
+    pr_fields, queues a squash auto-merge -- and updates the PR already open
+    rather than a second
+  - with a cutover.Target the wave also cuts each repo over: the plan names
+    the constitution move and signing, --out writes REPO.diff, a validator's
+    violation is "invalid" and nothing is pushed, a refusal by the converter
+    is hand work and the rest ships, and write_report() lists clean repos
+    apart from those that need a human
   - the ledger makes a re-run skip what is done and retry what is not
   - the token goes in a header and nowhere else
 
@@ -28,6 +36,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -176,18 +185,31 @@ def search(*hits: str) -> tuple[int, dict]:
 def routes(earlier: tuple = (), ours: tuple = (), **repos: str) -> dict:
     q = "/search/issues?q=org%3Acrunchtools%20is%3Apr%20is%3Aopen%20head%3A"
     return {
-        "/orgs/crunchtools/repos?type=public&per_page=100&page=1": listing(**repos),
+        "/orgs/crunchtools/repos?type=all&per_page=100&page=1": listing(**repos),
         "/orgs/crunchtools/repos": (200, []),
         q + "chore/python-sdlc": search(*earlier),
-        q + "chore/sdlc-floating": search(*ours),
+        q + "chore/sdlc-floating": search(),
+        q + "chore/renovate": search(),
+        q + W.BRANCH: search(*ours),
     }
 
 
-def wave_run(api: FakeApi, base: Path, names: list[str], apply: bool) -> tuple[dict, Path, str]:
-    """W.run over names, its stdout captured: (counts, ledger, output)."""
+LAST: list[W.Wave] = []  # the wave wave_run last ran, for what it recorded
+
+
+def wave_run(
+    api: FakeApi, base: Path, names: list[str], apply: bool, **attrs: object
+) -> tuple[dict, Path, str]:
+    """W.run over names, its stdout captured: (counts, ledger, output).
+
+    `attrs` are set on the Wave (target, sdlc, out ...) before it runs.
+    """
     available = W.org_repos(api)
     wave = W.survey(api, apply)
     wave.clone_base = f"file://{base}"
+    for key, value in attrs.items():
+        setattr(wave, key, value)
+    LAST[:] = [wave]
     ledger = base / "ledger.tsv"
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
@@ -270,7 +292,20 @@ api = FakeApi(
         **{"python-sdlc": "main", "sdlc": "main"},
     ),
 )
-names = ["pinned", "old", "odd", "bumping", "floating", "noexec", "python-sdlc", "sdlc", "gone"]
+# Private, so an anonymous listing does not show it; its HEAD is master.
+origin(base, "hidden", CONVERTIBLE, branch="master")
+names = [
+    "pinned",
+    "old",
+    "odd",
+    "bumping",
+    "floating",
+    "noexec",
+    "python-sdlc",
+    "sdlc",
+    "hidden",
+    "gone",
+]
 counts, ledger, out = wave_run(api, base, names, apply=False)
 got = rows(ledger)
 check("dry run: a pinned repo would open", got["pinned"][1] == "would-open", str(got["pinned"]))
@@ -308,11 +343,20 @@ check(
     got["sdlc"][1] == "skipped" and "converter's own repo" in got["sdlc"][3],
     str(got["sdlc"]),
 )
-check("dry run: a name not in the org is skipped", got["gone"][1] == "skipped")
+check(
+    "dry run: a repo the anonymous listing lacks is cloned at its HEAD, not skipped",
+    got["hidden"][1] == "would-open",
+    str(got["hidden"]),
+)
+check(
+    "dry run: a name that does not clone is a failure, with git's reason",
+    got["gone"][1] == "failed" and "clone" in got["gone"][3],
+    str(got["gone"]),
+)
 check("dry run: only reads", all(m == "GET" for m, _, _ in api.calls), str(api.calls))
 check(
     "dry run: nothing is pushed",
-    "chore/sdlc-floating" not in git(base / "crunchtools" / "pinned", "branch", "-a"),
+    W.BRANCH not in git(base / "crunchtools" / "pinned", "branch", "-a"),
 )
 check(
     "dry run: SDLC_IMAGE is not read without a token",
@@ -323,11 +367,11 @@ check("dry run: counts add up", sum(counts.values()) == len(names), str(counts))
 # The ledger: a re-run skips what is done and retries the rest.
 counts, _, _ = wave_run(api, base, names, apply=False)
 check(
-    "re-run: done repos are skipped", counts.get("already done") == 4, str(counts)
-)  # pinned, old, floating, noexec
+    "re-run: done repos are skipped", counts.get("already done") == 5, str(counts)
+)  # pinned, old, floating, noexec, hidden
 check(
-    "re-run: refused and skipped repos are tried again",
-    counts.get("refused") == 1 and counts.get("skipped") == 4,
+    "re-run: refused, skipped and failed repos are tried again",
+    counts.get("refused") == 1 and counts.get("skipped") == 3 and counts.get("failed") == 1,
     str(counts),
 )
 
@@ -360,20 +404,20 @@ check(
     sum(p == "/orgs/crunchtools/actions/variables/SDLC_IMAGE" for _, p, _ in api.calls) == 1,
 )
 
-log = git(bare, "log", "-1", "--format=%an%n%B", "chore/sdlc-floating")
+wave = LAST[0]
+log = git(bare, "log", "-1", "--format=%an%n%B", W.BRANCH)
 check(
-    "apply: the branch is pushed with the canonical message",
-    log.startswith("crunchtools-ci\n" + W.COMMIT_MESSAGE.splitlines()[0]),
+    "apply: the branch is pushed with the templated message",
+    log.startswith("crunchtools-ci\n" + W.commit_message(wave).splitlines()[0]),
     log,
 )
 check(
     "apply: the commit carries the Co-Authored-By trailer",
-    "Co-Authored-By: Claude"
-    in git(bare, "log", "-1", "--format=%(trailers)", "chore/sdlc-floating"),
+    "Co-Authored-By: Claude" in git(bare, "log", "-1", "--format=%(trailers)", W.BRANCH),
 )
 check(
     "apply: the bootstrap is committed executable",
-    git(bare, "ls-tree", "chore/sdlc-floating", ".sdlc/bin/sdlc").startswith("100755"),
+    git(bare, "ls-tree", W.BRANCH, ".sdlc/bin/sdlc").startswith("100755"),
 )
 check(
     "apply: the default branch is untouched",
@@ -386,8 +430,10 @@ check(
     opened and opened[0]["head"] == W.BRANCH and opened[0]["base"] == "main",
 )
 check(
-    "apply: the PR body is the fixed one, with a rollback",
-    opened and opened[0]["body"] == W.PR_BODY and "How to roll back" in W.PR_BODY,
+    "apply: the PR is the templated one, with a rollback",
+    bool(opened)
+    and {k: opened[0][k] for k in ("title", "body")} == W.pr_fields(wave, "pinned")
+    and "How to roll back" in opened[0]["body"],
 )
 merges = [b for m, p, b in api.calls if p == "/graphql"]
 check(
@@ -397,6 +443,16 @@ check(
     and merges[0]["variables"]["id"] == "PR_pinned",
 )
 check("apply: the token is never printed", CANARY not in out and CANARY not in ledger.read_text())
+
+# With a token, a name the listing does not have is skipped, not cloned.
+base = Path(tempfile.mkdtemp())
+api = FakeApi(CANARY, routes(pinned="main"))
+counts, ledger, _ = wave_run(api, base, ["ghost"], apply=False)
+check(
+    "authenticated: a name not in the listing is skipped",
+    rows(ledger)["ghost"][1] == "skipped" and "non-archived" in rows(ledger)["ghost"][3],
+    str(rows(ledger)),
+)
 
 # A PR that opens but cannot auto-merge is recorded, retried, and fails the run.
 base = Path(tempfile.mkdtemp())
@@ -422,8 +478,9 @@ subprocess.run(
     [sys.executable, str(W.CONVERTER), str(checkout), "--apply"], check=True, capture_output=True
 )
 (checkout / "README.md").write_text("not the converter's\n")
+plain = W.Wave(FakeApi(None, {}), False)
 try:
-    W.verify(checkout)
+    W.verify(plain, "stray", "main", checkout)
     stray = ""
 except RuntimeError as exc:
     stray = str(exc)
@@ -432,11 +489,206 @@ check("verify: a change outside the converter's files is refused", "README.md" i
 git(checkout, "rm", "-q", "--cached", "README.md")
 (checkout / ".sdlc/bin/sdlc").chmod(0o644)
 try:
-    W.verify(checkout)
+    W.verify(plain, "stray", "main", checkout)
     mode = ""
 except RuntimeError as exc:
     mode = str(exc)
 check("verify: a bootstrap that is not executable is refused", "100644" in mode, mode)
+
+for owned in (
+    ".sdlc/bin/sdlc",
+    ".specify/memory/constitution.md",
+    ".github/dependabot.yml",
+    ".github/workflows/release.yml",
+    "pyproject.toml",
+):
+    check(f"verify: the converter owns {owned}", bool(W.CONVERTER_OWNS.match(owned)))
+for stranger in (
+    "README.md",
+    ".github/CODEOWNERS",
+    ".github/workflows/sub/x.yml",
+    "src/dependabot.yml",
+):
+    check(f"verify: the converter does not own {stranger}", not W.CONVERTER_OWNS.match(stranger))
+
+# ----------------------------------------------------------------- cutover
+
+CALL = "crunchtools/constitution/.github/workflows/container-release.yml"
+CONTAINER = f"""\
+name: Container
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    uses: {CALL}@v1.59.0
+    with:
+      image: quay.io/crunchtools/x
+    secrets:
+      QUAY_USERNAME: ${{{{ secrets.QUAY_USERNAME }}}}
+"""
+MANIFEST = "# C\n\n> **Inherits:** crunchtools/constitution v1.59.0\n"
+PUSHER = """\
+name: Push
+on: [push]
+jobs:
+  p:
+    runs-on: ubuntu-latest
+    steps:
+      - run: podman push quay.io/crunchtools/y:latest
+"""
+CUTTABLE = {
+    **CONVERTIBLE,
+    ".github/workflows/container.yml": CONTAINER,
+    ".specify/memory/constitution.md": MANIFEST,
+}
+TARGET = W.cutover.Target(constitution="1.60.0", constitution_ref="v1.60.0")
+
+
+def verdict(*violations: str) -> W.cutover.Target:
+    v = types.SimpleNamespace(own_version=lambda: "1.60.0", validate=lambda _p: list(violations))
+    return W.cutover.Target("1.60.0", "v1.60.0", validator=v)
+
+
+base = Path(tempfile.mkdtemp())
+out_dir = Path(tempfile.mkdtemp())
+origin(base, "clean", CUTTABLE)
+origin(base, "handy", {**CUTTABLE, ".github/workflows/push.yml": PUSHER})
+origin(base, "odd", {**UNKNOWN_SHAPE, ".github/workflows/container.yml": CONTAINER})
+api = FakeApi(None, routes(clean="main", handy="main", odd="main"))
+counts, ledger, _ = wave_run(
+    api, base, ["clean", "handy", "odd"], apply=False, target=TARGET, sdlc="0.9.0", out=out_dir
+)
+got = rows(ledger)
+wave = LAST[0]
+check("cutover: a repo to cut over would open", got["clean"][1] == "would-open", str(got["clean"]))
+check(
+    "cutover: the plan names the constitution move and signing",
+    ".specify/memory/constitution.md" in got["clean"][3]
+    and ".github/workflows/container.yml" in got["clean"][3],
+    str(got["clean"]),
+)
+report = wave.reports["clean"]
+check(
+    "cutover: the report has the constitution move, signing, and the float",
+    any(c.startswith("constitution:") for c in report.changes)
+    and any(c.startswith("signing:") for c in report.changes)
+    and any(c.startswith("float:") for c in report.changes)
+    and not report.hand
+    and not report.invalid,
+    str(report),
+)
+check("cutover: a dry run still only reads", all(m == "GET" for m, _, _ in api.calls))
+diff = (out_dir / "clean.diff").read_text() if (out_dir / "clean.diff").exists() else ""
+check("cutover: --out writes REPO.diff", "sign: true" in diff and "v1.60.0" in diff, diff[:200])
+check(
+    "cutover: the diff is of the cutover, not of the converter alone",
+    "Inherits:** crunchtools/constitution v1.60.0" in diff and ".sdlc/bin/sdlc" in diff,
+)
+check(
+    "cutover: a repo convert_repo.py refuses is hand work, and the rest still ships",
+    got["odd"][1] == "would-open"
+    and any(h.startswith("float: ") for h in wave.reports["odd"].hand),
+    str((got["odd"], wave.reports["odd"])),
+)
+check(
+    "cutover: a workflow that pushes an image is hand work, not a stop",
+    got["handy"][1] == "would-open"
+    and any("push.yml" in h for h in wave.reports["handy"].hand)
+    and not wave.reports["clean"].hand,
+    str(wave.reports["handy"]),
+)
+fields = W.pr_fields(wave, "handy")
+check(
+    "cutover: the PR body names the hand work and the target",
+    "Left for a human" in fields["body"]
+    and "push.yml" in fields["body"]
+    and "v1.60.0" in fields["body"]
+    and "0.9.0" in fields["body"]
+    and "{" not in fields["title"],
+    fields["body"][:300],
+)
+check("cutover: the title is the commit's first line", "constitution 1.60.0" in fields["title"])
+
+# The report: clean repos apart from the ones that need a human.
+wave.outcomes["gone"] = ("skipped", "", "not a non-archived repo in crunchtools")
+write_to = out_dir / "report.md"
+W.write_report(wave, write_to, "node,bootc")
+text = write_to.read_text()
+check(
+    "report: the clean repos are listed apart from hand work",
+    "**Clean** (1): clean" in text and "**Hand work** (3):" in text,
+    text[:400],
+)
+hand_line = next(x for x in text.splitlines() if x.startswith("- **Hand work**"))
+check(
+    "report: handy, odd and the skipped repo are the hand work",
+    all(r in hand_line for r in ("handy", "odd", "gone"))
+    and "clean" not in hand_line.split(":", 1)[1],
+    hand_line,
+)
+check(
+    "report: it names the mode, target and unbuilt stacks",
+    "(dry run)" in text and "`v1.60.0`" in text and "`node,bootc`" in text and "0.9.0" in text,
+    text[:300],
+)
+check(
+    "report: each repo's section has its changes and its hand work",
+    "## clean: would-open" in text
+    and "- signing:" in text
+    and "- HAND signing:" in text
+    and "- HAND float:" in text,
+    text,
+)
+check("report: a skipped repo says why", "not a non-archived repo" in text)
+
+# A target validator's violation: nothing is pushed.
+base = Path(tempfile.mkdtemp())
+bare = origin(base, "unfit", CUTTABLE)
+api = FakeApi(CANARY, routes(unfit="main"))
+counts, ledger, _ = wave_run(
+    api, base, ["unfit"], apply=True, target=verdict("IX: signing is wrong"), sdlc="0.9.0"
+)
+got = rows(ledger)
+check(
+    "invalid: a validator's violation is action invalid, with the violation",
+    got["unfit"][1] == "invalid" and "IX: signing is wrong" in got["unfit"][3],
+    str(got),
+)
+check(
+    "invalid: nothing is pushed, no PR opened, no merge queued",
+    W.BRANCH not in git(bare, "branch", "-a") and all(m == "GET" for m, _, _ in api.calls),
+    str(api.calls),
+)
+check("invalid: it is not done, so a re-run tries again", "invalid" not in W.DONE)
+check(
+    "invalid: the report carries it",
+    LAST[0].reports["unfit"].invalid == ["IX: signing is wrong"],
+)
+W.write_report(LAST[0], base / "report.md", "")
+check(
+    "invalid: the report lists it as hand work",
+    "- **Hand work** (1): unfit" in (base / "report.md").read_text()
+    and "- INVALID IX: signing is wrong" in (base / "report.md").read_text(),
+)
+
+# A clean verdict ships, with the cutover in the commit.
+base = Path(tempfile.mkdtemp())
+bare = origin(base, "fit", CUTTABLE)
+api = FakeApi(CANARY, routes(fit="main"))
+counts, ledger, _ = wave_run(api, base, ["fit"], apply=True, target=verdict(), sdlc="0.9.0")
+check("cutover: a repo the validator passes is opened", rows(ledger)["fit"][1] == "opened")
+shipped = git(bare, "show", f"{W.BRANCH}:.github/workflows/container.yml")
+check("cutover: the pushed branch carries the signing", "sign: true" in shipped, shipped)
+check(
+    "cutover: and the constitution move",
+    "v1.60.0" in git(bare, "show", f"{W.BRANCH}:.specify/memory/constitution.md"),
+)
+check(
+    "cutover: the pushed commit message names the constitution",
+    "constitution 1.60.0" in git(bare, "log", "-1", "--format=%s", W.BRANCH),
+)
 
 # ---------------------------------------------------------------------- Api
 
@@ -480,13 +732,30 @@ check(
 
 # --------------------------------------------------------------------- main
 
+REQUIRED = ["--constitution-dir", "/nonexistent", "--constitution", "1.60.0", "--sdlc", "0.9.0"]
 env = {k: v for k, v in os.environ.items() if k != "GH_TOKEN"}
 proc = subprocess.run(
-    [sys.executable, str(SCRIPT), "--apply"], capture_output=True, text=True, env=env, check=False
+    [sys.executable, str(SCRIPT), "--apply", *REQUIRED],
+    capture_output=True,
+    text=True,
+    env=env,
+    check=False,
 )
 check(
     "main: --apply without GH_TOKEN cannot run (exit 2)",
     proc.returncode == 2 and "GH_TOKEN" in proc.stderr,
+    proc.stderr,
+)
+proc = subprocess.run(
+    [sys.executable, str(SCRIPT), *REQUIRED],
+    capture_output=True,
+    text=True,
+    env=env,
+    check=False,
+)
+check(
+    "main: a --constitution-dir that is not a checkout cannot run (exit 2)",
+    proc.returncode == 2 and "--constitution-dir" in proc.stderr,
     proc.stderr,
 )
 

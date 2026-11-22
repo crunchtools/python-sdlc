@@ -90,16 +90,28 @@ comments or in the guard's script (an older guard that does not cover
 `.sdlc/`), keeps everything else (publish, release, container builds), and
 refuses with exit 2 a shape it would have to guess at. So that a converted repo
 never meets GATE CANNOT RUN on its first run, it also writes `skip-stacks` for
-a stack this image cannot check yet (node, bootc, docs), and `[tool.sdlc.ci]
+a stack this image cannot check yet (node, bootc, docs, or the list
+`--unbuilt-stacks` names; an entry for a stack that now exists is dropped), and `[tool.sdlc.ci]
 skip` for the three container checks when the Containerfile needs build
 secrets (`--mount=type=secret`, `subscription-manager`, RHSM) that `sdlc ci`
 is not given; the publish workflow keeps building those with its secrets. A
 Python repo that names no stacks is left alone, and an existing key that does
 not already say this is refused rather than rewritten.
-`scripts/fleet_wave.py` runs it across the org: a plan by default, one
-auto-merging pull request per repo with `--apply`, a TSV ledger either way.
-It reads `GH_TOKEN` from the environment for the GitHub API (required with
-`--apply`), and pushes with the credentials git already has.
+`scripts/fleet_wave.py` is the fleet cutover (sdlc#88): one pull request per
+consumer repo that floats its gates with `convert_repo.py` and then, with
+`scripts/cutover.py`, moves its constitution pins and `Inherits:`, drops
+Dependabot, renames what still says python-sdlc, signs every
+`container-release.yml` call, adds a weekly rebuild where #88 lists one
+missing, and adds the Ashigaru release flow
+([`examples/release.yml`](examples/release.yml)). The versions are arguments:
+`--constitution-dir` (a constitution checkout at the target release, whose
+`fleet-bump.py` and validator it uses), `--constitution`, `--sdlc`,
+`--unbuilt-stacks`. A plan by default -- `--out DIR` writes each repo's diff and
+a `report.md` of what it changed and what needs a hand -- and one auto-merging
+pull request per repo with `--apply`; a repo the target validator fails is not
+pushed. A TSV ledger either way. It reads `GH_TOKEN` from the environment for
+the GitHub API (required with `--apply`), and pushes with the credentials git
+already has.
 
 **What floating trusts.** Whoever can move `quay.io/crunchtools/sdlc:latest`
 now decides the host-side code every seat and runner runs, and that code is no

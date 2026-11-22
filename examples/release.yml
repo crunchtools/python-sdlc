@@ -1,0 +1,90 @@
+# Release: let the Ashigaru app tag v*.*.* here, the only actor the cosign
+# release-tag ruleset lets through (a938). A tag made by hand is refused.
+#
+# Two jobs, the two halves of a release:
+#   • open — by hand (workflow_dispatch, version X.Y.Z). Prepare the release on
+#     a branch chore/release-X.Y.Z (CHANGELOG.md and the version strings,
+#     never a workflow) and push it, then run this. The app copies that branch
+#     to ashigaru/release-X.Y.Z and opens the pull request, because
+#     release_publish.py tags only a pull request the app wrote.
+#   • tag — when that pull request merges, Ashigaru's release-tag.yml tags the
+#     merge commit and publishes the GitHub Release with the app token, which
+#     starts the v* container run. Not stopped by ASHIGARU_ENABLED.
+#
+# The app has no Workflows permission, so it can write neither a ref nor a tag
+# at a commit whose .github/workflows differs from the default branch's. A
+# release commit touches no workflow, so neither is refused.
+#
+# crunchtools/sdlc's examples/release.yml, from rhel10-bootc-workstation's and
+# written by scripts/fleet_wave.py --cutover. Copy it unchanged apart from the
+# default branch, which appears twice below.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, X.Y.Z, prepared on chore/release-X.Y.Z"
+        required: true
+        type: string
+  # Ashigaru's release-tag.yml, for a merged ashigaru/release- branch in this
+  # repository. It checks out Ashigaru itself, not the pull request.
+  pull_request_target:  # zizmor: ignore[dangerous-triggers]
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  open:
+    name: Open the release pull request
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ${{ github.event.repository.private && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not X.Y.Z: $VERSION"; exit 1; }
+
+      - name: Mint the Ashigaru app token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.ASHIGARU_CLIENT_ID }}
+          private-key: ${{ secrets.ASHIGARU_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Copy the branch and open the pull request as the app
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          branch="ashigaru/release-$VERSION"
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/chore/release-$VERSION" --jq .object.sha)
+          # A rerun finds the branch already there: move it to the prepared commit instead.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" -f "sha=$sha" -F force=true >/dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/heads/$branch" -f "sha=$sha" >/dev/null
+          fi
+          open=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url // ""')
+          if [ -n "$open" ]; then echo "already open: $open"; exit 0; fi
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
+            --title "chore: release $VERSION" \
+            --body "Release $VERSION, from chore/release-$VERSION at ${sha:0:7}. On merge, Ashigaru's release-tag.yml tags v$VERSION."
+
+  tag:
+    name: Tag the release
+    if: github.event_name == 'pull_request_target'
+    permissions:
+      contents: read
+    uses: crunchtools/ashigaru/.github/workflows/release-tag.yml@v5
+    # By name, not `inherit`: whoever can move v5 can read only this one.
+    secrets:
+      ASHIGARU_APP_KEY: ${{ secrets.ASHIGARU_APP_KEY }}

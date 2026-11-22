@@ -90,3 +90,4 @@ max-complexity = 10
 "tests/test_convert_repo.py" = ["S101", "E501"]
 # The same fixtures, and counts asserted as the numbers they are.
 "tests/test_fleet_wave.py" = ["S101", "E501", "PLR2004"]
+"tests/test_cutover.py" = ["S101", "E501", "PLR2004"]

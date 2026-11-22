@@ -35,7 +35,7 @@ the per-repo constitution.
 Exit 0 when it converted (or there was nothing to do), 2 when the repo has a
 shape it will not guess at -- named, so it can be converted by hand.
 
-Usage: scripts/convert_repo.py REPO_DIR [--apply]
+Usage: scripts/convert_repo.py REPO_DIR [--apply] [--unbuilt-stacks node,bootc,docs]
 Needs PyYAML, to read the workflows; it never writes YAML, only text.
 """
 
@@ -72,9 +72,10 @@ FLOATING_CI_LINE = f"{BOOTSTRAP_AT} ci"
 
 # The repo was crunchtools/python-sdlc, and its image quay.io/crunchtools/
 # python-sdlc, which is now a mirror that goes away after the fleet wave. Each
-# old reference and its new form; a longer name (python-sdlc-extras) is not one.
+# old reference and its new form; a longer name (python-sdlc-extras, python-sdlc.x)
+# is not one, but a sentence-ending period after the name is not part of it.
 RENAMED = (
-    (re.compile(r"quay\.io/crunchtools/python-sdlc(?![\w.-])"), "quay.io/crunchtools/sdlc"),
+    (re.compile(r"quay\.io/crunchtools/python-sdlc(?![\w-]|\.[\w-])"), "quay.io/crunchtools/sdlc"),
     (
         re.compile(r"(?<![\w.-])crunchtools/python-sdlc/(?=\.github/workflows/[^\s@]+@)"),
         "crunchtools/sdlc/",
@@ -84,7 +85,7 @@ RENAMED = (
 SDLC_REPO = re.compile(r"^https://github\.com/crunchtools/(?:python-)?sdlc(?:\.git)?/?$")
 # A clone of sdlc under either name, over https or ssh.
 CLONES_SDLC = re.compile(
-    r"git clone\b.*github\.com[:/]crunchtools/(?:python-)?sdlc(?:\.git)?(?![\w.-])"
+    r"git clone\b.*github\.com[:/]crunchtools/(?:python-)?sdlc(?:\.git)?(?![\w-]|\.[\w-])"
 )
 STANDALONE_HOOKS = {"gourmand", "gatehouse"}
 SDLC_HOOKS = {"sdlc-commit", "sdlc-push"}
@@ -561,6 +562,9 @@ def refuse_links(repo: Path, paths: list[Path]) -> None:
 # Containerfile that CI cannot build without secrets. The planner's own rules,
 # mirrored here, decide which repos those are.
 
+# The stacks the image names but has no checks for yet. --unbuilt-stacks says
+# which of them still are; one that is not listed is now checked, so a
+# skip-stacks entry the converter wrote for it comes out again.
 PLANNED_STACKS = ("node", "bootc", "docs")
 CONTAINERFILES = ("Containerfile", "Dockerfile")
 CONTAINER_CI = ["container-build", "container-smoke", "container-scan"]
@@ -613,7 +617,39 @@ def with_key(text: str, table: str, key: str, value: list[str], note: str) -> st
     return text[: header.end()] + line + text[header.end() :]
 
 
-def convert_config(repo: Path, planned: dict[Path, str | None], notes: list[str]) -> None:
+SKIP_STACKS_LINE = re.compile(r"^(skip-stacks[ \t]*=[ \t]*)\[[^\]\n]*\]([ \t]*#.*)?[ \t]*\n?", re.M)
+
+
+def without_stacks(text: str, kept: list[str], where: str) -> str:
+    """`text` with the skip-stacks line holding only `kept`, or gone (with its note) if empty."""
+    found = SKIP_STACKS_LINE.search(text)
+    if found is None:
+        raise RefusedError(f"{where} skip-stacks is not one line; drop the checked stacks by hand")
+    if kept:
+        comment = found.group(2) or ""
+        line = f"{found.group(1)}{json.dumps(kept)}{comment}\n"
+        return text[: found.start()] + line + text[found.end() :]
+    head = text[: found.start()]
+    head = head.removesuffix(SKIP_STACKS_NOTE)
+    return head + text[found.end() :]
+
+
+def drop_checked(
+    text: str, kept: list[str], checked: list[str], where: str, notes: list[str]
+) -> str:
+    """`text` without the skip-stacks entries for `checked` stacks, saying so in `notes`."""
+    if not checked:
+        return text
+    notes.append(f"skip-stacks: dropped {', '.join(checked)} in {where} (now checked)")
+    return without_stacks(text, kept, where)
+
+
+def convert_config(
+    repo: Path,
+    planned: dict[Path, str | None],
+    notes: list[str],
+    unbuilt_stacks: tuple[str, ...] = PLANNED_STACKS,
+) -> None:
     pyproject = repo / "pyproject.toml"
     path = pyproject if pyproject.is_file() else repo / "sdlc.toml"
     text = planned.get(path) or (path.read_text() if path.is_file() else "")
@@ -625,7 +661,11 @@ def convert_config(repo: Path, planned: dict[Path, str | None], notes: list[str]
         return  # a Python repo naming no stacks runs the python stack alone
     drop = set(cfg.get("skip-stacks") or [])
     active = [s for s in [*detected_stacks(repo), *(cfg.get("stacks") or [])] if s not in drop]
-    unbuilt = sorted({s for s in active if s in PLANNED_STACKS})
+    unbuilt = sorted({s for s in active if s in unbuilt_stacks})
+    # A planned stack the image now checks, still skipped: its entry comes out.
+    listed = list(cfg.get("skip-stacks") or [])
+    checked = [s for s in listed if s in PLANNED_STACKS and s not in unbuilt_stacks]
+    kept = [s for s in listed if s not in checked]
     ci = cfg.get("ci") or {}
     cf = next((repo / f for f in CONTAINERFILES if (repo / f).is_file()), None)
     secrets = (
@@ -642,6 +682,7 @@ def convert_config(repo: Path, planned: dict[Path, str | None], notes: list[str]
             )
         text = with_key(text, "tool.sdlc", "skip-stacks", unbuilt, SKIP_STACKS_NOTE)
         notes.append(f"skip-stacks: {', '.join(unbuilt)} in {rel(repo, path)} (not checked yet)")
+    text = drop_checked(text, kept, checked, rel(repo, path), notes)
     if secrets:
         if "skip" in ci:
             raise RefusedError(
@@ -650,7 +691,7 @@ def convert_config(repo: Path, planned: dict[Path, str | None], notes: list[str]
             )
         text = with_key(text, "tool.sdlc.ci", "skip", CONTAINER_CI, SKIP_BUILD_NOTE)
         notes.append(f"skip in ci: the container checks, in {rel(repo, path)} (build secrets)")
-    if not (unbuilt or secrets):
+    if not (unbuilt or secrets or checked):
         return
     # Read back what was written: the stacks and the skips must be the ones
     # meant, in a file that is still TOML, or nothing is written at all.
@@ -658,14 +699,19 @@ def convert_config(repo: Path, planned: dict[Path, str | None], notes: list[str]
         after = tomllib.loads(text).get("tool", {}).get("sdlc", {})
     except tomllib.TOMLDecodeError as exc:
         raise RefusedError(f"{rel(repo, path)} would not be TOML: {exc}") from exc
-    if not set(unbuilt) <= set(after.get("skip-stacks") or []) or (
-        secrets and not set(CONTAINER_CI) <= set((after.get("ci") or {}).get("skip") or [])
+    now = after.get("skip-stacks") or []
+    if (
+        not set(unbuilt) <= set(now)
+        or (checked and now != kept)
+        or (secrets and not set(CONTAINER_CI) <= set((after.get("ci") or {}).get("skip") or []))
     ):
         raise RefusedError(f"{rel(repo, path)}: the keys written did not read back as meant")
     planned[path] = text
 
 
-def plan(repo: Path) -> tuple[dict[Path, str | None], list[str]]:
+def plan(
+    repo: Path, unbuilt_stacks: tuple[str, ...] = PLANNED_STACKS
+) -> tuple[dict[Path, str | None], list[str]]:
     """Every file the conversion writes (None: deletes), and what it kept."""
     planned: dict[Path, str | None] = {repo / BOOTSTRAP_AT: BOOTSTRAP.read_text()}
     notes: list[str] = []
@@ -674,7 +720,7 @@ def plan(repo: Path) -> tuple[dict[Path, str | None], list[str]]:
     refuse_links(repo, [hooks, *planned, wf_dir, repo / "pyproject.toml", repo / "sdlc.toml"])
     planned[hooks] = convert_hooks(hooks.read_text() if hooks.exists() else "")
     convert_workflows(repo, planned, notes)
-    convert_config(repo, planned, notes)
+    convert_config(repo, planned, notes, unbuilt_stacks)
     notes.append(f"writes: {BOOTSTRAP_AT}, executable (crunchtools/sdlc's bin/sdlc-bootstrap)")
     # The old name in anything that survives, and in the repo's config.
     candidates = [hooks, repo / "pyproject.toml", repo / "sdlc.toml"]
@@ -779,11 +825,27 @@ def diff(repo: Path, planned: dict[Path, str | None]) -> str:
     return "".join(out)
 
 
+def unbuilt_stacks_of(ap: argparse.ArgumentParser, value: str) -> tuple[str, ...]:
+    """The --unbuilt-stacks list; a name that is not a planned stack is a typo, not a stack."""
+    stacks = tuple(s.strip() for s in value.split(",") if s.strip())
+    if not set(stacks) <= set(PLANNED_STACKS):
+        ap.error(f"--unbuilt-stacks names only some of {', '.join(PLANNED_STACKS)}")
+    return stacks
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("repo", type=Path, help="a checkout of the repo to convert")
     ap.add_argument("--apply", action="store_true", help="write the changes; default prints them")
+    ap.add_argument(
+        "--unbuilt-stacks",
+        default=",".join(PLANNED_STACKS),
+        metavar="LIST",
+        help="comma-separated stacks the image still has no checks for (default: %(default)s); "
+        "empty means all exist, and a skip-stacks entry for any other is dropped",
+    )
     args = ap.parse_args()
+    unbuilt = unbuilt_stacks_of(ap, args.unbuilt_stacks)
     if not HAS_YAML:
         print("convert_repo: needs PyYAML (python3-pyyaml)", file=sys.stderr)
         return 2
@@ -792,7 +854,7 @@ def main() -> int:
         print(f"convert_repo: {repo} is not a git checkout", file=sys.stderr)
         return 2
     try:
-        planned, notes = plan(repo)
+        planned, notes = plan(repo, unbuilt)
     except RefusedError as exc:
         print(f"convert_repo: {repo.name}: NOT CONVERTED: {exc}", file=sys.stderr)
         return 2

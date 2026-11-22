@@ -187,9 +187,9 @@ def snapshot(repo: Path) -> dict[str, str]:
     }
 
 
-def convert(repo: Path, apply: bool = False) -> subprocess.CompletedProcess:
+def convert(repo: Path, apply: bool = False, *extra: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, str(SCRIPT), str(repo), *(["--apply"] if apply else [])],
+        [sys.executable, str(SCRIPT), str(repo), *(["--apply"] if apply else []), *extra],
         capture_output=True,
         text=True,
         check=False,
@@ -277,6 +277,29 @@ for config in ("pyproject.toml", "sdlc.toml"):
         f"{config}: the python-sdlc image moves to quay.io/crunchtools/sdlc, a longer name stays",
         'image = "quay.io/crunchtools/sdlc:0.8.0"' in moved
         and "quay.io/crunchtools/python-sdlc-extras:1" in moved,
+        moved,
+    )
+
+# A period ends a sentence; it is not part of the name. A name that goes on
+# after the dot, or after a dash, is a different one.
+for config in ("pyproject.toml", "sdlc.toml"):
+    text = (
+        "# the image is quay.io/crunchtools/python-sdlc.\n"
+        '[tool.sdlc.ci.tests]\nimage = "quay.io/crunchtools/python-sdlc"\n'
+        "# not quay.io/crunchtools/python-sdlc-extras or quay.io/crunchtools/python-sdlc.x\n"
+    )
+    repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, config: text})
+    convert(repo, apply=True)
+    moved = snapshot(repo)[config]
+    check(
+        f"{config}: a python-sdlc reference ending a sentence is renamed",
+        "# the image is quay.io/crunchtools/sdlc.\n" in moved
+        and 'image = "quay.io/crunchtools/sdlc"' in moved,
+        moved,
+    )
+    check(
+        f"{config}: python-sdlc-extras and python-sdlc.x are left alone",
+        "quay.io/crunchtools/python-sdlc-extras or quay.io/crunchtools/python-sdlc.x\n" in moved,
         moved,
     )
 
@@ -877,6 +900,75 @@ check(
     refused.returncode == REFUSED
     and "bootc" in refused.stderr
     and sdlc_cfg(repo).get("skip-stacks") == ["node"],
+    refused.stderr,
+)
+
+# --unbuilt-stacks says which planned stacks the image still cannot check. A
+# stack that is not listed is checked now, so the skip-stacks entry the
+# converter wrote for it comes out, with its note, and nothing else does.
+PROJECT = '[project]\nname = "x"\nversion = "0"\n'
+EVERY_STACK_BUILT = ("--unbuilt-stacks", "")
+for config, head in (
+    ("sdlc.toml", "[tool.sdlc]\n"),
+    ("pyproject.toml", PROJECT + '\n[tool.sdlc]\nstacks = ["python"]\n'),
+):
+    repo = make_repo({**HOOKED, "package.json": "{}\n", config: head})
+    wrote = convert(repo, apply=True)
+    check(
+        f"{config}: the default still writes skip-stacks and its note",
+        wrote.returncode == 0
+        and sdlc_cfg(repo, config).get("skip-stacks") == ["node"]
+        and "# Written by crunchtools/sdlc" in snapshot(repo)[config],
+        wrote.stderr,
+    )
+    done = convert(repo, True, *EVERY_STACK_BUILT)
+    after = snapshot(repo)[config]
+    check(
+        f"{config}: with every stack built the skip-stacks line and its note are gone",
+        done.returncode == 0
+        and "skip-stacks" not in after
+        and "# Written by" not in after
+        and "dropped node" in done.stderr,
+        done.stderr + after,
+    )
+    again = convert(repo, True, *EVERY_STACK_BUILT)
+    check(
+        f"{config}: dropping is idempotent, the second run changes nothing",
+        again.returncode == 0 and again.stdout == "",
+        again.stderr + again.stdout,
+    )
+
+repo = make_repo(
+    {
+        **HOOKED,
+        "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["bootc", "docs"]  # for now\n',
+    }
+)
+done = convert(repo, True, "--unbuilt-stacks", "docs")
+check(
+    "--unbuilt-stacks docs: only the stack now checked leaves the list, in place",
+    done.returncode == 0
+    and snapshot(repo)["sdlc.toml"] == '[tool.sdlc]\nskip-stacks = ["docs"]  # for now\n',
+    done.stderr + snapshot(repo)["sdlc.toml"],
+)
+again = convert(repo, True, "--unbuilt-stacks", "docs")
+check("--unbuilt-stacks docs: the second run changes nothing", again.stdout == "", again.stdout)
+
+repo = make_repo(
+    {**HOOKED, "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["node", "container", "python"]\n'}
+)
+done = convert(repo, True, *EVERY_STACK_BUILT)
+check(
+    "a skip-stacks entry outside node, bootc and docs is never dropped",
+    done.returncode == 0 and sdlc_cfg(repo).get("skip-stacks") == ["container", "python"],
+    done.stderr + snapshot(repo)["sdlc.toml"],
+)
+
+repo = make_repo({**HOOKED, "package.json": "{}\n"})
+refused = convert(repo, True, "--unbuilt-stacks", "nodes")
+check(
+    "--unbuilt-stacks naming an unknown stack is refused, nothing written",
+    refused.returncode == REFUSED and "sdlc.toml" not in snapshot(repo),
     refused.stderr,
 )
 
