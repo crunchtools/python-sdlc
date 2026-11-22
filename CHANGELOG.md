@@ -40,6 +40,18 @@ All notable changes to this project are documented here, following
   v1.60.0 lists `sdlc` beside `python-sdlc` in the fleet lists, which the
   rename had dropped this repo from.
 
+### Fixed
+
+- `sdlc ci` no longer gets CodeQL OOM-killed on agent seats (a989). Rootless
+  podman inside a seat drops `--memory`, so every lane was "given" 8g in a 4g
+  cgroup and CodeQL sized its heap from that beside an image build. The
+  launcher now reads the host's real ceiling (cgroup `memory.max` from leaf to
+  root, keeping a quarter for the agent, or MemTotal), defaults
+  `SDLC_MEMORY` to it when it is under 8g, divides it between CPU lanes as it
+  does the CPUs, and runs the lanes in turn when a share would be under
+  3072m. A machine with room for 8g per lane is unchanged. `SDLC_MEMORY`
+  now also refuses a size with the unit in the middle, like `8g8m`.
+
 ## [0.11.0] - 2026-11-22
 
 ### Security
