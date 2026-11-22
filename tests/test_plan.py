@@ -776,7 +776,7 @@ check(
 _words = [r[3].split(S.UNIT_SEPARATOR) for r in _node]
 check(
     "every node step mounts the repo's own volume, keyed on owner/repo",
-    all("sdlc-node-crunchtools-rotv:/node" in w for w in _words),
+    all("sdlc-node-crunchtools-rotv-" in " ".join(w) for w in _words),
     str(_words[0]),
 )
 check(
@@ -794,10 +794,11 @@ check(
     str([w[-1] for w in _words]),
 )
 check(
-    "two repos with one basename are two volumes",
-    S.NODE_VOLUME_PREFIX + "a-app" != S.NODE_VOLUME_PREFIX + "b-app"
-    and "sdlc-node-alice-app:/node" in node_plan("npm-lint", "git@github.com:alice/app.git")[0][3]
-    and "sdlc-node-bob-app:/node" in node_plan("npm-lint", "https://github.com/bob/app")[0][3],
+    "two repos whose words read the same are two volumes",
+    (a := node_plan("npm-lint", "https://github.com/alice-bob/app")[0][3])
+    != (b := node_plan("npm-lint", "https://github.com/alice/bob-app")[0][3])
+    and "sdlc-node-alice-bob-app-" in a
+    and "sdlc-node-alice-bob-app-" in b,
 )
 _local = node_plan("npm-lint", None)[0][3]
 check("no origin remote: a volume keyed on the host path", "sdlc-node-local-" in _local, _local)
@@ -946,7 +947,7 @@ def npm_audit_run(level: str, outputs: list[str]) -> tuple[int | str, int]:
     """t_npm_audit with npm replaced by canned outputs: (its result, npm audit runs)."""
     with tempfile.TemporaryDirectory() as root:
         Path(root, "package.json").write_text("{}")
-        saved = (S.node_install, S.npm_audit_once, S.time.sleep, S.REPO)
+        saved = (S.node_installed, S.npm_audit_once, S.time.sleep, S.REPO)
         calls: list[int] = []
 
         def once(*args):
@@ -955,7 +956,7 @@ def npm_audit_run(level: str, outputs: list[str]) -> tuple[int | str, int]:
             return S.classify_npm_audit(outputs[min(len(calls), len(outputs)) - 1], lvl)
 
         S.REPO = Path(root)
-        S.node_install = lambda *_a: Path(root)
+        S.node_installed = lambda *_a: Path(root)
         S.npm_audit_once = once
         S.time.sleep = lambda _s: None
         try:
@@ -964,7 +965,7 @@ def npm_audit_run(level: str, outputs: list[str]) -> tuple[int | str, int]:
         except S.CannotRunError as exc:
             result = str(exc)
         finally:
-            S.node_install, S.npm_audit_once, S.time.sleep, S.REPO = saved
+            S.node_installed, S.npm_audit_once, S.time.sleep, S.REPO = saved
         return result, len(calls)
 
 

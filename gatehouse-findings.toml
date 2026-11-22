@@ -102,3 +102,20 @@ unwritable cache means the seat verifies again next time, which is the safe \
 direction; failing the gate on it would turn a read-only HOME into a gate \
 that cannot run for no gain. CI never writes or reads it.
 """
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "Containerfile"
+evidence = "ARG NODE_MAJOR=24"
+status = "not-a-bug"
+reason = """
+Node is this image's runtime for the node and docs stacks, not a tool whose \
+verdict a repo pins, and it is pinned the way the base above pins Python to \
+3.14: by the line the weekly errata rebuild is meant to move within. \
+Hummingbird ships one nodejs24 build at a time and drops the one before, so an \
+exact RPM pin would fail that rebuild the week after it was written. The exact \
+version is not hidden: `sdlc versions` prints `node --version` beside the pin, \
+and tests/contract.sh asserts the major. Every tool a check runs \
+(markdownlint-cli2, lychee, hadolint, grype) is pinned exactly.
+"""

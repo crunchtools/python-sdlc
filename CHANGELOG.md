@@ -10,8 +10,8 @@ All notable changes to this project are documented here, following
 
 - The node stack: a repo with a root `package.json` gets `npm-lint`, `npm-test` and
   `npm-audit` in push and ci. They run the repo's own `lint` and `test` scripts and
-  `npm audit` in a workspace volume of the repo's own (`sdlc-node-<owner>-<repo>`,
-  never the shared cache; `npm ci` only when the lockfile changes), lint and test
+  `npm audit` in a workspace volume of the repo's own (`sdlc-node-<owner>-<repo>-<hash>`,
+  never the shared cache; a fresh `npm ci` every run), lint and test
   with no network, with `packages` for monorepos and `level`/`omit_dev` for the
   audit. A `package.json` only in a subdirectory is node, not docs.
 - The bootc stack. `bootc-lint` runs `bootc container lint` inside the image

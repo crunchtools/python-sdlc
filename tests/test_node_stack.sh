@@ -22,8 +22,8 @@ bad() { printf 'FAIL %s\n' "$*"; FAILED=$((FAILED + 1)); }
 
 WORK=$(mktemp -d)
 # Each fixture's origin is https://github.com/sdlc-test-<run>/<name>, so its
-# workspace volume is sdlc-node-sdlc-test-<run>-<name>: unique to this run, and
-# every one of them removed on the way out.
+# workspace volume is sdlc-node-sdlc-test-<run>-<name>-<hash>: unique to this
+# run, and every one of them removed on the way out.
 RUN_ID=$$
 VOLS="sdlc-node-sdlc-test-$RUN_ID-"
 # shellcheck disable=SC2329  # the EXIT trap below calls it
@@ -31,6 +31,7 @@ cleanup() {
   rm -rf "$WORK"
   podman volume ls -q | grep "^$VOLS" | xargs -r podman volume rm -f >/dev/null 2>&1 || :
 }
+vol() { podman volume ls -q | grep "^$VOLS$1-[0-9a-f]*\$" | head -1; }  # name -> its volume
 trap cleanup EXIT
 
 fixture() {            # name test-body [dep]: a package with lint and test scripts
@@ -84,13 +85,16 @@ else
   show
 fi
 
-# The install is the expensive part and it is keyed on the lockfile: a second
-# run must not repeat it. Nothing may be written into the developer's tree.
+# A run executes the repo's code with its workspace writable, so the next run
+# must not trust what it left: a dependency rewritten in place is reinstalled
+# from the lockfile, not executed. Nothing is written into the developer's tree.
+podman run --rm --entrypoint="" -v "$(vol passes):/v" "$IMAGE" \
+  sh -c 'echo "throw new Error(\"TAMPERED\")" >> /v/tree/node_modules/is-number/index.js'
 sdlc_in passes ci
-if [ "$rc" -eq 0 ] && ! grep -q 'npm ci' "$WORK/out"; then
-  ok "a second run reuses the install (no npm ci)"
+if [ "$rc" -eq 0 ] && grep -q 'npm ci' "$WORK/out" && ! grep -q TAMPERED "$WORK/out"; then
+  ok "a second run reinstalls: a node_modules the last run left is never trusted"
 else
-  bad "the second run exited $rc or ran npm ci again"
+  bad "the run after a tampered node_modules exited $rc"
   show
 fi
 if [ ! -e "$WORK/passes-$RUN_ID/node_modules" ]; then
@@ -209,9 +213,9 @@ sed 's/"test": "node --test"/"test": "node --test",\n    "postinstall": "node po
 git -C "$_a" add -A
 git -C "$_a" -c user.email=t@t -c user.name=t commit -qm postinstall
 sdlc_in attacker npm-test
-_seen=$(podman run --rm --entrypoint="" -v "${VOLS}victim:/v:ro" "$IMAGE" find /v -name POISON)
+_seen=$(podman run --rm --entrypoint="" -v "$(vol victim):/v:ro" "$IMAGE" find /v -name POISON)
 if [ "$rc" -eq 0 ] && grep -q 'npm ci' "$WORK/out" && ! grep -q 'SHARED-CACHE-VISIBLE' "$WORK/out" \
-   && [ -z "$_seen" ] && podman volume exists "${VOLS}attacker"; then
+   && [ -z "$_seen" ] && [ -n "$(vol attacker)" ] && [ "$(vol attacker)" != "$(vol victim)" ]; then
   ok "one repo's install scripts cannot write another repo's workspace"
 else
   bad "isolation: exit $rc, victim volume holds '${_seen}'"

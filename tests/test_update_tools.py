@@ -172,7 +172,9 @@ for label, payload in (
     ut.http_json = saved_http
 
 ut.http_json = lambda url: (
-    {"digest": NEW} if "hub.docker.com" in url and url.endswith("/0.25.0") else {}
+    {"digest": NEW}
+    if url == "https://hub.docker.com/v2/repositories/lycheeverse/lychee/tags/0.25.0"
+    else {}
 )
 check("digest is read from the tag's Docker Hub record", ut.lychee_digest("0.25.0") == NEW)
 

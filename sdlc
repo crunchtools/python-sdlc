@@ -1380,11 +1380,10 @@ def t_scan_rootfs() -> int:
 # wrong side effect for a gate anyway: it is gigabytes of the host
 # architecture's binaries. So each repo gets a WORKSPACE: a copy of its source
 # (what git tracks, plus what it does not ignore) at /node/tree, synced over on
-# every run with node_modules left alone, and npm's download cache beside it at
-# /node/npm. `npm ci` runs again only when a package's lockfile, package.json or
-# the node major changed.
+# every run, and npm's download cache beside it at /node/npm. `npm ci` runs
+# on every run; node_install says why.
 #
-# /node is a podman volume of the repo's OWN, `sdlc-node-<owner>-<repo>`, and
+# /node is a podman volume of the repo's OWN, `sdlc-node-<owner>-<repo>-<hash>`, and
 # these checks run as host steps that mount that volume and nothing else of the
 # gate's -- not the shared cache volume every other check uses. That is the
 # point. An install runs the dependencies' lifecycle scripts and a test runs the
@@ -1504,11 +1503,15 @@ def node_volume() -> str:
         pass
     parts = [p for p in re.split(r"[/:]", url.removesuffix(".git").rstrip("/")) if p]
     if len(parts) >= 2:  # noqa: PLR2004 -- owner and repo
-        key = f"{parts[-2]}-{parts[-1]}"
+        # Readable, then exact: the words alone are lossy (`alice-bob/app` and
+        # `alice/bob-app` read the same), so a hash of the pair itself ends it.
+        pair = f"{parts[-2]}/{parts[-1]}".lower()
+        word = _VOLUME_WORD.sub("-", pair.replace("/", "-")).strip("-.") or "repo"
+        key = f"{word}-{hashlib.sha256(pair.encode()).hexdigest()[:12]}"
     else:
         host = os.environ.get("SDLC_HOST_REPO", str(REPO))
         key = "local-" + hashlib.sha256(host.encode()).hexdigest()[:16]
-    return NODE_VOLUME_PREFIX + (_VOLUME_WORD.sub("-", key.lower()).strip("-.") or "repo")
+    return NODE_VOLUME_PREFIX + key
 
 
 def node_step(name: str, s: dict, command: list[str], *, network: bool) -> tuple[str, str, str]:
@@ -1664,8 +1667,7 @@ def node_sync(tree: Path) -> None:
         cannot(f"cannot prepare the node workspace in {tree}: {exc}")
 
 
-def node_install(name: str, packages: list[str]) -> Path:
-    """Sync the workspace and `npm ci` each package that needs it. Returns the tree."""
+def need_lockfiles(name: str, packages: list[str]) -> None:
     for rel in packages:
         if not (REPO / rel / "package-lock.json").is_file():
             cannot(
@@ -1673,40 +1675,51 @@ def node_install(name: str, packages: list[str]) -> Path:
                 f"(npm install --package-lock-only), and installing without one would "
                 f"test whatever is newest today rather than what the repo pinned"
             )
-    base = node_work()
-    tree = base / "tree"
+
+
+def node_install(name: str, packages: list[str]) -> Path:
+    """Sync the workspace and `npm ci` every package, every time. Returns the tree.
+
+    Every time, because an installed node_modules cannot be trusted from one
+    run to the next. The last run executed the code it checked -- lifecycle
+    scripts, tests -- with this workspace writable, so a branch nobody has
+    reviewed could rewrite a dependency in place, and a later run that skipped
+    the install would execute it. A stamp saying "already installed" would sit
+    in the same writable volume and be forged as easily. `npm ci` removes
+    node_modules before it installs, and what it installs from npm's cache is
+    checked against the lockfile's integrity hashes, so each run starts from
+    what the lockfile names and nothing a previous run left. The cache makes
+    that a local copy, not a download.
+    """
+    need_lockfiles(name, packages)
+    tree = node_work() / "tree"
     node_sync(tree)
     env = node_env()
     for rel in packages:
-        here = tree / rel
-        digest = hashlib.sha256()
-        for file in ("package-lock.json", "package.json"):
-            digest.update((here / file).read_bytes())
-        digest.update(f"node{BAKED['node']}".encode())
-        stamp = base / "stamps" / ((rel.replace("/", "__") if rel != "." else "root") + ".sha256")
-        # A package with no dependencies installs no node_modules at all, so
-        # its absence only says the stamp lies when the lock lists something.
-        lock = (here / "package-lock.json").read_text(encoding="utf-8")
-        has_deps = '"node_modules/' in lock or '"dependencies"' in lock
-        if (
-            (not has_deps or (here / "node_modules").is_dir())
-            and stamp.is_file()
-            and stamp.read_text(encoding="utf-8") == digest.hexdigest()
-        ):
-            continue
         step(f"npm ci ({rel})")
-        stamp.unlink(missing_ok=True)  # a half install must not look finished
-        rc, _ = run(["npm", "ci", "--no-audit", "--no-fund"], env=env, cwd=here)
+        rc, _ = run(["npm", "ci", "--no-audit", "--no-fund"], env=env, cwd=tree / rel)
         if rc != 0:
             cannot(
                 f"npm ci failed in {rel} (exit {rc}). A lockfile out of step with "
                 f"package.json is the usual cause, then the registry being unreachable"
             )
-        try:
-            stamp.parent.mkdir(parents=True, exist_ok=True)
-            stamp.write_text(digest.hexdigest(), encoding="utf-8")
-        except OSError as exc:
-            cannot(f"cannot record the install of {rel} in {stamp}: {exc}")
+    return tree
+
+
+def node_installed(name: str, packages: list[str]) -> Path:
+    """The tree the install step just prepared. A check step never installs.
+
+    It runs with no network, so an install here could only fail; and the
+    install step before it in the plan is what keeps the tree honest.
+    """
+    need_lockfiles(name, packages)
+    tree = node_work() / "tree"
+    missing = [rel for rel in packages if not (tree / rel / "package.json").is_file()]
+    if missing:
+        cannot(
+            f"{name}: the workspace has no {', '.join(missing)}; its npm-install step "
+            f"did not run. Run the check through bin/sdlc, which plans both steps"
+        )
     return tree
 
 
@@ -1720,7 +1733,7 @@ def npm_script_check(name: str, s: dict, script: str, extra: list[str]) -> int:
             f"package.json, so there is nothing to run. Add one, or skip {name} in "
             f"[tool.sdlc.push]; a check that ran nothing must not report a pass"
         )
-    tree = node_install(name, packages)
+    tree = node_installed(name, packages)
     env = node_env()
     if script == "test":
         # Test runners that watch by default (CRA, vitest without `run`) stop
@@ -1857,7 +1870,7 @@ def t_npm_audit(s: dict) -> int:
     if not isinstance(omit_dev, bool):
         cannot("npm-audit: omit_dev must be true or false")
     packages = node_packages("npm-audit", s)
-    tree = node_install("npm-audit", packages)
+    tree = node_installed("npm-audit", packages)
     attempts = len(NPM_AUDIT_BACKOFF) + 1
     worst = CLEAN
     for rel in packages:
