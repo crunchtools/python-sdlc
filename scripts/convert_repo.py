@@ -491,27 +491,48 @@ def classify(files: list[Path]) -> tuple[list[Path], list[Path]]:
 TEMPLATE_RUNNER = "ubuntu-latest"
 
 
-def runner_block(text: str) -> tuple[list[str], int] | None:
-    """The `runs-on:` lines of a covered workflow's `sdlc ci` job, the comment
-    just above them included, and their indent. Only that job has one."""
+def runner_block(text: str, job_id: str) -> tuple[list[str], int] | None:
+    """The `runs-on:` lines of job `job_id`, the comment just above them
+    included, and their indent."""
     lines = text.splitlines(keepends=True)
-    at = next((i for i, x in enumerate(lines) if x.lstrip().startswith("runs-on:")), None)
+
+    def indent_of(x: str) -> int:
+        return len(x) - len(x.lstrip())
+
+    top = next((i for i, x in enumerate(lines) if re.match(r"jobs:\s*$", x)), None)
+    head = next(
+        (
+            i
+            for i in range((top or 0) + 1, len(lines))
+            if re.match(rf"\s+{re.escape(job_id)}:\s*$", lines[i])
+        ),
+        None,
+    )
+    if top is None or head is None:
+        return None
+    stop = next(
+        (
+            i
+            for i in range(head + 1, len(lines))
+            if lines[i].strip()
+            and not lines[i].lstrip().startswith("#")
+            and indent_of(lines[i]) <= indent_of(lines[head])
+        ),
+        len(lines),
+    )
+    at = next((i for i in range(head + 1, stop) if lines[i].lstrip().startswith("runs-on:")), None)
     if at is None:
         return None
-    indent = len(lines[at]) - len(lines[at].lstrip())
+    indent = indent_of(lines[at])
     start = at
     while (
-        start
+        start > head + 1
         and lines[start - 1].strip().startswith("#")
-        and (len(lines[start - 1]) - len(lines[start - 1].lstrip()) == indent)
+        and indent_of(lines[start - 1]) == indent
     ):
         start -= 1
     end = at + 1
-    while (
-        end < len(lines)
-        and lines[end].strip()
-        and (len(lines[end]) - len(lines[end].lstrip()) > indent)
-    ):
+    while end < stop and lines[end].strip() and indent_of(lines[end]) > indent:
         end += 1
     return lines[start:end], indent
 
@@ -528,10 +549,12 @@ def with_runner(template: str, covered: list[Path]) -> str:
     runners = {}
     for path in covered:
         text = path.read_text()
-        job = next((j for j in jobs_of(parse(path.name, text)).values() if is_sdlc_job(j)), None)
-        found = runner_block(text)
-        if job is not None and found is not None:
-            runners[json.dumps(job.get("runs-on"), sort_keys=True)] = (job["runs-on"], found)
+        jobs = jobs_of(parse(path.name, text))
+        job_id = next((k for k, j in jobs.items() if is_sdlc_job(j)), None)
+        found = None if job_id is None else runner_block(text, str(job_id))
+        if found is not None:
+            runs_on = jobs[job_id].get("runs-on")
+            runners[json.dumps(runs_on, sort_keys=True)] = (runs_on, found)
     if len(runners) != 1:
         return template
     [(want, (block, indent))] = runners.values()

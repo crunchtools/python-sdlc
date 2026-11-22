@@ -518,6 +518,14 @@ check(
 )
 check("release: and the result is a workflow", yaml.safe_load(text)["jobs"])
 
+repo, result = run(PUBLISHES, default="m$(id)", label="release, unsafe branch")
+check(
+    "release: a default branch that is not a plain name is left to a human, never written",
+    not (repo / ".github/workflows/release.yml").exists()
+    and any("not a plain name" in h for h in result.hand),
+    str(result.hand),
+)
+
 repo, result = run({".github/workflows/ci.yml": CI_ONLY}, label="release, publishes nothing")
 check(
     "release: not written for a repo that publishes nothing",

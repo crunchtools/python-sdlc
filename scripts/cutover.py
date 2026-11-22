@@ -74,6 +74,7 @@ OLD_NAME = re.compile(r"(?<![\w.-])python-sdlc(?![\w-]|\.[\w-])")
 RELEASE_CALL = re.compile(r"^crunchtools/constitution/\.github/workflows/container-release\.yml@")
 ASHIGARU_TAGS = re.compile(r"^crunchtools/ashigaru/\.github/workflows/release(?:-tag)?\.yml@")
 COSIGN_SECRETS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
+SAFE_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 # A step that publishes an image itself, outside container-release.yml.
 SELF_PUBLISH = re.compile(
     r"\b(?:podman|buildah|docker)\s+push\b|\bskopeo\s+copy\b|docker/build-push-action@"
@@ -390,6 +391,10 @@ def add_release_flow(repo: Path, default: str, result: Result) -> None:
                 return
     if (repo / RELEASE).exists():
         result.hand.append(f"release: {RELEASE} exists and is not the Ashigaru flow; merge by hand")
+        return
+    if not SAFE_BRANCH.fullmatch(default):
+        # It lands in a shell line that runs with the app token: never written as is.
+        result.hand.append(f"release: default branch {default!r} is not a plain name; add by hand")
         return
     text = RELEASE_TEMPLATE.read_text()
     if default != "main":

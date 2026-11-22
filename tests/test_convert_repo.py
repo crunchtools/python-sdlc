@@ -954,6 +954,15 @@ check(
 again = convert(repo, True, "--unbuilt-stacks", "docs")
 check("--unbuilt-stacks docs: the second run changes nothing", again.stdout == "", again.stdout)
 
+repo = make_repo({**HOOKED, "sdlc.toml": '[tool.sdlc]\nskip-stacks = [\n  "docs",\n]\n'})
+before = snapshot(repo)
+refused = convert(repo, True, *EVERY_STACK_BUILT)
+check(
+    "a skip-stacks over several lines is refused, nothing written",
+    refused.returncode == REFUSED and "not one line" in refused.stderr and snapshot(repo) == before,
+    refused.stderr,
+)
+
 repo = make_repo(
     {**HOOKED, "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["node", "container", "python"]\n'}
 )
@@ -1132,6 +1141,16 @@ for label, old_ci in (
     ("the stub's shape", FLEET_CI),
     ("a pinned job", OLD_CI.replace("    runs-on: ubuntu-latest\n", FLEET_RUNNER, 1)),
     ("four-space indents", WIDE_CI),
+    (
+        "the job after gourmand's",
+        FLEET_CI.split("jobs:\n", 1)[0]
+        + "jobs:\n"
+        + "  gourmand:\n"
+        + FLEET_CI.split("  gourmand:\n", 1)[1]
+        + "\n"
+        + FLEET_CI.split("jobs:\n", 1)[1].split("  gourmand:\n", 1)[0].rstrip("\n")
+        + "\n",
+    ),
 ):
     repo = make_repo(
         {
