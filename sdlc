@@ -34,7 +34,7 @@ the tool's own verdict is a 2.
 from __future__ import annotations
 
 import argparse
-import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -271,27 +271,27 @@ CI_DEFAULTS = ["container-build", "bootc-lint", "container-smoke", "container-sc
 # image bump. `sdlc stacks` shows what was detected either way.
 
 STACK_OF = {
-    "ruff-check": "python",
-    "ruff-format": "python",
-    "lint": "python",
-    "mypy": "python",
-    "pytest": "python",
-    "semgrep": "python",
-    "pip-audit": "python",
-    "codeql": "python",
+    "ruff-check": ("python",),
+    "ruff-format": ("python",),
+    "lint": ("python",),
+    "mypy": ("python",),
+    "pytest": ("python",),
+    "semgrep": ("python",),
+    "pip-audit": ("python",),
+    "codeql": ("python",),
     # A bootc image is still built, linted and scanned as a container is. What
     # it is not is smoke-run: its PID 1 is systemd. It gets `bootc container
     # lint` instead, which is the judge its own CI already used.
     "containerfile-lint": ("container", "bootc"),
     "container-build": ("container", "bootc"),
-    "container-smoke": "container",
+    "container-smoke": ("container",),
     "container-scan": ("container", "bootc"),
-    "bootc-lint": "bootc",
-    "npm-lint": "node",
-    "npm-test": "node",
-    "npm-audit": "node",
-    "markdown-lint": "docs",
-    "link-check": "docs",
+    "bootc-lint": ("bootc",),
+    "npm-lint": ("node",),
+    "npm-test": ("node",),
+    "npm-audit": ("node",),
+    "markdown-lint": ("docs",),
+    "link-check": ("docs",),
 }
 
 # Stacks this image has checks for, and stacks it can name but not yet run.
@@ -479,9 +479,7 @@ def active_stacks(cfg: dict) -> tuple[str, ...]:
 
 def in_stacks(check: str, stacks: tuple[str, ...]) -> bool:
     owner = STACK_OF.get(check)
-    if owner is None:
-        return True
-    return any(o in stacks for o in ((owner,) if isinstance(owner, str) else owner))
+    return owner is None or any(o in stacks for o in owner)
 
 
 # CI runs push's checks except these two, which it gets from their own
@@ -1653,8 +1651,11 @@ def node_sync(tree: Path) -> None:
                 if str(path.relative_to(tree)) not in wanted:
                     path.unlink()
         for d in sorted(dirs, reverse=True):
-            with contextlib.suppress(OSError):  # not empty: it holds a wanted file
+            try:
                 d.rmdir()
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    raise  # it holds a wanted file; anything else is the cache
     except OSError as exc:
         cannot(f"cannot prepare the node workspace in {tree}: {exc}")
 
@@ -1720,7 +1721,7 @@ def npm_script_check(name: str, s: dict, script: str, extra: list[str]) -> int:
     if script == "test":
         # Test runners that watch by default (CRA, vitest without `run`) stop
         # watching when they see CI; there is no terminal here to quit one.
-        env.setdefault("CI", "true")
+        env["CI"] = "true"
     worst = CLEAN
     for rel in with_script:
         step(f"npm run {script} ({rel})" + "".join(f" {a}" for a in extra))
@@ -1971,6 +1972,10 @@ LYCHEE_FLEET_CONFIG = 'offline = true\ninclude_fragments = "anchor-only"\nno_pro
 # limit, a timeout. Everything else a remote returns is a finding.
 LYCHEE_EXTERNAL_ARGS = (
     "--offline=false",
+    # A link to localhost, a private range or link-local (cloud metadata) is
+    # never fetched: the gate runs on a developer's machine and a CI runner,
+    # and a repo's Markdown must not be a way to make either of them ask.
+    "--exclude-all-private",
     "--accept-timeouts",
     "--accept",
     "100..=103,200..=299,429",
@@ -2115,8 +2120,11 @@ def t_link_check(s: dict) -> int:
     cmd += ["--extensions", "md", "--hidden"]
     for d in MARKDOWN_EXCLUDED_DIRS:
         cmd += ["--exclude-path", f"(^|/){re.escape(d)}/"]
-    if external:
-        cmd += list(LYCHEE_EXTERNAL_ARGS)
+    # On the command line as well as in the fleet config, because lychee lets
+    # a later --config override an earlier one and the repo's lychee.toml is
+    # the later one: `offline = false` there must not turn an offline check
+    # into one that fetches whatever the repo's Markdown links to.
+    cmd += list(LYCHEE_EXTERNAL_ARGS) if external else ["--offline"]
     cmd += names(s.get("globs"), "link-check.globs") or ["."]
     step(f"lychee, {'local links and remote links' if external else 'local links only (offline)'}")
     rc, out = run(cmd, tee=True)

@@ -31,6 +31,8 @@ assert SPEC and SPEC.loader
 ut = importlib.util.module_from_spec(SPEC)
 sys.modules["update_tools"] = ut
 SPEC.loader.exec_module(ut)
+# The real one: later checks stub ut.http_json, and the curl checks need it.
+REAL_HTTP_JSON = ut.http_json
 
 OLD = "sha256:" + "a" * 64
 NEW = "sha256:" + "b" * 64
@@ -191,6 +193,55 @@ ut.gh_api = lambda path, *extra: "v1.2.3 v1.10.0 v1.9.9 nightly\n"
 check("repo tags sorted numerically", ut.latest_release("crunchtools/gourmand") == "1.10.0")
 
 # The real Containerfile still matches what the script rewrites.
+# ---------------------------------------------------- http_json, through curl
+
+
+class FakeProc:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def curl_answers(proc: FakeProc, url: str = "https://registry.npmjs.org/x"):
+    """(what http_json returned or the error text, the argv curl was given)."""
+    seen: list[list[str]] = []
+
+    def fake_run(argv, **_kw):
+        seen.append(argv)
+        return proc
+
+    saved = ut.subprocess.run
+    ut.subprocess.run = fake_run
+    try:
+        return REAL_HTTP_JSON(url), seen[0]
+    except ValueError as exc:
+        return str(exc), seen[0] if seen else []
+    finally:
+        ut.subprocess.run = saved
+
+
+got, argv = curl_answers(FakeProc(0, '{"dist-tags": {"latest": "1.2.3"}}'))
+check("http_json parses curl's JSON", got == {"dist-tags": {"latest": "1.2.3"}}, str(got))
+check(
+    "http_json runs curl https-only, failing on an HTTP error, with a timeout",
+    argv[:2] == ["curl", "-fsSL"]
+    and argv[argv.index("--proto") + 1] == "=https"
+    and argv[argv.index("--max-time") + 1] == str(ut.HTTP_TIMEOUT)
+    and argv[-1] == "https://registry.npmjs.org/x",
+    str(argv),
+)
+got, _ = curl_answers(FakeProc(22, "", "curl: (22) The requested URL returned error: 404"))
+check(
+    "a curl failure raises with curl's own stderr in it",
+    isinstance(got, str) and "exit 22" in got and "returned error: 404" in got,
+    str(got),
+)
+got, _ = curl_answers(FakeProc(0, "<html>rate limited</html>"))
+check(
+    "a non-JSON answer raises, naming the URL",
+    isinstance(got, str) and "did not answer JSON" in got,
+    str(got),
+)
+
 real = (REPO / "Containerfile").read_text()
 check("real Containerfile: one lychee FROM", len(ut.LYCHEE_FROM.findall(real)) == 1)
 check(

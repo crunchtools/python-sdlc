@@ -1474,6 +1474,20 @@ check(
     f"{configs} {argv}",
 )
 check("link-check resolves root-relative links against the repo", "--root-dir" in argv, str(argv))
+_, argv, _ = docs_run(
+    S.t_link_check, "lychee", 0, files={"README.md": "# x\n", "lychee.toml": "offline = false\n"}
+)
+check(
+    "a repo's lychee.toml cannot turn the offline check online: --offline is on the command line",
+    "--offline" in argv and "--offline=false" not in argv,
+    str(argv),
+)
+_, argv, _ = docs_run(S.t_link_check, "lychee", 0, s={"external": True})
+check(
+    "external link checks never fetch a private, loopback or link-local address",
+    "--exclude-all-private" in argv,
+    str(argv),
+)
 check(
     "link-check walks the repo as a directory, so lychee reads the ignore file",
     argv[-2] == "." and "--hidden" in argv and "md" in argv,

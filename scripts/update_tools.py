@@ -60,13 +60,18 @@ def http_json(url: str) -> dict:
     curl rather than urllib: --proto keeps it to https whatever the URL says,
     and a failed status is an error (-f) rather than a body to parse.
     """
-    out = subprocess.run(
+    proc = subprocess.run(
         ["curl", "-fsSL", "--proto", "=https", "--max-time", str(HTTP_TIMEOUT), url],
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout
-    return json.loads(out)
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise ValueError(f"curl {url} failed (exit {proc.returncode}): {proc.stderr.strip()}")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{url} did not answer JSON: {exc}") from exc
 
 
 def gh_api(path: str, *extra: str) -> str:
