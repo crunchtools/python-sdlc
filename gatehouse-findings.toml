@@ -119,3 +119,11 @@ version is not hidden: `sdlc versions` prints `node --version` beside the pin, \
 and tests/contract.sh asserts the major. Every tool a check runs \
 (markdownlint-cli2, lychee, hadolint, grype) is pinned exactly.
 """
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "docs/marketplace-free-ci.md"
+evidence = "image: ${{ vars.SDLC_REF || 'quay.io/crunchtools/sdlc:latest' }}"
+status = "not-a-bug"
+reason = "Constitution XV rule 5 has crunchtools tool images float at :latest; the fallback only covers a fork run with no vars, which holds no secret, and the doc says so (item 8)."
