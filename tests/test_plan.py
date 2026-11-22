@@ -903,6 +903,29 @@ check(
     f"{msg} {held} {linked}",
 )
 
+with tempfile.TemporaryDirectory() as root:
+    Path(root, "repo", "web").mkdir(parents=True)
+    Path(root, "repo", "web", "package-lock.json").write_text("{}")
+    Path(root, "work", "tree").mkdir(parents=True)
+    saved_repo, saved_env = S.REPO, os.environ.get(S.NODE_WORK_ENV)
+    S.REPO, os.environ[S.NODE_WORK_ENV] = Path(root, "repo"), str(Path(root, "work"))
+    try:
+        S.node_installed("npm-test", ["web"])
+        msg = None
+    except S.CannotRunError as exc:
+        msg = str(exc)
+    finally:
+        S.REPO = saved_repo
+        if saved_env is None:
+            del os.environ[S.NODE_WORK_ENV]
+        else:
+            os.environ[S.NODE_WORK_ENV] = saved_env
+check(
+    "a node check whose install step did not run is CANNOT_RUN, naming the step",
+    msg is not None and "npm-install step did not run" in msg,
+    str(msg),
+)
+
 # `npm audit --json`, as npm 10 prints it, trimmed to what the classifier reads.
 AUDIT_CLEAN = json.dumps(
     {"auditReportVersion": 2, "vulnerabilities": {}, "metadata": {"vulnerabilities": {"total": 0}}}

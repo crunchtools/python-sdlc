@@ -37,6 +37,7 @@ import argparse
 import errno
 import fcntl
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -1653,7 +1654,7 @@ def node_sync(tree: Path) -> None:
             links = [d for d in subdirs if Path(here, d).is_symlink()]
             subdirs[:] = [d for d in subdirs if d != "node_modules" and d not in links]
             dirs += [Path(here, d) for d in subdirs]
-            for f in [*files, *links]:
+            for f in itertools.chain(files, links):
                 path = Path(here, f)
                 if str(path.relative_to(tree)) not in wanted:
                     path.unlink()
