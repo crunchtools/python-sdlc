@@ -79,7 +79,10 @@ RENAMED = (
 )
 # The pinned hooks repo under either name: GitHub redirects the old one.
 SDLC_REPO = re.compile(r"^https://github\.com/crunchtools/(?:python-)?sdlc(?:\.git)?/?$")
-CLONES_SDLC = re.compile(r"git clone\b.*github\.com/crunchtools/sdlc(?:\.git)?(?![\w.-])")
+# A clone of sdlc under either name, over https or ssh.
+CLONES_SDLC = re.compile(
+    r"git clone\b.*github\.com[:/]crunchtools/(?:python-)?sdlc(?:\.git)?(?![\w.-])"
+)
 STANDALONE_HOOKS = {"gourmand", "gatehouse"}
 SDLC_HOOKS = {"sdlc-commit", "sdlc-push"}
 GOURMAND_CALL = re.compile(r"^crunchtools/gatehouse/\.github/workflows/gourmand\.yml@")

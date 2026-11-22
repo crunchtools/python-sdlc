@@ -21,8 +21,8 @@ All notable changes to this project are documented here, following
   `uses: crunchtools/python-sdlc/.github/workflows/...@` become `sdlc`, in
   workflows, `[tool.sdlc]` config and the hooks file. It accepts the pinned
   hooks, and the pinned `sdlc ci` step, under either repo name. It refuses a
-  kept workflow that clones `crunchtools/sdlc` by rev, as it already refused
-  one that clones python-sdlc. A repo that already floats gets the rename and
+  kept workflow that clones sdlc by rev under either name, over https or ssh,
+  where before it caught only an https clone of python-sdlc. A repo that already floats gets the rename and
   the current bootstrap, so `scripts/fleet_wave.py` can run the wave over the
   whole fleet. The wave skips this repo under either name, and its commit and
   pull request text says what the rename changes.

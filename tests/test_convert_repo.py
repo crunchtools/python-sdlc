@@ -703,9 +703,14 @@ check(
     "new name: that floated workflow's second run finds nothing to do", convert(repo).stdout == ""
 )
 
-# A kept workflow cloning the new name by rev is refused like the old one,
-# with or without `.git`.
-for url in ("https://github.com/crunchtools/sdlc", "https://github.com/crunchtools/sdlc.git"):
+# A kept workflow cloning sdlc by rev is refused under either name, over https
+# or ssh, with or without `.git`.
+for url in (
+    "https://github.com/crunchtools/sdlc",
+    "https://github.com/crunchtools/sdlc.git",
+    "git@github.com:crunchtools/sdlc",
+    "git@github.com:crunchtools/python-sdlc.git",
+):
     orphan = PUBLISH.replace(
         "      - run: echo quay.io/crunchtools/python-sdlc-extras\n",
         f'      - run: git clone --branch "$rev" {url} x\n',
