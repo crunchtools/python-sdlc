@@ -55,3 +55,19 @@ justification = """
   functions, not duplicated logic. Two restructurings of verify left it in \
   place, so there is no shared helper to extract.
 """
+
+# The same shape match, across #91 and #93. CH012 pairs cutover.py's job_span
+# (finds a job's lines under `jobs:`) with provenance.py's provenance (builds
+# an SLSA predicate from image labels): three statements, assign then
+# `if x is None: return None`, and nothing else in common.
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "scripts/cutover.py"
+classification = "gourmand_bug"
+justification = """
+  job_span and scripts/provenance.py's provenance share no line, call or \
+  identifier: one scans workflow text by indent for a job's span, the other \
+  maps image labels to an SLSA predicate dict. The match is three statements, \
+  an assignment and an early `return None`, the opening of most lookups in \
+  Python, not duplicated logic, so there is no shared helper to extract.
+"""

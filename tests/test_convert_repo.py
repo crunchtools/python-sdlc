@@ -187,9 +187,9 @@ def snapshot(repo: Path) -> dict[str, str]:
     }
 
 
-def convert(repo: Path, apply: bool = False) -> subprocess.CompletedProcess:
+def convert(repo: Path, apply: bool = False, *extra: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, str(SCRIPT), str(repo), *(["--apply"] if apply else [])],
+        [sys.executable, str(SCRIPT), str(repo), *(["--apply"] if apply else []), *extra],
         capture_output=True,
         text=True,
         check=False,
@@ -277,6 +277,29 @@ for config in ("pyproject.toml", "sdlc.toml"):
         f"{config}: the python-sdlc image moves to quay.io/crunchtools/sdlc, a longer name stays",
         'image = "quay.io/crunchtools/sdlc:0.8.0"' in moved
         and "quay.io/crunchtools/python-sdlc-extras:1" in moved,
+        moved,
+    )
+
+# A period ends a sentence; it is not part of the name. A name that goes on
+# after the dot, or after a dash, is a different one.
+for config in ("pyproject.toml", "sdlc.toml"):
+    text = (
+        "# the image is quay.io/crunchtools/python-sdlc.\n"
+        '[tool.sdlc.ci.tests]\nimage = "quay.io/crunchtools/python-sdlc"\n'
+        "# not quay.io/crunchtools/python-sdlc-extras or quay.io/crunchtools/python-sdlc.x\n"
+    )
+    repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, config: text})
+    convert(repo, apply=True)
+    moved = snapshot(repo)[config]
+    check(
+        f"{config}: a python-sdlc reference ending a sentence is renamed",
+        "# the image is quay.io/crunchtools/sdlc.\n" in moved
+        and 'image = "quay.io/crunchtools/sdlc"' in moved,
+        moved,
+    )
+    check(
+        f"{config}: python-sdlc-extras and python-sdlc.x are left alone",
+        "quay.io/crunchtools/python-sdlc-extras or quay.io/crunchtools/python-sdlc.x\n" in moved,
         moved,
     )
 
@@ -880,6 +903,84 @@ check(
     refused.stderr,
 )
 
+# --unbuilt-stacks says which planned stacks the image still cannot check. A
+# stack that is not listed is checked now, so the skip-stacks entry the
+# converter wrote for it comes out, with its note, and nothing else does.
+PROJECT = '[project]\nname = "x"\nversion = "0"\n'
+EVERY_STACK_BUILT = ("--unbuilt-stacks", "")
+for config, head in (
+    ("sdlc.toml", "[tool.sdlc]\n"),
+    ("pyproject.toml", PROJECT + '\n[tool.sdlc]\nstacks = ["python"]\n'),
+):
+    repo = make_repo({**HOOKED, "package.json": "{}\n", config: head})
+    wrote = convert(repo, apply=True)
+    check(
+        f"{config}: the default still writes skip-stacks and its note",
+        wrote.returncode == 0
+        and sdlc_cfg(repo, config).get("skip-stacks") == ["node"]
+        and "# Written by crunchtools/sdlc" in snapshot(repo)[config],
+        wrote.stderr,
+    )
+    done = convert(repo, True, *EVERY_STACK_BUILT)
+    after = snapshot(repo)[config]
+    check(
+        f"{config}: with every stack built the skip-stacks line and its note are gone",
+        done.returncode == 0
+        and "skip-stacks" not in after
+        and "# Written by" not in after
+        and "dropped node" in done.stderr,
+        done.stderr + after,
+    )
+    again = convert(repo, True, *EVERY_STACK_BUILT)
+    check(
+        f"{config}: dropping is idempotent, the second run changes nothing",
+        again.returncode == 0 and again.stdout == "",
+        again.stderr + again.stdout,
+    )
+
+repo = make_repo(
+    {
+        **HOOKED,
+        "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["bootc", "docs"]  # kept by hand\n',
+    }
+)
+done = convert(repo, True, "--unbuilt-stacks", "docs")
+check(
+    "--unbuilt-stacks docs: only the stack now checked leaves the list, in place",
+    done.returncode == 0
+    and snapshot(repo)["sdlc.toml"] == '[tool.sdlc]\nskip-stacks = ["docs"]  # kept by hand\n',
+    done.stderr + snapshot(repo)["sdlc.toml"],
+)
+again = convert(repo, True, "--unbuilt-stacks", "docs")
+check("--unbuilt-stacks docs: the second run changes nothing", again.stdout == "", again.stdout)
+
+repo = make_repo({**HOOKED, "sdlc.toml": '[tool.sdlc]\nskip-stacks = [\n  "docs",\n]\n'})
+before = snapshot(repo)
+refused = convert(repo, True, *EVERY_STACK_BUILT)
+check(
+    "a skip-stacks over several lines is refused, nothing written",
+    refused.returncode == REFUSED and "not one line" in refused.stderr and snapshot(repo) == before,
+    refused.stderr,
+)
+
+repo = make_repo(
+    {**HOOKED, "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["node", "container", "python"]\n'}
+)
+done = convert(repo, True, *EVERY_STACK_BUILT)
+check(
+    "a skip-stacks entry outside node, bootc and docs is never dropped",
+    done.returncode == 0 and sdlc_cfg(repo).get("skip-stacks") == ["container", "python"],
+    done.stderr + snapshot(repo)["sdlc.toml"],
+)
+
+repo = make_repo({**HOOKED, "package.json": "{}\n"})
+refused = convert(repo, True, "--unbuilt-stacks", "nodes")
+check(
+    "--unbuilt-stacks naming an unknown stack is refused, nothing written",
+    refused.returncode == REFUSED and "sdlc.toml" not in snapshot(repo),
+    refused.stderr,
+)
+
 RHSM_CONTAINERFILE = (
     "FROM registry.access.redhat.com/ubi10/ubi:latest\n"
     "RUN --mount=type=secret,id=rhsm subscription-manager register && dnf -y install httpd\n"
@@ -995,6 +1096,110 @@ check(
     done.stderr,
 )
 check("the gatehouse example's guard covers .sdlc/", "|\\.sdlc)/" in GATEHOUSE)
+
+
+# ------------------------------------------------- the fleet's own runner
+
+# The 54 fleet ci.yml files route the `sdlc ci` job between the cached and the
+# uncached self-hosted runners; replacing the job must not move it to GitHub's.
+FLEET_RUNNER = """\
+    # Same-repo PRs run on our cached runner, pushes and schedules on the uncached
+    # one; forks and Dependabot stay on GitHub's. An empty variable falls back to
+    # ubuntu-latest (crunchtools/trentina security.yml).
+    runs-on: >-
+      ${{ github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && github.event.pull_request.user.login != 'dependabot[bot]'
+          && (vars.CACHED_RUNNER_LABEL || 'ubuntu-latest')
+          || github.event_name != 'pull_request'
+          && (vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest')
+          || 'ubuntu-latest' }}
+"""
+FLEET_CI = CI.replace("    runs-on: ubuntu-latest\n", FLEET_RUNNER, 1)
+# Four spaces a level: the runner block moves left to the stub's job keys.
+WIDE_CI = (
+    """\
+name: CI
+on:
+    pull_request:
+jobs:
+    sdlc:
+        name: sdlc ci
+"""
+    + "".join("    " + x if x.strip() else x for x in FLEET_RUNNER.splitlines(keepends=True))
+    + """\
+        steps:
+            - uses: actions/checkout@v7
+            - name: sdlc ci
+              env:
+                  SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}
+              run: .sdlc/bin/sdlc ci
+"""
+)
+check("runner: the fixture differs from the stub", FLEET_CI != CI)
+for label, old_ci in (
+    ("the stub's shape", FLEET_CI),
+    ("a pinned job", OLD_CI.replace("    runs-on: ubuntu-latest\n", FLEET_RUNNER, 1)),
+    ("four-space indents", WIDE_CI),
+    (
+        "the job after gourmand's",
+        FLEET_CI.split("jobs:\n", 1)[0]
+        + "jobs:\n"
+        + "  gourmand:\n"
+        + FLEET_CI.split("  gourmand:\n", 1)[1]
+        + "\n"
+        + FLEET_CI.split("jobs:\n", 1)[1].split("  gourmand:\n", 1)[0].rstrip("\n")
+        + "\n",
+    ),
+):
+    repo = make_repo(
+        {
+            ".pre-commit-config.yaml": PINNED_HOOKS,
+            ".github/workflows/ci.yml": old_ci,
+            ".specify/memory/constitution.md": CONSTITUTION,
+        }
+    )
+    done = convert(repo, apply=True)
+    ci = snapshot(repo).get(".github/workflows/ci.yml", "")
+    job = ((yaml.safe_load(ci) or {}).get("jobs") or {}).get("sdlc") or {}
+    want = (yaml.safe_load(old_ci) or {}).get("jobs", {})
+    want = next((j.get("runs-on") for j in want.values() if j.get("name") == "sdlc ci"), None)
+    check(f"runner: {label}: --apply exits 0", done.returncode == 0, done.stderr)
+    check(f"runner: {label}: the job keeps its runner", job.get("runs-on") == want, ci)
+    check(f"runner: {label}: and its comment", "Same-repo PRs run on our cached" in ci)
+    check(f"runner: {label}: it still runs sdlc ci", runs_sdlc_ci(ci))
+    check(f"runner: {label}: a second run finds nothing to do", convert(repo).stdout == "")
+
+# Two covered workflows that disagree, or a job with no runner of its own,
+# leave nothing to carry: the stub is written as it is.
+for label, files in (
+    (
+        "two covered workflows disagree",
+        {
+            ".github/workflows/ci.yml": FLEET_CI,
+            ".github/workflows/sdlc.yml": CI.split("  gourmand:\n", 1)[0].rstrip("\n") + "\n",
+        },
+    ),
+    (
+        "the job names no runner",
+        {".github/workflows/ci.yml": CI.replace("    runs-on: ubuntu-latest\n", "", 1)},
+    ),
+):
+    repo = make_repo(
+        {
+            ".pre-commit-config.yaml": PINNED_HOOKS,
+            ".specify/memory/constitution.md": CONSTITUTION,
+            **files,
+        }
+    )
+    done = convert(repo, apply=True)
+    after = snapshot(repo)
+    check(f"runner: {label}: --apply exits 0", done.returncode == 0, done.stderr)
+    check(
+        f"runner: {label}: ci.yml is the stub",
+        after.get(".github/workflows/ci.yml") == CI,
+        after.get(".github/workflows/ci.yml", ""),
+    )
 
 
 def main() -> int:
