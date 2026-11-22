@@ -382,7 +382,9 @@ class Report:
     changes: list[str] = field(default_factory=list)
     hand: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)  # the target validator's verdict
-    pins_left: list[str] = field(default_factory=list)  # constitution calls off the target ref
+    pins_left: list[str] = field(
+        default_factory=list
+    )  # constitution calls off the ref and major tags
 
 
 def git(cwd: Path, *args: str, stdin: str | None = None) -> str:
@@ -756,7 +758,7 @@ def write_report(wave: Wave, path: Path, unbuilt: str) -> None:
         + (", ".join(r for r in wave.outcomes if r not in clean) or "none"),
         f"- **Ashigaru router caller re-copied** ({len(recopied)}): "
         + (", ".join(recopied) or "none"),
-        "- **Constitution calls left off the target ref** "
+        "- **Constitution calls at neither the target ref nor a major tag** "
         f"({sum(len(wave.reports.get(r, Report()).pins_left) for r in wave.outcomes)}): "
         + (", ".join(off_ref) or "none"),
     ]

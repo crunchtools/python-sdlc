@@ -794,7 +794,10 @@ repo, result = run(
 check(
     "pins: a call at a branch is counted and hand work, and a comment is not a call",
     result.pins_left == [".github/workflows/odd.yml:8 @main"]
-    and any(h.startswith("constitution: 1 call(s) left off") for h in result.hand),
+    and any(
+        h.startswith("constitution: 1 call(s) at neither v1.60.0 nor a major tag")
+        for h in result.hand
+    ),
     str((result.pins_left, result.hand)),
 )
 
@@ -865,6 +868,29 @@ check(
     and one_tag_path(repo)
     and not any(c.startswith("ashigaru:") for c in result.changed),
     str(result.changed),
+)
+
+UNSAFE = "m$(id)"
+UNSAFE_TEMPLATE = TEMPLATE.replace("refs/heads/main", f"refs/heads/{UNSAFE}").replace(
+    "--base main", f"--base {UNSAFE}"
+)
+repo, result = run(
+    {CALLER_PATH: CALLER, RELEASE_PATH: UNSAFE_TEMPLATE},
+    target=TARGET,
+    default=UNSAFE,
+    label="open, unsafe branch swap",
+)
+check(
+    "open: a default branch that is not a plain name is never written by the swap",
+    read(repo, RELEASE_PATH) == UNSAFE_TEMPLATE
+    and any("not a plain name" in h and "by hand" in h for h in result.hand),
+    str(result.hand),
+)
+repo, result = run({CALLER_PATH: CALLER}, target=TARGET, default=UNSAFE, label="open, unsafe new")
+check(
+    "open: nor by a fresh open-only release.yml",
+    not (repo / RELEASE_PATH).exists() and any("not a plain name" in h for h in result.hand),
+    str(result.hand),
 )
 
 # The router already in, and the full template beside it.

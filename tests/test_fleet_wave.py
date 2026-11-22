@@ -830,7 +830,7 @@ check(
     "crunchtools/ashigaru@c0ffee" in text
     and "**Ashigaru router caller re-copied** (1): enrolled" in text
     and "## Dependabot Ashigaru pin bumps to close (1)" in text
-    and "**Constitution calls left off the target ref** (0): none" in text
+    and "**Constitution calls at neither the target ref nor a major tag** (0): none" in text
     and "- https://github.com/crunchtools/enrolled/pull/9" in text,
     text,
 )

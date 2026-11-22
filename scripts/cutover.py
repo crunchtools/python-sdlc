@@ -130,7 +130,7 @@ class Result:
 
     changed: list[str] = field(default_factory=list)  # one line per change, for the report
     hand: list[str] = field(default_factory=list)  # what it would not guess at
-    pins_left: list[str] = field(default_factory=list)  # constitution calls not at the target ref
+    pins_left: list[str] = field(default_factory=list)  # calls at neither the target ref nor vN
 
 
 def load(path: Path, name: str) -> ModuleType:
@@ -539,6 +539,13 @@ def open_release(repo: Path, default: str, result: Result) -> None:
     """A router caller tags on merge: the rest of the repo only opens the pull request."""
     release = repo / RELEASE
     if release.is_file() and release.read_text() == templated(RELEASE_TEMPLATE, default):
+        if not SAFE_BRANCH.fullmatch(default):
+            # It lands in a shell line that runs with the app token: never written as is.
+            result.hand.append(
+                f"release: default branch {default!r} is not a plain name; "
+                f"swap {RELEASE} for {OPEN_TEMPLATE.name} by hand"
+            )
+            return
         release.write_text(templated(OPEN_TEMPLATE, default))
         result.changed.append(f"release: {RELEASE} is now {OPEN_TEMPLATE.name}; the router tags")
         return
@@ -665,8 +672,8 @@ def cutover(repo: Path, name: str, default: str, target: Target) -> Result:
     result.pins_left = pins_left(repo, target)
     if result.pins_left:
         result.hand.append(
-            f"constitution: {len(result.pins_left)} call(s) left off {target.constitution_ref}: "
-            + ", ".join(result.pins_left)
+            f"constitution: {len(result.pins_left)} call(s) at neither "
+            f"{target.constitution_ref} nor a major tag: " + ", ".join(result.pins_left)
         )
     return result
 
