@@ -68,6 +68,10 @@ All notable changes to this project are documented here, following
   does the CPUs, and runs the lanes in turn when a share would be under
   3072m. A machine with room for 8g per lane is unchanged. `SDLC_MEMORY`
   now also refuses a size with the unit in the middle, like `8g8m`.
+- `scripts/convert_repo.py` replaced a covered `sdlc ci` job's `runs-on` with
+  `examples/ci.yml`'s `ubuntu-latest`, moving 54 fleet repos off the cached
+  and uncached self-hosted runners. The stub now keeps the job's own runner
+  and the comment above it (a1003).
 
 ### Changed
 

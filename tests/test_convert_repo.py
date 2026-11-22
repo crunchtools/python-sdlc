@@ -1089,6 +1089,69 @@ check(
 check("the gatehouse example's guard covers .sdlc/", "|\\.sdlc)/" in GATEHOUSE)
 
 
+# ------------------------------------------------- the fleet's own runner
+
+# The 54 fleet ci.yml files route the `sdlc ci` job between the cached and the
+# uncached self-hosted runners; replacing the job must not move it to GitHub's.
+FLEET_RUNNER = """\
+    # Same-repo PRs run on our cached runner, pushes and schedules on the uncached
+    # one; forks and Dependabot stay on GitHub's. An empty variable falls back to
+    # ubuntu-latest (crunchtools/trentina security.yml).
+    runs-on: >-
+      ${{ github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && github.event.pull_request.user.login != 'dependabot[bot]'
+          && (vars.CACHED_RUNNER_LABEL || 'ubuntu-latest')
+          || github.event_name != 'pull_request'
+          && (vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest')
+          || 'ubuntu-latest' }}
+"""
+FLEET_CI = CI.replace("    runs-on: ubuntu-latest\n", FLEET_RUNNER, 1)
+# Four spaces a level: the runner block moves left to the stub's job keys.
+WIDE_CI = (
+    """\
+name: CI
+on:
+    pull_request:
+jobs:
+    sdlc:
+        name: sdlc ci
+"""
+    + "".join("    " + x if x.strip() else x for x in FLEET_RUNNER.splitlines(keepends=True))
+    + """\
+        steps:
+            - uses: actions/checkout@v7
+            - name: sdlc ci
+              env:
+                  SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}
+              run: .sdlc/bin/sdlc ci
+"""
+)
+check("runner: the fixture differs from the stub", FLEET_CI != CI)
+for label, old_ci in (
+    ("the stub's shape", FLEET_CI),
+    ("a pinned job", OLD_CI.replace("    runs-on: ubuntu-latest\n", FLEET_RUNNER, 1)),
+    ("four-space indents", WIDE_CI),
+):
+    repo = make_repo(
+        {
+            ".pre-commit-config.yaml": PINNED_HOOKS,
+            ".github/workflows/ci.yml": old_ci,
+            ".specify/memory/constitution.md": CONSTITUTION,
+        }
+    )
+    done = convert(repo, apply=True)
+    ci = snapshot(repo).get(".github/workflows/ci.yml", "")
+    job = ((yaml.safe_load(ci) or {}).get("jobs") or {}).get("sdlc") or {}
+    want = (yaml.safe_load(old_ci) or {}).get("jobs", {})
+    want = next((j.get("runs-on") for j in want.values() if j.get("name") == "sdlc ci"), None)
+    check(f"runner: {label}: --apply exits 0", done.returncode == 0, done.stderr)
+    check(f"runner: {label}: the job keeps its runner", job.get("runs-on") == want, ci)
+    check(f"runner: {label}: and its comment", "Same-repo PRs run on our cached" in ci)
+    check(f"runner: {label}: it still runs sdlc ci", runs_sdlc_ci(ci))
+    check(f"runner: {label}: a second run finds nothing to do", convert(repo).stdout == "")
+
+
 def main() -> int:
     print()
     if FAILED:
