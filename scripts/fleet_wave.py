@@ -713,7 +713,7 @@ def target_of(args: argparse.Namespace) -> cutover.Target:
     bump, validator = cutover.constitution_modules(args.constitution_dir.resolve())
     return cutover.Target(
         constitution=args.constitution,
-        constitution_ref=args.constitution_ref or f"v{args.constitution}",
+        constitution_ref=args.constitution_ref,
         bump=bump,
         validator=validator,
         weekly=frozenset(filter(None, args.weekly.split(","))),
@@ -746,8 +746,9 @@ def main() -> int:
     ap.add_argument(
         "--constitution-ref",
         metavar="REF",
-        help="what exact constitution workflow pins become (default vX.Y.Z; "
-        "v1, the major tag, is what fleet-bump.py writes)",
+        default="v1",
+        help="what exact constitution workflow pins become (default %(default)s, the major "
+        "tag each release moves, as fleet-bump.py writes; vX.Y.Z holds a repo back)",
     )
     ap.add_argument(
         "--sdlc",

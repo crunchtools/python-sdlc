@@ -41,7 +41,7 @@ All notable changes to this project are documented here, following
   writes `examples/release.yml`, the Ashigaru release flow from
   rhel10-bootc-workstation, where a repo publishes an image and has no release
   flow. The versions are arguments (`--constitution-dir`, `--constitution`,
-  `--constitution-ref`, `--sdlc`, `--unbuilt-stacks`). Each converted repo is
+  `--constitution-ref`, default `v1`, the major tag, as fleet-bump.py writes it; `--sdlc`, `--unbuilt-stacks`). Each converted repo is
   judged by the target validator, and one it fails is reported `invalid` and
   not pushed. `--out DIR` writes each repo's diff and a `report.md`: what each
   repo got, and what it needs by hand. The branch is `chore/fleet-cutover`;
