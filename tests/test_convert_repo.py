@@ -1170,6 +1170,37 @@ for label, old_ci in (
     check(f"runner: {label}: it still runs sdlc ci", runs_sdlc_ci(ci))
     check(f"runner: {label}: a second run finds nothing to do", convert(repo).stdout == "")
 
+# Two covered workflows that disagree, or a job with no runner of its own,
+# leave nothing to carry: the stub is written as it is.
+for label, files in (
+    (
+        "two covered workflows disagree",
+        {
+            ".github/workflows/ci.yml": FLEET_CI,
+            ".github/workflows/sdlc.yml": CI.split("  gourmand:\n", 1)[0].rstrip("\n") + "\n",
+        },
+    ),
+    (
+        "the job names no runner",
+        {".github/workflows/ci.yml": CI.replace("    runs-on: ubuntu-latest\n", "", 1)},
+    ),
+):
+    repo = make_repo(
+        {
+            ".pre-commit-config.yaml": PINNED_HOOKS,
+            ".specify/memory/constitution.md": CONSTITUTION,
+            **files,
+        }
+    )
+    done = convert(repo, apply=True)
+    after = snapshot(repo)
+    check(f"runner: {label}: --apply exits 0", done.returncode == 0, done.stderr)
+    check(
+        f"runner: {label}: ci.yml is the stub",
+        after.get(".github/workflows/ci.yml") == CI,
+        after.get(".github/workflows/ci.yml", ""),
+    )
+
 
 def main() -> int:
     print()
