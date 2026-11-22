@@ -1,0 +1,47 @@
+# sdlc's in-repo Semgrep rules.
+#
+# These encode obligations the code states in its own comments and that a
+# structural check can hold: no shell between a repo's config and a tool, and a
+# check that could not run never reports a pass. Judgment calls stay in review.
+# Each rule has a --test fixture under .semgrep/tests/:
+#
+#   .semgrep/run-tests.sh   (one fixture per rule, each run against this file)
+#
+# Suppress a true-but-accepted hit inline with
+#   # nosemgrep: <rule-id> -- <why this site discharges the obligation>
+# and never with a bare nosemgrep: the reason is the review record.
+
+rules:
+  - id: sdlc-no-shell
+    message: >-
+      A shell between a repo's config and a tool lets config words become
+      commands. Pass an argv list and leave shell=False (see passthrough():
+      "there is no shell between the caller and the tool").
+    severity: ERROR
+    languages: [python]
+    pattern-either:
+      - pattern: subprocess.$FUNC(..., shell=True, ...)
+      - pattern: os.system(...)
+      - pattern: os.popen(...)
+
+  - id: sdlc-check-except-returns-clean
+    message: >-
+      A check that could not run must not report a pass. In a t_* check, an
+      except arm that returns CLEAN or 0 turns a failure into a green lane.
+      Call cannot(...) (exit 2), or return the tool's own verdict.
+    severity: ERROR
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: return CLEAN
+          - pattern: return 0
+      - pattern-inside: |
+          def $FUNC(...):
+            ...
+            try:
+              ...
+            except $EXC:
+              ...
+      - metavariable-regex:
+          metavariable: $FUNC
+          regex: ^t_.*

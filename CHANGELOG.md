@@ -55,6 +55,15 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `sdlc push` on this repo runs every lane instead of reporting mypy, pytest,
+  semgrep and pip-audit as could-not-run (a1008). The lock was refreshed (it
+  still pinned 0.6.0, so `uv sync --locked` failed) and gained a `dev` group of
+  mypy, pytest and PyYAML; `[tool.mypy]` checks `sdlc`, `validate` and
+  `scripts/` with `scripts_are_modules`, and `tests/test_suites.py` runs each
+  script-style suite as its own process. `.semgrep/` holds two rules with
+  fixtures: no shell between config and a tool, and no `t_*` check returning a
+  pass from an `except` arm. `convert_repo.py` refuses a `- repo:` line with no
+  repo instead of crashing on it.
 - `sdlc ci` no longer gets CodeQL OOM-killed on agent seats (a989). Rootless
   podman inside a seat drops `--memory`, so every lane was "given" 8g in a 4g
   cgroup and CodeQL sized its heap from that beside an image build. The

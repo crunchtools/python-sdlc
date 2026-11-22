@@ -93,7 +93,7 @@ jobs:
             tests/test_host_contract.sh tests/test_container_stack.sh scripts/release-version.sh \
             scripts/revision-of.sh tests/test_revision_of.sh bin/sdlc-bootstrap \
             tests/test_bootstrap.sh scripts/sign-digest.sh tests/test_sign_digest.sh \
-            scripts/attest-digest.sh tests/test_attest_digest.sh
+            scripts/attest-digest.sh tests/test_attest_digest.sh .semgrep/run-tests.sh
           tests/test_host_contract.sh
           tests/test_bootstrap.sh
           tests/test_sign_digest.sh
