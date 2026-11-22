@@ -102,6 +102,13 @@ class Target:
 
 @dataclass
 class Result:
+    """What cutover() did to one checkout, for fleet_wave.py's report and PR body.
+
+    `changed` holds one line per edit it made and wrote. `hand` holds what it
+    would not do safely -- each line names the file and what a human must do --
+    and a repo with any is listed as hand work; the rest of its edits still ship.
+    """
+
     changed: list[str] = field(default_factory=list)  # one line per change, for the report
     hand: list[str] = field(default_factory=list)  # what it would not guess at
 

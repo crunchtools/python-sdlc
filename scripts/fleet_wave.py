@@ -731,6 +731,12 @@ def release(value: str) -> str:
     return value
 
 
+def exit_status(counts: dict[str, int]) -> int:
+    """1 when any repo failed, could not queue auto-merge, or was held back by
+    the target validator (`invalid`): each one is a repo a human has to look at."""
+    return 1 if counts.get("failed") or counts.get("no-automerge") or counts.get(INVALID) else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument(
@@ -828,7 +834,7 @@ def main() -> int:
         write_report(wave, args.out / "report.md", args.unbuilt_stacks)
         summary += f"; report {args.out / 'report.md'}"
     print(f"fleet_wave: {len(names)} repo(s): {summary or 'nothing to do'}; ledger {ledger}")
-    return 1 if counts.get("failed") or counts.get("no-automerge") else 0
+    return exit_status(counts)
 
 
 if __name__ == "__main__":

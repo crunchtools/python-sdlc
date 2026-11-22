@@ -673,6 +673,29 @@ check(
     and "- INVALID IX: signing is wrong" in (base / "report.md").read_text(),
 )
 
+# A repo with no manifest cannot be judged, so it is invalid, not shipped unjudged.
+base = Path(tempfile.mkdtemp())
+bare = origin(
+    base,
+    "unjudged",
+    {k: v for k, v in CUTTABLE.items() if k != ".specify/memory/constitution.md"},
+)
+api = FakeApi(CANARY, routes(unjudged="main"))
+counts, ledger, _ = wave_run(api, base, ["unjudged"], apply=True, target=verdict(), sdlc="0.9.0")
+got = rows(ledger)
+check(
+    "no manifest: the repo is invalid, named for its missing manifest",
+    got["unjudged"][1] == "invalid" and "MANIFEST: no" in got["unjudged"][3],
+    str(got),
+)
+check(
+    "no manifest: nothing is pushed, no PR opened, no merge queued",
+    W.BRANCH not in git(bare, "branch", "-a") and all(m == "GET" for m, _, _ in api.calls),
+    str(api.calls),
+)
+check("exit: an invalid repo makes the run exit 1", W.exit_status(counts) == 1, str(counts))
+check("exit: a run of clean plans exits 0", W.exit_status({"would-open": 3, "noop": 1}) == 0)
+
 # A clean verdict ships, with the cutover in the commit.
 base = Path(tempfile.mkdtemp())
 bare = origin(base, "fit", CUTTABLE)
