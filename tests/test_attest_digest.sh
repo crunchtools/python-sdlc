@@ -56,11 +56,13 @@ esac
 EOF
 
 # The fake syft logs its arguments and writes a non-empty SBOM to the file
-# named after `spdx-json=`; `syft-fails` breaks it.
+# named after `spdx-json=`; `syft-fails` breaks it, and `syft-empty` makes it
+# succeed without writing one.
 cat > "$W/bin/syft" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$W/syft.log"
 [ ! -e "$W/syft-fails" ] || exit 1
+[ ! -e "$W/syft-empty" ] || exit 0
 for _a in "\$@"; do
   case "\$_a" in spdx-json=*) printf '{"spdxVersion":"SPDX-2.3"}\n' > "\${_a#spdx-json=}" ;; esac
 done
@@ -88,7 +90,7 @@ EOF
 }
 reset() {
   rm -rf "$W/log" "$W/att" "$W/preds" "$W/syft.log" "$W/skopeo.log" \
-    "$W/attest-fails" "$W/verify-fails" "$W/syft-fails"
+    "$W/attest-fails" "$W/verify-fails" "$W/syft-fails" "$W/syft-empty"
   cp "$W/fleet.pub" "$W/secret.pub"
   good_labels
 }
@@ -242,6 +244,40 @@ if [ "$RC" -ne 0 ] && ! grep -q '^attest ' "$W/log" && ! printf '%s' "$OUT" | gr
   ok "a scan that fails fails the step before anything is attested"
 else
   bad "failed syft: exit $RC"
+fi
+
+reset
+touch "$W/syft-empty"
+run "$D" "$A"
+if [ "$RC" -ne 0 ] && ! grep -q '^attest ' "$W/log" && printf '%s' "$OUT" | grep -q 'syft wrote no SBOM'; then
+  ok "a scan that writes no SBOM fails the step before anything is attested"
+else
+  bad "empty syft: exit $RC"
+fi
+
+# Each predicate is made only when some repository lacks that one type.
+reset
+mkdir -p "$W/att"
+for r in "$A" "$B"; do : > "$W/att/$(printf '%s' "$r" | tr / _)_slsaprovenance1"; done
+run "$D" "$A" "$B"
+if [ "$RC" -eq 0 ] && [ "$(lines '' "$W/syft.log")" -eq 1 ] && [ ! -e "$W/skopeo.log" ] \
+   && [ "$(lines '^attest .* --type spdxjson ' "$W/log")" -eq 2 ] \
+   && [ "$(lines '^attest .* --type slsaprovenance1 ' "$W/log")" -eq 0 ]; then
+  ok "only the SBOM missing: scanned once, not inspected, only the SBOM attested"
+else
+  bad "SBOM only: exit $RC"; cat "$W/log"
+fi
+
+reset
+mkdir -p "$W/att"
+for r in "$A" "$B"; do : > "$W/att/$(printf '%s' "$r" | tr / _)_spdxjson"; done
+run "$D" "$A" "$B"
+if [ "$RC" -eq 0 ] && [ ! -e "$W/syft.log" ] && [ "$(lines '' "$W/skopeo.log")" -eq 1 ] \
+   && [ "$(lines '^attest .* --type slsaprovenance1 ' "$W/log")" -eq 2 ] \
+   && [ "$(lines '^attest .* --type spdxjson ' "$W/log")" -eq 0 ]; then
+  ok "only the provenance missing: inspected once, not scanned, only the provenance attested"
+else
+  bad "provenance only: exit $RC"; cat "$W/log"
 fi
 
 printf '\n'
