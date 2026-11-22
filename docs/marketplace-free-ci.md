@@ -4,10 +4,10 @@ Design for a1051. Nothing here is implemented: it is the target that
 `convert_repo.py` and `cutover.py` will be changed to write, and the list of
 `sdlc` internals that have to exist first.
 
-## The file: 76 lines, seven jobs, every repo
+## The file: 79 lines, seven jobs, every repo
 
 Every repo carries exactly this `.github/workflows/ci.yml`, byte for byte,
-whatever kind of repo it is. It is 76 lines without comments, and it contains
+whatever kind of repo it is. It is 79 lines without comments, and it contains
 no `uses:` of any kind: no `actions/checkout`, no reusable-workflow call and no
 third-party action. Every job runs one image, the sdlc **bootstrap**, by a
 literal digest, and one command, `sdlc event`. That command reads
@@ -45,28 +45,31 @@ jobs:
   ai:  # model keys and a read token, never an App key; hands its result on in 128 KiB chunks
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target' && github.event.action != 'closed'
     runs-on: &hosted ${{ github.event.repository.private && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
+    environment: ai  # its secrets reach the default branch's definition only
     container: *boot
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", OPENROUTER_API_KEY: "${{ secrets.OPENROUTER_API_KEY }}" }
     steps: *event
-  write:  # the Ashigaru App key, no model: comments, labels, PRs, pushes, release PR and tag, retriage
+  write:  # the Ashigaru App key, no model: comments, labels, PRs, pushes, release PR and tag
     needs: [check, ai]
-    if: always() && !cancelled() && contains(fromJSON('["pull_request_target","pull_request_review_comment","issues","workflow_dispatch","schedule"]'), github.event_name)
+    if: always() && !cancelled() && contains(fromJSON('["pull_request_target","issues","workflow_dispatch","schedule"]'), github.event_name)
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}" }
     runs-on: *hosted
+    environment: ashigaru  # default branch only
     container: *boot
     permissions: {}
     env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
            SDLC_AI_0: "${{ needs.ai.outputs.p0 }}", SDLC_AI_1: "${{ needs.ai.outputs.p1 }}", SDLC_AI_2: "${{ needs.ai.outputs.p2 }}", SDLC_AI_3: "${{ needs.ai.outputs.p3 }}" }
     steps: *event
-  gate:  # required: workflow guard and every finding answered; base definition, no secret
+  gate:  # required: workflow guard and every finding answered; no secret. On a reply, re-runs itself where it counts
     name: sdlc / gate (${{ github.event_name }})  # required as "(pull_request_target)"
     needs: write
-    if: always() && github.event_name == 'pull_request_target' && github.event.action != 'closed'
+    if: always() && (github.event_name == 'pull_request_target' && github.event.action != 'closed' || github.event_name == 'pull_request_review_comment')
+    concurrency: { group: "gate-${{ github.event.pull_request.number }}-${{ github.event_name }}" }
     runs-on: *hosted
     container: *boot
-    permissions: { contents: read, pull-requests: write }
+    permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}" }
     steps: *event
   image:  # builds the merged Containerfile through the socket, gates it, pushes gated-<sha> by digest
@@ -98,7 +101,7 @@ jobs:
     steps: *event
 ```
 
-**Why 76 lines and not 20.** GitHub makes a separate job only where the
+**Why 79 lines and not 20.** GitHub makes a separate job only where the
 permissions, the secrets, the OIDC grant or the runner differ. Seven levels
 differ (see below), and each job needs its `if`, `runs-on`, `container`,
 `permissions`, `env` and `steps` lines. Merging any two jobs would put a
@@ -172,8 +175,8 @@ does the same verification on the host.
 |---|---|---|---|---|
 | `check` | `sdlc / check (pull_request)` (required) | read token, `security-events`, the socket | push, pull_request (forks too), release, schedule, dispatch; self-hosted allowed | any secret |
 | `ai` | | Claude and OpenRouter keys, read token | issues; `pull_request_target` not closed; GitHub-hosted (private: uncached) | an App key, a write token |
-| `write` | | Ashigaru App key (sdlc mints and revokes the token) | `pull_request_target`, review comments, issues, release dispatch, schedule; GitHub-hosted | a model |
-| `gate` | `sdlc / gate (pull_request_target)` (required) | `pull-requests: write` | `pull_request_target` not closed, after `write`; GitHub-hosted | any secret |
+| `write` | | Ashigaru App key (sdlc mints and revokes the token) | `pull_request_target`, issues, release dispatch, schedule; GitHub-hosted. Never an event that runs the PR's copy of the file | a model |
+| `gate` | `sdlc / gate (pull_request_target)` (required) | `pull-requests: write`, `actions: write` | `pull_request_target` not closed, after `write`; and review comments, as the doorbell; GitHub-hosted | any secret |
 | `image` | | quay credentials | after a green `check` that reports an image, never on a PR; GitHub-hosted | the cosign key |
 | `promote` | | cosign key in `cosign-signing`; one at a time per repo | after `image` | a build: it signs a digest it did not make |
 | `pypi` | | `id-token: write` in `pypi` (tag-restricted) | `release`, when `check` reports `publish: pypi`; GitHub-hosted | anything else |
@@ -224,11 +227,11 @@ CodeQL uploads as `/language:python`, and zizmor as `zizmor`.
 | ai | issues | Ashigaru `triage`, then `code` when the verdict is ready-to-code | triage.yml classify, code.yml agent |
 | write | pull_request_target | posts the review; pushes the fix commit and its finding answers | review.yml, fix.yml publish |
 | write | pull_request_target closed, merged `ashigaru/release-*` from this repo | tags the merge and publishes the GitHub Release | release-tag.yml |
-| write | pull_request_review_comment | retriage: finds this PR's latest `pull_request_target` run and re-runs its `gate` job with the App token (`POST /actions/jobs/{id}/rerun`) | gatehouse-retriage.yml |
 | write | issues | labels; opens the `ashigaru/issue-N` pull request | triage.yml apply, code.yml publish |
 | write | workflow_dispatch with `version` | opens the release pull request from `chore/release-X.Y.Z` | release.yml open |
 | write | schedule | keeps the audit alert issue | dependency-audit.yml |
 | gate | pull_request_target | the workflow guard: fails, and comments, when a fork touches `.github/workflows/` or `.sdlc/`. Then Gatehouse triage | gatehouse.yml guard, triage.yml |
+| gate | pull_request_review_comment | retriage: finds this PR's latest `pull_request_target` run and re-runs its `gate` job with `GITHUB_TOKEN` (`POST /actions/jobs/{id}/rerun`). Its own check is `sdlc / gate (pull_request_review_comment)`, which nothing requires | gatehouse-retriage.yml |
 | image | push, schedule, dispatch, parent-image-updated, release | builds through the socket, runs the container gates, pushes `gated-<sha>` by digest | container-release build, gates, mark |
 | promote | after image | signs, attests, moves tags, never backwards; dispatches `parent-image-updated` downstream | container-release promote |
 | pypi | release | `uv build` in a nested container, then `uv publish` by OIDC from the job | publish.yml |
@@ -343,23 +346,43 @@ token and no secrets ([events](https://docs.github.com/en/actions/reference/work
 and its checks do not count toward the ruleset (gatehouse#50, quoted in
 `retriage.yml`). Today `gatehouse-retriage.yml` listens on `workflow_run`,
 which "is able to access secrets and write tokens, even if the previous
-workflow was not". The new file has no `workflow_run`: neither a second file
-nor a self-reference. Instead, on a review comment, `write` mints the App
-token and re-runs `gate` inside the PR's `pull_request_target` run. That
-works wherever `write` gets the App key, which means every same-repo pull
-request, including all of Ashigaru's. **On a fork's pull request it cannot**,
-because no secret reaches that run. A fork contributor's reply is then
-re-triaged at their next push, or when a maintainer re-runs `gate`. That is a
-real regression, kept because forks are rare here. Two things for spike #103:
-- the Ashigaru App needs **Actions: write** for the re-run;
-- confirm that a re-run started by an App token updates the check the
-  ruleset reads, as a re-run of the same job did in gatehouse#50.
+workflow was not". The new file has no `workflow_run`. Instead, on a review
+comment, the `gate` job re-runs `gate` inside the PR's `pull_request_target`
+run. It does this with `GITHUB_TOKEN` and `actions: write`, and it holds no
+secret.
+
+Because that run executes the PR's copy of `ci.yml`, **no job holding a secret
+may run on this event**. A same-repo branch could otherwise edit the file and
+then comment, and so get the Ashigaru App key, which can tag past the cosign
+ruleset. That is why `write` does not list this event. What the PR's copy can
+reach here is `GITHUB_TOKEN`, and the author of a same-repo branch already has
+that much access.
+
+On a fork's PR the token is read-only, so the re-run fails. A fork
+contributor's reply is then re-triaged at their next push, or when a
+maintainer re-runs `gate`. That is a real regression, kept because forks are
+rare here. Spike #103 confirms that a re-run started this way updates the
+check the ruleset reads, as a re-run of the same job did in gatehouse#50.
 
 **6. Who runs an event's workflow.**
 - `pull_request_target` runs "in the context of the default branch of the base
   repository", so its jobs are the base's definitions. That is why `ai`,
   `write` and `gate` run there, and never under `pull_request`.
 - `issues` and `release` run the default branch's definition.
+- **The rule that follows:** a job holding a secret lists only events that run
+  the default branch's definition (`pull_request_target`, `issues`,
+  `schedule`, `repository_dispatch`, `push` to the default branch, `release`).
+- **An `if:` cannot enforce that rule.** A writer can dispatch the workflow on
+  their own branch, or push a branch whose copy of `ci.yml` adds triggers.
+  Either way the `if:` that runs is the one they wrote. So **every secret
+  lives in an environment whose deployment rule admits only the default
+  branch** (`ai`, `ashigaru`, `cosign-signing`), or `v*` tags (`pypi`). A job
+  definition from any other ref gets an empty secret, whatever its `if:` says.
+  Today the App key, the Claude token and the OpenRouter key are org or repo
+  secrets, which any branch's workflow can read. Moving them into
+  environments is a cutover step, and it closes that gap for the current
+  workflows too. The cost is cosmetic: the environment shows as a
+  deployment in each PR's timeline.
 - `pull_request` and `pull_request_review_comment` run the merge commit's copy
   of `ci.yml` ([events](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)).
   So a fork can edit the jobs in its own run, as it can today. `gate` refuses
@@ -644,7 +667,10 @@ exist in the repo:
 1. sdlc grows `sdlc event` and the tools it needs, and releases.
 2. The bootstrap image ships, with its digest recorded.
 3. Spike #103 passes on both runner kinds.
-4. The PyPI environments and new trusted publishers are in place (Scott).
+4. The environments are in place, each restricted to the default branch
+   (`ai`, `ashigaru`, `cosign-signing`) or to `v*` tags (`pypi`), and the
+   Claude, OpenRouter and Ashigaru secrets have moved into them. The new
+   PyPI trusted publishers are registered (Scott).
 5. Three canary repos convert: mcp-wordpress, ubi10-core and acquacotta.
 6. The fleet wave runs.
 7. The reusables are deprecated a release later.
