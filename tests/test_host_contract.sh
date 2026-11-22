@@ -703,6 +703,7 @@ case "\$*" in
   *symbolic-ref*) echo refs/remotes/origin/main ;;
   *"diff --quiet"*) exit 1 ;;
   *diff*) echo "+a change" ;;
+  *cat-file*) exit 1 ;;
   *) exit 0 ;;
 esac
 EOF
@@ -1315,6 +1316,73 @@ if [ "$rc" -eq 0 ] && grep -q 'GATEHOUSE SKIPPED: no remote URL' "$RUN/gh-out"; 
   ok "no URL anywhere is a loud skip, not a failure"
 else
   bad "no remote found did not skip loudly (rc=$rc)"; sed 's/^/       /' "$RUN/gh-out"
+fi
+
+# CI Gatehouse: a repo whose HEAD carries .github/workflows/gatehouse.yml is
+# reviewed on every PR push, so the local run is skipped unless forced.
+ci() {                 # has-workflow|no-workflow -> exit status; output in $RUN/gh-out
+  GH_CI=$1 sh -c '
+    . "$1"; ME=sdlc
+    git() {
+      case "$*" in
+        "cat-file -e HEAD:.github/workflows/gatehouse.yml") [ "$GH_CI" = has-workflow ] ;;
+        *) return 1 ;;
+      esac
+    }
+    gatehouse_in_ci
+  ' sh "$GH_FUNCS" > "$RUN/gh-out" 2>&1
+}
+
+unset SDLC_GATEHOUSE_LOCAL
+ci has-workflow && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'gatehouse skipped: CI Gatehouse reviews this repo (.github/workflows/gatehouse.yml)' "$RUN/gh-out"; then
+  ok "a repo with CI Gatehouse skips the local review, in one line"
+else
+  bad "CI Gatehouse did not skip the local review (rc=$rc)"; sed 's/^/       /' "$RUN/gh-out"
+fi
+SDLC_GATEHOUSE_LOCAL=1 ci has-workflow && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] && [ ! -s "$RUN/gh-out" ]; then
+  ok "SDLC_GATEHOUSE_LOCAL=1 forces the local review"
+else
+  bad "SDLC_GATEHOUSE_LOCAL=1 did not force it (rc=$rc)"
+fi
+for v in 0 true yes 11 ' 1' ''; do
+  SDLC_GATEHOUSE_LOCAL=$v ci has-workflow && rc=0 || rc=$?
+  if [ "$rc" -eq 0 ]; then ok "SDLC_GATEHOUSE_LOCAL='$v' is not the force"; else bad "force accepted '$v'"; fi
+done
+ci no-workflow && rc=0 || rc=$?
+if [ "$rc" -ne 0 ]; then ok "no CI Gatehouse workflow: the local review runs"; else bad "skipped without a workflow"; fi
+
+# The classic shape: the staged-diff hook makes the same decision in its entry.
+# A one-line folded block (`entry: >-`), because the skip line carries a `: `.
+CLASSIC=$(sed -n "/entry: >-/{n;s/^ *bash -c '\(.*gatehouse.*\)'\$/\1/p;}" .pre-commit-config.yaml)
+classic() {            # has-workflow|no-workflow -> output in $RUN/gh-out
+  rm -f "$RUN/classic-ran"
+  GH_CI=$1 RAN="$RUN/classic-ran" bash -c '
+    git() {
+      case "$*" in
+        "cat-file -e HEAD:.github/workflows/gatehouse.yml") [ "$GH_CI" = has-workflow ] ;;
+        *) : ;;
+      esac
+    }
+    podman() { cat >/dev/null; touch "$RAN"; }
+    export -f git podman
+    bash -c "$1"
+  ' sh "$CLASSIC" > "$RUN/gh-out" 2>&1
+}
+if [ -z "$CLASSIC" ]; then
+  bad "the classic gatehouse hook entry was not found in .pre-commit-config.yaml"
+else
+  classic has-workflow
+  if [ ! -e "$RUN/classic-ran" ] && grep -q 'gatehouse skipped: CI Gatehouse' "$RUN/gh-out"; then
+    ok "the classic hook skips when CI Gatehouse reviews the repo"
+  else
+    bad "the classic hook ran with CI Gatehouse present"; sed 's/^/       /' "$RUN/gh-out"
+  fi
+  SDLC_GATEHOUSE_LOCAL=1 classic has-workflow
+  if [ -e "$RUN/classic-ran" ]; then ok "the classic hook runs when forced"; else bad "the classic hook ignored SDLC_GATEHOUSE_LOCAL=1"; fi
+  classic no-workflow
+  if [ -e "$RUN/classic-ran" ]; then ok "the classic hook runs without a CI workflow"; else bad "the classic hook skipped without a workflow"; fi
 fi
 
 printf '\n'

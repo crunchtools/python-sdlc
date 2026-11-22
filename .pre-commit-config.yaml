@@ -68,6 +68,10 @@ repos:
   # step, which then cannot read the repo at all. It cost half an hour here.
   # These three hooks mount one tree, so they share the label.
   #
+  # A THIRD: gatehouse skips when HEAD carries .github/workflows/gatehouse.yml,
+  # which this repo does, because CI reviews the same diff on every PR push.
+  # SDLC_GATEHOUSE_LOCAL=1 runs it here anyway (README, "Gatehouse and CI").
+  #
   # The fleet example should change the same way; raised separately.
   # `--events-backend=none --log-driver=none` keeps a gate out of the journal.
   - repo: local
@@ -82,7 +86,8 @@ repos:
 
       - id: gatehouse
         name: Gatehouse (AI code review, staged diff)
-        entry: bash -c 'git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,z -w /src quay.io/crunchtools/gatehouse:0.26.0 --stdin'
+        entry: >-
+          bash -c 'if [ "${SDLC_GATEHOUSE_LOCAL:-}" != 1 ] && git cat-file -e HEAD:.github/workflows/gatehouse.yml 2>/dev/null; then echo "gatehouse skipped: CI Gatehouse reviews this repo (.github/workflows/gatehouse.yml); SDLC_GATEHOUSE_LOCAL=1 runs it here"; exit 0; fi; git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,z -w /src quay.io/crunchtools/gatehouse:0.26.0 --stdin'
         language: system
         pass_filenames: false
         always_run: true

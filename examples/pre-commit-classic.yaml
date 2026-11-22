@@ -12,6 +12,11 @@
 # skipped with `SKIP=gatehouse git commit ...` — and must then be answered on
 # the PR, where the same finding will reappear.
 #
+# When HEAD carries .github/workflows/gatehouse.yml, CI reviews the same diff on
+# every PR push, so the hook prints one "gatehouse skipped" line and exits 0.
+# SDLC_GATEHOUSE_LOCAL=1 runs it here anyway. The entry is a folded block
+# because that line carries a `: `.
+#
 # Both hooks run podman with --events-backend=none and --log-driver=none.
 # Rootless podman otherwise writes six lifecycle events per run, each
 # carrying every image label, plus the tool's output, into the journal,
@@ -29,7 +34,8 @@ repos:
         stages: [pre-commit, pre-merge-commit]
       - id: gatehouse
         name: Gatehouse (AI code review, staged diff)
-        entry: bash -c 'git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,Z -w /src quay.io/crunchtools/gatehouse:latest --stdin'
+        entry: >-
+          bash -c 'if [ "${SDLC_GATEHOUSE_LOCAL:-}" != 1 ] && git cat-file -e HEAD:.github/workflows/gatehouse.yml 2>/dev/null; then echo "gatehouse skipped: CI Gatehouse reviews this repo (.github/workflows/gatehouse.yml); SDLC_GATEHOUSE_LOCAL=1 runs it here"; exit 0; fi; git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,Z -w /src quay.io/crunchtools/gatehouse:latest --stdin'
         language: system
         pass_filenames: false
         always_run: true

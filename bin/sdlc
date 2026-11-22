@@ -533,8 +533,20 @@ gatehouse_skipped() {
   return 0
 }
 
+# Returns 0 after printing why when CI reviews this repo, so a local run would pay
+# for the same review twice: every `sdlc push`, then every PR push, over the same
+# diff. HEAD's tree rather than the working tree, because HEAD is what is pushed.
+# SDLC_GATEHOUSE_LOCAL=1 (exactly 1) runs it here anyway.
+gatehouse_in_ci() {
+  [ "${SDLC_GATEHOUSE_LOCAL:-}" = 1 ] && return 1
+  git cat-file -e HEAD:.github/workflows/gatehouse.yml 2>/dev/null || return 1
+  printf '%s: gatehouse skipped: CI Gatehouse reviews this repo (.github/workflows/gatehouse.yml); SDLC_GATEHOUSE_LOCAL=1 runs it here\n' "$ME"
+  return 0
+}
+
 t_gatehouse() {
   gatehouse_skipped && return 0
+  gatehouse_in_ci && return 0
   _env=${GATEHOUSE_ENV:-$HOME/.config/mcp-env/gatehouse.env}
   [ -f "$_env" ] || die "$_env is missing; Gatehouse has no API key"
 

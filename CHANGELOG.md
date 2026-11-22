@@ -42,6 +42,12 @@ All notable changes to this project are documented here, following
 
 ### Changed
 
+- Gatehouse is skipped locally, in every tier and in the classic staged-diff
+  hook, when HEAD carries `.github/workflows/gatehouse.yml`: CI reviews the same
+  diff on every pull-request push, and the local run doubled the OpenRouter
+  bill. It prints one `gatehouse skipped: CI Gatehouse reviews this repo` line
+  and exits 0. `SDLC_GATEHOUSE_LOCAL=1` (exactly `1`) forces the local run;
+  `SDLC_SKIP` is unchanged.
 - Gatehouse triage is passed `review_result: ${{ needs.review.result }}`, so a PR
   whose review job died before posting is held (gatehouse v0.32.0).
 - The launcher's not-the-release banner asks about the name the bootstrap

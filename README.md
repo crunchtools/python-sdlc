@@ -473,6 +473,21 @@ boundary. The scp and ssh forms trust the literal host `github.com`, which
 `~/.ssh/config` can redirect, and the remote's name says nothing about where the
 server really is.
 
+## Gatehouse and CI
+
+A repo whose HEAD carries `.github/workflows/gatehouse.yml` is reviewed by CI on
+every pull-request push, over the same diff, so the local review is paid for
+twice. In that repo `sdlc gatehouse`, in every tier, prints one line and exits 0:
+
+```
+sdlc: gatehouse skipped: CI Gatehouse reviews this repo (.github/workflows/gatehouse.yml); SDLC_GATEHOUSE_LOCAL=1 runs it here
+```
+
+`SDLC_GATEHOUSE_LOCAL=1` (exactly `1`) runs it locally anyway; the remote guard
+above still applies. The classic staged-diff hook in
+[`examples/pre-commit-classic.yaml`](examples/pre-commit-classic.yaml) makes
+the same decision in its entry.
+
 ## Skipping a check
 
 `SDLC_SKIP=gatehouse git push` skips one check, once, for a false positive. The
