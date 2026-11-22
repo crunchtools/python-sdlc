@@ -1647,9 +1647,13 @@ def node_sync(tree: Path) -> None:
         wanted = node_copy(tree)
         dirs: list[Path] = []
         for here, subdirs, files in os.walk(tree):
-            subdirs[:] = [d for d in subdirs if d != "node_modules"]
+            # A symlink to a directory is listed among the directories, but it
+            # is a source entry like a file: kept when wanted, unlinked when
+            # stale, never descended into or offered to rmdir.
+            links = [d for d in subdirs if Path(here, d).is_symlink()]
+            subdirs[:] = [d for d in subdirs if d != "node_modules" and d not in links]
             dirs += [Path(here, d) for d in subdirs]
-            for f in files:
+            for f in [*files, *links]:
                 path = Path(here, f)
                 if str(path.relative_to(tree)) not in wanted:
                     path.unlink()

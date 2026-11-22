@@ -224,7 +224,9 @@ def main() -> int:
     for tool, old, new, digest in moves:
         # Both copies where there are two: one before the first FROM, one after
         # it (an ARG declared before FROM is out of scope inside the stage).
-        rewrite(containerfile, f"ARG {tool.arg}={old}\n", f"ARG {tool.arg}={new}\n", tool.copies)
+        rewrite(
+            containerfile, f"ARG {tool.arg}={old}\n", f"ARG {tool.arg}={new}\n", count=tool.copies
+        )
         if digest:
             apply_digest(containerfile, digest)
     rewrite(containerfile, f'LABEL version="{current}"', f'LABEL version="{version}"', count=1)

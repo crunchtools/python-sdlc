@@ -868,6 +868,41 @@ check(
     str(msg),
 )
 
+
+def node_sync_links() -> tuple[str | None, list[str], bool]:
+    """node_sync over a wanted and a stale symlink to a directory.
+
+    Returns the CannotRun message, what the tree holds, and whether `lib` is still a link.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        repo, tree = Path(root, "repo"), Path(root, "tree")
+        Path(repo, "src").mkdir(parents=True)
+        Path(repo, "src", "a.js").write_text("x")
+        Path(repo, "lib").symlink_to("src")
+        Path(tree, "gone").mkdir(parents=True)
+        Path(tree, "old").symlink_to("gone")
+        saved_repo, saved_files = S.REPO, S.node_source_files
+        S.REPO = repo
+        S.node_source_files = lambda: ["lib", "src/a.js"]
+        try:
+            S.node_sync(tree)
+            msg = None
+        except S.CannotRunError as exc:
+            msg = str(exc)
+        finally:
+            S.REPO, S.node_source_files = saved_repo, saved_files
+        held = sorted(str(f.relative_to(tree)) for f in tree.iterdir())
+        linked = Path(tree, "lib").is_symlink()
+    return msg, held, linked
+
+
+msg, held, linked = node_sync_links()
+check(
+    "node_sync keeps a wanted directory symlink and unlinks a stale one, neither an error",
+    msg is None and held == ["lib", "src"] and linked,
+    f"{msg} {held} {linked}",
+)
+
 # `npm audit --json`, as npm 10 prints it, trimmed to what the classifier reads.
 AUDIT_CLEAN = json.dumps(
     {"auditReportVersion": 2, "vulnerabilities": {}, "metadata": {"vulnerabilities": {"total": 0}}}
