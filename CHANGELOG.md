@@ -80,6 +80,16 @@ All notable changes to this project are documented here, following
   `bin/sdlc` now pins the hook's index tree at `refs/sdlc/hook-index` and
   removes the pin when the gate ends.
 
+- `sdlc push` on this repo runs every lane instead of reporting mypy, pytest,
+  semgrep and pip-audit as could-not-run (a1008). The lock was refreshed (it
+  still pinned 0.6.0, so `uv sync --locked` failed) and gained a `dev` group of
+  mypy, pytest and PyYAML; `[tool.mypy]` checks `sdlc`, `validate` and
+  `scripts/` with `scripts_are_modules`, and `tests/test_suites.py` runs each
+  script-style suite as its own process. `.semgrep/` holds two rules with
+  fixtures: no shell between config and a tool, and no `t_*` check returning a
+  pass from an `except` arm. `convert_repo.py` refuses a `- repo:` line with no
+  repo instead of crashing on it.
+
 ### Changed
 
 - The repo is `crunchtools/sdlc` and the image `quay.io/crunchtools/sdlc`
@@ -104,35 +114,6 @@ All notable changes to this project are documented here, following
   major tag, as `examples/constitution.yml` does, in place of `@v1.41.0`.
   v1.60.0 lists `sdlc` beside `python-sdlc` in the fleet lists, which the
   rename had dropped this repo from.
-
-### Fixed
-
-- `sdlc push` on this repo runs every lane instead of reporting mypy, pytest,
-  semgrep and pip-audit as could-not-run (a1008). The lock was refreshed (it
-  still pinned 0.6.0, so `uv sync --locked` failed) and gained a `dev` group of
-  mypy, pytest and PyYAML; `[tool.mypy]` checks `sdlc`, `validate` and
-  `scripts/` with `scripts_are_modules`, and `tests/test_suites.py` runs each
-  script-style suite as its own process. `.semgrep/` holds two rules with
-  fixtures: no shell between config and a tool, and no `t_*` check returning a
-  pass from an `except` arm. `convert_repo.py` refuses a `- repo:` line with no
-  repo instead of crashing on it.
-- `sdlc ci` no longer gets CodeQL OOM-killed on agent seats (a989). Rootless
-  podman inside a seat drops `--memory`, so every lane was "given" 8g in a 4g
-  cgroup and CodeQL sized its heap from that beside an image build. The
-  launcher now reads the host's real ceiling (cgroup `memory.max` from leaf to
-  root, keeping a quarter for the agent, or MemTotal), defaults
-  `SDLC_MEMORY` to it when it is under 8g, divides it between CPU lanes as it
-  does the CPUs, and runs the lanes in turn when a share would be under
-  3072m. A machine with room for 8g per lane is unchanged. `SDLC_MEMORY`
-  now also refuses a size with the unit in the middle, like `8g8m`.
-
-- `git commit -a` no longer loses its blobs when something prunes the clone
-  while the pre-commit hook runs (#94). Until the commit is made, `commit -a`
-  records its new blobs only in `.git/index.lock`, which gc cannot see, so a
-  `git gc --prune=now` from another process deleted them and the commit failed
-  with "invalid object ... Error building trees". While a hook's gate runs,
-  `bin/sdlc` now pins the hook's index tree at `refs/sdlc/hook-index` and
-  removes the pin when the gate ends.
 
 ## [0.11.0] - 2026-11-22
 
