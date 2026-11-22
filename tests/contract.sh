@@ -67,6 +67,10 @@ for probe in \
   "uv:uv --version" \
   "hadolint:hadolint --version" \
   "grype:grype version" \
+  "node:node --version" \
+  "npm:npm --version" \
+  "markdownlint-cli2:markdownlint-cli2 --help | head -1" \
+  "lychee:lychee --version" \
   "git:git --version" \
   "jq:jq --version" \
   "curl:curl --version" \
@@ -112,6 +116,14 @@ check_version hadolint  "$(inside sh -c 'printf %s "$SDLC_HADOLINT_VERSION"')" \
                         "$(inside sh -c 'hadolint --version' 2>&1)"
 check_version grype     "$(inside sh -c 'printf %s "$SDLC_GRYPE_VERSION"')" \
                         "$(inside sh -c 'grype version' 2>&1)"
+check_version node      "$(inside sh -c 'printf %s "$SDLC_NODE_VERSION"')" \
+                        "$(inside sh -c 'node --version' 2>&1)"
+# The probe is `--help | head -1` ("markdownlint-cli2 v0.24.0 (markdownlint
+# ..."): the package has no --version flag, and its banner names the version.
+check_version markdownlint-cli2 "$(inside sh -c 'printf %s "$SDLC_MARKDOWNLINT_CLI2_VERSION"')" \
+                        "$(inside sh -c 'markdownlint-cli2 --help' 2>&1 | head -1)"
+check_version lychee    "$(inside sh -c 'printf %s "$SDLC_LYCHEE_VERSION"')" \
+                        "$(inside sh -c 'lychee --version' 2>&1)"
 
 # codeql's bundle name is codeql-bundle-vX.Y.Z and the CLI reports X.Y.Z.
 _bundle=$(inside sh -c 'printf %s "$SDLC_CODEQL_BUNDLE"')
@@ -516,6 +528,45 @@ else
 fi
 rm -rf "$CFIX"
 
+# ------------------------------------------------------ the docs stack, in here
+#
+# A repo with Markdown and nothing else is the docs stack. Both checks run on a
+# READ-ONLY mount: the generated markdownlint and lychee configs have to land
+# under /tmp, and lychee has to do its work offline. The end-to-end run through
+# the launcher is tests/test_docs_stack.sh.
+DFIX=$(mktemp -d)
+mkdir "$DFIX/docs"
+printf '# Title\n\n## Usage\n\nSee [the guide](docs/guide.md#setup).\n' > "$DFIX/README.md"
+printf '# Guide\n\n## Setup\n\nBack to the [top](../README.md#usage).\n' > "$DFIX/docs/guide.md"
+docs() { podman run --rm --network=none -v "$DFIX:/repo:ro,z" -w /repo --entrypoint="" "$IMAGE" sdlc "$1" 2>&1; }
+plan=$(podman run --rm -v "$DFIX:/repo:ro,z" -w /repo --entrypoint="" \
+         -e SDLC_HOST_REPO=/host -e SDLC_CACHE_VOLUME=v -e SDLC_IMAGE=gate \
+         "$IMAGE" sdlc plan ci 2>&1 | cut -f1 | awk '!s[$0]++' | tr '\n' ' ')
+want="markdown-lint link-check constitution "
+if [ "$plan" = "$want" ]; then
+  ok "a Markdown-only repo plans the docs stack in ci"
+else
+  bad "sdlc plan ci on a Markdown-only repo gave '$plan', want '$want'"
+fi
+for check in markdown-lint link-check; do
+  if out=$(docs "$check"); then
+    ok "$check runs clean on a read-only, network-less fixture"
+  else
+    bad "$check failed on a clean fixture"
+    printf '%s\n' "$out" | sed 's/^/       /' | tail -8
+  fi
+done
+printf '\nSee [gone](docs/missing.md) and [bad](docs/guide.md#nowhere).\n' >> "$DFIX/README.md"
+rc=0
+out=$(docs link-check) || rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'missing.md' && printf '%s' "$out" | grep -q 'nowhere'; then
+  ok "link-check fails on a missing file and a missing #fragment (exit 1)"
+else
+  bad "link-check on broken links exited $rc, want 1 naming both"
+  printf '%s\n' "$out" | sed 's/^/       /' | tail -8
+fi
+rm -rf "$DFIX"
+
 # --------------------------------------- `sdlc versions` matches the build pins
 #
 # The version table is the image's central promise: a consuming repo pins this
@@ -533,7 +584,10 @@ for row in \
   "codeql:SDLC_CODEQL_BUNDLE" \
   "uv:SDLC_UV_VERSION" \
   "hadolint:SDLC_HADOLINT_VERSION" \
-  "grype:SDLC_GRYPE_VERSION"
+  "grype:SDLC_GRYPE_VERSION" \
+  "node:SDLC_NODE_VERSION" \
+  "markdownlint-cli2:SDLC_MARKDOWNLINT_CLI2_VERSION" \
+  "lychee:SDLC_LYCHEE_VERSION"
 do
   tool=${row%%:*}
   var=${row#*:}

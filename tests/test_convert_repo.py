@@ -868,55 +868,50 @@ def sdlc_cfg(repo: Path, name: str = "sdlc.toml") -> dict:
     return tomllib.loads(snapshot(repo).get(name, "")).get("tool", {}).get("sdlc", {})
 
 
-for label, files, want in (
-    ("node", {"package.json": "{}\n"}, ["node"]),
-    ("bootc", {"Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n"}, ["bootc"]),
-    ("docs", {"README.md": "# hi\n"}, ["docs"]),
+for label, files in (
+    ("node", {"package.json": "{}\n"}),
+    ("bootc", {"Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n"}),
+    ("bootc via ARG", {"Containerfile": "ARG B=quay.io/x/fedora-bootc\nFROM ${B}\n"}),
+    ("docs", {"README.md": "# hi\n"}),
 ):
     repo = make_repo({**HOOKED, **files})
     first = convert(repo, apply=True)
-    again = convert(repo, apply=True)
     check(
-        f"a {label} repo gets skip-stacks for the stack this image cannot check yet",
-        first.returncode == 0 and sdlc_cfg(repo).get("skip-stacks") == want,
+        f"a {label} repo gets no skip-stacks: every stack is checked now",
+        first.returncode == 0 and "skip-stacks" not in sdlc_cfg(repo),
         first.stderr + first.stdout,
-    )
-    check(
-        f"a {label} repo: the second run changes nothing",
-        again.returncode == 0 and again.stdout == "",
-        again.stderr + again.stdout,
     )
 
 repo = make_repo(
     {
         **HOOKED,
-        "package.json": "{}\n",
-        "Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n",
-        "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["node"]\n',
+        "Containerfile": "FROM registry.redhat.io/rhel10/rhel-bootc\n",
+        "sdlc.toml": '[tool.sdlc.push]\nskip = ["constitution"]\n',
     }
 )
-refused = convert(repo, apply=True)
+first = convert(repo, apply=True)
 check(
-    "a skip-stacks that leaves an unchecked stack out is refused, not rewritten",
-    refused.returncode == REFUSED
-    and "bootc" in refused.stderr
-    and sdlc_cfg(repo).get("skip-stacks") == ["node"],
-    refused.stderr,
+    "a bootc image on a registry.redhat.io base skips its build chain in ci",
+    first.returncode == 0
+    and (sdlc_cfg(repo).get("ci") or {}).get("skip")
+    == ["container-build", "bootc-lint", "container-scan"],
+    first.stderr + first.stdout,
 )
 
-# --unbuilt-stacks says which planned stacks the image still cannot check. A
-# stack that is not listed is checked now, so the skip-stacks entry the
-# converter wrote for it comes out, with its note, and nothing else does.
+# --unbuilt-stacks says which planned stacks the image still cannot check, and
+# by default none: every stack is checked. A stack that is not listed is
+# checked, so the skip-stacks entry an older converter wrote for it comes out,
+# with its note, and nothing else does.
 PROJECT = '[project]\nname = "x"\nversion = "0"\n'
-EVERY_STACK_BUILT = ("--unbuilt-stacks", "")
+EVERY_STACK_BUILT: tuple[str, ...] = ()
 for config, head in (
     ("sdlc.toml", "[tool.sdlc]\n"),
     ("pyproject.toml", PROJECT + '\n[tool.sdlc]\nstacks = ["python"]\n'),
 ):
     repo = make_repo({**HOOKED, "package.json": "{}\n", config: head})
-    wrote = convert(repo, apply=True)
+    wrote = convert(repo, True, "--unbuilt-stacks", "node")
     check(
-        f"{config}: the default still writes skip-stacks and its note",
+        f"{config}: an unbuilt node stack writes skip-stacks and its note",
         wrote.returncode == 0
         and sdlc_cfg(repo, config).get("skip-stacks") == ["node"]
         and "# Written by crunchtools/sdlc" in snapshot(repo)[config],

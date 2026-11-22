@@ -773,10 +773,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--unbuilt-stacks",
-        default="node,bootc,docs",
+        default="",
         metavar="LIST",
         help="stacks the sdlc image has no checks for yet, for convert_repo.py "
-        "(default %(default)s; empty: all exist)",
+        "(default: none, every stack is checked since sdlc#92)",
     )
     ap.add_argument(
         "--weekly",

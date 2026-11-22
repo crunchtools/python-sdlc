@@ -34,13 +34,17 @@ the tool's own verdict is a 2.
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
+import hashlib
+import itertools
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from collections.abc import Callable
@@ -66,6 +70,9 @@ BAKED = {
     "uv": os.environ.get("SDLC_UV_VERSION", "unknown"),
     "hadolint": os.environ.get("SDLC_HADOLINT_VERSION", "unknown"),
     "grype": os.environ.get("SDLC_GRYPE_VERSION", "unknown"),
+    "node": os.environ.get("SDLC_NODE_VERSION", "unknown"),
+    "markdownlint-cli2": os.environ.get("SDLC_MARKDOWNLINT_CLI2_VERSION", "unknown"),
+    "lychee": os.environ.get("SDLC_LYCHEE_VERSION", "unknown"),
 }
 
 
@@ -78,6 +85,9 @@ VERSION_PROBE = {
     "uv": ["uv", "--version"],
     "hadolint": ["hadolint", "--version"],
     "grype": ["grype", "version"],
+    "node": ["node", "--version"],
+    "markdownlint-cli2": ["markdownlint-cli2", "--help"],
+    "lychee": ["lychee", "--version"],
     # gatehouse has no --version flag; its usage line is all it offers.
     "gatehouse": None,
 }
@@ -217,13 +227,18 @@ DEFAULTS = {
     # (#48). First, because it is the cheapest thing here to fail.
     "push": [
         "lint",
+        "npm-lint",
+        "markdown-lint",
         "containerfile-lint",
         "mypy",
         "pytest",
+        "npm-test",
         "gourmand",
         "gatehouse",
         "semgrep",
         "pip-audit",
+        "npm-audit",
+        "link-check",
         "constitution",
         "codeql",
     ],
@@ -231,7 +246,7 @@ DEFAULTS = {
 
 # What `sdlc ci` adds to push's checks by default. Builds go here and nowhere
 # earlier: push never builds a container.
-CI_DEFAULTS = ["container-build", "container-smoke", "container-scan"]
+CI_DEFAULTS = ["container-build", "bootc-lint", "container-smoke", "container-scan"]
 
 # ------------------------------------------------------------------ the stacks
 #
@@ -257,23 +272,32 @@ CI_DEFAULTS = ["container-build", "container-smoke", "container-scan"]
 # image bump. `sdlc stacks` shows what was detected either way.
 
 STACK_OF = {
-    "ruff-check": "python",
-    "ruff-format": "python",
-    "lint": "python",
-    "mypy": "python",
-    "pytest": "python",
-    "semgrep": "python",
-    "pip-audit": "python",
-    "codeql": "python",
-    "containerfile-lint": "container",
-    "container-build": "container",
-    "container-smoke": "container",
-    "container-scan": "container",
+    "ruff-check": ("python",),
+    "ruff-format": ("python",),
+    "lint": ("python",),
+    "mypy": ("python",),
+    "pytest": ("python",),
+    "semgrep": ("python",),
+    "pip-audit": ("python",),
+    "codeql": ("python",),
+    # A bootc image is still built, linted and scanned as a container is. What
+    # it is not is smoke-run: its PID 1 is systemd. It gets `bootc container
+    # lint` instead, which is the judge its own CI already used.
+    "containerfile-lint": ("container", "bootc"),
+    "container-build": ("container", "bootc"),
+    "container-smoke": ("container",),
+    "container-scan": ("container", "bootc"),
+    "bootc-lint": ("bootc",),
+    "npm-lint": ("node",),
+    "npm-test": ("node",),
+    "npm-audit": ("node",),
+    "markdown-lint": ("docs",),
+    "link-check": ("docs",),
 }
 
 # Stacks this image has checks for, and stacks it can name but not yet run.
-STACKS = ("python", "container")
-PLANNED_STACKS = ("node", "bootc", "docs")
+STACKS = ("python", "container", "node", "bootc", "docs")
+PLANNED_STACKS: tuple[str, ...] = ()
 
 # What a Python repo that says nothing about stacks gets: the pre-stacks tool.
 COMPAT_STACKS = ("python",)
@@ -286,6 +310,73 @@ def containerfile() -> str | None:
     return next((f for f in CONTAINERFILES if (REPO / f).is_file()), None)
 
 
+BUILD_VAR = re.compile(r"\$(?:\{(?P<braced>\w+)(?::?-(?P<default>[^}]*))?\}|(?P<bare>\w+))")
+FROM_AS_WORDS = 3  # image, AS, name
+
+
+def logical_lines(text: str) -> list[str]:
+    """Containerfile instructions: continuations joined, comment lines dropped."""
+    lines, buf = [], ""
+    for raw in text.splitlines():
+        if raw.lstrip().startswith("#"):
+            continue  # a comment, even inside a continuation, is not an instruction
+        if raw.rstrip().endswith("\\"):
+            buf += raw.rstrip()[:-1] + " "
+            continue
+        lines.append((buf + raw).strip())
+        buf = ""
+    if buf.strip():
+        lines.append(buf.strip())
+    return lines
+
+
+def build_stages(text: str) -> tuple[dict[str, str], list[tuple[str, str | None]]]:
+    """The global ARG defaults, and each stage's (image word, lowercased AS name)."""
+    args: dict[str, str] = {}
+    stages: list[tuple[str, str | None]] = []
+    for words in (line.split() for line in logical_lines(text)):
+        op = words[0].upper() if words else ""
+        if op == "ARG" and not stages:
+            for name, eq, value in (w.partition("=") for w in words[1:]):
+                if eq:
+                    args[name] = value.strip("\"'")
+        elif op == "FROM":
+            rest = [w for w in words[1:] if not w.startswith("--")]
+            is_aliased = len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS"
+            if rest:
+                stages.append((rest[0], rest[2].lower() if is_aliased else None))
+    return args, stages
+
+
+def final_base(text: str) -> str | None:
+    """The image the FINAL stage of a Containerfile is built on, or None.
+
+    Substring-matching every FROM line called a bootc builder stage under a plain
+    runtime image bootc, and missed `ARG BASE=...-bootc` + `FROM ${BASE}`. What
+    ships is the last stage, so resolve that: fill $X, ${X} and ${X:-d} from the
+    global ARG defaults, and follow a `FROM <earlier-stage>` back to its own
+    base. An unset variable gives None.
+    """
+    args, stages = build_stages(text)
+    index = len(stages) - 1
+    seen: set[int] = set()
+    while index >= 0 and index not in seen:
+        seen.add(index)
+        image = stages[index][0]
+        names = [m["braced"] or m["bare"] for m in BUILD_VAR.finditer(image)]
+        defaults = [m["default"] for m in BUILD_VAR.finditer(image)]
+        if any(n not in args and d is None for n, d in zip(names, defaults, strict=True)):
+            return None
+        image = BUILD_VAR.sub(
+            lambda m: args.get(m["braced"] or m["bare"], m["default"] or ""), image
+        )
+        earlier = [i for i in range(index) if stages[i][1] == image.lower()]
+        if not earlier:
+            return image or None
+        index = earlier[-1]
+    return None
+
+
 def is_bootc(path: str) -> bool:
     """Does this Containerfile build a bootable host rather than a container?
 
@@ -296,11 +387,8 @@ def is_bootc(path: str) -> bool:
         text = (REPO / path).read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         cannot(f"cannot read {path} to tell a container from a bootc image: {exc}")
-    return any(
-        line.split()[0].upper() == "FROM" and "bootc" in line.lower()
-        for line in text.splitlines()
-        if line.strip()
-    )
+    base = final_base(text)
+    return base is not None and "bootc" in base.lower()
 
 
 def detect_stacks() -> list[str]:
@@ -311,11 +399,51 @@ def detect_stacks() -> list[str]:
     cf = containerfile()
     if cf and not is_bootc(cf):
         found.append("container")
-    if (REPO / "package.json").is_file():
+    if (REPO / "package.json").is_file() or package_dirs():
         found.append("node")
     if cf and is_bootc(cf):
         found.append("bootc")
     return found or ["docs"]
+
+
+def package_dirs() -> list[str]:
+    """Directories below the root holding a package.json of the repo's own.
+
+    A package.json only in `frontend/` is still a node project. Without this a
+    repo with no other stack fell through to docs and went green with its code
+    never linted, tested or audited. It is detected as node, and node_packages
+    then refuses the default `packages = ["."]` with these directories named,
+    so the repo says which ones are its packages rather than the gate guessing.
+
+    Asked of git, which knows what is ignored; a tree that is not a checkout is
+    walked. Never anything under node_modules.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "safe.directory=*", "ls-files", "-co", "--exclude-standard"],
+            cwd=REPO,
+            capture_output=True,
+            check=False,
+        )
+        listed = (
+            proc.stdout.decode("utf-8", "surrogateescape").splitlines()
+            if proc.returncode == 0
+            else None
+        )
+    except OSError:
+        listed = None
+    if listed is None:
+        listed = []
+        for root, dirs, files in os.walk(REPO):
+            dirs[:] = [d for d in dirs if d not in (".git", "node_modules")]
+            listed += [str((Path(root) / f).relative_to(REPO)) for f in files]
+    return sorted(
+        str(Path(f).parent)
+        for f in listed
+        if Path(f).name == "package.json"
+        and Path(f).parent != Path()
+        and "node_modules" not in Path(f).parts
+    )
 
 
 def stack_names(value: object, where: str) -> list[str]:
@@ -352,7 +480,7 @@ def active_stacks(cfg: dict) -> tuple[str, ...]:
 
 def in_stacks(check: str, stacks: tuple[str, ...]) -> bool:
     owner = STACK_OF.get(check)
-    return owner is None or owner in stacks
+    return owner is None or any(o in stacks for o in owner)
 
 
 # CI runs push's checks except these two, which it gets from their own
@@ -381,6 +509,7 @@ RESERVED = (
     "pytest-deps",
     "codeql-baseline",
     "scan-rootfs",
+    "npm-install",
 )
 
 
@@ -708,7 +837,7 @@ def builds_image(cfg: dict, check: str) -> str | None:
 
 def runs_image(cfg: dict, check: str) -> str | None:
     """The image this check runs or reads, or None when it uses none."""
-    if check in ("container-smoke", "container-scan"):
+    if check in ("container-smoke", "container-scan", "bootc-lint"):
         return container_image(cfg, check_settings(cfg, check))
     if kind_of(cfg, check) == "pytest-in-image":
         return str(check_settings(cfg, check).get("image", default_image_tag()))
@@ -1073,8 +1202,60 @@ def check_container_scan(cfg: dict, name: str, s: dict) -> list[tuple[str, str, 
     return [host_step(name, argv)]
 
 
+# -------------------------------------------------------------- the bootc stack
+#
+# A bootc image is a host, not an app, so the check that judges it is bootc's
+# own: `bootc container lint`, the static analysis its authors wrote to run as
+# a `RUN` at the end of a build. It runs here against the image container-build
+# produced, which is the same bytes and the same verdict, and the fleet's bootc
+# repos already gate on exactly `podman run --rm "$IMAGE" bootc container lint`.
+#
+# Measured, not assumed: it needs nothing the launcher withholds. Under the
+# launcher's `--cap-drop=all --security-opt=no-new-privileges`, with no network,
+# it runs to the same verdict as unrestricted (quay.io/centos-bootc/
+# centos-bootc:stream10), because it only reads the image's own filesystem. So
+# run_host stays exactly as it is and this check asks for no capability.
+#
+# `--entrypoint bootc`, not a trailing `bootc`: a bootc base's ENTRYPOINT is
+# not the CLI and a repo may set its own, so the binary is named explicitly.
+# What a lint run says is in its exit status: 0 passes -- warnings included, as
+# they are in a build -- and 1 is a failed lint, which is a finding. A podman
+# that never started the container is 125-127, which the launcher maps to 2.
+LINT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def check_bootc_lint(cfg: dict, name: str, s: dict) -> list[tuple[str, str, str]]:
+    """`bootc container lint` inside the image container-build built.
+
+    Settings: `fatal_warnings` makes a warning fail too (default false: a
+    stock bootc base itself warns, about /var/roothome/buildinfo, so a default
+    of true would fail every repo on a file it did not write); `skip` lists lint
+    names to leave out, discovered with `bootc container lint --list`; `image`
+    judges an image other than the one container-build tags.
+    """
+    fatal = s.get("fatal_warnings", False)
+    if not isinstance(fatal, bool):
+        cannot(f"{name}: fatal_warnings must be true or false")
+    skips = names(s.get("skip"), f"{name}.skip")
+    for lint in skips:
+        # A lint name is a word bootc reads as an argument, so one that is
+        # not a plain name never reaches the argv.
+        if not LINT_NAME_RE.fullmatch(lint):
+            cannot(f"{name}: skip {lint!r} is not a lint name (see `bootc container lint --list`)")
+    argv = ["podman", "run", "--rm", "--pull=never", "--network", "none"]
+    # `--` before the image, as in smoke: nothing after it is a podman option,
+    # and bin/sdlc checks the word that follows it.
+    argv += ["--entrypoint", "bootc", "--", container_image(cfg, s), "container", "lint"]
+    if fatal:
+        argv.append("--fatal-warnings")
+    for lint in skips:
+        argv += ["--skip", lint]
+    return [host_step(name, argv)]
+
+
 HOST_CHECKS = {
     "container-build": check_container_build,
+    "bootc-lint": check_bootc_lint,
     "container-smoke": check_container_smoke,
     "container-scan": check_container_scan,
 }
@@ -1186,6 +1367,790 @@ def t_scan_rootfs() -> int:
         f"grype could not scan the image (exit {rc}). Its vulnerability database is "
         f"downloaded on first use, so a refused network is the usual cause."
     )
+
+
+# --------------------------------------------------------------- the node stack
+#
+# Three checks -- npm-lint, npm-test, npm-audit -- over a repo with a
+# package.json at its root. Each runs the repo's OWN scripts: the stack does not
+# bring an opinion about eslint or vitest, it runs `npm run lint` and `npm test`
+# the way the repo's CI does, so a verdict here is the verdict there.
+#
+# WHERE node_modules LIVES, AND WHO CAN TOUCH IT. The repo is mounted
+# read-only, and `npm ci` writing node_modules into a developer's tree is the
+# wrong side effect for a gate anyway: it is gigabytes of the host
+# architecture's binaries. So each repo gets a WORKSPACE: a copy of its source
+# (what git tracks, plus what it does not ignore) at /node/tree, synced over on
+# every run, and npm's download cache beside it at /node/npm. `npm ci` runs
+# on every run; node_install says why.
+#
+# /node is a podman volume of the repo's OWN, `sdlc-node-<owner>-<repo>-<hash>`, and
+# these checks run as host steps that mount that volume and nothing else of the
+# gate's -- not the shared cache volume every other check uses. That is the
+# point. An install runs the dependencies' lifecycle scripts and a test runs the
+# repo's code, both with a writable workspace; in a shared volume, repo A's
+# postinstall could rewrite repo B's node_modules, and B's next green run would
+# be A's code. The volume is keyed on the origin remote's owner/repo, not the
+# directory name, so two different repos called `app` are not one workspace.
+#
+# Each check is two steps. `npm-install` syncs the tree and runs `npm ci`, with
+# the network. Then npm-lint and npm-test run with NO network -- what they need
+# is installed -- and npm-audit with it, because the registry is what it asks.
+#
+# Two consequences, both deliberate. Tests run at /node/tree, not /repo, so
+# one that reads `.git` or a path outside its package sees the workspace (no
+# .git) -- the same constraint a CI checkout with a shallow clone puts on it.
+# And the three checks share the workspace and the one install step, which is
+# safe because they all run in MAIN_LANE, one after the other.
+#
+# LIFECYCLE SCRIPTS RUN. `npm ci` is not given --ignore-scripts. Skipping them
+# would break the dependencies that need a postinstall step (esbuild's check,
+# native addons) and make this gate disagree with the repo's CI, which runs
+# them. The trust it extends is no wider than the check's own: `npm test` then
+# executes those same dependencies. The container is still the boundary --
+# no capabilities, the tree read-only, and no volume but the repo's own.
+#
+# NO LOCKFILE, NO CHECK. `npm ci` needs package-lock.json and refuses without
+# one; `npm install` would resolve whatever is newest today and bless a tree
+# the repo never pinned. The honest answer is 2, as need_lock_dep gives a
+# Python repo with no uv.lock.
+#
+# The commit tier gets none of these on purpose. It is "seconds, offline, free",
+# and an install is none of the three; a repo that wants lint at commit has
+# its own hook.
+#
+# MONOREPOS. `packages` (default ["."]) in a check's own table lists the
+# repo-relative directories that are npm packages, each with its own lockfile.
+# Every one is installed, and the check's script runs in each that defines it.
+# A root script that fans out (`npm run lint --prefix frontend`) wants the
+# fanned-out packages installed, so either list them and drop the root, or
+# list the root and the packages it calls. Listing both runs the script twice.
+
+NPM_AUDIT_LEVELS = ("info", "low", "moderate", "high", "critical")
+NPM_AUDIT_TIMEOUT = 120
+# The pauses BETWEEN attempts, as PIP_AUDIT_BACKOFF: the registry's audit
+# endpoint is the one network call in this check, and a blip there must not
+# read as either a pass or a finding.
+NPM_AUDIT_BACKOFF = (10, 30)
+
+
+def node_packages(name: str, s: dict) -> list[str]:
+    """The `packages` setting as repo-relative directories that hold a package.json."""
+    raw = names(s.get("packages", ["."]), f"{name}.packages")
+    if not raw:
+        cannot(f"{name}: packages is empty; list at least one directory, or omit it for '.'")
+    found: list[str] = []
+    for item in raw:
+        rel = in_repo(name, "packages", item)
+        if not (REPO / rel / "package.json").is_file():
+            nested = package_dirs() if rel == "." else []
+            if nested:
+                cannot(
+                    f"{name}: there is no package.json at the repo root, but there is in "
+                    f"{', '.join(nested)}. Say which are this repo's packages, in each node "
+                    f"check's table: [tool.sdlc.push.{name}] packages = "
+                    f'{json.dumps(nested)}; or [tool.sdlc] skip-stacks = ["node"] if none is'
+                )
+            cannot(f"{name}: packages entry {item!r} has no package.json")
+        if rel not in found:
+            found.append(rel)
+    return found
+
+
+def npm_scripts(rel: str) -> dict:
+    try:
+        data = json.loads((REPO / rel / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        cannot(f"cannot read {rel}/package.json: {exc}")
+    scripts = data.get("scripts") if isinstance(data, dict) else None
+    return scripts if isinstance(scripts, dict) else {}
+
+
+NODE_WORK_ENV = "SDLC_NODE_WORK"
+NODE_WORK = "/node"
+NODE_VOLUME_PREFIX = "sdlc-node-"
+_VOLUME_WORD = re.compile(r"[^a-z0-9_.-]+")
+
+
+def node_work() -> Path:
+    """The repo's own workspace volume, which only the node host steps mount."""
+    work = os.environ.get(NODE_WORK_ENV)
+    if not work:
+        cannot(
+            "the node checks run through bin/sdlc, which mounts the repo's own "
+            "workspace volume; there is none here"
+        )
+    return Path(work)
+
+
+def node_volume() -> str:
+    """`sdlc-node-<owner>-<repo>` from the origin remote; a hash of the host path without one.
+
+    The owner is in the name because a basename is not an identity: two repos
+    that share a name would otherwise share one workspace -- the cross-repo
+    write this volume exists to prevent.
+    """
+    url = ""
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "safe.directory=*", "remote", "get-url", "origin"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        url = proc.stdout.strip() if proc.returncode == 0 else ""
+    except OSError:
+        pass
+    parts = [p for p in re.split(r"[/:]", url.removesuffix(".git").rstrip("/")) if p]
+    if len(parts) >= 2:  # noqa: PLR2004 -- owner and repo
+        # Readable, then exact: the words alone are lossy (`alice-bob/app` and
+        # `alice/bob-app` read the same), so a hash of the pair itself ends it.
+        pair = f"{parts[-2]}/{parts[-1]}".lower()
+        word = _VOLUME_WORD.sub("-", pair.replace("/", "-")).strip("-.") or "repo"
+        key = f"{word}-{hashlib.sha256(pair.encode()).hexdigest()[:12]}"
+    else:
+        host = os.environ.get("SDLC_HOST_REPO", str(REPO))
+        key = "local-" + hashlib.sha256(host.encode()).hexdigest()[:16]
+    return NODE_VOLUME_PREFIX + key
+
+
+def node_step(name: str, s: dict, command: list[str], *, network: bool) -> tuple[str, str, str]:
+    """A host step running `sdlc <command>` in this image over the repo's own volume."""
+    host = os.environ.get("SDLC_HOST_REPO")
+    if not host:
+        cannot(f"{name}: run through bin/sdlc, which supplies the host paths")
+    argv = [
+        "podman",
+        "run",
+        "--rm",
+        "--pull=never",
+        "-v",
+        f"{host}:/repo:ro,z",
+        "-w",
+        "/repo",
+        "-v",
+        f"{node_volume()}:{NODE_WORK}",
+        "--tmpfs",
+        "/tmp:rw,exec,size=4g,mode=1777",
+        "-e",
+        "HOME=/tmp",
+        "-e",
+        f"{NODE_WORK_ENV}={NODE_WORK}",
+        "-e",
+        f"SDLC_PROJECT={project_name()}",
+        # By name: podman copies the launcher's value when it has one, so
+        # `sdlc npm-test -- --grep x` reaches the script without its
+        # separator-joined words ever being written into a plan line.
+        "-e",
+        "SDLC_ARGS",
+    ]
+    if not network:
+        argv += ["--network", "none"]
+    return host_step(name, [*argv, "--", GATE_IMAGE, *command])
+
+
+def check_node(cfg: dict, name: str, s: dict) -> list[tuple[str, str, str]]:
+    """Install with the network, then judge: lint and test offline, the audit online."""
+    node_packages(name, s)  # refused at plan time, not halfway through a tier
+    return [
+        node_step(name, s, ["npm-install", name], network=True),
+        node_step(name, s, [name], network=name == "npm-audit"),
+    ]
+
+
+def t_npm_install(check: str | None) -> int:
+    """The install step of a node check: sync the workspace and `npm ci` what changed."""
+    if check not in ("npm-lint", "npm-test", "npm-audit"):
+        cannot("npm-install takes the node check it installs for")
+    node_install(check, node_packages(check, check_settings(sdlc_config(), check)))
+    return CLEAN
+
+
+HOST_CHECKS.update({"npm-lint": check_node, "npm-test": check_node, "npm-audit": check_node})
+
+
+def node_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.update(
+        {
+            # HOME is where npm wants its logs and config, and the tree is read-only.
+            "HOME": "/tmp",
+            "npm_config_cache": str(node_work() / "npm"),
+            "npm_config_update_notifier": "false",
+            "npm_config_fund": "false",
+        }
+    )
+    return env
+
+
+def node_source_files() -> list[str]:
+    """Repo-relative files to copy: tracked, plus untracked-but-not-ignored.
+
+    Untracked files count because a gate that ignores the file you just created
+    and have not yet `git add`ed judges a tree you are not about to push.
+    `.gitignore` keeps node_modules, build output and secrets out without this
+    code having to know their names.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-c",
+                "safe.directory=*",
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+            cwd=REPO,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as exc:
+        cannot(f"cannot run git to list the source: {exc}")
+    if proc.returncode != 0:
+        cannot(f"git ls-files failed ({proc.stderr.decode(errors='replace').strip()})")
+    listed = proc.stdout.decode("utf-8", "surrogateescape").split("\0")
+    return sorted({p for p in listed if p})
+
+
+def node_copy(tree: Path) -> set[str]:
+    """Copy the source into `tree`, replacing what differs. Returns what it holds."""
+    wanted = set()
+    for rel in node_source_files():
+        src = REPO / rel
+        parts = Path(rel).parts
+        # A tracked file that is deleted in the worktree, or a submodule; and
+        # nothing that is an installed tree of any kind.
+        if not (src.is_file() or src.is_symlink()) or "node_modules" in parts or ".git" in parts:
+            continue
+        wanted.add(rel)
+        dst = tree / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            a, b = src.lstat(), dst.lstat()
+            if a.st_size == b.st_size and a.st_mtime_ns == b.st_mtime_ns:
+                continue
+        except FileNotFoundError:
+            pass
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        shutil.copy2(src, dst, follow_symlinks=False)
+    return wanted
+
+
+def node_sync(tree: Path) -> None:
+    """Make `tree` the repo's source, leaving every node_modules in it alone."""
+    try:
+        tree.mkdir(parents=True, exist_ok=True)
+        wanted = node_copy(tree)
+        dirs: list[Path] = []
+        for here, subdirs, files in os.walk(tree):
+            # A symlink to a directory is listed among the directories, but it
+            # is a source entry like a file: kept when wanted, unlinked when
+            # stale, never descended into or offered to rmdir.
+            links = [d for d in subdirs if Path(here, d).is_symlink()]
+            subdirs[:] = [d for d in subdirs if d != "node_modules" and d not in links]
+            dirs += [Path(here, d) for d in subdirs]
+            for f in itertools.chain(files, links):
+                path = Path(here, f)
+                if str(path.relative_to(tree)) not in wanted:
+                    path.unlink()
+        for d in sorted(dirs, reverse=True):
+            # Every directory is offered for removal; one that still holds a
+            # wanted file refuses with ENOTEMPTY (EEXIST on some filesystems)
+            # and stays. Any other refusal is the workspace itself failing,
+            # and is raised to the 2 below.
+            try:
+                d.rmdir()
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    raise
+    except OSError as exc:
+        cannot(f"cannot prepare the node workspace in {tree}: {exc}")
+
+
+def need_lockfiles(name: str, packages: list[str]) -> None:
+    for rel in packages:
+        if not (REPO / rel / "package-lock.json").is_file():
+            cannot(
+                f"{name}: {rel}/package-lock.json is missing; npm ci needs a lockfile "
+                f"(npm install --package-lock-only), and installing without one would "
+                f"test whatever is newest today rather than what the repo pinned"
+            )
+
+
+def node_install(name: str, packages: list[str]) -> Path:
+    """Sync the workspace and `npm ci` every package, every time. Returns the tree.
+
+    Every time, because an installed node_modules cannot be trusted from one
+    run to the next. The last run executed the code it checked -- lifecycle
+    scripts, tests -- with this workspace writable, so a branch nobody has
+    reviewed could rewrite a dependency in place, and a later run that skipped
+    the install would execute it. A stamp saying "already installed" would sit
+    in the same writable volume and be forged as easily. `npm ci` removes
+    node_modules before it installs, and what it installs from npm's cache is
+    checked against the lockfile's integrity hashes, so each run starts from
+    what the lockfile names and nothing a previous run left. The cache makes
+    that a local copy, not a download.
+    """
+    need_lockfiles(name, packages)
+    tree = node_work() / "tree"
+    node_sync(tree)
+    env = node_env()
+    for rel in packages:
+        step(f"npm ci ({rel})")
+        rc, _ = run(["npm", "ci", "--no-audit", "--no-fund"], env=env, cwd=tree / rel)
+        if rc != 0:
+            cannot(
+                f"npm ci failed in {rel} (exit {rc}). A lockfile out of step with "
+                f"package.json is the usual cause, then the registry being unreachable"
+            )
+    return tree
+
+
+def node_installed(name: str, packages: list[str]) -> Path:
+    """The tree the install step just prepared. A check step never installs.
+
+    It runs with no network, so an install here could only fail; and the
+    install step before it in the plan is what keeps the tree honest.
+    """
+    need_lockfiles(name, packages)
+    tree = node_work() / "tree"
+    missing = [rel for rel in packages if not (tree / rel / "package.json").is_file()]
+    if missing:
+        cannot(
+            f"{name}: the workspace has no {', '.join(missing)}; its npm-install step "
+            f"did not run. Run the check through bin/sdlc, which plans both steps"
+        )
+    return tree
+
+
+def npm_script_check(name: str, s: dict, script: str, extra: list[str]) -> int:
+    """Run `npm run <script>` in every listed package that defines it."""
+    packages = node_packages(name, s)
+    with_script = [p for p in packages if script in npm_scripts(p)]
+    if not with_script:
+        cannot(
+            f"{name}: none of {', '.join(packages)} defines a {script!r} script in its "
+            f"package.json, so there is nothing to run. Add one, or skip {name} in "
+            f"[tool.sdlc.push]; a check that ran nothing must not report a pass"
+        )
+    tree = node_installed(name, packages)
+    env = node_env()
+    if script == "test":
+        # Test runners that watch by default (CRA, vitest without `run`) stop
+        # watching when they see CI; there is no terminal here to quit one.
+        env["CI"] = "true"
+    worst = CLEAN
+    for rel in with_script:
+        step(f"npm run {script} ({rel})" + "".join(f" {a}" for a in extra))
+        cmd = ["npm", "run", script]
+        if extra:
+            cmd += ["--", *extra]
+        rc, _ = run(cmd, env=env, cwd=tree / rel)
+        # npm reports the script's own status, and a repo's scripts do not know
+        # this tool's exit contract: eslint's 2 means it crashed, a test runner
+        # may say anything. Non-zero is the repo's check failing, so it is a
+        # finding; "could not run at all" (126/127) was already raised by run().
+        if rc != 0:
+            worst = FOUND
+    return worst
+
+
+def t_npm_lint(s: dict) -> int:
+    return npm_script_check("npm-lint", s, "lint", [])
+
+
+def t_npm_test(s: dict) -> int:
+    return npm_script_check("npm-test", s, "test", passthrough())
+
+
+def npm_audit_report(text: str) -> tuple[dict | None, str]:
+    """The `vulnerabilities` table of an `npm audit --json` output, or (None, why not)."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, f"npm audit printed no JSON: {text.strip()[:300] or '(nothing)'}"
+    if not isinstance(data, dict):
+        return None, "npm audit's JSON was not an object"
+    err = data.get("error")
+    if isinstance(err, dict):
+        return None, f"{err.get('code', 'error')}: {err.get('summary') or err.get('detail')}"
+    if err:
+        return None, str(err)
+    vulns = data.get("vulnerabilities")
+    if not isinstance(vulns, dict):
+        return None, "npm audit's JSON has no vulnerabilities report"
+    return vulns, ""
+
+
+def npm_audit_line(pkg: str, info: dict) -> str:
+    # `via` holds advisories (dicts) for the package itself and names (str) for
+    # packages it is vulnerable through; titles are what a person acts on.
+    via = info.get("via", [])
+    titles = sorted({v["title"] for v in via if isinstance(v, dict) and "title" in v})
+    fix = info.get("fixAvailable")
+    if isinstance(fix, dict):
+        how = f"fix: {fix.get('name')}@{fix.get('version')}" + (
+            " (breaking)" if fix.get("isSemVerMajor") else ""
+        )
+    else:
+        how = "fix: npm audit fix" if fix else "no fix available"
+    return f"  {info.get('severity'):<9} {pkg} {info.get('range', '')}  [{how}]" + "".join(
+        f"\n            {t}" for t in titles
+    )
+
+
+def classify_npm_audit(text: str, level: str) -> tuple[str, str]:
+    """(verdict, detail) for one `npm audit --json` output.
+
+    The verdict is "clean", "found" or "error". "error" is anything that is not
+    an answer: output that is not JSON, or JSON carrying npm's `error` object,
+    which is how a refused network, a 5xx from the audit endpoint and a missing
+    lockfile all arrive -- exit 1, the same status as a finding. A report with
+    no `vulnerabilities` key is not accepted as clean either: only a report
+    that says what it audited can clear it.
+
+    Severity is read from the report rather than trusted to npm's exit status,
+    so the threshold is this tool's setting and one place decides.
+    """
+    vulns, why = npm_audit_report(text)
+    if vulns is None:
+        return "error", why
+    floor = NPM_AUDIT_LEVELS.index(level)
+    hits = [
+        (NPM_AUDIT_LEVELS.index(info["severity"]), pkg, info)
+        for pkg, info in vulns.items()
+        if isinstance(info, dict)
+        and info.get("severity") in NPM_AUDIT_LEVELS
+        and NPM_AUDIT_LEVELS.index(info["severity"]) >= floor
+    ]
+    if not hits:
+        return "clean", ""
+    ordered = sorted(hits, key=lambda h: (-h[0], h[1]))
+    return "found", "\n".join(npm_audit_line(pkg, info) for _, pkg, info in ordered)
+
+
+def npm_audit_once(rel: str, tree: Path, level: str, omit_dev: bool) -> tuple[str, str]:
+    cmd = ["npm", "audit", "--json", f"--audit-level={level}"]
+    if omit_dev:
+        cmd += ["--omit=dev"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=tree / rel,
+            env=node_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=NPM_AUDIT_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "error", f"npm audit timed out after {NPM_AUDIT_TIMEOUT}s"
+    except OSError as exc:
+        cannot(f"cannot start npm: {exc}")
+    if proc.returncode in (126, 127):
+        cannot(f"npm could not be invoked (exit {proc.returncode})")
+    return classify_npm_audit(proc.stdout, level)
+
+
+def t_npm_audit(s: dict) -> int:
+    """Audit each package's locked dependencies against the registry, and GATE on it.
+
+    The same promise t_pip_audit makes: the verdict is the tool's, a network
+    failure is retried and then a 2, never a 1 that reads as a finding or a 0
+    that reads as a pass. `level` is the lowest severity that fails (npm's own
+    names, default "high"); `omit_dev` (default false) leaves devDependencies
+    out. The default audits everything, as pip-audit audits the whole locked
+    environment: a dev dependency runs on the machine that builds the release.
+    """
+    level = str(s.get("level", "high"))
+    if level not in NPM_AUDIT_LEVELS:
+        cannot(f"npm-audit: level {level!r} is not one of {', '.join(NPM_AUDIT_LEVELS)}")
+    omit_dev = s.get("omit_dev", False)
+    if not isinstance(omit_dev, bool):
+        cannot("npm-audit: omit_dev must be true or false")
+    packages = node_packages("npm-audit", s)
+    tree = node_installed("npm-audit", packages)
+    attempts = len(NPM_AUDIT_BACKOFF) + 1
+    worst = CLEAN
+    for rel in packages:
+        for attempt in range(1, attempts + 1):
+            step(
+                f"npm audit --audit-level={level} ({rel}"
+                + (f", attempt {attempt} of {attempts}" if attempt > 1 else "")
+                + ")"
+            )
+            verdict, detail = npm_audit_once(rel, tree, level, omit_dev)
+            if verdict != "error":
+                break
+            if attempt == attempts:
+                cannot(
+                    f"npm audit could not run in {rel}: {detail}, on all {attempts} "
+                    f"attempts. The audit never completed, so this is neither a pass "
+                    f"nor a finding."
+                )
+            delay = NPM_AUDIT_BACKOFF[attempt - 1]
+            print(f"\nnpm audit: {detail}; retrying in {delay}s.", flush=True)
+            time.sleep(delay)
+        if verdict == "found":
+            print(f"\nvulnerabilities at or above {level} in {rel}:\n{detail}", flush=True)
+            worst = FOUND
+    return worst
+
+
+# --------------------------------------------------------------- the docs stack
+#
+# Two verdicts over the repo's Markdown. Neither is a fixer, so neither runs at
+# commit; both run at push and in ci. Both read the same set of files, so a
+# page one of them judges is a page the other judges.
+
+# Where Markdown is never the repo's own: vendored and installed trees. Hidden
+# directories are NOT excluded wholesale -- `.github/` and `.claude/skills/` are
+# docs a reviewer reads -- except the VCS directory, which markdownlint-cli2
+# would otherwise walk. Both tools also honour .gitignore, which covers a
+# virtualenv.
+MARKDOWN_EXCLUDED_DIRS = ("node_modules", "vendor", ".git")
+MARKDOWN_GLOB = "**/*.md"
+
+# markdownlint-cli2 reads these from the repo root (and every directory below
+# it), so any one of them means the repo has stated its own rules.
+MARKDOWNLINT_CONFIGS = (
+    ".markdownlint.json",
+    ".markdownlint.jsonc",
+    ".markdownlint.yaml",
+    ".markdownlint.yml",
+    ".markdownlint.cjs",
+    ".markdownlint.mjs",
+    ".markdownlint-cli2.jsonc",
+    ".markdownlint-cli2.yaml",
+    ".markdownlint-cli2.cjs",
+    ".markdownlint-cli2.mjs",
+)
+# The fleet's defaults judge whether the page is RIGHT, not whether it is to
+# anyone's taste, because a gate that fails on taste is a gate people skip.
+# Calibrated against twenty fleet repos: with every rule on there were 28,000
+# findings, and with these off about a dozen remain, each a real defect (a
+# skipped heading level, a broken #fragment, a table row with the wrong cell
+# count, an undefined reference link). A repo that wants more states it in its
+# own config and gets none of this (MARKDOWNLINT_CONFIGS).
+#   Layout and style, which render identically either way: MD004 list marker,
+#   MD007 list indent, MD009 trailing space, MD012 blank runs, MD013 line
+#   length, MD014 `$` before a command, MD022/MD031/MD032/MD058 blank lines
+#   around headings, fences, lists and tables, MD025 more than one H1, MD026
+#   heading punctuation, MD028 blank inside a quote, MD029 ordered-list numbers,
+#   MD040 fence language, MD046 code-block style, MD047 final newline, MD049
+#   emphasis style, MD059 link text and MD060 table column style.
+#   Content the fleet writes on purpose: MD033 inline HTML, MD034 bare URLs,
+#   MD036 bold used as a heading, MD041 first line a heading, and MD024
+#   duplicate headings, which every Keep-a-Changelog file has (`### Fixed`
+#   twice in one release is a habit, not a broken page; MD051 still catches an
+#   anchor that no longer resolves).
+#   False positives on how a line WRAPS or what a code span holds: MD018 raised
+#   on `#47)` at the start of a wrapped line, MD037 and MD038 raised on
+#   `* ` and `COPY . ` that are the point of the sentence.
+MARKDOWNLINT_FLEET_OFF = (
+    "MD004",
+    "MD007",
+    "MD009",
+    "MD012",
+    "MD013",
+    "MD014",
+    "MD018",
+    "MD022",
+    "MD024",
+    "MD025",
+    "MD026",
+    "MD028",
+    "MD029",
+    "MD031",
+    "MD032",
+    "MD033",
+    "MD034",
+    "MD036",
+    "MD037",
+    "MD038",
+    "MD040",
+    "MD041",
+    "MD046",
+    "MD047",
+    "MD049",
+    "MD058",
+    "MD059",
+    "MD060",
+)
+
+# lychee's fleet defaults, as a config file the repo's own lychee.toml is merged
+# over (later `-c` wins, key by key). Offline so the gate is deterministic and
+# needs no network: what it judges is the repo's OWN links -- a file that was
+# renamed, an anchor that was reworded. Fragments are checked because that is
+# the half of a local link a rename does not announce.
+LYCHEE_FLEET_CONFIG = 'offline = true\ninclude_fragments = "anchor-only"\nno_progress = true\n'
+# What is not the page's fault when the check does go to the network: a rate
+# limit, a timeout. Everything else a remote returns is a finding.
+LYCHEE_EXTERNAL_ARGS = (
+    "--offline=false",
+    # A link to localhost, a private range or link-local (cloud metadata) is
+    # never fetched: the gate runs on a developer's machine and a CI runner,
+    # and a repo's Markdown must not be a way to make either of them ask.
+    "--exclude-all-private",
+    "--accept-timeouts",
+    "--accept",
+    "100..=103,200..=299,429",
+)
+# lychee prints this header, and only this header, when it checked links and
+# some were broken. Its exit 2 is ALSO what its argument parser exits with, so
+# the header is how a broken link is told from a broken command line.
+LYCHEE_FOUND_HEADER = re.compile(r"^Issues found in \d+ inputs?\b", re.M)
+
+
+def has_markdown() -> bool:
+    """Is there any Markdown for the docs checks to read?
+
+    Asked of git first, which already knows what is ignored, so a repo with a
+    large ignored tree (build output, a vendored SDK) is not walked to answer a
+    yes-or-no question. A tree that is not a git checkout is walked instead,
+    with the same exclusions, and the walk stops at the first file it finds.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "safe.directory=*", "ls-files", "-co", "--exclude-standard", "*.md"],
+            cwd=REPO,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        return any(
+            not set(Path(f).parts) & set(MARKDOWN_EXCLUDED_DIRS)
+            for f in proc.stdout.decode("utf-8", "surrogateescape").splitlines()
+        )
+    for _, dirs, files in os.walk(REPO):
+        dirs[:] = [d for d in dirs if d not in MARKDOWN_EXCLUDED_DIRS]
+        if any(f.endswith(".md") for f in files):
+            return True
+    return False
+
+
+def markdown_globs(name: str, s: dict) -> list[str]:
+    """`globs` in a docs check's table, else every Markdown file in the repo."""
+    return names(s.get("globs"), f"{name}.globs") or [MARKDOWN_GLOB]
+
+
+def repo_markdownlint_config() -> str | None:
+    """The first of the repo's own markdownlint config files, or None."""
+    return next((c for c in MARKDOWNLINT_CONFIGS if (REPO / c).is_file()), None)
+
+
+def markdownlint_fleet_config() -> str:
+    """The fleet defaults as a markdownlint-cli2 config document.
+
+    The ignore-file switch is a cli2 option, not a rule, so the defaults ride
+    in a cli2 config file; JSON is valid JSONC, which is what cli2 reads it as.
+    """
+    rules: dict[str, object] = {"default": True}
+    rules.update(dict.fromkeys(MARKDOWNLINT_FLEET_OFF, False))
+    return json.dumps({"gitignore": True, "config": rules}, indent=2) + "\n"
+
+
+def tmp_file(name: str, text: str) -> str:
+    """Write a generated config where this container can: the repo is read-only."""
+    try:
+        path = Path(tempfile.mkdtemp(prefix="sdlc-docs-")) / name
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        cannot(f"cannot write {name} under /tmp: {exc}")
+    return str(path)
+
+
+def t_markdown_lint(s: dict) -> int:
+    """markdownlint-cli2 over the repo's Markdown.
+
+    A repo with its own markdownlint config (MARKDOWNLINT_CONFIGS) is judged by
+    that and nothing else. Without one, MARKDOWNLINT_FLEET_OFF is switched off
+    and the rest of markdownlint's defaults apply, from a config file written
+    under /tmp: the repo is mounted read-only and is not ours to put a file in.
+    The repo's ignore file is honoured.
+
+    markdownlint-cli2 answers 0 clean, 1 findings, and anything else is the
+    tool: a config it could not parse, a glob it could not read.
+    """
+    if not has_markdown():
+        print("There is no Markdown in this repository; nothing to lint.")
+        return CLEAN
+    cmd = ["markdownlint-cli2"]
+    own = repo_markdownlint_config()
+    if own is None:
+        cmd += ["--config", tmp_file(".markdownlint-cli2.jsonc", markdownlint_fleet_config())]
+    cmd += markdown_globs("markdown-lint", s)
+    cmd += [f"#{d}" for d in MARKDOWN_EXCLUDED_DIRS]
+    step(f"markdownlint-cli2, {'the repo config ' + own if own else 'the fleet defaults'}")
+    rc = run(cmd)[0]
+    if rc not in (CLEAN, FOUND):
+        cannot(f"markdownlint-cli2 could not run (exit {rc})")
+    return rc
+
+
+def lychee_verdict(rc: int, out: str) -> int:
+    """lychee's exit status and report as this file's 0, 1 or a refusal.
+
+    lychee exits 0 clean, 2 for broken links, 3 for a config it could not load,
+    1 for an unexpected failure -- and 2 again for an invalid command line, so
+    its 2 alone is not a verdict. A 2 is a finding only when it also printed
+    the header it prints over a list of broken links. Translated here and
+    nowhere else, as t_scan_rootfs does for grype.
+    """
+    if rc == 0:
+        return CLEAN
+    if rc == 2 and LYCHEE_FOUND_HEADER.search(out):  # noqa: PLR2004 -- lychee's own "broken links"
+        return FOUND
+    cannot(f"lychee could not check the links (exit {rc})")
+
+
+def t_link_check(s: dict) -> int:
+    """lychee over the repo's Markdown: do its links point at something.
+
+    OFFLINE by default (LYCHEE_FLEET_CONFIG): local files and their #fragments,
+    so the verdict does not depend on anyone's uptime. `external = true` in the
+    check's table adds the network; a remote that times out or rate-limits is
+    accepted rather than reported, and any other bad answer is a finding. A
+    repo's lychee.toml is merged OVER the defaults, key by key, so it can
+    exclude a pattern without having to restate `offline`, and its
+    .lycheeignore applies as lychee reads it. Root-relative links (`/docs/x.md`)
+    resolve against the repo root, the way the forge renders them.
+    """
+    external = s.get("external", False)
+    if not isinstance(external, bool):
+        cannot("link-check: external must be true or false")
+    if not has_markdown():
+        print("There is no Markdown in this repository; no links to check.")
+        return CLEAN
+    cmd = ["lychee", "--config", tmp_file("lychee.toml", LYCHEE_FLEET_CONFIG)]
+    if (REPO / "lychee.toml").is_file():
+        cmd += ["--config", str(REPO / "lychee.toml")]
+    cmd += ["--root-dir", str(REPO.resolve())]
+    # The repo as a DIRECTORY input, not a `**/*.md` glob, and that is
+    # deliberate: lychee reads .gitignore while it walks a directory and not
+    # for a glob, so a glob would judge `build/` and a vendored tree the
+    # ignore file excludes. --hidden brings `.github/` in, as markdownlint-cli2
+    # already reads it; the VCS directory is then excluded by hand.
+    cmd += ["--extensions", "md", "--hidden"]
+    for d in MARKDOWN_EXCLUDED_DIRS:
+        cmd += ["--exclude-path", f"(^|/){re.escape(d)}/"]
+    # On the command line as well as in the fleet config, because lychee lets
+    # a later --config override an earlier one and the repo's lychee.toml is
+    # the later one: `offline = false` there must not turn an offline check
+    # into one that fetches whatever the repo's Markdown links to.
+    cmd += list(LYCHEE_EXTERNAL_ARGS) if external else ["--offline"]
+    cmd += names(s.get("globs"), "link-check.globs") or ["."]
+    step(f"lychee, {'local links and remote links' if external else 'local links only (offline)'}")
+    rc, out = run(cmd, tee=True)
+    return lychee_verdict(rc, out)
 
 
 # pytest and the plugins an in-image run needs. Pure Python, so one install
@@ -2295,12 +3260,18 @@ BUILTINS = {
     "constitution": t_constitution,
     "codeql": t_codeql,
     "containerfile-lint": t_containerfile_lint,
+    "npm-lint": t_npm_lint,
+    "npm-test": t_npm_test,
+    "npm-audit": t_npm_audit,
+    "markdown-lint": t_markdown_lint,
+    "link-check": t_link_check,
     # Answered by bin/sdlc on the host; listed so the name is known here.
     "hooks-installed": None,
     # Planned as host steps, which bin/sdlc runs; HOST_CHECKS builds them.
     "container-build": None,
     "container-smoke": None,
     "container-scan": None,
+    "bootc-lint": None,
 }
 
 
@@ -2332,7 +3303,9 @@ def t_stacks() -> int:
             "sdlc always has.\nTo run what was detected, add "
             "[tool.sdlc] stacks = [...] with the ones you want."
         )
-    print(f"\nthis image checks: {', '.join(STACKS)}; not yet: {', '.join(PLANNED_STACKS)}")
+    print(f"\nthis image checks: {', '.join(STACKS)}")
+    if PLANNED_STACKS:
+        print(f"not yet: {', '.join(PLANNED_STACKS)}")
     return CLEAN
 
 
@@ -2386,6 +3359,8 @@ def main() -> int:
 
     if args.what == "launcher":
         return t_launcher(args.arg)
+    if args.what == "npm-install":
+        return t_npm_install(args.arg)
     if args.what == "plan":
         if not args.arg:
             cannot("plan needs commit, push, ci or a check name")

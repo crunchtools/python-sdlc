@@ -35,7 +35,7 @@ the per-repo constitution.
 Exit 0 when it converted (or there was nothing to do), 2 when the repo has a
 shape it will not guess at -- named, so it can be converted by hand.
 
-Usage: scripts/convert_repo.py REPO_DIR [--apply] [--unbuilt-stacks node,bootc,docs]
+Usage: scripts/convert_repo.py REPO_DIR [--apply] [--unbuilt-stacks LIST]
 Needs PyYAML, to read the workflows; it never writes YAML, only text.
 """
 
@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import re
 import sys
 import tomllib
@@ -663,16 +664,22 @@ def refuse_links(repo: Path, paths: list[Path]) -> None:
 # Containerfile that CI cannot build without secrets. The planner's own rules,
 # mirrored here, decide which repos those are.
 
-# The stacks the image names but has no checks for yet. --unbuilt-stacks says
-# which of them still are; one that is not listed is now checked, so a
-# skip-stacks entry the converter wrote for it comes out again.
+# The stacks the image once named without checks. Since sdlc#92 it checks all
+# three, so --unbuilt-stacks defaults to none of them; one that is not listed is
+# checked, so a skip-stacks entry the converter wrote for it comes out again.
 PLANNED_STACKS = ("node", "bootc", "docs")
 CONTAINERFILES = ("Containerfile", "Dockerfile")
 CONTAINER_CI = ["container-build", "container-smoke", "container-scan"]
+# A bootc image is built and scanned like a container but linted rather than
+# smoke-run, so the same build chain is a different list of checks.
+BOOTC_CI = ["container-build", "bootc-lint", "container-scan"]
 # A build that needs a secret CI does not hand `sdlc ci`: a BuildKit secret
-# mount, or Red Hat subscription content. The publish workflow keeps building
-# these with the secrets it has.
-BUILD_SECRETS = re.compile(r"--mount=type=secret|subscription-manager|\brhsm\b", re.I)
+# mount, Red Hat subscription content, or a base image registry.redhat.io will
+# not serve without a login. The publish workflow keeps building these with the
+# secrets it has.
+BUILD_SECRETS = re.compile(
+    r"--mount=type=secret|subscription-manager|\brhsm\b|registry\.redhat\.io/", re.I
+)
 SKIP_STACKS_NOTE = (
     "# Written by crunchtools/sdlc's scripts/convert_repo.py: the image has no\n"
     "# checks for these stacks yet, and a stack it cannot check makes every run\n"
@@ -691,18 +698,89 @@ def needs_build_secrets(text: str) -> bool:
     return BUILD_SECRETS.search(code) is not None
 
 
+# Mirrors the planner's final_base() in `sdlc`: this file does not import it.
+BUILD_VAR = re.compile(r"\$(?:\{(?P<braced>\w+)(?::?-(?P<default>[^}]*))?\}|(?P<bare>\w+))")
+FROM_AS_WORDS = 3  # image, AS, name
+
+
+def logical_lines(text: str) -> list[str]:
+    """Containerfile instructions: continuations joined, comment lines dropped."""
+    lines, buf = [], ""
+    for raw in text.splitlines():
+        if raw.lstrip().startswith("#"):
+            continue  # a comment, even inside a continuation, is not an instruction
+        if raw.rstrip().endswith("\\"):
+            buf += raw.rstrip()[:-1] + " "
+            continue
+        lines.append((buf + raw).strip())
+        buf = ""
+    if buf.strip():
+        lines.append(buf.strip())
+    return lines
+
+
+def build_stages(text: str) -> tuple[dict[str, str], list[tuple[str, str | None]]]:
+    """The global ARG defaults, and each stage's (image word, lowercased AS name)."""
+    args: dict[str, str] = {}
+    stages: list[tuple[str, str | None]] = []
+    for words in (line.split() for line in logical_lines(text)):
+        op = words[0].upper() if words else ""
+        if op == "ARG" and not stages:
+            for name, eq, value in (w.partition("=") for w in words[1:]):
+                if eq:
+                    args[name] = value.strip("\"'")
+        elif op == "FROM":
+            rest = [w for w in words[1:] if not w.startswith("--")]
+            is_aliased = len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS"
+            if rest:
+                stages.append((rest[0], rest[2].lower() if is_aliased else None))
+    return args, stages
+
+
+def final_base(text: str) -> str | None:
+    """The image the FINAL stage of a Containerfile is built on, or None.
+
+    Substring-matching every FROM line called a bootc builder stage under a plain
+    runtime image bootc, and missed `ARG BASE=...-bootc` + `FROM ${BASE}`. What
+    ships is the last stage, so resolve that: fill $X, ${X} and ${X:-d} from the
+    global ARG defaults, and follow a `FROM <earlier-stage>` back to its own
+    base. An unset variable gives None.
+    """
+    args, stages = build_stages(text)
+    index = len(stages) - 1
+    seen: set[int] = set()
+    while index >= 0 and index not in seen:
+        seen.add(index)
+        image = stages[index][0]
+        names = [m["braced"] or m["bare"] for m in BUILD_VAR.finditer(image)]
+        defaults = [m["default"] for m in BUILD_VAR.finditer(image)]
+        if any(n not in args and d is None for n, d in zip(names, defaults, strict=True)):
+            return None
+        image = BUILD_VAR.sub(
+            lambda m: args.get(m["braced"] or m["bare"], m["default"] or ""), image
+        )
+        earlier = [i for i in range(index) if stages[i][1] == image.lower()]
+        if not earlier:
+            return image or None
+        index = earlier[-1]
+    return None
+
+
 def detected_stacks(repo: Path) -> list[str]:
     """The planner's detect_stacks(), over a checkout."""
     found = ["python"] if (repo / "pyproject.toml").is_file() else []
     cf = next((repo / f for f in CONTAINERFILES if (repo / f).is_file()), None)
-    bootc = cf is not None and any(
-        line.split()[0].upper() == "FROM" and "bootc" in line.lower()
-        for line in cf.read_text(errors="replace").splitlines()
-        if line.strip()
-    )
+    base = final_base(cf.read_text(errors="replace")) if cf is not None else None
+    bootc = base is not None and "bootc" in base.lower()
     if cf is not None and not bootc:
         found.append("container")
-    if (repo / "package.json").is_file():
+    nested = False
+    for here, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in ("node_modules", ".git")]
+        if Path(here) != repo and "package.json" in files:
+            nested = True
+            break
+    if (repo / "package.json").is_file() or nested:
         found.append("node")
     if bootc:
         found.append("bootc")
@@ -749,7 +827,7 @@ def convert_config(
     repo: Path,
     planned: dict[Path, str | None],
     notes: list[str],
-    unbuilt_stacks: tuple[str, ...] = PLANNED_STACKS,
+    unbuilt_stacks: tuple[str, ...] = (),
 ) -> None:
     pyproject = repo / "pyproject.toml"
     path = pyproject if pyproject.is_file() else repo / "sdlc.toml"
@@ -769,8 +847,9 @@ def convert_config(
     kept = [s for s in listed if s not in checked]
     ci = cfg.get("ci") or {}
     cf = next((repo / f for f in CONTAINERFILES if (repo / f).is_file()), None)
+    chain = BOOTC_CI if "bootc" in active else CONTAINER_CI
     secrets = (
-        "container" in active
+        ("container" in active or "bootc" in active)
         and cf is not None
         and needs_build_secrets(cf.read_text(errors="replace"))
         and "container-build" not in (ci.get("skip") or [])
@@ -788,9 +867,9 @@ def convert_config(
         if "skip" in ci:
             raise RefusedError(
                 f"{rel(repo, path)} [tool.sdlc.ci] skip exists; the Containerfile needs build "
-                f"secrets, so add {', '.join(CONTAINER_CI)} to it by hand"
+                f"secrets, so add {', '.join(chain)} to it by hand"
             )
-        text = with_key(text, "tool.sdlc.ci", "skip", CONTAINER_CI, SKIP_BUILD_NOTE)
+        text = with_key(text, "tool.sdlc.ci", "skip", chain, SKIP_BUILD_NOTE)
         notes.append(f"skip in ci: the container checks, in {rel(repo, path)} (build secrets)")
     if not (unbuilt or secrets or checked):
         return
@@ -804,14 +883,14 @@ def convert_config(
     if (
         not set(unbuilt) <= set(now)
         or (checked and now != kept)
-        or (secrets and not set(CONTAINER_CI) <= set((after.get("ci") or {}).get("skip") or []))
+        or (secrets and not set(chain) <= set((after.get("ci") or {}).get("skip") or []))
     ):
         raise RefusedError(f"{rel(repo, path)}: the keys written did not read back as meant")
     planned[path] = text
 
 
 def plan(
-    repo: Path, unbuilt_stacks: tuple[str, ...] = PLANNED_STACKS
+    repo: Path, unbuilt_stacks: tuple[str, ...] = ()
 ) -> tuple[dict[Path, str | None], list[str]]:
     """Every file the conversion writes (None: deletes), and what it kept."""
     planned: dict[Path, str | None] = {repo / BOOTSTRAP_AT: BOOTSTRAP.read_text()}
@@ -940,7 +1019,7 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="write the changes; default prints them")
     ap.add_argument(
         "--unbuilt-stacks",
-        default=",".join(PLANNED_STACKS),
+        default="",
         metavar="LIST",
         help="comma-separated stacks the image still has no checks for (default: %(default)s); "
         "empty means all exist, and a skip-stacks entry for any other is dropped",

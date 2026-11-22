@@ -8,6 +8,23 @@ All notable changes to this project are documented here, following
 
 ### Added
 
+- The node stack: a repo with a root `package.json` gets `npm-lint`, `npm-test` and
+  `npm-audit` in push and ci. They run the repo's own `lint` and `test` scripts and
+  `npm audit` in a workspace volume of the repo's own (`sdlc-node-<owner>-<repo>-<hash>`,
+  never the shared cache; a fresh `npm ci` every run), lint and test
+  with no network, with `packages` for monorepos and `level`/`omit_dev` for the
+  audit. A `package.json` only in a subdirectory is node, not docs.
+- The bootc stack. `bootc-lint` runs `bootc container lint` inside the image
+  `container-build` built, with no network and the launcher's dropped
+  capabilities (`fatal_warnings`, `skip`, `image` settings); a bootc image is
+  never smoke-run. `tests/test_bootc_stack.sh` proves it against a real bootc base.
+  Detection reads the final stage's base, with `ARG` defaults resolved.
+- The docs stack: `markdown-lint` (markdownlint-cli2, fleet defaults that judge
+  correctness and not taste unless the repo has its own config) and `link-check`
+  (lychee, offline by default; `external = true` adds remote links), both in
+  push and ci for a repo with nothing else to be. The image carries
+  markdownlint-cli2 0.24.0 and lychee 0.24.2.
+  `scripts/update_tools.py` moves both pins, lychee's digest with its version.
 - `sdlc gatehouse` mounts the file named by `OPENROUTER_API_KEY_FILE` in
   `gatehouse.env` read-only at the same path, so an OpenRouter key delivered
   as a file reaches Gatehouse as a file and never as an environment value
@@ -49,7 +66,8 @@ All notable changes to this project are documented here, following
   repo. The listing includes private repos the token can see, and `sdlc` and
   `constitution` are skipped as upstream.
 - `scripts/convert_repo.py --unbuilt-stacks LIST`: the stacks the image has no
-  checks for yet, `node,bootc,docs` by default. A `skip-stacks` entry for one
+  checks for yet, none by default now that all three are checked (this
+  repo's fleet_wave.py likewise). A `skip-stacks` entry for one
   of those three that is no longer in the list is dropped, with the note the
   converter wrote above it when the list empties.
 
