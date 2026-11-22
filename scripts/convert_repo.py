@@ -553,7 +553,7 @@ def with_runner(template: str, covered: list[Path], notes: list[str]) -> str:
     one the stub cannot carry, or one that reads `matrix`, `inputs`, `needs` or
     `strategy` leave the template as it is, and say so in `notes`.
     """
-    runners = {}
+    runners: dict[str, tuple[object, tuple[list[str], int] | None]] = {}
     for path in covered:
         text = path.read_text()
         jobs = jobs_of(parse(path.name, text))
