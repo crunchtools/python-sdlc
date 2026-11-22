@@ -315,12 +315,19 @@ jobs:
       # was made in), already-attested skipped, every attestation verified
       # (tests/test_attest_digest.sh). Provenance names the run that BUILT
       # the digest, read off its labels (scripts/provenance.py).
+      # syft, skopeo and provenance.py parse the image, so they run WITHOUT
+      # the key, as constitution#209; only the attest step below holds it.
+      - name: Write the SBOM and provenance of the digest being promoted
+        env:
+          REF: ${{ needs.build.outputs.ref }}
+        run: scripts/attest-digest.sh write "$RUNNER_TEMP/attest" "${REF#*@}" "$QUAY" "$MIRROR"
+
       - name: Attest the SBOM and provenance of the digest being promoted
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
           REF: ${{ needs.build.outputs.ref }}
-        run: scripts/attest-digest.sh "${REF#*@}" "$QUAY" "$MIRROR"
+        run: scripts/attest-digest.sh attest "$RUNNER_TEMP/attest" "${REF#*@}" "$QUAY" "$MIRROR"
 
       # Copies the tested digest. No rebuild, so the bytes that were verified
       # are the bytes that get the tag.

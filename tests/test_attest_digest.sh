@@ -2,8 +2,9 @@
 # scripts/attest-digest.sh against a fake cosign, syft and skopeo: what promote
 # attests (an SBOM and SLSA provenance, per repository), that it scans and
 # inspects only when something is missing, that it refuses a wrong key or a bad
-# digest before attesting anything, and that a failed attestation, verification
-# or scan fails the step.
+# digest before attesting anything, that a failed attestation, verification or
+# scan fails the step, and that only the attest step holds the key and only the
+# keyless write step parses the image (constitution#209).
 #
 # Usage: tests/test_attest_digest.sh
 
@@ -89,15 +90,24 @@ good_labels() {
 EOF
 }
 reset() {
-  rm -rf "$W/log" "$W/att" "$W/preds" "$W/syft.log" "$W/skopeo.log" \
+  rm -rf "$W/log" "$W/att" "$W/out" "$W/preds" "$W/syft.log" "$W/skopeo.log" \
     "$W/attest-fails" "$W/verify-fails" "$W/syft-fails" "$W/syft-empty"
   cp "$W/fleet.pub" "$W/secret.pub"
   good_labels
 }
-run() {              # args...: set RC and OUT
+write() {            # digest repo...: the keyless step alone; set RC and OUT
   RC=0
-  OUT=$(PATH="$W/bin:$PATH" GITHUB_REPOSITORY=crunchtools/sdlc COSIGN_PRIVATE_KEY=k \
-    sh "$ATTEST" "$@" 2>&1) || RC=$?
+  OUT=$(PATH="$W/bin:$PATH" GITHUB_REPOSITORY=crunchtools/sdlc \
+    sh "$ATTEST" write "$W/out" "$@" 2>&1) || RC=$?
+}
+attest() {           # digest repo...: the key step alone; set RC and OUT
+  RC=0
+  OUT=$(PATH="$W/bin:$PATH" COSIGN_PRIVATE_KEY=k sh "$ATTEST" attest "$W/out" "$@" 2>&1) || RC=$?
+}
+run() {              # digest repo...: both steps, as promote runs them; set RC and OUT
+  write "$@"
+  [ "$RC" -ne 0 ] || { _w=$OUT; attest "$@"; OUT="$_w
+$OUT"; }
 }
 lines() { grep -c -- "$1" "$2" 2>/dev/null || true; }   # count matches, 0 if the file is absent
 
@@ -191,8 +201,7 @@ fi
 reset
 printf 'not the fleet key\n' > "$W/secret.pub"
 run "$D" "$A"
-if [ "$RC" -eq 1 ] && ! grep -q '^attest \|^verify-attestation ' "$W/log" \
-   && [ ! -e "$W/syft.log" ] && [ ! -e "$W/skopeo.log" ] \
+if [ "$RC" -eq 1 ] && ! grep -q '^attest ' "$W/log" \
    && printf '%s' "$OUT" | grep -q 'not the private half'; then
   ok "a private key that is not the bootstrap's is refused before anything is attested"
 else
@@ -211,8 +220,8 @@ done
 
 reset
 RC=0
-OUT=$(PATH="$W/bin:$PATH" GITHUB_REPOSITORY=crunchtools/sdlc COSIGN_PRIVATE_KEY='' \
-  sh "$ATTEST" "$D" "$A" 2>&1) || RC=$?
+OUT=$(PATH="$W/bin:$PATH" COSIGN_PRIVATE_KEY='' \
+  sh "$ATTEST" attest "$W/out" "$D" "$A" 2>&1) || RC=$?
 if [ "$RC" -eq 1 ] && [ ! -e "$W/log" ]; then
   ok "no private key is a failure, not a skip"
 else
@@ -278,6 +287,49 @@ if [ "$RC" -eq 0 ] && [ ! -e "$W/syft.log" ] && [ "$(lines '' "$W/skopeo.log")" 
   ok "only the provenance missing: inspected once, not scanned, only the provenance attested"
 else
   bad "provenance only: exit $RC"; cat "$W/log"
+fi
+
+# The key boundary (constitution#209): write never runs with the key, and
+# attest never runs anything that parses the image.
+for v in COSIGN_PRIVATE_KEY COSIGN_PASSWORD; do
+  reset
+  RC=0
+  OUT=$(env "$v=k" PATH="$W/bin:$PATH" GITHUB_REPOSITORY=crunchtools/sdlc \
+    sh "$ATTEST" write "$W/out" "$D" "$A" 2>&1) || RC=$?
+  if [ "$RC" -eq 1 ] && [ ! -e "$W/log" ] && [ ! -e "$W/syft.log" ] && [ ! -e "$W/skopeo.log" ] \
+     && printf '%s' "$OUT" | grep -q 'must run without'; then
+    ok "write refuses to run with $v set, before anything parses the image"
+  else
+    bad "write with $v: exit $RC"; printf '%s\n' "$OUT"
+  fi
+done
+
+reset
+write "$D" "$A" "$B"
+rm -f "$W/syft.log" "$W/skopeo.log"
+attest "$D" "$A" "$B"
+if [ "$RC" -eq 0 ] && [ ! -e "$W/syft.log" ] && [ ! -e "$W/skopeo.log" ] \
+   && [ "$(lines '^attest ' "$W/log")" -eq 4 ]; then
+  ok "attest runs only cosign: no scan and no inspect with the key in the environment"
+else
+  bad "attest parsed the image: exit $RC"; cat "$W/syft.log" "$W/skopeo.log" 2>/dev/null
+fi
+
+reset
+attest "$D" "$A"
+if [ "$RC" -ne 0 ] && ! grep -q '^attest ' "$W/log" && printf '%s' "$OUT" | grep -q 'write step left none'; then
+  ok "attest with no SBOM written fails rather than attesting nothing"
+else
+  bad "attest without write: exit $RC"; printf '%s\n' "$OUT"
+fi
+
+reset
+RC=0
+OUT=$(PATH="$W/bin:$PATH" sh "$ATTEST" sign "$W/out" "$D" "$A" 2>&1) || RC=$?
+if [ "$RC" -eq 1 ] && [ ! -e "$W/log" ]; then
+  ok "an unknown step is refused"
+else
+  bad "unknown step: exit $RC"
 fi
 
 printf '\n'

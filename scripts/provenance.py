@@ -8,8 +8,9 @@ org.opencontainers.image.revision it already wrote, so the signature covers
 them. Promote usually takes a digest an EARLIER run built (a tag run builds
 nothing), so the builder is read off the image, never taken from the promote
 run. A digest built before a997, or whose record is not this repo's
-container.yml at its own revision (inherited FROM a base image), gets no
-provenance rather than a wrong one. The same shape as constitution's
+container.yml on main or a v* tag at its own revision (inherited FROM a base
+image, or a branch's dispatched build), gets no provenance rather than a wrong
+one. The same shape as constitution's
 container_release.py provenance (#204), whose trusted builder is its reusable
 workflow; sdlc hand-rolls its own, so the builder is this repo's container.yml.
 
@@ -33,6 +34,9 @@ BUILD_COMMIT = "com.crunchtools.build.commit"
 REVISION = "org.opencontainers.image.revision"
 WORKFLOW = ".github/workflows/container.yml@"
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+# Only main and release tags build what promote publishes; a record from any
+# other ref (a pull request's merge ref, a dispatched branch) is not one.
+RELEASED_REF = re.compile(r"^(refs/heads/main|refs/tags/v[^/]+)$")
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
 
 
@@ -47,7 +51,7 @@ def build_record(labels: dict[str, str], repo: str) -> tuple[str, str, str, str]
     honest = (
         own_run.match(run_url)
         and builder.startswith(trusted)
-        and len(builder) > len(trusted)
+        and RELEASED_REF.match(builder[len(trusted) :])
         and workflow == builder
         and COMMIT.match(commit)
         and commit == labels.get(REVISION)
@@ -89,8 +93,9 @@ def main(argv: list[str] | None = None) -> int:
     predicate = provenance(labels, a.repo)
     if predicate is None:
         print(
-            f"::warning::the image records no container.yml run of {a.repo} at its own "
-            "revision (built before a997, or a base image's record); no provenance attested",
+            f"::warning::the image records no container.yml run of {a.repo} on main or a v* tag "
+            "at its own revision (built before a997, a branch build, or a base image's record); "
+            "no provenance attested",
             file=sys.stderr,
         )
         return 0

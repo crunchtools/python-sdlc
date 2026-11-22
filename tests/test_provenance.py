@@ -6,8 +6,8 @@ than none. The record is the labels container.yml stamps into the image: the run
 the builder, the workflow and the commit. This feeds `skopeo inspect`-shaped JSON
 to the script and asserts that a record of this repo's container.yml at its own
 revision yields the exact SLSA v1 predicate, and that every other shape (no
-labels, another repo's run, another workflow, a commit that is not the revision)
-yields exit 0, no file and a ::warning::.
+labels, another repo's run, another workflow, a ref other than main or a v*
+tag, a commit that is not the revision) yields exit 0, no file and a ::warning::.
 
 Run: tests/test_provenance.py   (needs python3 only)
 """
@@ -150,6 +150,25 @@ REFUSALS = [
         inspect(with_labels(workflow=f"{REPO}/.github/workflows/container.yml@refs/tags/v1")),
         True,
     ),
+    *[
+        (
+            f"builder ref is {ref}",
+            inspect(
+                with_labels(
+                    builder=f"{REPO}/.github/workflows/container.yml@{ref}",
+                    workflow=f"{REPO}/.github/workflows/container.yml@{ref}",
+                )
+            ),
+            True,
+        )
+        for ref in (
+            "refs/pull/91/merge",
+            "refs/heads/feat/a997",
+            "refs/heads/mainline",
+            "refs/tags/1.0.0",
+            "refs/tags/v1/x",
+        )
+    ],
     ("commit is not 40 hex", inspect(with_labels(commit="abc123", revision="abc123")), True),
     (
         "commit is uppercase hex",
@@ -173,6 +192,17 @@ def main() -> int:
     failed += check("valid record writes the exact predicate", written == EXPECTED, repr(written))
     failed += check("valid record exits 0", code == 0, f"exit {code}: {err}")
     failed += check("valid record has no warning", "::warning::" not in err, err)
+
+    tag = f"{REPO}/.github/workflows/container.yml@refs/tags/v0.12.0"
+    code, _, written = run(inspect(with_labels(builder=tag, workflow=tag)))
+    failed += check(
+        "a v* tag's record is trusted",
+        code == 0
+        and written is not None
+        and written["buildDefinition"]["externalParameters"]["workflow"]["ref"]
+        == "refs/tags/v0.12.0",
+        repr(written),
+    )
 
     code, _, written = run(inspect(VALID), repo=None, env_repo=REPO)
     failed += check("GITHUB_REPOSITORY stands in for --repo", code == 0 and written == EXPECTED)

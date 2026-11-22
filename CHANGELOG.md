@@ -20,10 +20,12 @@ All notable changes to this project are documented here, following
   records its run, workflow and commit in `com.crunchtools.build.*` labels,
   and `scripts/provenance.py` writes the predicate from them, so a tag run
   that promotes without building names the run that built the digest. A
-  digest built before this gets the SBOM and no provenance.
-  `scripts/attest-digest.sh` scans once and attests in both `sdlc` and the
-  `python-sdlc` mirror, since an attestation stays in the repository it was
-  made in. Verify with `cosign verify-attestation --insecure-ignore-tlog
+  digest built before this, or by any ref but main or a `v*` tag, gets the
+  SBOM and no provenance. `scripts/attest-digest.sh` scans once and attests in
+  both `sdlc` and the `python-sdlc` mirror, since an attestation stays in the
+  repository it was made in. As constitution#209 does, syft, skopeo and the
+  predicate writer run in a step without the key, and only the `cosign attest`
+  step holds it. Verify with `cosign verify-attestation --insecure-ignore-tlog
   --type spdxjson` (or `slsaprovenance1`) and the fleet key.
 
 ### Changed
