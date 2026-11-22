@@ -27,6 +27,10 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `release.yml` tags with the `ashigaru-crunchtools` App instead of
+  `crunchtools-ci` (a965). The new cosign release-tag ruleset lets only the
+  Ashigaru App create `v*.*.*` tags, so the next release tag would have been
+  refused. The token is scoped to this repository and `contents: write`.
 - Gatehouse runs, in every tier and by hand as `sdlc gatehouse`, only when the
   remote is a crunchtools repo on GitHub, because it sends the diff to an
   external model and the diff can be a Red Hat repo's. Any other remote, or
