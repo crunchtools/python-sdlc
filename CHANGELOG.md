@@ -65,6 +65,14 @@ All notable changes to this project are documented here, following
   3072m. A machine with room for 8g per lane is unchanged. `SDLC_MEMORY`
   now also refuses a size with the unit in the middle, like `8g8m`.
 
+- `git commit -a` no longer loses its blobs when something prunes the clone
+  while the pre-commit hook runs (#94). Until the commit is made, `commit -a`
+  records its new blobs only in `.git/index.lock`, which gc cannot see, so a
+  `git gc --prune=now` from another process deleted them and the commit failed
+  with "invalid object ... Error building trees". While a hook's gate runs,
+  `bin/sdlc` now pins the hook's index tree at `refs/sdlc/hook-index` and
+  removes the pin when the gate ends.
+
 ## [0.11.0] - 2026-11-22
 
 ### Security
