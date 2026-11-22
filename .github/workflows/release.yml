@@ -1,7 +1,7 @@
 # A merge that changes the version IS the release. When main's pyproject.toml
 # names a version with a CHANGELOG heading and no tag yet, this tags it, and the
 # tag push runs container.yml, which promotes the image to that version and then
-# opens a bump PR in every repo that pins python-sdlc.
+# opens a bump PR in every repo that pins sdlc.
 #
 # Without this, a tool update that merged itself would sit untagged until a
 # person noticed, and no repo would receive it.

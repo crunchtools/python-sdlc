@@ -1,4 +1,4 @@
-# python-sdlc
+# sdlc
 
 Every CrunchTools Python check in one container image, run the same way on a
 laptop and in CI.
@@ -61,7 +61,7 @@ the tag resolves to is signed by the crunchtools fleet key, which it carries
 inline, using cosign v2 from a digest-pinned image. Then it runs the launcher
 and every check by that digest. An unsigned image is a 2, GATE CANNOT RUN.
 Promote signs every digest before a tag moves onto it, so `:latest`, `:main`
-and every release since python-sdlc#81 are signed. Older release tags are not,
+and every release since #81 are signed. Older release tags are not,
 so `SDLC_IMAGE=<old release>` is refused. A digest verified once is remembered in
 `${XDG_CACHE_HOME:-~/.cache}/sdlc/verified/`, so an offline seat keeps working.
 CI always verifies.
@@ -118,7 +118,7 @@ The rev-pinned form still works, and is what a repo has until it converts:
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
-  - repo: https://github.com/crunchtools/python-sdlc
+  - repo: https://github.com/crunchtools/sdlc
     rev: v0.8.0
     hooks:
       - id: sdlc-commit
@@ -168,7 +168,7 @@ skip-stacks = ["node"]
 ```
 
 **A Python repo that names neither key runs the python stack alone**, exactly
-as python-sdlc always has, whatever else is in it. Turning the container stack
+as sdlc always has, whatever else is in it. Turning the container stack
 on under 36 pinned repos is its own decision, not a side effect of a bump.
 `sdlc stacks` shows what was detected and what runs.
 
@@ -392,6 +392,10 @@ It is the digest the contract test ran against at `:<sha>`, read back after the
 copy, and it never moves back onto an older commit. Only a release moves `latest` and the version tags, and no
 pull request run touches a registry at all. The release is the gate.
 
+`quay.io/crunchtools/sdlc` is the image. `quay.io/crunchtools/python-sdlc` is a
+transitional mirror carrying the same signed digest, retired once the fleet has
+moved.
+
 A floating repo opts its CI into `:main` with the repository variable
 `SDLC_IMAGE=main` -- a setting only an admin can change, rather than a one-line
 edit a pull request could slip in. It is not a wall: a pull request from a
@@ -415,8 +419,8 @@ planner runs inside whichever image was chosen.
 
 **Nothing built on a laptop or a seat is ever pushed.** To try a change to
 this image before it merges, build it locally (`podman build -t
-localhost/python-sdlc:dev .`) and run it with
-`SDLC_IMAGE=localhost/python-sdlc:dev` through this clone's `bin/sdlc`. A
+localhost/sdlc:dev .`) and run it with
+`SDLC_IMAGE=localhost/sdlc:dev` through this clone's `bin/sdlc`. A
 converted repo's `.sdlc/bin/sdlc` will not take it: the bootstrap runs what it
 pulls, so it pulls only `quay.io/crunchtools/sdlc` at `main`, `latest`, a
 release `X.Y.Z` or `@sha256:<digest>`, and refuses anything else with exit 2.
@@ -511,7 +515,7 @@ sees it. `sdlc codeql-baseline` writes it from the current findings. See
 
 ## How a new Gourmand or Gatehouse arrives
 
-Their releases trigger a rebuild here, which is released as a new python-sdlc
+Their releases trigger a rebuild here, which is released as a new sdlc
 version and promoted to `sdlc:latest`. Every converted repo floats on that tag,
 so the laptop then runs the reviewer CI runs, with no pull request per repo. A
 repo still pinned by `rev:` moves only when it converts or bumps by hand.

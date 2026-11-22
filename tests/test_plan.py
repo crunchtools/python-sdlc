@@ -18,7 +18,7 @@ rules are pinned case by case:
 
 Run inside the image, which has the interpreter and PyYAML the runner needs:
   podman run --rm -v .:/src:ro,z -w /src --entrypoint /opt/constitution-venv/bin/python3 \
-      quay.io/crunchtools/python-sdlc:<tag> tests/test_plan.py
+      quay.io/crunchtools/sdlc:<tag> tests/test_plan.py
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ check(
     str(ci),
 )
 
-# python-sdlc#48: the commit tier's ruff steps fix and pass, so without a
+# #48: the commit tier's ruff steps fix and pass, so without a
 # non-mutating verdict in push, ci ran no ruff at all.
 check("ci renders the ruff verdict", "lint" in ci, str(ci))
 check(
@@ -427,7 +427,7 @@ def plan_of(target: str, pyproject: str, **env) -> list[list[str]]:
     return [line.split("\t") for line in buf.getvalue().splitlines()]
 
 
-# python-sdlc#50: a push skip is the only way a verdict leaves ci, so ci and
+# #50: a push skip is the only way a verdict leaves ci, so ci and
 # tiers say so; otherwise a green ci reads the same whether lint ran or not.
 check("no push skip, nothing to report", S.push_skips(empty) == [])
 check(

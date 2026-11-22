@@ -64,7 +64,8 @@ from pathlib import Path
 from typing import Any
 
 ORG = "crunchtools"
-SELF = "python-sdlc"  # the converter's own repo: the source, not a consumer
+# The converter's own repo, the source and not a consumer, under either name.
+SELF = {"sdlc", "python-sdlc"}
 BRANCH = "chore/sdlc-floating"
 # Branches of earlier waves whose open pull requests edit the `rev:` line this
 # wave deletes: one merging after the conversion would conflict, and a
@@ -95,10 +96,12 @@ LEDGER_HEADER = ("repo", "action", "pr_url", "reason")
 COMMIT_MESSAGE = """\
 chore: float the sdlc gates on quay.io/crunchtools/sdlc
 
-Converted by python-sdlc's scripts/convert_repo.py. The hooks and the
-`sdlc ci` job run .sdlc/bin/sdlc, which takes its launcher from
-quay.io/crunchtools/sdlc:latest, so nothing in this repo pins a python-sdlc
-release and no version-bump pull request follows this one.
+Converted by crunchtools/sdlc's scripts/convert_repo.py. The hooks and
+the `sdlc ci` job run .sdlc/bin/sdlc, which takes its launcher from
+quay.io/crunchtools/sdlc:latest, so nothing in this repo pins an sdlc
+release and no version-bump pull request follows this one. What still
+named crunchtools/python-sdlc, the repo's old name, now names
+crunchtools/sdlc.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 """
@@ -109,16 +112,21 @@ what they run changes when the image does and no pull request has to bump a pin.
 
 ## What changed
 
-- `.sdlc/bin/sdlc` (new, executable): python-sdlc's `bin/sdlc-bootstrap`. It \
-asks `quay.io/crunchtools/sdlc` for its launcher and runs it. It names no \
-release, so nothing ever bumps it.
-- `.pre-commit-config.yaml`: the rev-pinned python-sdlc hooks (or the \
+- `.sdlc/bin/sdlc` (new or refreshed, executable): crunchtools/sdlc's \
+`bin/sdlc-bootstrap`. It asks `quay.io/crunchtools/sdlc` for its launcher, \
+checks its signature, and runs it. It names no release, so no pin bumps it.
+- `.pre-commit-config.yaml`: the rev-pinned sdlc hooks (or the \
 standalone Gourmand and Gatehouse hooks) become two local hooks running \
 `.sdlc/bin/sdlc commit` and `.sdlc/bin/sdlc push`. Other hooks are kept.
 - `.github/workflows/`: the `sdlc ci` job runs `.sdlc/bin/sdlc ci` with \
 `SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}`. Its name, and so the required check, is \
-unchanged. Workflows the stub does not cover are kept; \
-`quay.io/crunchtools/python-sdlc` becomes `quay.io/crunchtools/sdlc`.
+unchanged. Workflows the stub does not cover are kept.
+- The old name: the repo was `crunchtools/python-sdlc`. \
+`quay.io/crunchtools/python-sdlc`, now a mirror that goes away, becomes \
+`quay.io/crunchtools/sdlc`, and a `uses: crunchtools/python-sdlc/...` \
+becomes `crunchtools/sdlc/...`, in workflows and `[tool.sdlc]` config.
+- A repo that already floats gets only the current bootstrap and stubs, and the \
+rename.
 - `.specify/` is not touched.
 
 ## How to roll back
@@ -132,7 +140,7 @@ request; the organization variable does the same fleet-wide. Locally, \
 That restores the pinned hooks and workflows exactly as they were.
 
 It merges itself (squash) when its required checks pass. Opened by \
-python-sdlc's `scripts/fleet_wave.py`; a re-run of the wave reuses the branch \
+crunchtools/sdlc's `scripts/fleet_wave.py`; a re-run of the wave reuses the branch \
 `chore/sdlc-floating` and this pull request.
 """
 
@@ -292,7 +300,7 @@ def refusal(stderr: str) -> str:
 
 
 def preflight(wave: Wave, repo: str) -> None:
-    if repo == SELF:
+    if repo in SELF:
         raise LeftAloneError("skipped", "the converter's own repo, not a consumer")
     if repo in wave.earlier:
         raise LeftAloneError(

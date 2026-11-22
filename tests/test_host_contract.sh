@@ -419,7 +419,7 @@ printf '\n== a check deferred to CI\n\n'
 
 # 3 is the image saying "could not run, and CI judges this commit". A push lets
 # it through, loudly, so --no-verify is not the only door past a broken
-# CodeQL; every other command must still treat it as a 2 (python-sdlc#33).
+# CodeQL; every other command must still treat it as a 2 (#33).
 touch "$SHIM/defer"
 log_mark
 PATH="$SHIM" sh bin/sdlc push > "$RUN/out" 2>&1 && rc=0 || rc=$?
@@ -795,7 +795,7 @@ fi
 # And they must have invoked podman ONLY -- a second shim would have been
 # created if anything else were reached, but assert the image name appears so we
 # know it was a real run and not just `podman volume`.
-if grep -q 'python-sdlc\|run --rm' "$LOG" 2>/dev/null; then
+if grep -q 'crunchtools/sdlc\|run --rm' "$LOG" 2>/dev/null; then
   ok "podman was asked to run the image"
 else
   bad "podman was called but never asked to run the image"
@@ -855,7 +855,7 @@ printf '\n== an image other than the pinned release\n\n'
 # The inner loop runs a pull request's image. With no override, nothing about
 # the argv may change: no pull flag, the pinned image. With one, the image is
 # named on every run and a floating tag is pulled when newer.
-pinned="quay.io/crunchtools/python-sdlc:$(tr -d ' \t\n\r' < IMAGE_TAG)"
+pinned="quay.io/crunchtools/sdlc:$(tr -d ' \t\n\r' < IMAGE_TAG)"
 last_run() { grep ' run --rm' "$RUN/podman.log" | tail -1; }
 
 log_mark
@@ -879,9 +879,9 @@ else
 fi
 
 log_mark
-SDLC_IMAGE=localhost/python-sdlc:dev PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+SDLC_IMAGE=localhost/sdlc:dev PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
 log_since
-if last_run | grep -q -- ' localhost/python-sdlc:dev tiers$' && ! last_run | grep -q -- '--pull'; then
+if last_run | grep -q -- ' localhost/sdlc:dev tiers$' && ! last_run | grep -q -- '--pull'; then
   ok "a local image is run as built, never pulled"
 else
   bad "SDLC_IMAGE=localhost/...: $(last_run)"
@@ -1036,7 +1036,7 @@ else
   bad "a failing check through the bootstrap exited $rc"
 fi
 
-# Floating, the launcher needs no clone of python-sdlc: no IMAGE_TAG beside it.
+# Floating, the launcher needs no clone of this repo: no IMAGE_TAG beside it.
 FLOAT=$(mktemp -d)
 sed "s|^LAUNCHED_FROM=\$|LAUNCHED_FROM='quay.io/crunchtools/sdlc:latest'|" bin/sdlc > "$FLOAT/sdlc"
 log_mark
@@ -1138,7 +1138,7 @@ if [ "$_odd" = 0 ]; then
 else
   bad "$_odd of 3 runs racing one cold cache did not exit $_want"
 fi
-_root="$CLONECACHE/python-sdlc/constitution"
+_root="$CLONECACHE/sdlc/constitution"
 _links=$(find "$_root" -mindepth 1 -maxdepth 1 -type l | wc -l | tr -d ' ')
 _dirs=$(find "$_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
 _nested=$(find "$_root" -mindepth 2 -name '.v*' | wc -l | tr -d ' ')
@@ -1176,13 +1176,13 @@ matches() {            # URL -> 0 when it is a crunchtools GitHub repo
   sh -c '. "$1"; is_crunchtools_github "$2"' sh "$GH_FUNCS" "$1"
 }
 for url in \
-  https://github.com/crunchtools/python-sdlc \
-  https://github.com/crunchtools/python-sdlc.git \
-  https://github.com/CrunchTools/python-sdlc \
-  https://user:token@github.com/crunchtools/python-sdlc \
-  git@github.com:crunchtools/python-sdlc \
-  git@github.com:crunchtools/python-sdlc.git \
-  ssh://git@github.com/crunchtools/python-sdlc \
+  https://github.com/crunchtools/sdlc \
+  https://github.com/crunchtools/sdlc.git \
+  https://github.com/CrunchTools/sdlc \
+  https://user:token@github.com/crunchtools/sdlc \
+  git@github.com:crunchtools/sdlc \
+  git@github.com:crunchtools/sdlc.git \
+  ssh://git@github.com/crunchtools/sdlc \
   http://trentina:8019/proxy/git/github/crunchtools/developer \
   https://trentina.crunchtools.com/proxy/git/github/crunchtools/josui \
   HTTPS://GITHUB.COM/crunchtools/x \

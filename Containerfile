@@ -1,4 +1,4 @@
-# python-sdlc: every CrunchTools Python SDLC check, in one image.
+# sdlc: every CrunchTools Python SDLC check, in one image.
 #
 # The rule this image exists to serve (constitution XII): a language-specific
 # SDLC ships as ONE fully baked image. The standalone gourmand and gatehouse
@@ -50,7 +50,7 @@ USER root
 
 LABEL maintainer="fatherlinux <scott.mccarty@crunchtools.com>"
 LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest, Gourmand, Gatehouse, Semgrep, CodeQL, pip-audit, hadolint, grype and the constitution validator."
-LABEL org.opencontainers.image.source="https://github.com/crunchtools/python-sdlc"
+LABEL org.opencontainers.image.source="https://github.com/crunchtools/sdlc"
 LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python and container repos."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 LABEL version="0.11.0"

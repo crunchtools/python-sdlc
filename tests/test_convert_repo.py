@@ -598,6 +598,135 @@ check(
     refused.stderr,
 )
 
+# ------------------------------------- the repo's new name: crunchtools/sdlc
+
+NEW_PINNED_HOOKS = PINNED_HOOKS.replace("crunchtools/python-sdlc", "crunchtools/sdlc")
+NEW_PINNED_STEP = (
+    PINNED_STEP.replace("crunchtools\\/python-sdlc", "crunchtools\\/sdlc")
+    .replace("no python-sdlc rev", "no sdlc rev")
+    .replace("crunchtools/python-sdlc", "crunchtools/sdlc")
+)
+RENAMED_PUBLISH = """\
+name: Publish
+on:
+  release:
+jobs:
+  build:
+    uses: crunchtools/python-sdlc/.github/workflows/build.yml@v1
+  extras:
+    uses: crunchtools/python-sdlc-extras/.github/workflows/x.yml@v1
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: podman pull quay.io/crunchtools/python-sdlc:0.11.0
+      - run: echo quay.io/crunchtools/python-sdlc-extras
+"""
+
+# A repo that already floats still has the old name in a kept workflow.
+repo = make_repo(
+    {
+        ".pre-commit-config.yaml": HOOKS,
+        ".sdlc/bin/sdlc": BOOTSTRAP,
+        ".github/workflows/ci.yml": CI,
+        ".github/workflows/publish.yml": RENAMED_PUBLISH,
+    }
+)
+(repo / ".sdlc/bin/sdlc").chmod(0o755)
+done = convert(repo, apply=True)
+published = snapshot(repo)[".github/workflows/publish.yml"]
+check(
+    "floating: the old image and reusable workflow become crunchtools/sdlc's",
+    done.returncode == 0
+    and "quay.io/crunchtools/sdlc:0.11.0" in published
+    and "uses: crunchtools/sdlc/.github/workflows/build.yml@v1" in published
+    and "crunchtools/python-sdlc/" not in published
+    and "python-sdlc:" not in published,
+    done.stderr + published,
+)
+check(
+    "floating: a longer name (python-sdlc-extras) is left alone, as a workflow and as an image",
+    "uses: crunchtools/python-sdlc-extras/.github/workflows/x.yml@v1" in published
+    and "quay.io/crunchtools/python-sdlc-extras" in published,
+    published,
+)
+check(
+    "floating: a `renamed:` note names the file",
+    any(
+        line.startswith("convert_repo: ") and "renamed:" in line and "publish.yml" in line
+        for line in done.stderr.splitlines()
+    ),
+    done.stderr,
+)
+check(
+    "floating: only the kept workflow changed",
+    snapshot(repo)[".pre-commit-config.yaml"] == HOOKS
+    and snapshot(repo)[".github/workflows/ci.yml"] == CI,
+)
+again = convert(repo)
+check(
+    "floating: a second run finds nothing to do",
+    again.returncode == 0 and again.stdout == "",
+    again.stdout,
+)
+
+# A hooks file pinned to the new name converts exactly like the old-name pin.
+repo = make_repo({".pre-commit-config.yaml": NEW_PINNED_HOOKS})
+done = convert(repo, apply=True)
+check(
+    "new name: a hooks pin at crunchtools/sdlc becomes the floating hooks",
+    NEW_PINNED_HOOKS != PINNED_HOOKS
+    and done.returncode == 0
+    and snapshot(repo)[".pre-commit-config.yaml"] == HOOKS,
+    done.stderr,
+)
+
+# A mixed workflow whose pinned step names the new repo floats like the old one.
+repo = make_repo(
+    {
+        ".pre-commit-config.yaml": NEW_PINNED_HOOKS,
+        ".github/workflows/tests.yml": MIXED.replace(PINNED_STEP, NEW_PINNED_STEP),
+    }
+)
+done = convert(repo, apply=True)
+tests_yml = snapshot(repo)[".github/workflows/tests.yml"]
+check(
+    "new name: a pinned `sdlc ci` step naming crunchtools/sdlc floats in place",
+    NEW_PINNED_STEP != PINNED_STEP
+    and done.returncode == 0
+    and "\n        run: .sdlc/bin/sdlc ci\n" in tests_yml
+    and "git clone" not in tests_yml
+    and "make test" in tests_yml
+    and runs_sdlc_ci(tests_yml),
+    done.stderr + tests_yml,
+)
+check(
+    "new name: that floated workflow's second run finds nothing to do", convert(repo).stdout == ""
+)
+
+# A kept workflow cloning the new name by rev is refused like the old one,
+# with or without `.git`.
+for url in ("https://github.com/crunchtools/sdlc", "https://github.com/crunchtools/sdlc.git"):
+    orphan = PUBLISH.replace(
+        "      - run: echo quay.io/crunchtools/python-sdlc-extras\n",
+        f'      - run: git clone --branch "$rev" {url} x\n',
+    )
+    repo = make_repo(
+        {
+            ".pre-commit-config.yaml": PINNED_HOOKS,
+            ".github/workflows/ci.yml": OLD_CI,
+            ".github/workflows/publish.yml": orphan,
+        }
+    )
+    before = snapshot(repo)
+    refused = convert(repo, apply=True)
+    check(
+        f"a kept workflow cloning {url} by rev is refused, nothing written",
+        refused.returncode == REFUSED
+        and snapshot(repo) == before
+        and "publish.yml" in refused.stderr,
+        refused.stderr,
+    )
+
 # ------------------------------------------------------------- symlinks
 
 # --apply writes, deletes and chmods. A checkout whose planned paths link

@@ -6,6 +6,27 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- The repo is `crunchtools/sdlc` and the image `quay.io/crunchtools/sdlc`
+  (a974). `container.yml` pushes and signs `sdlc` first, and copies the same
+  digest, with the same tags and its own signature, to
+  `quay.io/crunchtools/python-sdlc`. That copy is a transitional mirror and
+  goes away after the fleet wave. A clone's `bin/sdlc` runs
+  `quay.io/crunchtools/sdlc:$IMAGE_TAG`, and its constitution cache moves to
+  `~/.cache/sdlc/constitution/`. The project is `sdlc` in `pyproject.toml`.
+  `bin/sdlc-bootstrap` is unchanged byte for byte, so its pinned sha256 stands.
+- `scripts/convert_repo.py` renames what still says python-sdlc in a
+  consumer: `quay.io/crunchtools/python-sdlc` and
+  `uses: crunchtools/python-sdlc/.github/workflows/...@` become `sdlc`, in
+  workflows, `[tool.sdlc]` config and the hooks file. It accepts the pinned
+  hooks, and the pinned `sdlc ci` step, under either repo name. It refuses a
+  kept workflow that clones `crunchtools/sdlc` by rev, as it already refused
+  one that clones python-sdlc. A repo that already floats gets the rename and
+  the current bootstrap, so `scripts/fleet_wave.py` can run the wave over the
+  whole fleet. The wave skips this repo under either name, and its commit and
+  pull request text says what the rename changes.
+
 ## [0.11.0] - 2026-11-22
 
 ### Security
@@ -1057,7 +1078,7 @@ cached tag was never refreshed — that gate had been running a two-week-old
 reviewer while CI pulled fresh. Local and CI were different reviewers on the
 same diff.
 
-[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/crunchtools/sdlc/compare/v0.11.0...HEAD
 [0.11.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.11.0
 [0.10.4]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.10.4
 [0.10.3]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.10.3

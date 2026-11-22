@@ -5,7 +5,7 @@ The Containerfile pins both exactly, so rebuilding when one of them releases
 changes nothing: the build pulls the same version it pulled before. What a
 release has to do is MOVE THE PIN. This script does that, and when anything
 moved it also bumps this image's own PATCH version, so the change ships as a
-python-sdlc release, which every converted repo receives through sdlc:latest.
+sdlc release, which every converted repo receives through sdlc:latest.
 
 Run by .github/workflows/update-tools.yml. Writes `changed=true|false` and a
 one-line `summary` to $GITHUB_OUTPUT when that is set.
@@ -107,7 +107,7 @@ def main() -> int:
     current = image_tag.read_text(encoding="utf-8").strip()
     version = bump_patch(current)
     summary = ", ".join(f"{repo.split('/')[1]} {old} -> {new}" for repo, old, new, _ in moves)
-    print(f"python-sdlc {current} -> {version}: {summary}")
+    print(f"sdlc {current} -> {version}: {summary}")
     if args.dry_run:
         return 0
 

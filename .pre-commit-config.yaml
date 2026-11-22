@@ -1,6 +1,6 @@
 # This repo's own gates.
 #
-# The classic fleet shape, not python-sdlc's own two hooks: this repo builds the
+# The classic fleet shape, not sdlc's own two hooks: this repo builds the
 # image, so gating it on that image is circular on a first clone. Constitution
 # XII (v1.30.0) exempts it by name (`sdlc_exempt`), with gourmand and gatehouse.
 #

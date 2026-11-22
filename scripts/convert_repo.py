@@ -5,10 +5,11 @@ Rewrites a checkout so its gates come from quay.io/crunchtools/sdlc:latest
 with nothing in the repo naming a release -- which makes the PR wave that
 applies this the last one: what the gates run changes when the image does.
 
-  .sdlc/bin/sdlc           python-sdlc's bin/sdlc-bootstrap: asks the image for
+  .sdlc/bin/sdlc           crunchtools/sdlc's bin/sdlc-bootstrap: asks the image for
                            its launcher and runs it. The one file a converted
                            repo carries; it names no release, so nothing bumps it
-  .pre-commit-config.yaml  the rev-pinned python-sdlc hooks, and the standalone
+  .pre-commit-config.yaml  the rev-pinned sdlc hooks (under either repo name), and
+                           the standalone
                            Gourmand and Gatehouse hooks, become the two hooks of
                            examples/pre-commit-floating.yaml, which run it
   .github/workflows/       a workflow whose every job the stubs cover -- the
@@ -19,8 +20,13 @@ applies this the last one: what the gates run changes when the image does.
                            container build) is kept. An `sdlc ci` job that
                            shares its workflow with jobs the stub does not cover
                            keeps its place and has its step rewritten instead.
-  any image reference      quay.io/crunchtools/python-sdlc becomes
-                           quay.io/crunchtools/sdlc, in workflows and config
+  the old name             the repo was crunchtools/python-sdlc: its image
+                           (quay.io/crunchtools/python-sdlc) and a reusable
+                           workflow's `uses: crunchtools/python-sdlc/...@` become
+                           crunchtools/sdlc's, in workflows, config and the hooks
+                           file. The hooks `repo:` pin needs no rename: it is
+                           replaced, under either name. A repo already floating
+                           gets this, and the current bootstrap, alone
 
 Deterministic and offline: the same checkout gives the same diff. It prints
 that diff and changes nothing without --apply. It never touches .specify/,
@@ -61,9 +67,19 @@ BOOTSTRAP = ROOT / "bin" / "sdlc-bootstrap"
 BOOTSTRAP_AT = Path(".sdlc/bin/sdlc")
 FLOATING_CI_LINE = f"{BOOTSTRAP_AT} ci"
 
-OLD_IMAGE = "quay.io/crunchtools/python-sdlc"
-NEW_IMAGE = "quay.io/crunchtools/sdlc"
-SDLC_REPO = re.compile(r"^https://github\.com/crunchtools/python-sdlc(?:\.git)?/?$")
+# The repo was crunchtools/python-sdlc, and its image quay.io/crunchtools/
+# python-sdlc, which is now a mirror that goes away after the fleet wave. Each
+# old reference and its new form; a longer name (python-sdlc-extras) is not one.
+RENAMED = (
+    (re.compile(r"quay\.io/crunchtools/python-sdlc(?![\w.-])"), "quay.io/crunchtools/sdlc"),
+    (
+        re.compile(r"(?<![\w.-])crunchtools/python-sdlc/(?=\.github/workflows/[^\s@]+@)"),
+        "crunchtools/sdlc/",
+    ),
+)
+# The pinned hooks repo under either name: GitHub redirects the old one.
+SDLC_REPO = re.compile(r"^https://github\.com/crunchtools/(?:python-)?sdlc(?:\.git)?/?$")
+CLONES_SDLC = re.compile(r"git clone\b.*github\.com/crunchtools/sdlc(?:\.git)?(?![\w.-])")
 STANDALONE_HOOKS = {"gourmand", "gatehouse"}
 SDLC_HOOKS = {"sdlc-commit", "sdlc-push"}
 GOURMAND_CALL = re.compile(r"^crunchtools/gatehouse/\.github/workflows/gourmand\.yml@")
@@ -75,12 +91,12 @@ SDLC_CI_LINE = re.compile(r"^\s*[\"']?(?:\S*/)?sdlc[\"']?\s+ci\b", re.M)
 # script will guess at.
 PINNED_BODY = (
     r"[ \t]*rev=\$\(awk "
-    r"'/repo: https:\\/\\/github\.com\\/crunchtools\\/python-sdlc/ \{f=1; next\}\n"
+    r"'/repo: https:\\/\\/github\.com\\/crunchtools\\/(?:python-)?sdlc/ \{f=1; next\}\n"
     r"[ \t]*f && /rev:/ \{print \$2; exit\}' \.pre-commit-config\.yaml\)\n"
     r"[ \t]*\[ -n \"\$rev\" \] \|\| "
-    r"\{ echo \"no python-sdlc rev in \.pre-commit-config\.yaml\" >&2; exit 2; \}\n"
+    r"\{ echo \"no (?:python-)?sdlc rev in \.pre-commit-config\.yaml\" >&2; exit 2; \}\n"
     r"[ \t]*git clone -q --depth 1 --branch \"\$rev\" "
-    r"https://github\.com/crunchtools/python-sdlc \"\$RUNNER_TEMP/sdlc\"\n"
+    r"https://github\.com/crunchtools/(?:python-)?sdlc \"\$RUNNER_TEMP/sdlc\"\n"
     r"[ \t]*(?P<q>\"?)\$RUNNER_TEMP/sdlc/bin/sdlc(?P=q) ci\n"
 )
 PINNED_STEP = re.compile(r"^" + PINNED_BODY, re.M)
@@ -167,9 +183,7 @@ def refuse_hooks(repos: list) -> None:
     """Refuse a hooks file this script would have to guess at."""
     pinned = [r for r in repos if SDLC_REPO.match(str(r.get("repo", "")))]
     if any({h.get("id") for h in r.get("hooks") or []} != SDLC_HOOKS for r in pinned):
-        raise RefusedError(
-            ".pre-commit-config.yaml: python-sdlc is pinned with hooks other than its two"
-        )
+        raise RefusedError(".pre-commit-config.yaml: sdlc is pinned with hooks other than its two")
     local = {h.get("id") for r in repos if r.get("repo") == "local" for h in r.get("hooks") or []}
     if local & SDLC_HOOKS:
         raise RefusedError(
@@ -177,7 +191,7 @@ def refuse_hooks(repos: list) -> None:
         )
     if not pinned and local & STANDALONE_HOOKS != STANDALONE_HOOKS:
         raise RefusedError(
-            ".pre-commit-config.yaml has neither the python-sdlc pin nor both standalone "
+            ".pre-commit-config.yaml has neither the sdlc pin nor both standalone "
             "hooks (gourmand, gatehouse); there is nothing this script knows to replace"
         )
 
@@ -195,7 +209,7 @@ def only_replaced(repos: list) -> bool:
 
 
 def without_replaced(lines: list[str]) -> str:
-    """The `repos:` items that survive: all but python-sdlc and the standalone hooks."""
+    """The `repos:` items that survive: all but the sdlc pin and the standalone hooks."""
     kept: list[str] = []
     for item in split_items(lines):
         repo = re.match(r"^\s*-\s+repo:\s*(\S+)", item[0]).group(1)
@@ -544,13 +558,14 @@ CONTAINER_CI = ["container-build", "container-smoke", "container-scan"]
 # these with the secrets it has.
 BUILD_SECRETS = re.compile(r"--mount=type=secret|subscription-manager|\brhsm\b", re.I)
 SKIP_STACKS_NOTE = (
-    "# Written by python-sdlc's scripts/convert_repo.py: the image has no checks\n"
-    "# for these stacks yet, and a stack it cannot check makes every run exit 2.\n"
+    "# Written by crunchtools/sdlc's scripts/convert_repo.py: the image has no\n"
+    "# checks for these stacks yet, and a stack it cannot check makes every run\n"
+    "# exit 2.\n"
 )
 SKIP_BUILD_NOTE = (
-    "# Written by python-sdlc's scripts/convert_repo.py: the Containerfile needs\n"
-    "# build secrets (a secret mount, or RHSM) that `sdlc ci` is not given. The\n"
-    "# publish workflow still builds it, with them.\n"
+    "# Written by crunchtools/sdlc's scripts/convert_repo.py: the Containerfile\n"
+    "# needs build secrets (a secret mount, or RHSM) that `sdlc ci` is not given.\n"
+    "# The publish workflow still builds it, with them.\n"
 )
 
 
@@ -649,18 +664,21 @@ def plan(repo: Path) -> tuple[dict[Path, str | None], list[str]]:
     planned[hooks] = convert_hooks(hooks.read_text() if hooks.exists() else "")
     convert_workflows(repo, planned, notes)
     convert_config(repo, planned, notes)
-    notes.append(f"writes: {BOOTSTRAP_AT}, executable (python-sdlc's bin/sdlc-bootstrap)")
-    # An image reference in anything that survives, and in the repo's config.
-    candidates = [repo / "pyproject.toml", repo / "sdlc.toml"]
+    notes.append(f"writes: {BOOTSTRAP_AT}, executable (crunchtools/sdlc's bin/sdlc-bootstrap)")
+    # The old name in anything that survives, and in the repo's config.
+    candidates = [hooks, repo / "pyproject.toml", repo / "sdlc.toml"]
     candidates += sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else []
     refuse_links(repo, candidates)
     for path in candidates:
         if not path.exists() or planned.get(path, "") is None:
             continue
         text = planned.get(path) or path.read_text()
-        moved = re.sub(re.escape(OLD_IMAGE) + r"(?![\w.-])", NEW_IMAGE, text)
+        moved = text
+        for old, new in RENAMED:
+            moved = old.sub(new, moved)
         if moved != text:
             planned[path] = moved
+            notes.append(f"renamed: python-sdlc to sdlc in {rel(repo, path)}")
     refuse_links(repo, list(planned))
     verify(repo, planned)
     return planned, notes
@@ -706,12 +724,16 @@ def verify(repo: Path, planned: dict[Path, str | None]) -> None:
         for p in (sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else [])
         if p not in planned
     }
-    # Nothing may still clone python-sdlc at the hooks file's rev: the rev is
-    # gone, so such a step would exit 2 on every run from now on.
+    # Nothing may still clone sdlc, under either name, at the hooks file's rev:
+    # the rev is gone, so such a step would exit 2 on every run from now on.
     for path, text in texts.items():
-        if PINNED_STEP.search(text) or "github.com/crunchtools/python-sdlc" in text:
+        if (
+            PINNED_STEP.search(text)
+            or "github.com/crunchtools/python-sdlc" in text
+            or CLONES_SDLC.search(text)
+        ):
             raise RefusedError(
-                f"{rel(repo, path)} still fetches python-sdlc by the rev this removes; "
+                f"{rel(repo, path)} still fetches sdlc by the rev this removes; "
                 f"convert that step by hand"
             )
     # Exactly the launcher, as constitution v1.46.0's check_floating_ci reads it:
