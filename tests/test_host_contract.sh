@@ -518,7 +518,7 @@ MEMSH="$RUN/memory.sh"
   sed -n '/^LANE_MEMORY_MIN=/p' bin/sdlc
   sed -n '/^lane_memory()/,/^}$/p' bin/sdlc
   # shellcheck disable=SC2016  # source for the generated script, not expanded here
-  echo 'GATE_MEMORY_MB=$(_size_mb "$1"); MEM_AVAILABLE=$2; lane_memory "$3"'
+  echo 'lane_memory "$3" "$2" "$(_size_mb "$1")"'
 } > "$MEMSH"
 
 mem() {                # expected gate-memory available lanes description

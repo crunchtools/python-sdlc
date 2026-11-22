@@ -1258,7 +1258,7 @@ run_lanes() {          # the plan -> the worst status of every lane
   [ "$_lane_cpus" -lt 1 ] && _lane_cpus=1
   # Memory is divided the same way, but never floored past what there is:
   # run_plan only sends a plan here when every lane's share is worth running.
-  _lane_mem=$(lane_memory "$_oncpu")
+  _lane_mem=$(lane_memory "$_oncpu" "${MEM_AVAILABLE:-0}" "$GATE_MEMORY_MB")
 
   # Once, here, rather than from whichever lane gets there first.
   need_volume "$CACHE_VOLUME"
@@ -1347,13 +1347,13 @@ run_lanes() {          # the plan -> the worst status of every lane
 # Under it, the lanes take turns: slower, and a run that finishes.
 LANE_MEMORY_MIN=3072
 
-lane_memory() {        # lanes-on-cpu -> MB per lane, or 0 when they must take turns
-  _lm=$(( ${MEM_AVAILABLE:-0} / $1 ))
-  [ "${MEM_AVAILABLE:-0}" -gt 0 ] || _lm=$GATE_MEMORY_MB    # unknown: as before
-  [ "$_lm" -gt "$GATE_MEMORY_MB" ] && _lm=$GATE_MEMORY_MB
+lane_memory() {        # lanes available-MB budget-MB -> MB per lane, or 0 to take turns
+  _lm=$(( $2 / $1 ))
+  [ "$2" -gt 0 ] || _lm=$3                       # unknown: as before
+  [ "$_lm" -gt "$3" ] && _lm=$3
   # A budget someone set below the minimum is the floor they asked for.
   _floor=$LANE_MEMORY_MIN
-  [ "$GATE_MEMORY_MB" -lt "$_floor" ] && _floor=$GATE_MEMORY_MB
+  [ "$3" -lt "$_floor" ] && _floor=$3
   if [ "$_lm" -lt "$_floor" ]; then printf 0; else printf '%s' "$_lm"; fi
 }
 
@@ -1385,7 +1385,7 @@ run_plan() {           # commit | push | ci | <check>
     run_serial "$_plan" || _plan_rc=$?
   elif [ "${_oncpu:-0}" -eq 1 ]; then
     run_split "$_plan" || _plan_rc=$?
-  elif [ "$(lane_memory "$_oncpu")" -eq 0 ]; then
+  elif [ "$(lane_memory "$_oncpu" "${MEM_AVAILABLE:-0}" "$GATE_MEMORY_MB")" -eq 0 ]; then
     # Two containers that cannot both fit are not faster side by side: the
     # kernel kills one, and a killed CodeQL is a gate that could not run.
     printf '%s: %s lanes do not fit in the %sm this machine has; running them in turn\n' \
