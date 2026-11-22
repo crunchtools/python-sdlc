@@ -6,10 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-22
+
 ### Security
 
 - `bin/sdlc-bootstrap` verifies the image before it runs anything from it
-  (#81). It resolves the tag to a digest and checks that digest's cosign
+  (#82). It resolves the tag to a digest and checks that digest's cosign
   signature against the fleet key, which it carries inline. cosign v2.6.5 runs
   from a digest-pinned image, so the host still needs only podman. The
   launcher and every check then run by that digest. An unsigned or
@@ -1055,7 +1057,21 @@ cached tag was never refreshed — that gate had been running a two-week-old
 reviewer while CI pulled fresh. Local and CI were different reviewers on the
 same diff.
 
-[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/crunchtools/python-sdlc/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.11.0
+[0.10.4]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.10.4
+[0.10.3]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.10.3
+[0.10.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.10.2
+[0.10.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.10.1
+[0.10.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.10.0
+[0.9.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.9.1
+[0.9.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.9.0
+[0.8.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.8.0
+[0.7.5]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.7.5
+[0.7.4]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.7.4
+[0.7.3]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.7.3
+[0.7.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.7.2
+[0.7.1]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.7.1
 [0.7.0]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.7.0
 [0.6.3]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.6.3
 [0.6.2]: https://github.com/crunchtools/python-sdlc/releases/tag/v0.6.2
