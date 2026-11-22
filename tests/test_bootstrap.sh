@@ -151,6 +151,33 @@ else
   bad "digest ref: exit $RC"; cat "$W/log"
 fi
 
+# A digest that is not here yet is pulled, then verified like any other; one
+# that cannot be pulled is a 2 before anything is verified or run.
+reset
+touch "$W/absent"
+RC=0
+OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" \
+        SDLC_IMAGE="@$E" sh "$BOOT" versions 2>&1) || RC=$?
+pull_at=$(grep -n " pull -q -- $FLEET@$E\$" "$W/log" | cut -d: -f1)
+verify_at=$(grep -n " verify .* $FLEET@$E\$" "$W/log" | cut -d: -f1)
+if [ "$RC" -eq 0 ] && [ -n "$pull_at" ] && [ -n "$verify_at" ] && [ "$pull_at" -lt "$verify_at" ] \
+   && [ -e "$W/ran" ]; then
+  ok "SDLC_IMAGE=@sha256 that is not here is pulled, then verified, then run"
+else
+  bad "absent digest: exit $RC"; cat "$W/log"
+fi
+reset
+touch "$W/absent" "$W/pull-fails"
+RC=0
+OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" \
+        SDLC_IMAGE="@$E" sh "$BOOT" versions 2>&1) || RC=$?
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'could not be pulled' \
+   && ! grep -q ' verify \| launcher ' "$W/log"; then
+  ok "SDLC_IMAGE=@sha256 that cannot be pulled is a 2, nothing verified or run"
+else
+  bad "unpullable digest: exit $RC"; cat "$W/log"
+fi
+
 reset
 RC=0
 OUT=$(PATH="$W/bin:$PATH" SDLC_IMAGE=docker.io/evil/sdlc:latest sh "$BOOT" versions 2>&1) || RC=$?

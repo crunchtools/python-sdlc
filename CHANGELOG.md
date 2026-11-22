@@ -21,7 +21,8 @@ All notable changes to this project are documented here, following
 - `container.yml`'s promote job signs the tested digest in both
   `quay.io/crunchtools/python-sdlc` and `quay.io/crunchtools/sdlc` before any
   tag moves. It uses the fleet key from the `cosign-signing` environment and
-  checks it against the key the bootstrap trusts. Release tags from before
+  checks it against the key the bootstrap trusts (`scripts/sign-digest.sh`,
+  tested by `tests/test_sign_digest.sh`). Release tags from before
   this change are unsigned, and the new bootstrap refuses them.
 
 ### Fixed

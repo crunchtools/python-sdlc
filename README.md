@@ -63,7 +63,8 @@ and every check by that digest. An unsigned image is a 2, GATE CANNOT RUN.
 Promote signs every digest before a tag moves onto it, so `:latest`, `:main`
 and every release since python-sdlc#81 are signed. Older release tags are not,
 so `SDLC_IMAGE=<old release>` is refused. A digest verified once is remembered in
-`~/.cache/sdlc/verified/`, so an offline seat keeps working.
+`${XDG_CACHE_HOME:-~/.cache}/sdlc/verified/`, so an offline seat keeps working.
+CI always verifies.
 
 `.pre-commit-config.yaml` is
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
