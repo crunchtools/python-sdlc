@@ -52,9 +52,14 @@ All notable changes to this project are documented here, following
   `.github/workflows/ashigaru.yml` calls triage, code and fix one by one, so
   Dependabot bumps it one pin at a time, gets crunchtools/ashigaru's
   `examples/ashigaru.yml`, read at the `v5` tag and never main, in the same
-  pull request. Its `router.yml@v5` call carries the release-tag job, so such
-  a repo needs no `release.yml`. A router caller already at `v5`, and a repo
-  with no `ashigaru.yml`, are left alone. `report.md` names the ashigaru
+  pull request. Its `router.yml@v5` call carries the release-tag job, so a
+  router repo's `release.yml` becomes the new `examples/release-open.yml`:
+  the workflow_dispatch that has the app open the release pull request, and no
+  tag job. sdlc's full template is swapped for it, another `release.yml`
+  loses its tag job and `pull_request_target`, a workflow that is only a tag
+  job is removed, and a repo still left with two tag paths is hand work. A
+  router caller already at `v5`, a repo with no `ashigaru.yml`, and the
+  ashigaru repo itself are left alone. `report.md` names the ashigaru
   commit the caller came from, the repos that got it, and the open Dependabot
   pull requests that bump one Ashigaru pin, to close at cutover.
 - `scripts/convert_repo.py --unbuilt-stacks LIST`: the stacks the image has no

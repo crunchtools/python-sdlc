@@ -810,11 +810,12 @@ check(
     diff[-600:],
 )
 check(
-    "caller: the other diffs are as without it, but the router's release job stands for release.yml",
+    "caller: the other diffs are as without it; release.yml is the open-only one",
     {c for c in wave.reports["plain"].changes if not c.startswith("release:")}
-    == {c for c in wave.reports["enrolled"].changes if not c.startswith("ashigaru:")}
+    == {c for c in wave.reports["enrolled"].changes if not c.startswith(("ashigaru:", "release:"))}
     and "ashigaru.yml" not in str(wave.reports["plain"].changes)
-    and "release.yml" not in str(wave.reports["enrolled"].changes),
+    and "the router tags" in str(wave.reports["enrolled"].changes)
+    and "+# Release, open half" in diff,
     str((wave.reports["plain"].changes, wave.reports["enrolled"].changes)),
 )
 check(

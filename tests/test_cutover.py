@@ -19,8 +19,13 @@ change is pinned on its own fixture:
     no release flow; any other release flow is reported, not merged
   - a pre-router ashigaru.yml (triage, code and fix called one by one, a
     release.yml@v2 job among them) becomes the target's router caller,
-    unchanged, and then counts as the release flow; a router caller at the
-    tag, a repo with no ashigaru.yml and a target with no caller are left alone
+    unchanged; a router caller at the tag, a repo with no ashigaru.yml and a
+    target with no caller are left alone
+  - a router repo gets examples/release-open.yml, which only opens the release
+    pull request; sdlc's full template becomes it, another release.yml loses
+    its tag job (and pull_request_target with it), a workflow that is only a
+    tag job goes, and every routed fixture ends with exactly one tag path; the
+    ashigaru repo itself is left alone
   - a workflow that pushes an image itself is reported; a commented-out push
     is not
   - Dependabot's removal is the target constitution's, and its failure is hand
@@ -53,6 +58,7 @@ FAILED: list[str] = []
 REF = "v1.60.0"
 TARGET = cut.Target(constitution="1.60.0", constitution_ref=REF)
 TEMPLATE = (ROOT / "examples" / "release.yml").read_text()
+OPEN = (ROOT / "examples" / "release-open.yml").read_text()
 COSIGN = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 CALL = "crunchtools/constitution/.github/workflows/container-release.yml"
 
@@ -792,31 +798,115 @@ check(
     str(result.changed),
 )
 
+RELEASE_PATH = ".github/workflows/release.yml"
+
+
+def one_tag_path(repo: Path) -> bool:
+    return cut.tag_paths(repo) == [f"{CALLER_PATH}:ashigaru"]
+
+
 repo, result = run(
     {**PUBLISHES, CALLER_PATH: PRE_ROUTER}, target=ROUTED, label="caller, pre-router publisher"
 )
 check(
-    "caller: the router's release job passes the release check: no release.yml, no hand work",
-    not (repo / ".github/workflows/release.yml").exists()
-    and not any(h.startswith("release:") for h in result.hand)
-    and any(c.startswith("ashigaru:") for c in result.changed),
-    str((result.hand, result.changed)),
-)
-repo, result = run(
-    {**PUBLISHES, CALLER_PATH: CALLER}, target=TARGET, label="caller, router already there"
+    "open: a re-copied repo gets the open-only release.yml, one tag path, no hand work",
+    read(repo, RELEASE_PATH) == OPEN and one_tag_path(repo) and not result.hand,
+    str((result.hand, result.changed, cut.tag_paths(repo))),
 )
 check(
-    "release: a router.yml caller at the tag is the release flow",
-    not (repo / ".github/workflows/release.yml").exists()
-    and not any(h.startswith("release:") for h in result.hand),
+    "open: the open-only template is the full one without its tag job and trigger",
+    yaml.safe_load(OPEN)["jobs"] == {"open": yaml.safe_load(TEMPLATE)["jobs"]["open"]}
+    and list(yaml.safe_load(OPEN)[True]) == ["workflow_dispatch"],
+)
+repo, result = run({CALLER_PATH: PRE_ROUTER}, target=ROUTED, label="open, no image")
+check(
+    "open: a router repo that publishes no image gets it too",
+    read(repo, RELEASE_PATH) == OPEN and one_tag_path(repo),
+)
+repo, _ = run({CALLER_PATH: PRE_ROUTER}, target=ROUTED, default="master", label="open, master")
+check(
+    "open: master is substituted for main",
+    "refs/heads/master" in read(repo, RELEASE_PATH) and "--base master" in read(repo, RELEASE_PATH),
+)
+
+# rotv's shape: the router already in, and the full template beside it.
+repo, result = run(
+    {**PUBLISHES, CALLER_PATH: CALLER, RELEASE_PATH: TEMPLATE}, target=TARGET, label="open, rotv"
+)
+check(
+    "open: a router caller beside the full template keeps one tag path: the template opens only",
+    read(repo, RELEASE_PATH) == OPEN and one_tag_path(repo) and not result.hand,
+    str((result.hand, cut.tag_paths(repo))),
+)
+
+# developer's and rhel10-bootc-server's shape: their own release.yml, with a tag job.
+CUSTOM_RELEASE = TEMPLATE.replace("# Release: let", "# Ours, edited.\n# Release: let")
+repo, result = run(
+    {**PUBLISHES, CALLER_PATH: PRE_ROUTER, RELEASE_PATH: CUSTOM_RELEASE},
+    target=ROUTED,
+    label="open, own release.yml",
+)
+left = yaml.safe_load(read(repo, RELEASE_PATH))
+check(
+    "open: another release.yml loses its tag job and pull_request_target, and keeps the rest",
+    list(left["jobs"]) == ["open"]
+    and list(left[True]) == ["workflow_dispatch"]
+    and read(repo, RELEASE_PATH).startswith("# Ours, edited.")
+    and "pull_request_target" not in read(repo, RELEASE_PATH)
+    and one_tag_path(repo)
+    and not result.hand,
+    read(repo, RELEASE_PATH)[-400:] + str(result.hand),
+)
+repo, result = run(
+    {**PUBLISHES, CALLER_PATH: CALLER, ".github/workflows/tag.yml": V5},
+    target=TARGET,
+    label="open, a lone tag workflow",
+)
+check(
+    "open: a workflow that is only a tag job goes; release.yml opens",
+    not (repo / ".github/workflows/tag.yml").exists()
+    and read(repo, RELEASE_PATH) == OPEN
+    and one_tag_path(repo),
+    str(result.changed),
+)
+FLOW = (
+    "name: R\non: [workflow_dispatch, pull_request_target]\njobs:\n"
+    "  open:\n    runs-on: x\n    steps:\n      - run: echo ashigaru/release-1\n"
+    '  "tag":\n    uses: crunchtools/ashigaru/.github/workflows/release-tag.yml@v5\n'
+)
+repo, result = run({CALLER_PATH: CALLER, RELEASE_PATH: FLOW}, target=TARGET, label="open, flow on")
+check(
+    "open: a tag job it cannot drop is hand work, and two tag paths are named",
+    read(repo, RELEASE_PATH) == FLOW
+    and any("drop its tag job by hand" in h for h in result.hand)
+    and any("2 tag paths" in h for h in result.hand),
     str(result.hand),
+)
+repo, result = run(
+    {CALLER_PATH: CALLER, RELEASE_PATH: OTHER}, target=TARGET, label="open, other release.yml"
+)
+check(
+    "open: a release.yml that opens nothing is kept and named",
+    read(repo, RELEASE_PATH) == OTHER and any("release-open.yml by hand" in h for h in result.hand),
+    str(result.hand),
+)
+repo, result = run(
+    {CALLER_PATH: CALLER, RELEASE_PATH: TEMPLATE},
+    name="ashigaru",
+    target=TARGET,
+    label="open, ashigaru",
+)
+check(
+    "open: the ashigaru repo itself is left alone",
+    read(repo, RELEASE_PATH) == TEMPLATE and not result.changed and not result.hand,
 )
 
 CUSTOM = CALLER.replace("# Ashigaru: copy unchanged.", "# ours, edited")
 repo, result = run({CALLER_PATH: CUSTOM}, target=ROUTED, label="caller, router edited")
 check(
     "caller: a router caller at the tag is left as it is, edits and all",
-    read(repo, CALLER_PATH) == CUSTOM and not result.changed,
+    read(repo, CALLER_PATH) == CUSTOM
+    and not any(c.startswith("ashigaru:") for c in result.changed),
 )
 OLD_ROUTER = CALLER.replace(f"router.yml@{cut.ASHIGARU_TAG}", "router.yml@v4")
 repo, _ = run({CALLER_PATH: OLD_ROUTER}, target=ROUTED, label="caller, router v4")
@@ -824,13 +914,13 @@ check("caller: a router caller at an older tag is re-copied", read(repo, CALLER_
 
 repo, result = run({".github/workflows/ci.yml": CI_ONLY}, target=ROUTED, label="caller, none")
 check(
-    "caller: a repo with no ashigaru.yml is not enrolled",
+    "caller: a repo with no ashigaru.yml is not enrolled, and gets no release.yml",
     not (repo / CALLER_PATH).exists() and not result.changed,
 )
 repo, result = run({CALLER_PATH: PRE_ROUTER}, target=TARGET, label="caller, no target caller")
 check(
     "caller: without a caller in the target, ashigaru.yml is untouched",
-    read(repo, CALLER_PATH) == PRE_ROUTER and not result.changed,
+    read(repo, CALLER_PATH) == PRE_ROUTER and not result.changed and not result.hand,
 )
 
 

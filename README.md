@@ -106,7 +106,9 @@ missing, adds the Ashigaru release flow
 ([`examples/release.yml`](examples/release.yml)), and replaces a pre-router
 `.github/workflows/ashigaru.yml` with crunchtools/ashigaru's
 `examples/ashigaru.yml`, read at the `v5` tag, whose `router.yml` call brings
-the release-tag job with it. The versions are arguments:
+the release-tag job with it. A router repo's `release.yml` is then
+[`examples/release-open.yml`](examples/release-open.yml), which only opens the
+release pull request, so each repo has exactly one tag path. The versions are arguments:
 `--constitution-dir` (a constitution checkout at the target release, whose
 `fleet-bump.py` and validator it uses), `--constitution`, `--sdlc`,
 `--unbuilt-stacks`. A plan by default -- `--out DIR` writes each repo's diff and

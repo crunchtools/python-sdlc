@@ -186,7 +186,9 @@ the only way a release tag is made.
 triage, code and fix one by one, is crunchtools/ashigaru's \
 `examples/ashigaru.yml`: one call to `router.yml` at the major tag, which \
 brings the release-tag job too. Dependabot's one-pin bumps of the old file \
-are moot.
+are moot. With the router tagging, `release.yml` is crunchtools/sdlc's \
+`examples/release-open.yml`: the same dispatch opens the release pull request, \
+and no second job tags it.
 
 ## How to roll back
 
