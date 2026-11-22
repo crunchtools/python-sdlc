@@ -66,8 +66,10 @@ fi
 
 rm -f "$W/log"
 run "$D" "$A" "$B"
-if [ "$RC" -eq 0 ] && ! grep -q '^sign ' "$W/log" && printf '%s' "$OUT" | grep -q 'already signed'; then
-  ok "an already-signed digest is not signed again"
+if [ "$RC" -eq 0 ] && ! grep -q '^sign ' "$W/log" && printf '%s' "$OUT" | grep -q 'already signed' \
+   && [ "$(grep -c -- "^verify --insecure-ignore-tlog --key .*/fleet.pub $A@$D\$" "$W/log")" -eq 2 ] \
+   && [ "$(grep -c -- "^verify --insecure-ignore-tlog --key .*/fleet.pub $B@$D\$" "$W/log")" -eq 2 ]; then
+  ok "an already-signed digest is verified in both repositories and not signed again"
 else
   bad "already signed: exit $RC"; cat "$W/log"
 fi
