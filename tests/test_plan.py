@@ -839,7 +839,7 @@ def node_sync_with(rmdir_errno: int | None) -> tuple[str | None, list[str]]:
 
             Path.rmdir = failing
         try:
-            S.node_sync(tree)
+            S.node_sync(tree, ["."])
             msg = None
         except S.CannotRunError as exc:
             msg = str(exc)
@@ -885,7 +885,7 @@ def node_sync_links() -> tuple[str | None, list[str], bool]:
         S.REPO = repo
         S.node_source_files = lambda: ["lib", "src/a.js"]
         try:
-            S.node_sync(tree)
+            S.node_sync(tree, ["."])
             msg = None
         except S.CannotRunError as exc:
             msg = str(exc)
@@ -901,6 +901,45 @@ check(
     "node_sync keeps a wanted directory symlink and unlinks a stale one, neither an error",
     msg is None and held == ["lib", "src"] and linked,
     f"{msg} {held} {linked}",
+)
+
+
+def node_sync_modules() -> tuple[str | None, list[str]]:
+    """node_sync with node_modules under a listed package, two unlisted, and behind a link.
+
+    Returns the CannotRun message and the node_modules paths the tree still holds.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        repo, tree = Path(root, "repo"), Path(root, "tree")
+        Path(repo, "web").mkdir(parents=True)
+        Path(repo, "web", "package.json").write_text("{}")
+        # A wanted link to a directory outside the tree that holds a node_modules:
+        # walking into it would delete what the link points at.
+        Path(root, "ext", "node_modules", "d").mkdir(parents=True)
+        Path(repo, "lib").symlink_to(Path(root, "ext"))
+        for planted in ("web/node_modules/a", "node_modules/b", "web/src/node_modules/c"):
+            Path(tree, planted).mkdir(parents=True)
+            Path(tree, planted, "index.js").write_text("x")
+        saved_repo, saved_files = S.REPO, S.node_source_files
+        S.REPO = repo
+        S.node_source_files = lambda: ["lib", "web/package.json"]
+        try:
+            S.node_sync(tree, ["web"])
+            msg = None
+        except S.CannotRunError as exc:
+            msg = str(exc)
+        finally:
+            S.REPO, S.node_source_files = saved_repo, saved_files
+        held = sorted(str(d.relative_to(tree)) for d in tree.rglob("node_modules") if d.is_dir())
+        linked = Path(tree, "lib").is_symlink() and Path(root, "ext", "node_modules", "d").is_dir()
+    return msg, held + (["lib -> ext/node_modules"] if linked else [])
+
+
+msg, held = node_sync_modules()
+check(
+    "node_sync removes every node_modules but a listed package's own, never following a link",
+    msg is None and held == ["web/node_modules", "lib -> ext/node_modules"],
+    f"{msg} {held}",
 )
 
 with tempfile.TemporaryDirectory() as root:

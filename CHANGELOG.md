@@ -73,6 +73,12 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- A stray node_modules no longer survives into the next node check. The
+  workspace sync kept every node_modules in the copied tree, but `npm ci`
+  resets only each listed package's own, so one an earlier run left elsewhere
+  survived both, and Node's resolution walks up into it. The sync now removes
+  every node_modules except those directly under a listed package; a
+  symlinked directory is still never walked into. (#100)
 - `convert_repo.py` no longer carries a `runs-on` that reads `matrix`,
   `inputs`, `needs` or `strategy` into examples/ci.yml, whose `sdlc` job has
   none of them; and every time ci.yml falls back to `ubuntu-latest` from a

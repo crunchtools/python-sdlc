@@ -1641,8 +1641,13 @@ def node_copy(tree: Path) -> set[str]:
     return wanted
 
 
-def node_sync(tree: Path) -> None:
-    """Make `tree` the repo's source, leaving every node_modules in it alone."""
+def node_sync(tree: Path, packages: list[str]) -> None:
+    """Make `tree` the repo's source plus the node_modules of `packages`, and nothing else.
+
+    A listed package's node_modules is left for its `npm ci` to reset. Any
+    other is removed: no install resets it, and Node's resolution walks up
+    into it, so one planted by an earlier run would survive into this one.
+    """
     try:
         tree.mkdir(parents=True, exist_ok=True)
         wanted = node_copy(tree)
@@ -1652,6 +1657,12 @@ def node_sync(tree: Path) -> None:
             # is a source entry like a file: kept when wanted, unlinked when
             # stale, never descended into or offered to rmdir.
             links = [d for d in subdirs if Path(here, d).is_symlink()]
+            if (
+                "node_modules" in subdirs
+                and "node_modules" not in links
+                and str(Path(here).relative_to(tree)) not in packages
+            ):
+                shutil.rmtree(Path(here, "node_modules"))
             subdirs[:] = [d for d in subdirs if d != "node_modules" and d not in links]
             dirs += [Path(here, d) for d in subdirs]
             for f in itertools.chain(files, links):
@@ -1698,7 +1709,7 @@ def node_install(name: str, packages: list[str]) -> Path:
     """
     need_lockfiles(name, packages)
     tree = node_work() / "tree"
-    node_sync(tree)
+    node_sync(tree, packages)
     env = node_env()
     for rel in packages:
         step(f"npm ci ({rel})")
