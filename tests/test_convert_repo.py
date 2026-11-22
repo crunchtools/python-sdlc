@@ -941,14 +941,14 @@ for config, head in (
 repo = make_repo(
     {
         **HOOKED,
-        "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["bootc", "docs"]  # for now\n',
+        "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["bootc", "docs"]  # kept by hand\n',
     }
 )
 done = convert(repo, True, "--unbuilt-stacks", "docs")
 check(
     "--unbuilt-stacks docs: only the stack now checked leaves the list, in place",
     done.returncode == 0
-    and snapshot(repo)["sdlc.toml"] == '[tool.sdlc]\nskip-stacks = ["docs"]  # for now\n',
+    and snapshot(repo)["sdlc.toml"] == '[tool.sdlc]\nskip-stacks = ["docs"]  # kept by hand\n',
     done.stderr + snapshot(repo)["sdlc.toml"],
 )
 again = convert(repo, True, "--unbuilt-stacks", "docs")

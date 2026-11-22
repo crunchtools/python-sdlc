@@ -31,6 +31,7 @@ Run inside the image, which has the interpreter and PyYAML the script needs:
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import tempfile
 from pathlib import Path
@@ -39,8 +40,10 @@ from types import SimpleNamespace
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
-import cutover as cut  # noqa: E402
+_SPEC = importlib.util.spec_from_file_location("cutover", ROOT / "scripts" / "cutover.py")
+cut = importlib.util.module_from_spec(_SPEC)
+sys.modules["cutover"] = cut  # dataclasses look their module up there
+_SPEC.loader.exec_module(cut)
 
 FAILED: list[str] = []
 REF = "v1.60.0"
@@ -259,14 +262,16 @@ check(
 repo, _ = run(
     {
         ".github/workflows/container.yml": release_job(
-            QUAY, "      image: x\n      sign: false  # for now\n"
+            QUAY, "      image: x\n      sign: false  # kept by hand\n"
         )
     },
     label="sign: false, comment",
 )
 text = read(repo, ".github/workflows/container.yml")
 check(
-    "sign: a trailing comment on the flipped line survives", "sign: true  # for now" in text, text
+    "sign: a trailing comment on the flipped line survives",
+    "sign: true  # kept by hand" in text,
+    text,
 )
 
 repo, _ = run({".github/workflows/container.yml": release_job(QUAY, "")}, label="sign, no with")
@@ -654,9 +659,11 @@ check(
 )
 check("validate: a clean verdict is []", cut.validate(repo, judging([])) == [])
 check("validate: no target validator is []", cut.validate(repo, TARGET) == [])
+unjudged = cut.validate(make({"README.md": "x"}), judging([]))
 check(
-    "validate: a repo with no manifest is []",
-    cut.validate(make({"README.md": "x"}), judging(VERDICT)) == [],
+    "validate: a repo with no manifest is not a pass",
+    len(unjudged) == 1 and unjudged[0].startswith("MANIFEST:"),
+    str(unjudged),
 )
 asked = []
 cut.validate(
@@ -673,6 +680,37 @@ check(
     "validate: it judges the manifest",
     asked == [repo / ".specify/memory/constitution.md"],
     str(asked),
+)
+
+# ------------------------------------------------- the target constitution
+
+# constitution_modules() over a checkout shaped like constitution's: fleet-bump.py
+# imports fleet_common from scripts/, and the validator sits at the top.
+fake = make(
+    {
+        "scripts/fleet_common.py": "MARK = 'common'\n",
+        "scripts/fleet-bump.py": (
+            "from fleet_common import MARK\n"
+            "def drop_dependabot(root, validator):\n"
+            "    return [MARK + ':' + validator.own_version()]\n"
+        ),
+        "validate-constitution.py": (
+            "def own_version():\n    return '1.60.0'\ndef validate(path):\n    return []\n"
+        ),
+    }
+)
+bump, validator = cut.constitution_modules(fake)
+loaded = cut.Target("1.60.0", REF, bump=bump, validator=validator)
+result = cut.Result()
+cut.drop_dependabot(make({}), loaded, result)
+check(
+    "constitution_modules: fleet-bump.py loads with its fleet_common and drives the drop",
+    result.changed == ["Dependabot: common:1.60.0"] and not result.hand,
+    str(result),
+)
+check(
+    "constitution_modules: the validator loads and judges a manifest",
+    cut.validate(make({".specify/memory/constitution.md": MANIFEST}), loaded) == [],
 )
 
 # --------------------------------------------------------------- everything

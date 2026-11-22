@@ -78,8 +78,14 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import cutover  # beside this script, not an installed package
+# cutover.py beside this script, by path: not an installed package, and no
+# sys.path entry left behind for whoever imports this.
+_CUTOVER = importlib.util.spec_from_file_location(
+    "cutover", Path(__file__).resolve().parent / "cutover.py"
+)
+cutover = importlib.util.module_from_spec(_CUTOVER)
+sys.modules["cutover"] = cutover  # dataclasses look their module up there
+_CUTOVER.loader.exec_module(cutover)
 
 ORG = "crunchtools"
 # The converter's own repo under either name, and the constitution: upstream of

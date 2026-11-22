@@ -334,7 +334,9 @@ def self_published(repo: Path, result: Result) -> None:
 def cron(name: str) -> str:
     """A weekly slot from the repo's name, so the fleet does not rebuild in one minute."""
     digest = int(hashlib.sha256(name.encode()).hexdigest(), 16)
-    return f"{digest % 60} {2 + digest // 60 % 5} * * {digest // 300 % 7}"
+    rest, minute = divmod(digest, 60)
+    rest, hour = divmod(rest, 5)  # 02:00 to 06:59 UTC, the fleet's quiet hours
+    return f"{minute} {2 + hour} * * {rest % 7}"
 
 
 def add_schedule(repo: Path, name: str, result: Result) -> None:
@@ -420,8 +422,11 @@ def cutover(repo: Path, name: str, default: str, target: Target) -> Result:
 
 def validate(repo: Path, target: Target) -> list[str]:
     """The target constitution's verdict on the converted checkout; [] when it passes."""
-    if target.validator is None or not (repo / MANIFEST).is_file():
+    if target.validator is None:
         return []
+    if not (repo / MANIFEST).is_file():
+        # Nothing to judge is not a pass: a repo the validator cannot read ships unjudged.
+        return [f"MANIFEST: no {MANIFEST}, so the target constitution cannot judge it"]
     mine = target.validator.own_version() or ""
     return [
         v
