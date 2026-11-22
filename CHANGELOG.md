@@ -25,6 +25,25 @@ All notable changes to this project are documented here, following
   push and ci for a repo with nothing else to be. The image carries
   markdownlint-cli2 0.24.0 and lychee 0.24.2.
   `scripts/update_tools.py` moves both pins, lychee's digest with its version.
+- `sdlc gatehouse` mounts the file named by `OPENROUTER_API_KEY_FILE` in
+  `gatehouse.env` read-only at the same path, so an OpenRouter key delivered
+  as a file reaches Gatehouse as a file and never as an environment value
+  (a968). A relative path, one holding `:` or `,`, or a missing file stops the
+  gate before it runs. Without the variable nothing changes. Needs Gatehouse
+  0.9.0 or later in the image; it ships 0.31.0.
+- Promote attests a syft SPDX SBOM and SLSA v1 provenance to the digest it
+  signed, with the fleet key, before any tag moves, as constitution's
+  `container-release.yml` does for every other image (a997). The build step
+  records its run, workflow and commit in `com.crunchtools.build.*` labels,
+  and `scripts/provenance.py` writes the predicate from them, so a tag run
+  that promotes without building names the run that built the digest. A
+  digest built before this, or by any ref but main or a `v*` tag, gets the
+  SBOM and no provenance. `scripts/attest-digest.sh` scans once and attests in
+  both `sdlc` and the `python-sdlc` mirror, since an attestation stays in the
+  repository it was made in. As constitution#209 does, syft, skopeo and the
+  predicate writer run in a step without the key, and only the `cosign attest`
+  step holds it. Verify with `cosign verify-attestation --insecure-ignore-tlog
+  --type spdxjson` (or `slsaprovenance1`) and the fleet key.
 
 ### Changed
 
@@ -50,6 +69,18 @@ All notable changes to this project are documented here, following
   major tag, as `examples/constitution.yml` does, in place of `@v1.41.0`.
   v1.60.0 lists `sdlc` beside `python-sdlc` in the fleet lists, which the
   rename had dropped this repo from.
+
+### Fixed
+
+- `sdlc ci` no longer gets CodeQL OOM-killed on agent seats (a989). Rootless
+  podman inside a seat drops `--memory`, so every lane was "given" 8g in a 4g
+  cgroup and CodeQL sized its heap from that beside an image build. The
+  launcher now reads the host's real ceiling (cgroup `memory.max` from leaf to
+  root, keeping a quarter for the agent, or MemTotal), defaults
+  `SDLC_MEMORY` to it when it is under 8g, divides it between CPU lanes as it
+  does the CPUs, and runs the lanes in turn when a share would be under
+  3072m. A machine with room for 8g per lane is unchanged. `SDLC_MEMORY`
+  now also refuses a size with the unit in the middle, like `8g8m`.
 
 ## [0.11.0] - 2026-11-22
 

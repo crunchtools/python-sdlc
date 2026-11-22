@@ -43,6 +43,10 @@ Three things went wrong on josui-skills at once (#33), and each has its own fix.
   machine's MemTotal. All three, because rootless podman drops `--memory`
   silently when the memory controller is not delegated, as in a developer
   container. At the default 8g that is `--ram=6144`, a 4.6 GB heap.
+  Inside an agent seat none of the three saw the seat's own 4g ceiling, so
+  the launcher now reads it (a989): `SDLC_MEMORY` defaults to what the
+  host's cgroup really allows, is divided between lanes like the CPUs, and
+  lanes that would not fit run in turn.
 - **One database per project, one run at a time.** The database lives at
   `/cache/codeql/<worktree basename>`, so two checkouts with the same basename,
   or a push retried while the last is still running, deleted each other's

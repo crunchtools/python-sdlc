@@ -160,6 +160,9 @@ case " \$* " in
   *" plan lanes-stall "*)
     printf 'f${TAB}one${TAB}image-ro${TAB}quiet-ok\n'
     printf 's${TAB}two${TAB}image-ro${TAB}very-slow-rc-one\n' ;;
+  *" plan lanes-all-local "*)
+    printf 'gatehouse${TAB}one${TAB}local${TAB}gatehouse\n'
+    printf 'gatehouse${TAB}two${TAB}local${TAB}gatehouse\n' ;;
   *" plan lanes-review "*)
     printf 'x${TAB}main${TAB}image-ro${TAB}tick-x\n'
     printf 'rev${TAB}review${TAB}local${TAB}gatehouse\n' ;;
@@ -338,7 +341,7 @@ else
   bad "up-systemd-args exited $rc: $(tail -2 "$RUN/out")"
 fi
 rc=0
-PATH="$SHIM" SDLC_CPUS=4 sh bin/sdlc lanes-skip > "$RUN/out" 2>&1 || rc=$?
+PATH="$SHIM" SDLC_CPUS=4 SDLC_MEMORY=1g sh bin/sdlc lanes-skip > "$RUN/out" 2>&1 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q '== up-systemd-ep SKIPPED, not judged' "$RUN/out" \
    && grep -q '== b passed' "$RUN/out"; then
   ok "in a lane, the skip is printed as SKIPPED and the run still exits 0"
@@ -372,7 +375,7 @@ else
   bad "up-adv-podman exited $rc, want 2"
 fi
 rc=0
-PATH="$SHIM" SDLC_CPUS=4 sh bin/sdlc lanes-adv > "$RUN/out" 2>&1 || rc=$?
+PATH="$SHIM" SDLC_CPUS=4 SDLC_MEMORY=1g sh bin/sdlc lanes-adv > "$RUN/out" 2>&1 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q '== up-adv-dies FOUND SOMETHING, ADVISORY' "$RUN/out" \
    && grep -q '== b passed' "$RUN/out"; then
   ok "in a lane, an advisory finding is printed as ADVISORY and the run exits 0"
@@ -506,6 +509,78 @@ else
   printf 'skip taskset unavailable or too few CPUs\n'
 fi
 
+printf '\n== the memory budget\n\n'
+
+# An agent seat runs rootless podman inside a container, where `--memory` is
+# dropped without a word. Every lane was "given" 8g in a 4g seat, CodeQL sized
+# its heap from that, and beside an image build it was killed (a989). Pinned
+# here as arithmetic, because no test can choose the cgroup it runs in.
+MEMSH="$RUN/memory.sh"
+{
+  sed -n '/^_size_mb()/,/^}$/p' bin/sdlc
+  sed -n '/^LANE_MEMORY_MIN=/p' bin/sdlc
+  sed -n '/^lane_memory()/,/^}$/p' bin/sdlc
+  # shellcheck disable=SC2016  # source for the generated script, not expanded here
+  echo 'lane_memory "$3" "$2" "$(_size_mb "$1")"'
+} > "$MEMSH"
+
+mem() {                # expected gate-memory available lanes description
+  _got=$(sh "$MEMSH" "$2" "$3" "$4")
+  if [ "$_got" = "$1" ]; then ok "$5 ($_got)"; else bad "$5: got $_got, want $1"; fi
+}
+mem 0    8g 3072  2 "a 4g seat runs two CPU lanes in turn, not side by side"
+mem 3072 8g 3072  1 "one lane on a 4g seat gets what the seat has, not 8g"
+mem 8192 8g 16384 2 "a 16g runner still gives two lanes 8g each"
+mem 6144 8g 12288 2 "a smaller machine divides what it has between the lanes"
+mem 1024 1g 3072  2 "a budget set below the minimum is the floor asked for"
+mem 8192 8g 0     2 "memory that cannot be read changes nothing"
+mem 4096 4096m 30000 3 "megabytes are read as megabytes"
+mem 8192 08g 30000 2 "a leading zero is decimal, not a shell error"
+mem 10240 010g 30000 2 "a leading zero is decimal, not octal"
+
+# The ceiling itself, read from a cgroup tree and meminfo of the test's own.
+# What a seat, a runner and a v1 host look like, without needing to be one.
+CGSH="$RUN/cgroup.sh"
+{
+  sed -n '/^_cgroup_memory_ceiling()/,/^}$/p' bin/sdlc
+  sed -n '/^memory_available()/,/^}$/p' bin/sdlc
+  # shellcheck disable=SC2016  # source for the generated script, not expanded here
+  echo 'memory_available "$@"'
+} > "$CGSH"
+CG="$RUN/cg"
+echo 'MemTotal:       16365980 kB' > "$RUN/meminfo"
+cgtree() {             # proc-cgroup-line root-max mid-max leaf-max
+  rm -rf "$CG"
+  mkdir -p "$CG/a/b"
+  printf '%s\n' "$1" > "$RUN/proc-cgroup"
+  [ -n "$2" ] && printf '%s\n' "$2" > "$CG/memory.max"
+  [ -n "$3" ] && printf '%s\n' "$3" > "$CG/a/memory.max"
+  [ -n "$4" ] && printf '%s\n' "$4" > "$CG/a/b/memory.max"
+  return 0
+}
+avail() {              # expected meminfo description
+  _got=$(sh "$CGSH" "$2" "$RUN/proc-cgroup" "$CG")
+  if [ "$_got" = "$1" ]; then ok "$3 ($_got)"; else bad "$3: got $_got, want $1"; fi
+}
+cgtree 0::/ 4294967296 '' ''
+avail 3072  "$RUN/meminfo" "a 4g seat at its namespace root keeps a quarter for the agent"
+cgtree 0::/a/b max max 7516192768
+avail 5376  "$RUN/meminfo" "a 7g leaf is read under an unlimited parent"
+cgtree 0::/a/b max 4294967296 max
+avail 3072  "$RUN/meminfo" "the smallest ceiling on the way to the root wins"
+cgtree 0::/a/b max max max
+avail 15982 "$RUN/meminfo" "max everywhere is MemTotal, taken whole"
+cgtree 0::/a/b max 25769803776 max
+avail 15982 "$RUN/meminfo" "a slice larger than the machine changes nothing"
+cgtree 0::/a/b '' '' ''
+avail 15982 "$RUN/meminfo" "no memory.max files is MemTotal"
+cgtree 4:memory:/a/b '' '' 4294967296
+avail 15982 "$RUN/meminfo" "cgroup v1, with no unified line, is MemTotal"
+cgtree 0::/../a max max 4294967296
+avail 15982 "$RUN/meminfo" "a path outside the namespace is not walked"
+cgtree 0::/a/b max max max
+avail 0     "$RUN/no-such-meminfo" "nothing readable is 0, which changes nothing"
+
 printf '\n== the lanes\n\n'
 
 # Steps of one lane run in sequence; lanes run at the same time. What has to
@@ -516,7 +591,9 @@ printf '\n== the lanes\n\n'
 lanes() {              # target [stall-seconds] -> exit status, output in $RUN/out
   rm -f "$SHIM/must-not-run"
   _rc=0
-  PATH="$SHIM" SDLC_CPUS=4 SDLC_LANE_STALL=${2:-3600} \
+  # 1g, so two lanes fit on any machine this runs on -- an agent seat included.
+  # Whether they fit at all is decided by the memory test, not by the host.
+  PATH="$SHIM" SDLC_CPUS=4 SDLC_MEMORY=1g SDLC_LANE_STALL=${2:-3600} \
     sh bin/sdlc "$1" > "$RUN/out" 2>&1 || _rc=$?
   return "$_rc"
 }
@@ -682,6 +759,14 @@ else
   grep -o -- '--cpus [0-9]*\|--cpu-quota [0-9]*' "$RUN/podman.log" | sort -u \
     | sed 's/^/       /'
 fi
+# And each lane's container is told its share of memory, not the whole of it.
+# (The plan itself is asked for at the whole budget, before there are lanes.)
+if grep -q -- '--memory 1024m' "$RUN/podman.log"; then
+  ok "each lane's containers get the lane's memory"
+else
+  bad "the lanes did not pass their memory share to podman"
+  grep -o -- '--memory [0-9a-z]*' "$RUN/podman.log" | sort -u | sed 's/^/       /'
+fi
 
 # A container that succeeds must report success, whatever the caller's last
 # exit status was. Gatehouse runs right after `git diff --quiet`, which exits 1
@@ -715,6 +800,59 @@ if [ "$rc" -eq 0 ]; then
 else
   bad "a passing review after a non-empty diff exited $rc"
 fi
+# Two lanes with no container between them have no memory to divide (a999).
+PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" sh bin/sdlc lanes-all-local > "$RUN/out" 2>&1 && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && ! grep -q 'division' "$RUN/out"; then
+  ok "lanes with no container in them run without dividing by zero"
+else
+  bad "lanes-all-local exited $rc: $(tail -2 "$RUN/out")"
+fi
+
+# a968: a key named by OPENROUTER_API_KEY_FILE is mounted read-only at its own
+# path, so it stays a file inside the container and never an environment value.
+KEYFILE="$GITSHIM/gatehouse-openrouter-key"
+printf 'sk-or-v1-test\n' > "$KEYFILE"
+printf 'GATEHOUSE_LLM_BASE_URL=https://openrouter.ai/api/v1\nOPENROUTER_API_KEY_FILE=%s\n' \
+  "$KEYFILE" > "$GITSHIM/keyfile.env"
+log_mark
+PATH="$GITSHIM" GATEHOUSE_ENV="$GITSHIM/keyfile.env" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 \
+  && rc=0 || rc=$?
+log_since
+KEY_MOUNTS=$(grep ' gatehouse$' "$RUN/podman.log" | grep -o ' -v ' | wc -l)
+if [ "$rc" -eq 0 ] && grep -qF -- "-v $KEYFILE:$KEYFILE:ro,z" "$RUN/podman.log" \
+    && grep -qF -- "--env-file $GITSHIM/keyfile.env" "$RUN/podman.log" \
+    && ! grep -q 'sk-or-v1-test' "$RUN/podman.log"; then
+  ok "a key file named in gatehouse.env is mounted read-only, not passed as a value"
+else
+  bad "a key file named in gatehouse.env was not mounted (exit $rc)"
+  sed 's/^/       /' "$RUN/podman.log"
+fi
+
+log_mark
+PATH="$GITSHIM" GATEHOUSE_ENV="$ENVFILE" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 || :
+log_since
+# Counted against the key-file run: exactly one -v fewer, whatever it was.
+PLAIN_MOUNTS=$(grep ' gatehouse$' "$RUN/podman.log" | grep -o ' -v ' | wc -l)
+if [ "$PLAIN_MOUNTS" -gt 0 ] && [ "$KEY_MOUNTS" -eq $((PLAIN_MOUNTS + 1)) ]; then
+  ok "without OPENROUTER_API_KEY_FILE nothing extra is mounted"
+else
+  bad "a gatehouse.env with no key file still mounted one"
+  sed 's/^/       /' "$RUN/podman.log"
+fi
+
+: > "$GITSHIM/a,b"
+for bad_path in relative/key "$GITSHIM/missing-key" "$GITSHIM/a:b" "$GITSHIM/a,b"; do
+  printf 'OPENROUTER_API_KEY_FILE=%s\n' "$bad_path" > "$GITSHIM/keyfile.env"
+  log_mark
+  PATH="$GITSHIM" GATEHOUSE_ENV="$GITSHIM/keyfile.env" sh bin/sdlc gatehouse-direct >/dev/null 2>&1 \
+    && rc=0 || rc=$?
+  log_since
+  if [ "$rc" -ne 0 ] && ! grep -q ' gatehouse$' "$RUN/podman.log"; then
+    ok "OPENROUTER_API_KEY_FILE=$bad_path is refused before Gatehouse runs"
+  else
+    bad "OPENROUTER_API_KEY_FILE=$bad_path reached Gatehouse (exit $rc)"
+  fi
+done
 
 printf '\n== a lane that is not on a CPU\n\n'
 
