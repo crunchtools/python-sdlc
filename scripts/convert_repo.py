@@ -48,11 +48,14 @@ import re
 import sys
 import tomllib
 from pathlib import Path
+from typing import TypeGuard
 
 try:
     import yaml
 except ImportError:  # the image's constitution venv has it; main() says so
-    yaml = None
+    HAS_YAML = False
+else:
+    HAS_YAML = True
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples"
@@ -215,7 +218,10 @@ def without_replaced(lines: list[str]) -> str:
     """The `repos:` items that survive: all but the sdlc pin and the standalone hooks."""
     kept: list[str] = []
     for item in split_items(lines):
-        repo = re.match(r"^\s*-\s+repo:\s*(\S+)", item[0]).group(1)
+        named = re.match(r"^\s*-\s+repo:\s*(\S+)", item[0])
+        if not named:
+            raise RefusedError(f".pre-commit-config.yaml: {item[0].strip()!r} names no repo")
+        repo = named.group(1)
         if SDLC_REPO.match(repo):
             continue
         trimmed = drop_hooks(item, STANDALONE_HOOKS) if repo == "local" else item
@@ -296,7 +302,7 @@ def jobs_of(parsed: dict) -> dict:
     return jobs if isinstance(jobs, dict) else {}
 
 
-def is_sdlc_job(job: object) -> bool:
+def is_sdlc_job(job: object) -> TypeGuard[dict]:
     return (
         isinstance(job, dict)
         and job.get("name") == "sdlc ci"
@@ -307,7 +313,7 @@ def is_sdlc_job(job: object) -> bool:
     )
 
 
-def is_gourmand_job(job: object) -> bool:
+def is_gourmand_job(job: object) -> TypeGuard[dict]:
     return isinstance(job, dict) and bool(GOURMAND_CALL.match(str(job.get("uses", ""))))
 
 
@@ -445,7 +451,9 @@ def same_gatehouse(current: dict, canonical: dict) -> bool:
         return True
     guard = (current.get("jobs") or {}).get("guard")
     new = (canonical.get("jobs") or {}).get("guard") or {}
-    steps = guard.get("steps") if isinstance(guard, dict) else None
+    if not isinstance(guard, dict):
+        return False
+    steps = guard.get("steps")
     if not isinstance(steps, list) or len(steps) != len(new.get("steps") or []):
         return False
     # Only a `run` that is exactly the pre-#150 script becomes the new one;
@@ -487,8 +495,8 @@ def convert_workflows(repo: Path, planned: dict[Path, str | None], notes: list[s
         # The `sdlc ci` job stays where it is, beside jobs examples/ci.yml does not
         # have; writing ci.yml as well would run it twice. Nothing is deleted.
         for path in mixed:
-            on = parse(path.name, path.read_text())
-            on = on.get("on", on.get(True))
+            parsed = parse(path.name, path.read_text())
+            on = parsed.get("on", parsed.get(True))
             events = set(on) if isinstance(on, (dict, list)) else {on}
             if not events <= FLOATABLE_EVENTS:
                 others = ", ".join(sorted(map(str, events - FLOATABLE_EVENTS)))
@@ -721,7 +729,7 @@ def verify(repo: Path, planned: dict[Path, str | None]) -> None:
     if planned[repo / BOOTSTRAP_AT] != BOOTSTRAP.read_text():
         raise RefusedError(f"{BOOTSTRAP_AT} would not be bin/sdlc-bootstrap")
     wf_dir = repo / ".github" / "workflows"
-    texts = {p: planned.get(p, "") for p in planned if p.parent == wf_dir and planned[p]}
+    texts = {p: text for p, text in planned.items() if p.parent == wf_dir and text}
     texts |= {
         p: p.read_text()
         for p in (sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else [])
@@ -755,7 +763,7 @@ def verify(repo: Path, planned: dict[Path, str | None]) -> None:
 
 
 def diff(repo: Path, planned: dict[Path, str | None]) -> str:
-    out = []
+    out: list[str] = []
     for path in sorted(planned):
         before = path.read_text() if path.exists() else ""
         after = planned[path] or ""
@@ -776,7 +784,7 @@ def main() -> int:
     ap.add_argument("repo", type=Path, help="a checkout of the repo to convert")
     ap.add_argument("--apply", action="store_true", help="write the changes; default prints them")
     args = ap.parse_args()
-    if yaml is None:
+    if not HAS_YAML:
         print("convert_repo: needs PyYAML (python3-pyyaml)", file=sys.stderr)
         return 2
     repo = args.repo.resolve()
