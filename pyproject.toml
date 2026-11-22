@@ -15,12 +15,42 @@ description = "One container image and one script for every CrunchTools Python S
 requires-python = ">=3.14"
 license = "AGPL-3.0-or-later"
 
+# What the uv-driven checks of `sdlc push` load from THIS repo's lock rather
+# than from the image: mypy and pytest run in the project environment, and
+# PyYAML is the one third-party import the scripts make. A group, not an extra,
+# because there is no package to hang an extra on; uv syncs `dev` by default.
+[dependency-groups]
+dev = [
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "pyyaml>=6.0",
+    # Pinned to a release past the fleet's 7-day cooldown.
+    "types-pyyaml==6.0.12.20261113",
+]
+
+[tool.mypy]
+python_version = "3.14"
+# `sdlc` and `validate` have no .py extension, so mypy would name both
+# `__main__` and refuse the pair; this names each after its file instead.
+scripts_are_modules = true
+# What `sdlc push` checks when it runs mypy bare. tests/ is not here yet: the
+# suites load `sdlc` through importlib, so mypy sees a module of Any.
+files = ["sdlc", "validate", "scripts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The suites are scripts that check at import; tests/test_suites.py runs each
+# as its own process, so it is the only file pytest collects.
+python_files = ["test_suites.py"]
+
 [tool.ruff]
 line-length = 100
 # The version the image bakes. Kept equal to the ruff hook's rev below and to
 # RUFF_VERSION in the Containerfile -- a repo whose formatter disagrees with its
 # own gate is the drift this project exists to delete.
 target-version = "py314"
+# Semgrep's rule fixtures are the bad code each rule must catch, on purpose.
+extend-exclude = [".semgrep/tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "S", "B", "C4", "C901", "DTZ", "PIE", "PT",
@@ -60,3 +90,4 @@ max-complexity = 10
 "tests/test_convert_repo.py" = ["S101", "E501"]
 # The same fixtures, and counts asserted as the numbers they are.
 "tests/test_fleet_wave.py" = ["S101", "E501", "PLR2004"]
+"tests/test_cutover.py" = ["S101", "E501", "PLR2004"]

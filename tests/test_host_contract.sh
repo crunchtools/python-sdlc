@@ -201,6 +201,8 @@ case " \$* " in
     printf 'rc-five${TAB}main${TAB}image-ro${TAB}exit-five\n' ;;
   *" plan rc-four "*)
     printf 'rc-four${TAB}main${TAB}image-ro${TAB}exit-four\n' ;;
+  *" plan prune-race "*)
+    printf 'prune-race${TAB}main${TAB}image-ro${TAB}prune-now\n' ;;
   *" plan up-"*)
     _secs=1; _what=\$_last
     case "\$_last" in up-build) _what=build ;; up-noseconds) _secs=soon ;; esac
@@ -241,6 +243,9 @@ case "\$_last" in
     if [ -f "$SHIM/review-fails" ]; then printf 'REVIEW FOUND SOMETHING\n'; exit 1; fi
     printf 'REVIEW CLEAN\n' ;;
   must-not-run) printf 'RAN must-not-run\n'; touch "$SHIM/must-not-run" ;;
+  # Another process cleaning the clone while the hook runs: it has no
+  # GIT_INDEX_FILE, so it sees only refs and .git/index.
+  prune-now) (unset GIT_INDEX_FILE; git gc --quiet --prune=now) ;;
   after-the-failure|other-lane-first|other-lane-second)
     printf 'RAN %s\n' "\$_last" ;;
 esac
@@ -285,6 +290,51 @@ if [ ! -e "$SHIM/pwned" ]; then
 else
   bad "a host step's word was evaluated as shell"
 fi
+
+printf '\n== a prune while the commit hook runs\n\n'
+
+# `git commit -a` records its new blobs only in .git/index.lock while the hook
+# runs, and gc cannot see a lock file. A step here runs `git gc --prune=now` as
+# some other process would; the commit must still be made (a1001, #94).
+PR=$RUN/prune-repo
+git init -q "$PR"
+git -C "$PR" config user.email a1001@test
+git -C "$PR" config user.name a1001
+mkdir "$PR/.gemini"
+printf 'one\n' > "$PR/.gemini/config.yaml"
+git -C "$PR" add -A
+git -C "$PR" commit -q -m one
+printf '#!/bin/sh\nPATH="%s" exec sh "%s" prune-race\n' "$SHIM" "$PWD/bin/sdlc" \
+  > "$PR/.git/hooks/pre-commit"
+chmod +x "$PR/.git/hooks/pre-commit"
+printf 'two\n' >> "$PR/.gemini/config.yaml"
+git -C "$PR" commit -q -a -m two > "$RUN/out" 2>&1 && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] && [ "$(git -C "$PR" log -1 --format=%s)" = two ] \
+   && git -C "$PR" fsck --no-progress --no-dangling >/dev/null 2>&1; then
+  ok "commit -a survives a prune during the hook"
+else
+  bad "commit -a lost its blobs to a prune during the hook (exit $rc): $(tail -2 "$RUN/out")"
+fi
+if git -C "$PR" rev-parse --verify --quiet refs/sdlc/hook-index >/dev/null; then
+  bad "the hook's pin outlived the gate"
+else
+  ok "the hook's pin is removed when the gate ends"
+fi
+
+# And when the gate does not pass: a finding returns through run_plan, a step
+# that cannot run dies through its trap. Neither may leave the pin behind.
+for case_ in rc-five evil; do
+  printf '#!/bin/sh\nPATH="%s" exec sh "%s" %s\n' "$SHIM" "$PWD/bin/sdlc" "$case_" \
+    > "$PR/.git/hooks/pre-commit"
+  printf '%s\n' "$case_" >> "$PR/.gemini/config.yaml"
+  git -C "$PR" commit -q -a -m "$case_" > "$RUN/out" 2>&1 && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$(git -C "$PR" log -1 --format=%s)" = two ] \
+     && ! git -C "$PR" rev-parse --verify --quiet refs/sdlc/hook-index >/dev/null; then
+    ok "a $case_ gate stops the commit and removes the pin"
+  else
+    bad "a $case_ gate left the pin or made the commit (exit $rc)"
+  fi
+done
 
 printf '\n== a run given time to stay up\n\n'
 

@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 # The exit-code contract, matching sdlc's.
 CANNOT_RUN = 2
@@ -41,7 +42,7 @@ REMOTE = "https://github.com/crunchtools/constitution"
 INHERITS = re.compile(r"^>\s*\*\*Inherits:\*\*.*?(v\d+\.\d+\.\d+)", re.MULTILINE)
 
 
-def die(msg: str) -> None:
+def die(msg: str) -> NoReturn:
     print(f"GATE CANNOT RUN: {msg}", file=sys.stderr)
     sys.exit(CANNOT_RUN)
 

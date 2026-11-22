@@ -44,6 +44,69 @@ All notable changes to this project are documented here, following
   predicate writer run in a step without the key, and only the `cosign attest`
   step holds it. Verify with `cosign verify-attestation --insecure-ignore-tlog
   --type spdxjson` (or `slsaprovenance1`) and the fleet key.
+- The fleet cutover (sdlc#88, a982): `scripts/fleet_wave.py` now opens one
+  pull request per consumer repo carrying every change at once, so each repo's
+  CI runs once. After `convert_repo.py` floats the gates, the new
+  `scripts/cutover.py` moves every exact `crunchtools/constitution` workflow
+  pin, `Inherits:` and the constitution hook rev to the target release; drops
+  `.github/dependabot.yml` and its auto-merge caller with the target
+  constitution's own `fleet-bump.py` code (from constitution v1.60.0 the
+  validator fails a repo that has them); renames a bare `python-sdlc` left in a
+  workflow, hooks file or sdlc config (`downstream:`, a dispatch loop); adds
+  `sign: true` and the two cosign secrets to every `container-release.yml`
+  call; adds a weekly rebuild to the repos `--weekly` names (#88's four); and
+  writes `examples/release.yml`, the Ashigaru release flow from
+  rhel10-bootc-workstation, where a repo publishes an image and has no release
+  flow. The versions are arguments (`--constitution-dir`, `--constitution`,
+  `--constitution-ref`, default `v1`, the major tag, as fleet-bump.py writes it; `--sdlc`, `--unbuilt-stacks`). Each converted repo is
+  judged by the target validator, and one it fails is reported `invalid` and
+  not pushed. `--out DIR` writes each repo's diff and a `report.md`: what each
+  repo got, and what it needs by hand. The branch is `chore/fleet-cutover`;
+  open pull requests from `chore/sdlc-floating` or `chore/renovate` skip a
+  repo. The listing includes private repos the token can see, and `sdlc` and
+  `constitution` are skipped as upstream.
+- `scripts/convert_repo.py --unbuilt-stacks LIST`: the stacks the image has no
+  checks for yet, none by default now that all three are checked (this
+  repo's fleet_wave.py likewise). A `skip-stacks` entry for one
+  of those three that is no longer in the list is dropped, with the note the
+  converter wrote above it when the list empties.
+
+### Fixed
+
+- `scripts/convert_repo.py` renamed `quay.io/crunchtools/python-sdlc`, and
+  refused a clone of sdlc, only when no period followed the name, so a
+  reference ending a sentence was missed. A period is now a boundary unless a
+  name character follows it.
+- `sdlc ci` no longer gets CodeQL OOM-killed on agent seats (a989). Rootless
+  podman inside a seat drops `--memory`, so every lane was "given" 8g in a 4g
+  cgroup and CodeQL sized its heap from that beside an image build. The
+  launcher now reads the host's real ceiling (cgroup `memory.max` from leaf to
+  root, keeping a quarter for the agent, or MemTotal), defaults
+  `SDLC_MEMORY` to it when it is under 8g, divides it between CPU lanes as it
+  does the CPUs, and runs the lanes in turn when a share would be under
+  3072m. A machine with room for 8g per lane is unchanged. `SDLC_MEMORY`
+  now also refuses a size with the unit in the middle, like `8g8m`.
+- `scripts/convert_repo.py` replaced a covered `sdlc ci` job's `runs-on` with
+  `examples/ci.yml`'s `ubuntu-latest`, moving 54 fleet repos off the cached
+  and uncached self-hosted runners. The stub now keeps the job's own runner
+  and the comment above it (a1003).
+- `git commit -a` no longer loses its blobs when something prunes the clone
+  while the pre-commit hook runs (#94). Until the commit is made, `commit -a`
+  records its new blobs only in `.git/index.lock`, which gc cannot see, so a
+  `git gc --prune=now` from another process deleted them and the commit failed
+  with "invalid object ... Error building trees". While a hook's gate runs,
+  `bin/sdlc` now pins the hook's index tree at `refs/sdlc/hook-index` and
+  removes the pin when the gate ends.
+
+- `sdlc push` on this repo runs every lane instead of reporting mypy, pytest,
+  semgrep and pip-audit as could-not-run (a1008). The lock was refreshed (it
+  still pinned 0.6.0, so `uv sync --locked` failed) and gained a `dev` group of
+  mypy, pytest and PyYAML; `[tool.mypy]` checks `sdlc`, `validate` and
+  `scripts/` with `scripts_are_modules`, and `tests/test_suites.py` runs each
+  script-style suite as its own process. `.semgrep/` holds two rules with
+  fixtures: no shell between config and a tool, and no `t_*` check returning a
+  pass from an `except` arm. `convert_repo.py` refuses a `- repo:` line with no
+  repo instead of crashing on it.
 
 ### Changed
 
@@ -69,18 +132,6 @@ All notable changes to this project are documented here, following
   major tag, as `examples/constitution.yml` does, in place of `@v1.41.0`.
   v1.60.0 lists `sdlc` beside `python-sdlc` in the fleet lists, which the
   rename had dropped this repo from.
-
-### Fixed
-
-- `sdlc ci` no longer gets CodeQL OOM-killed on agent seats (a989). Rootless
-  podman inside a seat drops `--memory`, so every lane was "given" 8g in a 4g
-  cgroup and CodeQL sized its heap from that beside an image build. The
-  launcher now reads the host's real ceiling (cgroup `memory.max` from leaf to
-  root, keeping a quarter for the agent, or MemTotal), defaults
-  `SDLC_MEMORY` to it when it is under 8g, divides it between CPU lanes as it
-  does the CPUs, and runs the lanes in turn when a share would be under
-  3072m. A machine with room for 8g per lane is unchanged. `SDLC_MEMORY`
-  now also refuses a size with the unit in the middle, like `8g8m`.
 
 ## [0.11.0] - 2026-11-22
 

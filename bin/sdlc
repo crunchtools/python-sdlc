@@ -1192,7 +1192,7 @@ run_split() {          # the plan -> the worst status, one lane streaming
   # sequential path -- same output, live, as a repo with one lane has always had
   # -- and the others run beside it, buffered, and are printed whole after it.
   OUT=$(mktemp -d) || die "cannot create a scratch directory for the lane logs"
-  trap 'rm -rf "$OUT"; record_finish 2' EXIT HUP INT TERM
+  trap 'rm -rf "$OUT"; record_finish 2; unpin_hook_index' EXIT HUP INT TERM
 
   printf '%s\n' "$1" | cut -f1 | awk '!seen[$0]++' > "$OUT/order"
   printf '%s\n' "$1" | cut -f2 | awk '!seen[$0]++' > "$OUT/lanes"
@@ -1257,7 +1257,7 @@ run_split() {          # the plan -> the worst status, one lane streaming
 
 run_lanes() {          # the plan -> the worst status of every lane
   OUT=$(mktemp -d) || die "cannot create a scratch directory for the lane logs"
-  trap 'rm -rf "$OUT"; record_finish 2' EXIT HUP INT TERM
+  trap 'rm -rf "$OUT"; record_finish 2; unpin_hook_index' EXIT HUP INT TERM
 
   # The checks in plan order, first appearance: the order blocks are printed in.
   printf '%s\n' "$1" | cut -f1 | awk '!seen[$0]++' > "$OUT/order"
@@ -1384,7 +1384,34 @@ lane_memory() {        # lanes available-MB budget-MB -> MB per lane, or 0 to ta
   if [ "$_lm" -lt "$_floor" ]; then printf 0; else printf '%s' "$_lm"; fi
 }
 
+# `git commit -a` writes its blobs, records them ONLY in the index it is
+# building -- .git/index.lock, exported to the hook as GIT_INDEX_FILE -- and then
+# runs this. gc and prune judge reachability from refs and .git/index, never a
+# lock file, so for as long as the gate runs those blobs are garbage: a
+# `git gc --prune=now` from any other process deletes them, and the commit dies
+# "invalid object ... Error building trees" (a1001, #94). A ref to the hook's
+# tree makes them reachable until the gate is done.
+#
+# A shared ref, not refs/worktree/: gc run from a linked worktree does not walk
+# another worktree's refs/worktree/. One name is enough because this cannot gate
+# a linked worktree at all, so two hooks never hold it at once. A run killed
+# before it unpins leaves a ref the next one overwrites.
+HOOK_PIN=refs/sdlc/hook-index
+
+pin_hook_index() {
+  [ -n "${GIT_INDEX_FILE:-}" ] || return 0
+  _tree=$(git write-tree 2>/dev/null) || return 0
+  git update-ref "$HOOK_PIN" "$_tree" 2>/dev/null || :
+}
+
+unpin_hook_index() {
+  [ -n "${GIT_INDEX_FILE:-}" ] || return 0
+  git update-ref -d "$HOOK_PIN" 2>/dev/null || :
+}
+
 run_plan() {           # commit | push | ci | <check>
+  pin_hook_index
+  trap 'unpin_hook_index' EXIT HUP INT TERM
   # The image asks this to decide whether CodeQL may defer to CI.
   SDLC_TIER=$1
   export SDLC_TIER
@@ -1396,7 +1423,7 @@ run_plan() {           # commit | push | ci | <check>
   # However this ends -- a step's `die`, a signal -- the record is rendered from
   # whatever was finished. 2 because the only way out through here is a gate
   # that could not run; every ordinary ending goes through the call below.
-  trap 'record_finish 2' EXIT HUP INT TERM
+  trap 'record_finish 2; unpin_hook_index' EXIT HUP INT TERM
 
   _n=$(printf '%s\n' "$_plan" | awk -F"$TAB" '!seen[$2]++ {n++} END {print n + 0}')
   # How many of those lanes run a container, which decides which executor can
@@ -1427,6 +1454,7 @@ run_plan() {           # commit | push | ci | <check>
 
   trap - EXIT HUP INT TERM
   record_finish "$_plan_rc"
+  unpin_hook_index
   return "$_plan_rc"
 }
 
