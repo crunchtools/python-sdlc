@@ -1651,11 +1651,15 @@ def node_sync(tree: Path) -> None:
                 if str(path.relative_to(tree)) not in wanted:
                     path.unlink()
         for d in sorted(dirs, reverse=True):
+            # Every directory is offered for removal; one that still holds a
+            # wanted file refuses with ENOTEMPTY (EEXIST on some filesystems)
+            # and stays. Any other refusal is the workspace itself failing,
+            # and is raised to the 2 below.
             try:
                 d.rmdir()
             except OSError as exc:
                 if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST):
-                    raise  # it holds a wanted file; anything else is the cache
+                    raise
     except OSError as exc:
         cannot(f"cannot prepare the node workspace in {tree}: {exc}")
 

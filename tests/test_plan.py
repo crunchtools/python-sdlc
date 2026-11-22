@@ -24,6 +24,7 @@ Run inside the image, which has the interpreter and PyYAML the runner needs:
 from __future__ import annotations
 
 import contextlib
+import errno
 import importlib.machinery
 import importlib.util
 import io
@@ -812,6 +813,57 @@ msg = node_repo_msg({}, {"web/package.json": "{}", "api/package.json": "{}"})
 check(
     "the default packages, with only nested package.json files, names them and refuses",
     "no package.json at the repo root" in str(msg) and '["api", "web"]' in str(msg),
+    str(msg),
+)
+
+
+def node_sync_with(rmdir_errno: int | None) -> tuple[str | None, list[str]]:
+    """node_sync over a stale and a kept directory, rmdir failing with `rmdir_errno`.
+
+    Returns the CannotRun message (None when it succeeded) and what the tree holds.
+    """
+    with tempfile.TemporaryDirectory() as root:
+        repo, tree = Path(root, "repo"), Path(root, "tree")
+        Path(repo, "src").mkdir(parents=True)
+        Path(repo, "src", "a.js").write_text("x")
+        Path(tree, "stale").mkdir(parents=True)
+        Path(tree, "stale", "old.js").write_text("x")
+        saved_repo, saved_files, saved_rmdir = S.REPO, S.node_source_files, Path.rmdir
+        S.REPO = repo
+        S.node_source_files = lambda: ["src/a.js"]
+        if rmdir_errno is not None:
+
+            def failing(self, _e=rmdir_errno):
+                raise OSError(_e, os.strerror(_e), str(self))
+
+            Path.rmdir = failing
+        try:
+            S.node_sync(tree)
+            msg = None
+        except S.CannotRunError as exc:
+            msg = str(exc)
+        finally:
+            S.REPO, S.node_source_files, Path.rmdir = saved_repo, saved_files, saved_rmdir
+        held = sorted(str(f.relative_to(tree)) for f in tree.rglob("*"))
+    return msg, held
+
+
+msg, held = node_sync_with(None)
+check(
+    "node_sync removes a stale directory and keeps the one holding a wanted file",
+    msg is None and held == ["src", "src/a.js"],
+    f"{msg} {held}",
+)
+msg, _ = node_sync_with(errno.ENOTEMPTY)
+check(
+    "node_sync: a non-empty directory's rmdir refusal is expected, not an error",
+    msg is None,
+    str(msg),
+)
+msg, _ = node_sync_with(errno.EACCES)
+check(
+    "node_sync: any other rmdir failure is CANNOT_RUN, naming the workspace",
+    msg is not None and "cannot prepare the node workspace" in msg,
     str(msg),
 )
 
