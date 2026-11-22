@@ -27,6 +27,12 @@ this, so each repo gets one pull request that carries every change at once:
                    repo that publishes an image and has no release flow: the
                    Ashigaru app tags v*.*.*, the only actor the cosign release-tag
                    ruleset lets through
+  Ashigaru caller  a pre-router .github/workflows/ashigaru.yml (triage, code
+                   and fix called one by one, which Dependabot bumps one job
+                   at a time) becomes crunchtools/ashigaru's examples/ashigaru.yml
+                   at the target tag, which calls router.yml and brings the
+                   release-tag job with it. A repo with no ashigaru.yml is not
+                   enrolled here
 
 What it will not guess at -- an existing release flow of another shape, a
 call it cannot edit and read back -- goes to the `hand` list, and the rest of
@@ -60,6 +66,8 @@ MANIFEST = Path(".specify/memory/constitution.md")
 HOOKS = Path(".pre-commit-config.yaml")
 WORKFLOWS = Path(".github/workflows")
 RELEASE = WORKFLOWS / "release.yml"
+ASHIGARU_CALLER = WORKFLOWS / "ashigaru.yml"
+ASHIGARU_TAG = "v5"  # the major tag router.yml and release-tag.yml are called at
 CONFIGS = (Path("pyproject.toml"), Path("sdlc.toml"))
 
 # fleet-bump.py's own three patterns: the pins that move with a constitution release.
@@ -75,6 +83,7 @@ HOOK_REV = re.compile(
 OLD_NAME = re.compile(r"(?<![\w.-])python-sdlc(?![\w-]|\.[\w-])")
 RELEASE_CALL = re.compile(r"^crunchtools/constitution/\.github/workflows/container-release\.yml@")
 ASHIGARU_TAGS = re.compile(r"^crunchtools/ashigaru/\.github/workflows/release(?:-tag)?\.yml@")
+ROUTER_CALL = re.compile(r"^crunchtools/ashigaru/\.github/workflows/router\.yml@")
 COSIGN_SECRETS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 SAFE_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 # A step that publishes an image itself, outside container-release.yml.
@@ -98,6 +107,8 @@ class Target:
     bump: ModuleType | None = None  # the target constitution's scripts/fleet-bump.py
     validator: ModuleType | None = None  # and its validate-constitution.py
     weekly: frozenset[str] = frozenset()  # repos that get a weekly rebuild
+    ashigaru_caller: str = ""  # examples/ashigaru.yml at ASHIGARU_TAG; "" leaves callers alone
+    ashigaru_source: str = ""  # where it was read: crunchtools/ashigaru@<sha>, for the report
 
 
 @dataclass
@@ -389,6 +400,37 @@ def add_schedule(repo: Path, name: str, result: Result) -> None:
         result.changed.append(f"schedule: weekly rebuild ({cron(name)}) in {rel(repo, path)}")
 
 
+# --------------------------------------------------------- Ashigaru caller
+
+
+def router_calls(parsed: object) -> set[str]:
+    """The `uses:` of each job that calls Ashigaru's router.yml."""
+    jobs = parsed.get("jobs") if isinstance(parsed, dict) else None
+    return {
+        str(job["uses"])
+        for job in (jobs or {}).values()
+        if isinstance(job, dict) and ROUTER_CALL.match(str(job.get("uses", "")))
+    }
+
+
+def recopy_caller(repo: Path, target: Target, result: Result) -> None:
+    """A pre-router ashigaru.yml becomes the canonical router caller, copied unchanged."""
+    path = repo / ASHIGARU_CALLER
+    if not target.ashigaru_caller or not path.is_file():
+        return
+    try:
+        have = router_calls(yaml.safe_load(path.read_text()))
+    except yaml.YAMLError:
+        have = set()  # a caller that does not parse calls nothing: replace it
+    if have and have <= router_calls(yaml.safe_load(target.ashigaru_caller)):
+        return  # already the router caller, at the target's tag
+    path.write_text(target.ashigaru_caller)
+    result.changed.append(
+        f"ashigaru: {ASHIGARU_CALLER} re-copied as the router caller "
+        f"(examples/ashigaru.yml at {target.ashigaru_source or ASHIGARU_TAG})"
+    )
+
+
 # ----------------------------------------------------------------- release
 
 
@@ -400,8 +442,11 @@ def add_release_flow(repo: Path, default: str, result: Result) -> None:
     for path, workflow in parsed.items():
         for job in (workflow.get("jobs") or {}).values():
             uses = str(job.get("uses", "")) if isinstance(job, dict) else ""
-            if uses.endswith("release-tag.yml@v5") and ASHIGARU_TAGS.match(uses):
+            tags = ASHIGARU_TAGS.match(uses) or ROUTER_CALL.match(uses)
+            if tags and uses.endswith(f"/release-tag.yml@{ASHIGARU_TAG}"):
                 return  # already tags through the app
+            if tags and uses.endswith(f"/router.yml@{ASHIGARU_TAG}"):
+                return  # the router's release job calls release-tag.yml
             if ASHIGARU_TAGS.match(uses):
                 result.hand.append(
                     f"release: {rel(repo, path)} tags through {uses}; move it to "
@@ -440,6 +485,7 @@ def cutover(repo: Path, name: str, default: str, target: Target) -> Result:
     self_published(repo, result)
     if name in target.weekly:
         add_schedule(repo, name, result)
+    recopy_caller(repo, target, result)  # before the release check, which counts the router
     add_release_flow(repo, default, result)
     return result
 

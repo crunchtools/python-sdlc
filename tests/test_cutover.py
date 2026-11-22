@@ -17,6 +17,10 @@ change is pinned on its own fixture:
   - examples/release.yml becomes .github/workflows/release.yml, with the
     default branch substituted, only in a repo that publishes an image and has
     no release flow; any other release flow is reported, not merged
+  - a pre-router ashigaru.yml (triage, code and fix called one by one, a
+    release.yml@v2 job among them) becomes the target's router caller,
+    unchanged, and then counts as the release flow; a router caller at the
+    tag, a repo with no ashigaru.yml and a target with no caller are left alone
   - a workflow that pushes an image itself is reported; a commented-out push
     is not
   - Dependabot's removal is the target constitution's, and its failure is hand
@@ -758,6 +762,75 @@ check(
 check(
     "everything: every workflow still parses",
     all(yaml.safe_load(p.read_text()) for p in (repo / ".github/workflows").glob("*.yml")),
+)
+
+
+# --------------------------------------------------------- Ashigaru caller
+
+CALLER = (
+    "# Ashigaru: copy unchanged.\nname: Ashigaru\non:\n  issues:\n  pull_request_target:\n"
+    "permissions: {}\njobs:\n  ashigaru:\n    name: Ashigaru\n"
+    f"    uses: crunchtools/ashigaru/.github/workflows/router.yml@{cut.ASHIGARU_TAG}\n"
+    "    secrets:\n      ASHIGARU_APP_KEY: ${{ secrets.ASHIGARU_APP_KEY }}\n"
+)
+ROUTED = cut.Target(
+    "1.60.0", REF, ashigaru_caller=CALLER, ashigaru_source="crunchtools/ashigaru@abc123"
+)
+PRE_ROUTER = "name: Ashigaru\non:\n  issues:\njobs:\n" + "".join(
+    f"  {job}:\n    uses: crunchtools/ashigaru/.github/workflows/{job}.yml@{ref}\n"
+    for job, ref in (("triage", "v2"), ("code", "v3"), ("fix", "v2"), ("release", "v2"))
+)
+CALLER_PATH = ".github/workflows/ashigaru.yml"
+
+repo, result = run({CALLER_PATH: PRE_ROUTER}, target=ROUTED, label="caller, pre-router")
+check(
+    "caller: a pre-router ashigaru.yml becomes the router caller", read(repo, CALLER_PATH) == CALLER
+)
+check(
+    "caller: the re-copy is reported with its source",
+    any(c.startswith("ashigaru:") and "crunchtools/ashigaru@abc123" in c for c in result.changed),
+    str(result.changed),
+)
+
+repo, result = run(
+    {**PUBLISHES, CALLER_PATH: PRE_ROUTER}, target=ROUTED, label="caller, pre-router publisher"
+)
+check(
+    "caller: the router's release job passes the release check: no release.yml, no hand work",
+    not (repo / ".github/workflows/release.yml").exists()
+    and not any(h.startswith("release:") for h in result.hand)
+    and any(c.startswith("ashigaru:") for c in result.changed),
+    str((result.hand, result.changed)),
+)
+repo, result = run(
+    {**PUBLISHES, CALLER_PATH: CALLER}, target=TARGET, label="caller, router already there"
+)
+check(
+    "release: a router.yml caller at the tag is the release flow",
+    not (repo / ".github/workflows/release.yml").exists()
+    and not any(h.startswith("release:") for h in result.hand),
+    str(result.hand),
+)
+
+CUSTOM = CALLER.replace("# Ashigaru: copy unchanged.", "# ours, edited")
+repo, result = run({CALLER_PATH: CUSTOM}, target=ROUTED, label="caller, router edited")
+check(
+    "caller: a router caller at the tag is left as it is, edits and all",
+    read(repo, CALLER_PATH) == CUSTOM and not result.changed,
+)
+OLD_ROUTER = CALLER.replace(f"router.yml@{cut.ASHIGARU_TAG}", "router.yml@v4")
+repo, _ = run({CALLER_PATH: OLD_ROUTER}, target=ROUTED, label="caller, router v4")
+check("caller: a router caller at an older tag is re-copied", read(repo, CALLER_PATH) == CALLER)
+
+repo, result = run({".github/workflows/ci.yml": CI_ONLY}, target=ROUTED, label="caller, none")
+check(
+    "caller: a repo with no ashigaru.yml is not enrolled",
+    not (repo / CALLER_PATH).exists() and not result.changed,
+)
+repo, result = run({CALLER_PATH: PRE_ROUTER}, target=TARGET, label="caller, no target caller")
+check(
+    "caller: without a caller in the target, ashigaru.yml is untouched",
+    read(repo, CALLER_PATH) == PRE_ROUTER and not result.changed,
 )
 
 

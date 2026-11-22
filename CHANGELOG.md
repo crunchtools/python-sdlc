@@ -48,6 +48,15 @@ All notable changes to this project are documented here, following
   open pull requests from `chore/sdlc-floating` or `chore/renovate` skip a
   repo. The listing includes private repos the token can see, and `sdlc` and
   `constitution` are skipped as upstream.
+- The fleet cutover re-copies the Ashigaru caller (a1024): a repo whose
+  `.github/workflows/ashigaru.yml` calls triage, code and fix one by one, so
+  Dependabot bumps it one pin at a time, gets crunchtools/ashigaru's
+  `examples/ashigaru.yml`, read at the `v5` tag and never main, in the same
+  pull request. Its `router.yml@v5` call carries the release-tag job, so such
+  a repo needs no `release.yml`. A router caller already at `v5`, and a repo
+  with no `ashigaru.yml`, are left alone. `report.md` names the ashigaru
+  commit the caller came from, the repos that got it, and the open Dependabot
+  pull requests that bump one Ashigaru pin, to close at cutover.
 - `scripts/convert_repo.py --unbuilt-stacks LIST`: the stacks the image has no
   checks for yet, `node,bootc,docs` by default. A `skip-stacks` entry for one
   of those three that is no longer in the list is dropped, with the note the
