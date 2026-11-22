@@ -65,6 +65,23 @@ All notable changes to this project are documented here, following
   open pull requests from `chore/sdlc-floating` or `chore/renovate` skip a
   repo. The listing includes private repos the token can see, and `sdlc` and
   `constitution` are skipped as upstream.
+- The fleet cutover re-copies the Ashigaru caller (a1024): a repo whose
+  `.github/workflows/ashigaru.yml` calls triage, code and fix one by one, so
+  Dependabot bumps it one pin at a time, gets crunchtools/ashigaru's
+  `examples/ashigaru.yml`, read at the `v5` tag and never main, in the same
+  pull request. Its `router.yml@v5` call carries the release-tag job, so a
+  router repo's `release.yml` becomes the new `examples/release-open.yml`:
+  the workflow_dispatch that has the app open the release pull request, and no
+  tag job. sdlc's full template is swapped for it, another `release.yml`
+  loses its tag job and `pull_request_target`, a workflow that is only a tag
+  job is removed, and a repo still left with two tag paths is hand work. A
+  router caller already at `v5`, a repo with no `ashigaru.yml`, and the
+  ashigaru repo itself are left alone.
+  `report.md` also counts the constitution workflow calls, in any workflow,
+  left at neither the target ref nor a major tag after the cutover, and each
+  is hand work. `report.md` names the ashigaru
+  commit the caller came from, the repos that got it, and the open Dependabot
+  pull requests that bump one Ashigaru pin, to close at cutover.
 - `scripts/convert_repo.py --unbuilt-stacks LIST`: the stacks the image has no
   checks for yet, none by default now that all three are checked (this
   repo's fleet_wave.py likewise). A `skip-stacks` entry for one

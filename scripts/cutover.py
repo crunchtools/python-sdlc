@@ -26,7 +26,17 @@ this, so each repo gets one pull request that carries every change at once:
   release          examples/release.yml, as .github/workflows/release.yml, in a
                    repo that publishes an image and has no release flow: the
                    Ashigaru app tags v*.*.*, the only actor the cosign release-tag
-                   ruleset lets through
+                   ruleset lets through. A repo whose ashigaru.yml calls the
+                   router, whose release job tags, gets examples/release-open.yml
+                   instead -- the dispatch that opens the release pull request --
+                   and any other tag job of its own is dropped, so each repo
+                   ends with exactly one tag path or is named for a human
+  Ashigaru caller  a pre-router .github/workflows/ashigaru.yml (triage, code
+                   and fix called one by one, which Dependabot bumps one job
+                   at a time) becomes crunchtools/ashigaru's examples/ashigaru.yml
+                   at the target tag, which calls router.yml and brings the
+                   release-tag job with it. A repo with no ashigaru.yml is not
+                   enrolled here
 
 What it will not guess at -- an existing release flow of another shape, a
 call it cannot edit and read back -- goes to the `hand` list, and the rest of
@@ -55,17 +65,23 @@ else:
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE_TEMPLATE = ROOT / "examples" / "release.yml"
+OPEN_TEMPLATE = ROOT / "examples" / "release-open.yml"  # for a repo whose router tags
 
 MANIFEST = Path(".specify/memory/constitution.md")
 HOOKS = Path(".pre-commit-config.yaml")
 WORKFLOWS = Path(".github/workflows")
 RELEASE = WORKFLOWS / "release.yml"
+ASHIGARU_CALLER = WORKFLOWS / "ashigaru.yml"
+ASHIGARU_REPO = "ashigaru"
+ASHIGARU_TAG = "v5"  # the major tag router.yml and release-tag.yml are called at
 CONFIGS = (Path("pyproject.toml"), Path("sdlc.toml"))
 
 # fleet-bump.py's own three patterns: the pins that move with a constitution release.
 CONSTITUTION_PIN = re.compile(
     r"(crunchtools/constitution/\.github/workflows/[\w-]+\.ya?ml@)v\d+\.\d+\.\d+(?![\w-]|\.[\w-])"
 )
+# Any reusable-workflow call into the constitution, at whatever ref: what is left after the move.
+CONSTITUTION_CALL = re.compile(r"crunchtools/constitution/\.github/workflows/[\w.-]+@([\w./-]+)")
 INHERITS = re.compile(r"^(>\s*\*\*Inherits:\*\*.*?)v\d+\.\d+\.\d+", re.M)
 HOOK_REV = re.compile(
     r"(repo:\s*https://github\.com/crunchtools/constitution/?\s*\n\s*rev:\s*)v\d+\.\d+\.\d+"
@@ -75,6 +91,7 @@ HOOK_REV = re.compile(
 OLD_NAME = re.compile(r"(?<![\w.-])python-sdlc(?![\w-]|\.[\w-])")
 RELEASE_CALL = re.compile(r"^crunchtools/constitution/\.github/workflows/container-release\.yml@")
 ASHIGARU_TAGS = re.compile(r"^crunchtools/ashigaru/\.github/workflows/release(?:-tag)?\.yml@")
+ROUTER_CALL = re.compile(r"^crunchtools/ashigaru/\.github/workflows/router\.yml@")
 COSIGN_SECRETS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 SAFE_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 # A step that publishes an image itself, outside container-release.yml.
@@ -98,6 +115,8 @@ class Target:
     bump: ModuleType | None = None  # the target constitution's scripts/fleet-bump.py
     validator: ModuleType | None = None  # and its validate-constitution.py
     weekly: frozenset[str] = frozenset()  # repos that get a weekly rebuild
+    ashigaru_caller: str = ""  # examples/ashigaru.yml at ASHIGARU_TAG; "" leaves callers alone
+    ashigaru_source: str = ""  # where it was read: crunchtools/ashigaru@<sha>, for the report
 
 
 @dataclass
@@ -111,6 +130,7 @@ class Result:
 
     changed: list[str] = field(default_factory=list)  # one line per change, for the report
     hand: list[str] = field(default_factory=list)  # what it would not guess at
+    pins_left: list[str] = field(default_factory=list)  # calls at neither the target ref nor vN
 
 
 def load(path: Path, name: str) -> ModuleType:
@@ -200,6 +220,17 @@ def move_constitution(repo: Path, target: Target, result: Result) -> None:
         if new != text:
             path.write_text(new)
             result.changed.append(f"constitution: {target.constitution_ref} in {rel(repo, path)}")
+
+
+def pins_left(repo: Path, target: Target) -> list[str]:
+    """Each constitution workflow call at neither the target ref nor a major tag."""
+    left = []
+    for path in sorted((repo / WORKFLOWS).glob("*.y*ml")):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            for ref in CONSTITUTION_CALL.findall(line.split("#", 1)[0]):
+                if ref != target.constitution_ref and not re.fullmatch(r"v\d+", ref):
+                    left.append(f"{rel(repo, path)}:{n} @{ref}")
+    return left
 
 
 def drop_dependabot(repo: Path, target: Target, result: Result) -> None:
@@ -389,38 +420,234 @@ def add_schedule(repo: Path, name: str, result: Result) -> None:
         result.changed.append(f"schedule: weekly rebuild ({cron(name)}) in {rel(repo, path)}")
 
 
+# --------------------------------------------------------- Ashigaru caller
+
+
+def router_calls(parsed: object) -> set[str]:
+    """The `uses:` of each job that calls Ashigaru's router.yml."""
+    jobs = parsed.get("jobs") if isinstance(parsed, dict) else None
+    return {
+        str(job["uses"])
+        for job in (jobs or {}).values()
+        if isinstance(job, dict) and ROUTER_CALL.match(str(job.get("uses", "")))
+    }
+
+
+def recopy_caller(repo: Path, target: Target, result: Result) -> None:
+    """A pre-router ashigaru.yml becomes the canonical router caller, copied unchanged."""
+    path = repo / ASHIGARU_CALLER
+    if not target.ashigaru_caller or not path.is_file():
+        return
+    try:
+        have = router_calls(yaml.safe_load(path.read_text()))
+    except yaml.YAMLError:
+        have = set()  # a caller that does not parse calls nothing: replace it
+    if have and have <= router_calls(yaml.safe_load(target.ashigaru_caller)):
+        return  # already the router caller, at the target's tag
+    path.write_text(target.ashigaru_caller)
+    result.changed.append(
+        f"ashigaru: {ASHIGARU_CALLER} re-copied as the router caller "
+        f"(examples/ashigaru.yml at {target.ashigaru_source or ASHIGARU_TAG})"
+    )
+
+
 # ----------------------------------------------------------------- release
 
 
-def add_release_flow(repo: Path, default: str, result: Result) -> None:
+def reusable(workflow: object) -> bool:
+    """A workflow other workflows call: Ashigaru's own, not a repo's caller."""
+    on = workflow.get("on", workflow.get(True)) if isinstance(workflow, dict) else None
+    return "workflow_call" in (on if isinstance(on, (dict, list)) else [on])
+
+
+def tag_jobs(workflow: object) -> list[str]:
+    """The jobs that call Ashigaru's release-tag.yml, or release.yml before it."""
+    jobs = workflow.get("jobs") if isinstance(workflow, dict) else None
+    return [
+        job_id
+        for job_id, job in (jobs or {}).items()
+        if isinstance(job, dict) and ASHIGARU_TAGS.match(str(job.get("uses", "")))
+    ]
+
+
+def tag_paths(repo: Path) -> list[str]:
+    """Every job that tags a release through the app: the router caller's counts once."""
+    paths = []
+    for path in sorted((repo / WORKFLOWS).glob("*.y*ml")):
+        workflow = yaml.safe_load(path.read_text()) or {}
+        if reusable(workflow):
+            continue
+        jobs = workflow.get("jobs") or {}
+        paths += [f"{rel(repo, path)}:{j}" for j in tag_jobs(workflow)]
+        paths += [
+            f"{rel(repo, path)}:{j}"
+            for j, job in jobs.items()
+            if isinstance(job, dict) and ROUTER_CALL.match(str(job.get("uses", "")))
+        ]
+    return paths
+
+
+def drop_block(lines: list[str], at: int, indent: int) -> None:
+    """Delete the key at `at`, its block, the comments that introduce it and a blank before."""
+    stop = last_content(lines, at, block_end(lines, at, indent))
+    while at > 0 and lines[at - 1].startswith(" " * indent + "#"):
+        at -= 1
+    if at > 0 and not lines[at - 1].strip():
+        at -= 1
+    del lines[at:stop]
+
+
+def untagged(text: str, workflow: dict, jobs: list[str]) -> tuple[str, dict]:
+    """(text, expected parse) of a workflow with `jobs` gone, and the
+    pull_request_target trigger with them when nothing left needs it."""
+    lines = text.splitlines(keepends=True)
+    expected = yaml.safe_load(yaml.safe_dump(workflow))
+    for job_id in jobs:
+        span = job_span(lines, job_id)
+        if span is None:
+            raise ValueError(f"no job `{job_id}` under `jobs:`")
+        drop_block(lines, span[0], span[2])
+        del expected["jobs"][job_id]
+    on_key = "on" if "on" in expected else True
+    on = expected.get(on_key)
+    if (
+        isinstance(on, dict)
+        and "pull_request_target" in on
+        and "pull_request_target" not in yaml.safe_dump(expected["jobs"])
+    ):
+        top = next(
+            (i for i, x in enumerate(lines) if re.match(r"^(?:on|\"on\"|'on'):\s*(?:#.*)?$", x)),
+            None,
+        )
+        if top is None:
+            raise ValueError("no block `on:`")
+        end = block_end(lines, top, 0)
+        indent = next(
+            len(x) - len(x.lstrip()) for x in lines[top + 1 : end] if x.strip() and x[0] == " "
+        )
+        at = find_key(lines, "pull_request_target", indent, top + 1, end)
+        if at is None:
+            raise ValueError("`pull_request_target:` is not a key of the block `on:`")
+        drop_block(lines, at, indent)
+        del on["pull_request_target"]
+        if not on:
+            raise ValueError("no trigger would be left")
+    return "".join(lines).rstrip("\n") + "\n", expected
+
+
+def open_release(repo: Path, default: str, result: Result) -> None:
+    """A router caller tags on merge: the rest of the repo only opens the pull request."""
+    release = repo / RELEASE
+    if release.is_file() and release.read_text() == templated(RELEASE_TEMPLATE, default):
+        if not SAFE_BRANCH.fullmatch(default):
+            # It lands in a shell line that runs with the app token: never written as is.
+            result.hand.append(
+                f"release: default branch {default!r} is not a plain name; "
+                f"swap {RELEASE} for {OPEN_TEMPLATE.name} by hand"
+            )
+            return
+        release.write_text(templated(OPEN_TEMPLATE, default))
+        result.changed.append(f"release: {RELEASE} is now {OPEN_TEMPLATE.name}; the router tags")
+        return
+    for path in sorted((repo / WORKFLOWS).glob("*.y*ml")):
+        text = path.read_text()
+        workflow = yaml.safe_load(text) or {}
+        jobs = tag_jobs(workflow)
+        if reusable(workflow) or router_calls(workflow) or not jobs:
+            continue
+        if len(jobs) == len(workflow.get("jobs") or {}):
+            path.unlink()  # nothing in it but a second tag path
+            result.changed.append(
+                f"release: {rel(repo, path)} removed; router.yml's release job tags"
+            )
+            continue
+        try:
+            new, expected = untagged(text, workflow, jobs)
+            readback = yaml.safe_load(new)
+        except (ValueError, yaml.YAMLError) as exc:
+            result.hand.append(
+                f"release: {rel(repo, path)}: {exc}; drop its tag job by hand, the router tags"
+            )
+            continue
+        if readback != expected:
+            result.hand.append(
+                f"release: {rel(repo, path)} did not read back as only its tag job gone; "
+                f"drop it by hand, the router tags"
+            )
+            continue
+        path.write_text(new)
+        result.changed.append(
+            f"release: tag job {', '.join(jobs)} dropped from {rel(repo, path)}; "
+            f"router.yml's release job tags"
+        )
+    if (repo / RELEASE).exists():
+        if "ashigaru/release-" not in (repo / RELEASE).read_text():
+            result.hand.append(
+                f"release: {RELEASE} exists and does not open Ashigaru's release pull "
+                f"request; merge {OPEN_TEMPLATE.name} by hand"
+            )
+        return
+    write_template(repo, OPEN_TEMPLATE, default, result, "opens the release PR; the router tags")
+
+
+def templated(template: Path, default: str) -> str:
+    text = template.read_text()
+    if default != "main":
+        text = text.replace("refs/heads/main", f"refs/heads/{default}")
+        text = text.replace("--base main", f"--base {default}")
+    return text
+
+
+def write_template(repo: Path, template: Path, default: str, result: Result, what: str) -> None:
+    if not SAFE_BRANCH.fullmatch(default):
+        # It lands in a shell line that runs with the app token: never written as is.
+        result.hand.append(f"release: default branch {default!r} is not a plain name; add by hand")
+        return
+    (repo / RELEASE).write_text(templated(template, default))
+    result.changed.append(f"release: {RELEASE} ({what})")
+
+
+def add_release_flow(repo: Path, name: str, default: str, result: Result) -> None:
+    if name == ASHIGARU_REPO:
+        return  # it hosts router.yml and release-tag.yml, and releases by its own sweep
     workflows = sorted((repo / WORKFLOWS).glob("*.y*ml"))
     parsed = {path: yaml.safe_load(path.read_text()) or {} for path in workflows}
+    routed = any(
+        u.endswith(f"/router.yml@{ASHIGARU_TAG}")
+        for workflow in parsed.values()
+        if not reusable(workflow)
+        for u in router_calls(workflow)
+    )
+    if routed:
+        open_release(repo, default, result)
+    else:
+        tagged_release(repo, default, parsed, result)
+    paths = tag_paths(repo)
+    if len(paths) > 1:
+        result.hand.append(
+            f"release: {len(paths)} tag paths ({', '.join(paths)}); keep exactly one"
+        )
+
+
+def tagged_release(repo: Path, default: str, parsed: dict[Path, dict], result: Result) -> None:
+    """No router: examples/release.yml both opens the pull request and tags it."""
     if not any(release_calls(p) for p in parsed.values()):
         return  # publishes no image, so no cosign release-tag ruleset to satisfy
     for path, workflow in parsed.items():
         for job in (workflow.get("jobs") or {}).values():
             uses = str(job.get("uses", "")) if isinstance(job, dict) else ""
-            if uses.endswith("release-tag.yml@v5") and ASHIGARU_TAGS.match(uses):
+            if uses.endswith(f"/release-tag.yml@{ASHIGARU_TAG}") and ASHIGARU_TAGS.match(uses):
                 return  # already tags through the app
             if ASHIGARU_TAGS.match(uses):
                 result.hand.append(
                     f"release: {rel(repo, path)} tags through {uses}; move it to "
-                    f"release-tag.yml@v5 by hand rather than add a second flow"
+                    f"release-tag.yml@{ASHIGARU_TAG} by hand rather than add a second flow"
                 )
                 return
     if (repo / RELEASE).exists():
         result.hand.append(f"release: {RELEASE} exists and is not the Ashigaru flow; merge by hand")
         return
-    if not SAFE_BRANCH.fullmatch(default):
-        # It lands in a shell line that runs with the app token: never written as is.
-        result.hand.append(f"release: default branch {default!r} is not a plain name; add by hand")
-        return
-    text = RELEASE_TEMPLATE.read_text()
-    if default != "main":
-        text = text.replace("refs/heads/main", f"refs/heads/{default}")
-        text = text.replace("--base main", f"--base {default}")
-    (repo / RELEASE).write_text(text)
-    result.changed.append(f"release: {RELEASE} (Ashigaru app tags v*.*.*)")
+    write_template(repo, RELEASE_TEMPLATE, default, result, "Ashigaru app tags v*.*.*")
 
 
 # -------------------------------------------------------------------- run
@@ -440,7 +667,14 @@ def cutover(repo: Path, name: str, default: str, target: Target) -> Result:
     self_published(repo, result)
     if name in target.weekly:
         add_schedule(repo, name, result)
-    add_release_flow(repo, default, result)
+    recopy_caller(repo, target, result)  # before the release check, which counts the router
+    add_release_flow(repo, name, default, result)
+    result.pins_left = pins_left(repo, target)
+    if result.pins_left:
+        result.hand.append(
+            f"constitution: {len(result.pins_left)} call(s) at neither "
+            f"{target.constitution_ref} nor a major tag: " + ", ".join(result.pins_left)
+        )
     return result
 
 

@@ -102,8 +102,13 @@ consumer repo that floats its gates with `convert_repo.py` and then, with
 `scripts/cutover.py`, moves its constitution pins and `Inherits:`, drops
 Dependabot, renames what still says python-sdlc, signs every
 `container-release.yml` call, adds a weekly rebuild where #88 lists one
-missing, and adds the Ashigaru release flow
-([`examples/release.yml`](examples/release.yml)). The versions are arguments:
+missing, adds the Ashigaru release flow
+([`examples/release.yml`](examples/release.yml)), and replaces a pre-router
+`.github/workflows/ashigaru.yml` with crunchtools/ashigaru's
+`examples/ashigaru.yml`, read at the `v5` tag, whose `router.yml` call brings
+the release-tag job with it. A router repo's `release.yml` is then
+[`examples/release-open.yml`](examples/release-open.yml), which only opens the
+release pull request, so each repo has exactly one tag path. The versions are arguments:
 `--constitution-dir` (a constitution checkout at the target release, whose
 `fleet-bump.py` and validator it uses), `--constitution`, `--sdlc`,
 `--unbuilt-stacks`. A plan by default -- `--out DIR` writes each repo's diff and

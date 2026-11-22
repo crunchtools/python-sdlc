@@ -19,6 +19,10 @@ The wave is the last fleet-wide one, so what it does to a repo is pinned:
     violation is "invalid" and nothing is pushed, a refusal by the converter
     is hand work and the rest ships, and write_report() lists clean repos
     apart from those that need a human
+  - the Ashigaru caller is read at the tag's commit, through an annotated tag
+    too, and one that calls no router at the tag cannot run the wave; the
+    report names its commit, the repos that got it, and the open Dependabot
+    pin bumps it makes moot
   - the ledger makes a re-run skip what is done and retry what is not
   - the token goes in a header and nowhere else
 
@@ -29,6 +33,7 @@ Run inside the image, which has the interpreter, git and PyYAML it needs:
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import importlib.util
 import io
@@ -182,9 +187,17 @@ def search(*hits: str) -> tuple[int, dict]:
     }
 
 
+BUMPS = "/search/issues?q=org%3Acrunchtools%20is%3Apr%20is%3Aopen%20author%3Aapp/dependabot"
+
+
+def bumps(*titles: tuple[str, str]) -> tuple[int, dict]:
+    return 200, {"items": [{"html_url": url, "title": title} for url, title in titles]}
+
+
 def routes(earlier: tuple = (), ours: tuple = (), **repos: str) -> dict:
     q = "/search/issues?q=org%3Acrunchtools%20is%3Apr%20is%3Aopen%20head%3A"
     return {
+        BUMPS: bumps(),
         "/orgs/crunchtools/repos?type=all&per_page=100&page=1": listing(**repos),
         "/orgs/crunchtools/repos": (200, []),
         q + "chore/python-sdlc": search(*earlier),
@@ -732,6 +745,115 @@ check(
 check(
     "cutover: the pushed commit message names the constitution",
     "constitution 1.60.0" in git(bare, "log", "-1", "--format=%s", W.BRANCH),
+)
+
+# ---------------------------------------------------------- Ashigaru caller
+
+TAG = W.cutover.ASHIGARU_TAG
+CALLER = (
+    "name: Ashigaru\non:\n  issues:\njobs:\n  ashigaru:\n"
+    f"    uses: crunchtools/ashigaru/.github/workflows/router.yml@{TAG}\n"
+)
+ASH = "/repos/crunchtools/ashigaru"
+
+
+def caller_routes(text: str, annotated: bool = False) -> dict:
+    commit = {"type": "commit", "sha": "c0ffee"}
+    tag = {"type": "tag", "sha": "7a6"} if annotated else commit
+    return {
+        f"{ASH}/git/ref/tags/{TAG}": (200, {"object": tag}),
+        f"{ASH}/git/tags/7a6": (200, {"object": commit}),
+        f"{ASH}/contents/examples/ashigaru.yml?ref=c0ffee": (
+            200,
+            {"content": base64.b64encode(text.encode()).decode()},
+        ),
+    }
+
+
+for annotated in (False, True):
+    api = FakeApi(None, caller_routes(CALLER, annotated))
+    got_caller = W.ashigaru_caller(api)
+    check(
+        f"caller: read at the tag's commit ({'annotated' if annotated else 'lightweight'})",
+        got_caller == (CALLER, "c0ffee")
+        and any(path.endswith("?ref=c0ffee") for _, path, _ in api.calls)
+        and not any("ref=main" in path for _, path, _ in api.calls),
+        str(api.calls),
+    )
+try:
+    W.ashigaru_caller(FakeApi(None, caller_routes(CALLER.replace(f"@{TAG}", "@v4"))))
+    error = ""
+except W.ApiError as exc:
+    error = str(exc)
+check(
+    "caller: one that calls no router at the tag cannot run", "calls no router.yml" in error, error
+)
+try:
+    W.ashigaru_caller(FakeApi(None, {}))
+    error = ""
+except W.ApiError as exc:
+    error = str(exc)
+check("caller: a tag that cannot be read cannot run", "HTTP 404" in error, error)
+
+PRE_ROUTER = "name: Ashigaru\non:\n  issues:\njobs:\n" + "".join(
+    f"  {job}:\n    uses: crunchtools/ashigaru/.github/workflows/{job}.yml@v2\n"
+    for job in ("triage", "code", "fix")
+)
+ROUTED = W.cutover.Target(
+    "1.60.0", "v1.60.0", ashigaru_caller=CALLER, ashigaru_source="crunchtools/ashigaru@c0ffee"
+)
+base = Path(tempfile.mkdtemp())
+out_dir = Path(tempfile.mkdtemp())
+origin(base, "enrolled", {**CUTTABLE, ".github/workflows/ashigaru.yml": PRE_ROUTER})
+origin(base, "plain", CUTTABLE)
+bump_routes = routes(enrolled="main", plain="main")
+bump_routes[BUMPS] = bumps(
+    (
+        "https://github.com/crunchtools/enrolled/pull/9",
+        "chore(deps): bump crunchtools/ashigaru/.github/workflows/fix.yml from 2 to 3",
+    ),
+    (
+        "https://github.com/crunchtools/enrolled/pull/8",
+        "chore(deps): bump actions/checkout from 6 to 7",
+    ),
+)
+api = FakeApi(None, bump_routes)
+counts, ledger, _ = wave_run(
+    api, base, ["enrolled", "plain"], apply=False, target=ROUTED, sdlc="0.9.0", out=out_dir
+)
+wave = LAST[0]
+diff = (out_dir / "enrolled.diff").read_text()
+check(
+    "caller: the dry run re-copies the pre-router caller",
+    f"+    uses: crunchtools/ashigaru/.github/workflows/router.yml@{TAG}" in diff
+    and "-  triage:" in diff
+    and not (out_dir / "plain.diff").read_text().count("ashigaru.yml"),
+    diff[-600:],
+)
+check(
+    "caller: the other diffs are as without it; release.yml is the open-only one",
+    {c for c in wave.reports["plain"].changes if not c.startswith("release:")}
+    == {c for c in wave.reports["enrolled"].changes if not c.startswith(("ashigaru:", "release:"))}
+    and "ashigaru.yml" not in str(wave.reports["plain"].changes)
+    and "the router tags" in str(wave.reports["enrolled"].changes)
+    and "+# Release, open half" in diff,
+    str((wave.reports["plain"].changes, wave.reports["enrolled"].changes)),
+)
+check(
+    "caller: only the Ashigaru pin bumps are listed",
+    wave.pin_bumps == ["https://github.com/crunchtools/enrolled/pull/9"],
+    str(wave.pin_bumps),
+)
+W.write_report(wave, out_dir / "report.md", "")
+text = (out_dir / "report.md").read_text()
+check(
+    "report: the caller's source commit, the repos that got it, and the bumps to close",
+    "crunchtools/ashigaru@c0ffee" in text
+    and "**Ashigaru router caller re-copied** (1): enrolled" in text
+    and "## Dependabot Ashigaru pin bumps to close (1)" in text
+    and "**Constitution calls at neither the target ref nor a major tag** (0): none" in text
+    and "- https://github.com/crunchtools/enrolled/pull/9" in text,
+    text,
 )
 
 # ---------------------------------------------------------------------- Api

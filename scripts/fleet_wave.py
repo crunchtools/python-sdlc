@@ -4,7 +4,8 @@
 Every non-archived repo in the org the token can see (or the ones a --repos
 file names) is cloned at its default branch, floated by convert_repo.py, cut
 over by cutover.py -- the constitution pins, Dependabot's removal, the old
-name, `sign: true`, the weekly rebuild, the Ashigaru release flow -- and
+name, `sign: true`, the weekly rebuild, the Ashigaru release flow, the
+Ashigaru router caller -- and
 judged by the target constitution's own validator. Without --apply that is
 all: the plan goes to the ledger, and with --out each repo's diff and a report
 go to a directory, and nothing leaves this machine. With --apply each repo
@@ -37,6 +38,12 @@ Per repo, in order, and a repo that fails a step is skipped with the reason:
 The branch is one per repo and reused: a re-run force-pushes it and updates
 the pull request already open on it rather than opening a second.
 
+Before the first repo it reads crunchtools/ashigaru's examples/ashigaru.yml at
+the tag cutover.ASHIGARU_TAG names, never main, and the commit that tag points
+at goes in the report; and it lists the open Dependabot pull requests that bump
+one Ashigaru workflow pin, which the router caller makes moot, for whoever
+applies the wave to close.
+
 THE LEDGER is a TSV (repo, action, pr_url, reason), appended one row per repo
 as it finishes, so a run that dies leaves what it did. A re-run reads it and
 skips every repo already done (opened, updated, noop, or would-* for a dry
@@ -63,6 +70,8 @@ Usage: scripts/fleet_wave.py --constitution-dir DIR --constitution X.Y.Z --sdlc 
 from __future__ import annotations
 
 import argparse
+import base64
+import dataclasses
 import http.client
 import importlib.util
 import json
@@ -126,6 +135,9 @@ UNANSWERED = {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN, HTTPStatus.TOO_MANY
 
 DONE = {"opened", "updated", "noop", "would-open", "would-update"}
 INVALID = "invalid"  # the target validator fails the result: not pushed
+ASHIGARU = "ashigaru"  # the repo examples/ashigaru.yml is read from
+# A Dependabot title bumping an Ashigaru reusable workflow pin.
+PIN_BUMP = re.compile(r"\bcrunchtools/ashigaru/\.github/workflows/[\w-]+\.ya?ml\b", re.I)
 LEDGER_HEADER = ("repo", "action", "pr_url", "reason")
 
 COMMIT_MESSAGE = """\
@@ -170,6 +182,13 @@ SBOM and provenance, before any tag moves.
 `examples/release.yml`): run it with a version to have the Ashigaru app open \
 the release pull request; when it merges, the app tags `vX.Y.Z`. That is now \
 the only way a release tag is made.
+- **ashigaru**: `.github/workflows/ashigaru.yml`, which called Ashigaru's \
+triage, code and fix one by one, is crunchtools/ashigaru's \
+`examples/ashigaru.yml`: one call to `router.yml` at the major tag, which \
+brings the release-tag job too. Dependabot's one-pin bumps of the old file \
+are moot. With the router tagging, `release.yml` is crunchtools/sdlc's \
+`examples/release-open.yml`: the same dispatch opens the release pull request, \
+and no second job tags it.
 
 ## How to roll back
 
@@ -275,6 +294,42 @@ def open_prs_from(api: Api, branch: str) -> dict[str, dict]:
     return found
 
 
+def ashigaru_caller(api: Api) -> tuple[str, str]:
+    """(examples/ashigaru.yml, the commit it was read at), at cutover.ASHIGARU_TAG."""
+    repo, tag = f"/repos/{ORG}/{ASHIGARU}", cutover.ASHIGARU_TAG
+    status, ref = api.call("GET", f"{repo}/git/ref/tags/{tag}")
+    if status != HTTPStatus.OK or not isinstance(ref, dict):
+        raise ApiError(f"reading {ORG}/{ASHIGARU}'s tag {tag}: HTTP {status}")
+    obj = ref["object"]
+    if obj["type"] == "tag":  # annotated: the tag object names the commit
+        status, tagged = api.call("GET", f"{repo}/git/tags/{obj['sha']}")
+        if status != HTTPStatus.OK or not isinstance(tagged, dict):
+            raise ApiError(f"reading {ORG}/{ASHIGARU}'s tag {tag}: HTTP {status}")
+        obj = tagged["object"]
+    sha = str(obj["sha"])
+    status, content = api.call("GET", f"{repo}/contents/examples/ashigaru.yml?ref={sha}")
+    if status != HTTPStatus.OK or not isinstance(content, dict) or "content" not in content:
+        raise ApiError(f"reading examples/ashigaru.yml at {ORG}/{ASHIGARU}@{sha}: HTTP {status}")
+    text = base64.b64decode(content["content"]).decode()
+    if not any(u.endswith(f"@{tag}") for u in cutover.router_calls(cutover.yaml.safe_load(text))):
+        raise ApiError(f"examples/ashigaru.yml at {ORG}/{ASHIGARU}@{sha} calls no router.yml@{tag}")
+    return text, sha
+
+
+def pin_bumps(api: Api) -> list[str]:
+    """Open Dependabot pull requests bumping an Ashigaru workflow pin: their URLs, sorted."""
+    query = urllib.parse.quote(f'org:{ORG} is:pr is:open author:app/dependabot "{ORG}/{ASHIGARU}"')
+    found: list[str] = []
+    for page in range(1, 11):
+        status, hits = api.call("GET", f"/search/issues?q={query}&per_page={PAGE}&page={page}")
+        if status != HTTPStatus.OK or not isinstance(hits, dict):
+            raise ApiError(f"searching for Dependabot Ashigaru pin bumps: HTTP {status}")
+        found += [i["html_url"] for i in hits["items"] if PIN_BUMP.search(i.get("title", ""))]
+        if len(hits["items"]) < PAGE:
+            break
+    return sorted(found)
+
+
 def sdlc_image(api: Api, path: str) -> str | None:
     """The SDLC_IMAGE variable at `path`, or None when it is unset."""
     status, variable = api.call("GET", f"{path}/actions/variables/SDLC_IMAGE")
@@ -316,6 +371,7 @@ class Wave:
     converter_args: tuple[str, ...] = ()  # e.g. --unbuilt-stacks
     out: Path | None = None  # where a dry run writes each repo's diff and the report
     reports: dict[str, Report] = field(default_factory=dict)
+    pin_bumps: list[str] = field(default_factory=list)  # Dependabot PRs the router makes moot
     outcomes: dict[str, tuple[str, str, str]] = field(default_factory=dict)  # this run's rows
 
 
@@ -326,6 +382,9 @@ class Report:
     changes: list[str] = field(default_factory=list)
     hand: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)  # the target validator's verdict
+    pins_left: list[str] = field(
+        default_factory=list
+    )  # constitution calls off the ref and major tags
 
 
 def git(cwd: Path, *args: str, stdin: str | None = None) -> str:
@@ -422,6 +481,7 @@ def convert(wave: Wave, repo: str, default: str, checkout: Path) -> list[str]:
         result = cutover.cutover(checkout, repo, default, wave.target)
         report.changes += result.changed
         report.hand += result.hand
+        report.pins_left = result.pins_left
     changed = verify(wave, repo, default, checkout, floated=floated)
     if not changed:
         raise LeftAloneError("noop", "already cut over" if wave.target else "already floating")
@@ -630,10 +690,12 @@ def survey(api: Api, apply: bool) -> Wave:
         for repo, pr in open_prs_from(api, branch).items()
     }
     wave.ours = open_prs_from(api, BRANCH)
+    wave.pin_bumps = pin_bumps(api)
     if api.authenticated:
         wave.org_image = sdlc_image(api, f"/orgs/{ORG}")
     else:
         wave.notes.append("no API token: SDLC_IMAGE (organization and repository) not checked")
+        wave.notes.append("no API token: Dependabot pin bumps listed in public repos only")
     return wave
 
 
@@ -676,7 +738,7 @@ REPORT_HEAD = """\
 
 Target: constitution `{constitution_ref}` (Inherits v{constitution}), sdlc {sdlc} \
 through the organization variable `SDLC_IMAGE`, unbuilt stacks `{unbuilt}`.
-
+{caller}
 {summary}
 
 """
@@ -687,16 +749,34 @@ def write_report(wave: Wave, path: Path, unbuilt: str) -> None:
     clean = [
         r for r, (action, _, _) in wave.outcomes.items() if action in DONE and not hand(wave, r)
     ]
+    recopied = [
+        r
+        for r in wave.outcomes
+        if any(c.startswith("ashigaru:") for c in wave.reports.get(r, Report()).changes)
+    ]
+    off_ref = [r for r in wave.outcomes if wave.reports.get(r, Report()).pins_left]
     rows = [
         f"- **Clean** ({len(clean)}): {', '.join(clean) or 'none'}",
         f"- **Hand work** ({len(wave.outcomes) - len(clean)}): "
         + (", ".join(r for r in wave.outcomes if r not in clean) or "none"),
+        f"- **Ashigaru router caller re-copied** ({len(recopied)}): "
+        + (", ".join(recopied) or "none"),
+        "- **Constitution calls at neither the target ref nor a major tag** "
+        f"({sum(len(wave.reports.get(r, Report()).pins_left) for r in wave.outcomes)}): "
+        + (", ".join(off_ref) or "none"),
     ]
+    source = wave.target.ashigaru_source if wave.target else ""
+    caller = (
+        f"Ashigaru caller: `examples/ashigaru.yml` at `{cutover.ASHIGARU_TAG}`, {source}.\n"
+        if source
+        else ""
+    )
     out = [
         REPORT_HEAD.format(
             mode="(applied)" if wave.apply else "(dry run)",
             unbuilt=unbuilt or "none",
             summary="\n".join(rows),
+            caller=caller,
             **versions(wave),
         )
     ]
@@ -709,6 +789,10 @@ def write_report(wave: Wave, path: Path, unbuilt: str) -> None:
         out += [f"- HAND {h}" for h in report.hand]
         out += [f"- INVALID {v}" for v in report.invalid]
         out.append("")
+    out.append(f"## Dependabot Ashigaru pin bumps to close ({len(wave.pin_bumps)})\n")
+    out.append("Moot once the router caller lands: close them at cutover.\n")
+    out += [f"- {url}" for url in wave.pin_bumps] or ["- none"]
+    out.append("")
     path.write_text("\n".join(out))
 
 
@@ -821,6 +905,10 @@ def main() -> int:
         args.out.mkdir(parents=True, exist_ok=True)
     api = Api(token)
     try:
+        caller, sha = ashigaru_caller(api)
+        target = dataclasses.replace(
+            target, ashigaru_caller=caller, ashigaru_source=f"{ORG}/{ASHIGARU}@{sha}"
+        )
         available = org_repos(api)
         names = wanted(args.repos) if args.repos else sorted(available)
         wave = survey(api, args.apply)
