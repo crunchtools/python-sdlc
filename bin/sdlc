@@ -249,8 +249,68 @@ budget() {
   printf '%s' "$_half"
 }
 
+_cgroup_memory_ceiling() {      # memory.max from leaf to root, in MB; 0 for none
+  _dir=$(awk -F: '$2=="" {print $3; exit}' /proc/self/cgroup 2>/dev/null) || _dir=
+  # The same namespace-root rule, and the same bounded walk, as the CPU ceiling.
+  case "$_dir" in /|/..|/../*|*/../*|*/..) _dir= ;; esac
+  _path="/sys/fs/cgroup${_dir%/}"
+  _best=0
+  while :; do
+    if [ -r "$_path/memory.max" ]; then
+      _m=$(cat "$_path/memory.max" 2>/dev/null) || _m=max
+      case "$_m" in
+        ''|*[!0-9]*) ;;
+        *) _m=$(( _m / 1048576 ))
+           if [ "$_best" -eq 0 ] || [ "$_m" -lt "$_best" ]; then _best=$_m; fi ;;
+      esac
+    fi
+    case "$_path" in
+      /sys/fs/cgroup/*) _path=$(dirname "$_path") ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$_best"
+}
+
+# What the gate's containers can really have between them, in MB.
+#
+# Not what `--memory` says. Rootless podman drops `--memory` without a word when
+# the memory controller is not delegated, and an agent seat -- a container
+# running rootless podman inside it -- is exactly that. So every lane was "given"
+# 8g on a seat whose cgroup holds 4g for everything, CodeQL sized its heap from
+# that 8g, and beside an image build the kernel killed it: exit 137, COULD NOT
+# RUN (a989, Exedore Max). The ceiling the kernel enforces is the seat's
+# memory.max, so that is what is read, smallest from leaf to root.
+#
+# A quarter of a cgroup ceiling, never under 512 MB, is left for what else lives
+# in it: on a seat that is the agent driving this run. MemTotal is taken as it
+# is -- the kernel's own reservation is already off it, and a dedicated runner
+# has nothing else to keep.
+memory_available() {
+  _total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo 2>/dev/null) || _total=
+  case "$_total" in ''|*[!0-9]*) _total=0 ;; esac
+  _cg=$(_cgroup_memory_ceiling)
+  if [ "${_cg:-0}" -gt 0 ] 2>/dev/null && { [ "$_total" -eq 0 ] || [ "$_cg" -lt "$_total" ]; }; then
+    _keep=$(( _cg / 4 ))
+    [ "$_keep" -lt 512 ] && _keep=512
+    _total=$(( _cg - _keep ))
+    [ "$_total" -lt 1 ] && _total=1
+  fi
+  printf '%s' "$_total"
+}
+
+_size_mb() {                    # 8g | 4096m | 4194304k | bytes -> MB
+  case "$1" in
+    *[gG]) printf '%s' $(( ${1%?} * 1024 )) ;;
+    *[mM]) printf '%s' "${1%?}" ;;
+    *[kK]) printf '%s' $(( ${1%?} / 1024 )) ;;
+    *)     printf '%s' $(( $1 / 1048576 )) ;;
+  esac
+}
+
 GATE_CPUS=${SDLC_CPUS:-$(budget)}
 GATE_MEMORY=${SDLC_MEMORY:-8g}
+MEM_AVAILABLE=$(memory_available)
 
 # Validated BEFORE any arithmetic uses them, because `$(( ))` on a non-number
 # aborts the script with a shell error rather than our exit 2 (gates.sh:122-134).
@@ -258,8 +318,18 @@ case "$GATE_CPUS" in ''|*[!0-9]*) die "SDLC_CPUS must be a whole number" ;; esac
 { [ "$GATE_CPUS" -ge 1 ] && [ "$GATE_CPUS" -le 1024 ]; } \
   || die "SDLC_CPUS must be between 1 and 1024"
 case "$GATE_MEMORY" in
-  '' | *[!0-9kKmMgG]* | [!0-9]*) die "SDLC_MEMORY must be a size like 8g or 4096m" ;;
+  # A unit only at the end: `8g8m` is not a size, and is now also arithmetic.
+  '' | *[!0-9kKmMgG]* | [!0-9]* | *[kKmMgG]?*)
+    die "SDLC_MEMORY must be a size like 8g or 4096m" ;;
 esac
+GATE_MEMORY_MB=$(_size_mb "$GATE_MEMORY")
+# The default is only a default: on a machine with less, it is what there is.
+# A budget someone SET is theirs, and is left alone.
+if [ -z "${SDLC_MEMORY:-}" ] && [ "${MEM_AVAILABLE:-0}" -gt 0 ] \
+   && [ "$MEM_AVAILABLE" -lt "$GATE_MEMORY_MB" ]; then
+  GATE_MEMORY_MB=$MEM_AVAILABLE
+  GATE_MEMORY=${MEM_AVAILABLE}m
+fi
 
 CACHE_VOLUME=${SDLC_CACHE_VOLUME:-crunchtools-hook-cache}
 
@@ -1014,9 +1084,10 @@ _close_check() {       # the open check's block is complete
   fi
 }
 
-run_lane() {           # lane-index steps-file lane-cpus -> the lane's worst
+run_lane() {           # lane-index steps-file lane-cpus [lane-memory] -> the lane's worst
   _k=$1
   GATE_CPUS=$3
+  GATE_MEMORY=${4:-$GATE_MEMORY}
   _worst=0
   _failed=
   _cur=
@@ -1185,11 +1256,14 @@ run_lanes() {          # the plan -> the worst status of every lane
   [ "$_oncpu" -lt 1 ] && _oncpu=1
   _lane_cpus=$(( GATE_CPUS / _oncpu ))
   [ "$_lane_cpus" -lt 1 ] && _lane_cpus=1
+  # Memory is divided the same way, but never floored past what there is:
+  # run_plan only sends a plan here when every lane's share is worth running.
+  _lane_mem=$(lane_memory "$_oncpu")
 
   # Once, here, rather than from whichever lane gets there first.
   need_volume "$CACHE_VOLUME"
 
-  printf '%s: %s lanes at the same time, %s CPU(s) each\n' "$ME" "$NLANES" "$_lane_cpus"
+  printf '%s: %s lanes at the same time, %s CPU(s) and %sm each\n' "$ME" "$NLANES" "$_lane_cpus" "$_lane_mem"
   _k=0
   _pids=
   while IFS= read -r _lane; do
@@ -1202,7 +1276,7 @@ run_lanes() {          # the plan -> the worst status of every lane
     printf '%s:   lane %s: %s\n' "$ME" "$_lane" \
       "$(cut -f2 "$OUT/steps.$_k" | awk '!seen[$0]++' | tr '\n' ' ')"
     if lane_has_container "$1" "$_lane"; then _cpus=$_lane_cpus; else _cpus=1; fi
-    run_lane "$_k" "$OUT/steps.$_k" "$_cpus" &
+    run_lane "$_k" "$OUT/steps.$_k" "$_cpus" "${_lane_mem}m" &
     _pids="$_pids $!"
   done < "$OUT/lanes"
 
@@ -1266,6 +1340,23 @@ run_lanes() {          # the plan -> the worst status of every lane
   return "$_worst"
 }
 
+# The smallest share of memory worth a lane, in MB. CodeQL is the check that
+# sets it: the image hands its evaluator three quarters of SDLC_MEMORY and CodeQL
+# rounds anything under 2048 up to 2048, so below 2048 / (3/4) the share is a
+# fiction the evaluator ignores. 3072 is that with room for the JVM around it.
+# Under it, the lanes take turns: slower, and a run that finishes.
+LANE_MEMORY_MIN=3072
+
+lane_memory() {        # lanes-on-cpu -> MB per lane, or 0 when they must take turns
+  _lm=$(( ${MEM_AVAILABLE:-0} / $1 ))
+  [ "${MEM_AVAILABLE:-0}" -gt 0 ] || _lm=$GATE_MEMORY_MB    # unknown: as before
+  [ "$_lm" -gt "$GATE_MEMORY_MB" ] && _lm=$GATE_MEMORY_MB
+  # A budget someone set below the minimum is the floor they asked for.
+  _floor=$LANE_MEMORY_MIN
+  [ "$GATE_MEMORY_MB" -lt "$_floor" ] && _floor=$GATE_MEMORY_MB
+  if [ "$_lm" -lt "$_floor" ]; then printf 0; else printf '%s' "$_lm"; fi
+}
+
 run_plan() {           # commit | push | ci | <check>
   # The image asks this to decide whether CodeQL may defer to CI.
   SDLC_TIER=$1
@@ -1294,6 +1385,12 @@ run_plan() {           # commit | push | ci | <check>
     run_serial "$_plan" || _plan_rc=$?
   elif [ "${_oncpu:-0}" -eq 1 ]; then
     run_split "$_plan" || _plan_rc=$?
+  elif [ "$(lane_memory "$_oncpu")" -eq 0 ]; then
+    # Two containers that cannot both fit are not faster side by side: the
+    # kernel kills one, and a killed CodeQL is a gate that could not run.
+    printf '%s: %s lanes do not fit in the %sm this machine has; running them in turn\n' \
+      "$ME" "$_oncpu" "${MEM_AVAILABLE:-0}"
+    run_serial "$_plan" || _plan_rc=$?
   else
     run_lanes "$_plan" || _plan_rc=$?
   fi

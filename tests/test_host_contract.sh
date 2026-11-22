@@ -338,7 +338,7 @@ else
   bad "up-systemd-args exited $rc: $(tail -2 "$RUN/out")"
 fi
 rc=0
-PATH="$SHIM" SDLC_CPUS=4 sh bin/sdlc lanes-skip > "$RUN/out" 2>&1 || rc=$?
+PATH="$SHIM" SDLC_CPUS=4 SDLC_MEMORY=1g sh bin/sdlc lanes-skip > "$RUN/out" 2>&1 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q '== up-systemd-ep SKIPPED, not judged' "$RUN/out" \
    && grep -q '== b passed' "$RUN/out"; then
   ok "in a lane, the skip is printed as SKIPPED and the run still exits 0"
@@ -372,7 +372,7 @@ else
   bad "up-adv-podman exited $rc, want 2"
 fi
 rc=0
-PATH="$SHIM" SDLC_CPUS=4 sh bin/sdlc lanes-adv > "$RUN/out" 2>&1 || rc=$?
+PATH="$SHIM" SDLC_CPUS=4 SDLC_MEMORY=1g sh bin/sdlc lanes-adv > "$RUN/out" 2>&1 || rc=$?
 if [ "$rc" -eq 0 ] && grep -q '== up-adv-dies FOUND SOMETHING, ADVISORY' "$RUN/out" \
    && grep -q '== b passed' "$RUN/out"; then
   ok "in a lane, an advisory finding is printed as ADVISORY and the run exits 0"
@@ -506,6 +506,33 @@ else
   printf 'skip taskset unavailable or too few CPUs\n'
 fi
 
+printf '\n== the memory budget\n\n'
+
+# An agent seat runs rootless podman inside a container, where `--memory` is
+# dropped without a word. Every lane was "given" 8g in a 4g seat, CodeQL sized
+# its heap from that, and beside an image build it was killed (a989). Pinned
+# here as arithmetic, because no test can choose the cgroup it runs in.
+MEMSH="$RUN/memory.sh"
+{
+  sed -n '/^_size_mb()/,/^}$/p' bin/sdlc
+  sed -n '/^LANE_MEMORY_MIN=/p' bin/sdlc
+  sed -n '/^lane_memory()/,/^}$/p' bin/sdlc
+  # shellcheck disable=SC2016  # source for the generated script, not expanded here
+  echo 'GATE_MEMORY_MB=$(_size_mb "$1"); MEM_AVAILABLE=$2; lane_memory "$3"'
+} > "$MEMSH"
+
+mem() {                # expected gate-memory available lanes description
+  _got=$(sh "$MEMSH" "$2" "$3" "$4")
+  if [ "$_got" = "$1" ]; then ok "$5 ($_got)"; else bad "$5: got $_got, want $1"; fi
+}
+mem 0    8g 3072  2 "a 4g seat runs two CPU lanes in turn, not side by side"
+mem 3072 8g 3072  1 "one lane on a 4g seat gets what the seat has, not 8g"
+mem 8192 8g 16384 2 "a 16g runner still gives two lanes 8g each"
+mem 6144 8g 12288 2 "a smaller machine divides what it has between the lanes"
+mem 1024 1g 3072  2 "a budget set below the minimum is the floor asked for"
+mem 8192 8g 0     2 "memory that cannot be read changes nothing"
+mem 4096 4096m 30000 3 "megabytes are read as megabytes"
+
 printf '\n== the lanes\n\n'
 
 # Steps of one lane run in sequence; lanes run at the same time. What has to
@@ -516,7 +543,9 @@ printf '\n== the lanes\n\n'
 lanes() {              # target [stall-seconds] -> exit status, output in $RUN/out
   rm -f "$SHIM/must-not-run"
   _rc=0
-  PATH="$SHIM" SDLC_CPUS=4 SDLC_LANE_STALL=${2:-3600} \
+  # 1g, so two lanes fit on any machine this runs on -- an agent seat included.
+  # Whether they fit at all is decided by the memory test, not by the host.
+  PATH="$SHIM" SDLC_CPUS=4 SDLC_MEMORY=1g SDLC_LANE_STALL=${2:-3600} \
     sh bin/sdlc "$1" > "$RUN/out" 2>&1 || _rc=$?
   return "$_rc"
 }
@@ -681,6 +710,14 @@ else
   bad "the lanes did not divide the CPU budget"
   grep -o -- '--cpus [0-9]*\|--cpu-quota [0-9]*' "$RUN/podman.log" | sort -u \
     | sed 's/^/       /'
+fi
+# And each lane's container is told its share of memory, not the whole of it.
+# (The plan itself is asked for at the whole budget, before there are lanes.)
+if grep -q -- '--memory 1024m' "$RUN/podman.log"; then
+  ok "each lane's containers get the lane's memory"
+else
+  bad "the lanes did not pass their memory share to podman"
+  grep -o -- '--memory [0-9a-z]*' "$RUN/podman.log" | sort -u | sed 's/^/       /'
 fi
 
 # A container that succeeds must report success, whatever the caller's last
