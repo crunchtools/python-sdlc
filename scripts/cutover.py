@@ -80,6 +80,8 @@ CONFIGS = (Path("pyproject.toml"), Path("sdlc.toml"))
 CONSTITUTION_PIN = re.compile(
     r"(crunchtools/constitution/\.github/workflows/[\w-]+\.ya?ml@)v\d+\.\d+\.\d+(?![\w-]|\.[\w-])"
 )
+# Any reusable-workflow call into the constitution, at whatever ref: what is left after the move.
+CONSTITUTION_CALL = re.compile(r"crunchtools/constitution/\.github/workflows/[\w.-]+@([\w./-]+)")
 INHERITS = re.compile(r"^(>\s*\*\*Inherits:\*\*.*?)v\d+\.\d+\.\d+", re.M)
 HOOK_REV = re.compile(
     r"(repo:\s*https://github\.com/crunchtools/constitution/?\s*\n\s*rev:\s*)v\d+\.\d+\.\d+"
@@ -128,6 +130,7 @@ class Result:
 
     changed: list[str] = field(default_factory=list)  # one line per change, for the report
     hand: list[str] = field(default_factory=list)  # what it would not guess at
+    pins_left: list[str] = field(default_factory=list)  # constitution calls not at the target ref
 
 
 def load(path: Path, name: str) -> ModuleType:
@@ -217,6 +220,17 @@ def move_constitution(repo: Path, target: Target, result: Result) -> None:
         if new != text:
             path.write_text(new)
             result.changed.append(f"constitution: {target.constitution_ref} in {rel(repo, path)}")
+
+
+def pins_left(repo: Path, target: Target) -> list[str]:
+    """Each constitution workflow call at neither the target ref nor a major tag."""
+    left = []
+    for path in sorted((repo / WORKFLOWS).glob("*.y*ml")):
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            for ref in CONSTITUTION_CALL.findall(line.split("#", 1)[0]):
+                if ref != target.constitution_ref and not re.fullmatch(r"v\d+", ref):
+                    left.append(f"{rel(repo, path)}:{n} @{ref}")
+    return left
 
 
 def drop_dependabot(repo: Path, target: Target, result: Result) -> None:
@@ -648,6 +662,12 @@ def cutover(repo: Path, name: str, default: str, target: Target) -> Result:
         add_schedule(repo, name, result)
     recopy_caller(repo, target, result)  # before the release check, which counts the router
     add_release_flow(repo, name, default, result)
+    result.pins_left = pins_left(repo, target)
+    if result.pins_left:
+        result.hand.append(
+            f"constitution: {len(result.pins_left)} call(s) left off {target.constitution_ref}: "
+            + ", ".join(result.pins_left)
+        )
     return result
 
 

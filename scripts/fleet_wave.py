@@ -382,6 +382,7 @@ class Report:
     changes: list[str] = field(default_factory=list)
     hand: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)  # the target validator's verdict
+    pins_left: list[str] = field(default_factory=list)  # constitution calls off the target ref
 
 
 def git(cwd: Path, *args: str, stdin: str | None = None) -> str:
@@ -475,6 +476,7 @@ def convert(wave: Wave, repo: str, default: str, checkout: Path) -> list[str]:
         result = cutover.cutover(checkout, repo, default, wave.target)
         report.changes += result.changed
         report.hand += result.hand
+        report.pins_left = result.pins_left
     changed = verify(wave, repo, default, checkout, floated=floated)
     if not changed:
         raise LeftAloneError("noop", "already cut over" if wave.target else "already floating")
@@ -747,12 +749,16 @@ def write_report(wave: Wave, path: Path, unbuilt: str) -> None:
         for r in wave.outcomes
         if any(c.startswith("ashigaru:") for c in wave.reports.get(r, Report()).changes)
     ]
+    off_ref = [r for r in wave.outcomes if wave.reports.get(r, Report()).pins_left]
     rows = [
         f"- **Clean** ({len(clean)}): {', '.join(clean) or 'none'}",
         f"- **Hand work** ({len(wave.outcomes) - len(clean)}): "
         + (", ".join(r for r in wave.outcomes if r not in clean) or "none"),
         f"- **Ashigaru router caller re-copied** ({len(recopied)}): "
         + (", ".join(recopied) or "none"),
+        "- **Constitution calls left off the target ref** "
+        f"({sum(len(wave.reports.get(r, Report()).pins_left) for r in wave.outcomes)}): "
+        + (", ".join(off_ref) or "none"),
     ]
     source = wave.target.ashigaru_source if wave.target else ""
     caller = (

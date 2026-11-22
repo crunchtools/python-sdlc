@@ -59,7 +59,10 @@ All notable changes to this project are documented here, following
   loses its tag job and `pull_request_target`, a workflow that is only a tag
   job is removed, and a repo still left with two tag paths is hand work. A
   router caller already at `v5`, a repo with no `ashigaru.yml`, and the
-  ashigaru repo itself are left alone. `report.md` names the ashigaru
+  ashigaru repo itself are left alone.
+  `report.md` also counts the constitution workflow calls, in any workflow,
+  left at neither the target ref nor a major tag after the cutover, and each
+  is hand work. `report.md` names the ashigaru
   commit the caller came from, the repos that got it, and the open Dependabot
   pull requests that bump one Ashigaru pin, to close at cutover.
 - `scripts/convert_repo.py --unbuilt-stacks LIST`: the stacks the image has no

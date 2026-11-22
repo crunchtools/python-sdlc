@@ -6,6 +6,8 @@ change is pinned on its own fixture:
 
   - the constitution pins, `Inherits:` and the hook `rev:` move together, and
     a `@v1` major-tag call is left alone
+  - every constitution call in every workflow ends at the target ref or a
+    major tag; one at another ref (a branch, a sha) is counted and hand work
   - a bare `python-sdlc` becomes `sdlc` in a `downstream:` input and a dispatch
     loop, and `python-sdlc-extras` is not touched
   - every container-release.yml call signs: `sign: true` (added, or flipped
@@ -770,6 +772,31 @@ check(
     all(yaml.safe_load(p.read_text()) for p in (repo / ".github/workflows").glob("*.yml")),
 )
 
+
+# ------------------------------------------------------ constitution leftovers
+
+SPREAD = {
+    f".github/workflows/{name}.yml": release_job(QUAY).replace("@v1.59.0", f"@{ref}")
+    for name, ref in (("container-base", "v1.51.0"), ("container-dev", "v1.46.0"), ("ci", "v1"))
+}
+repo, result = run(SPREAD, label="pins, every workflow")
+check(
+    "pins: every exact constitution call in every workflow moves, none left",
+    not result.pins_left
+    and all(f"container-release.yml@{REF}" in read(repo, p) for p in SPREAD if "ci" not in p)
+    and not any(h.startswith("constitution:") for h in result.hand),
+    str((result.pins_left, result.hand)),
+)
+repo, result = run(
+    {".github/workflows/odd.yml": release_job(QUAY).replace("@v1.59.0", "@main  # v1.59.0")},
+    label="pins, a branch",
+)
+check(
+    "pins: a call at a branch is counted and hand work, and a comment is not a call",
+    result.pins_left == [".github/workflows/odd.yml:8 @main"]
+    and any(h.startswith("constitution: 1 call(s) left off") for h in result.hand),
+    str((result.pins_left, result.hand)),
+)
 
 # --------------------------------------------------------- Ashigaru caller
 
