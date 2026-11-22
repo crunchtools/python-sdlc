@@ -558,9 +558,10 @@ def with_runner(template: str, covered: list[Path], notes: list[str]) -> str:
         jobs = jobs_of(parse(path.name, text))
         job_id = next((k for k, j in jobs.items() if is_sdlc_job(j)), None)
         runs_on = None if job_id is None else jobs[job_id].get("runs-on")
-        if runs_on is not None:
-            found = runner_block(text, str(job_id))
-            runners[json.dumps(runs_on, sort_keys=True)] = (runs_on, found)
+        key = json.dumps(runs_on, sort_keys=True)
+        if runs_on is not None and runners.get(key, (None, None))[1] is None:
+            # Two files on one runner: the block either can lift serves.
+            runners[key] = (runs_on, runner_block(text, str(job_id)))
 
     def fallback(why: str) -> str:
         notes.append(f"runner: ci.yml takes {TEMPLATE_RUNNER}, {why}")
@@ -581,7 +582,10 @@ def with_runner(template: str, covered: list[Path], notes: list[str]) -> str:
     shift = 4 - indent  # the template's job keys sit at four spaces
     moved = [(" " * shift + x if shift >= 0 else x[-shift:]) if x.strip() else x for x in block]
     new = template.replace(f"    runs-on: {TEMPLATE_RUNNER}\n", "".join(moved), 1)
-    got = jobs_of(yaml.safe_load(new)).get("sdlc", {}).get("runs-on")
+    try:  # an alias whose anchor stayed behind does not load at all
+        got = jobs_of(yaml.safe_load(new)).get("sdlc", {}).get("runs-on")
+    except yaml.YAMLError:
+        got = None
     return new if got == want else fallback("the `sdlc ci` job's runs-on did not read back")
 
 

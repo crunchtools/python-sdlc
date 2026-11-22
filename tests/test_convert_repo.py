@@ -23,6 +23,7 @@ Run inside the image, which has the interpreter and PyYAML the script needs:
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import subprocess
 import sys
@@ -1246,6 +1247,69 @@ for context, runner in (
         f"runner: ci.yml takes ubuntu-latest, the `sdlc ci` job's runs-on reads `{context}`"
         in done.stderr,
         done.stderr,
+    )
+
+
+# A runner the converter cannot lift out (a flow-style job) or that does not
+# load once lifted (an alias whose anchor stays behind) keeps the stub's own.
+for label, old_ci, why in (
+    (
+        "a flow-style job",
+        CI.replace(
+            CI[CI.index("  sdlc:\n") : CI.index("  gourmand:\n")],
+            "  sdlc: {name: sdlc ci, runs-on: self-hosted, steps: [{run: .sdlc/bin/sdlc ci}]}\n\n",
+            1,
+        ),
+        "could not be lifted out",
+    ),
+    (
+        "an alias",
+        CI.replace("name: sdlc ci\n", "name: &runner sdlc ci\n", 1).replace(
+            "runs-on: ubuntu-latest", "runs-on: *runner", 1
+        ),
+        "did not read back",
+    ),
+):
+    repo = make_repo(
+        {
+            ".pre-commit-config.yaml": PINNED_HOOKS,
+            ".specify/memory/constitution.md": CONSTITUTION,
+            ".github/workflows/ci.yml": old_ci,
+        }
+    )
+    done = convert(repo, apply=True)
+    after = snapshot(repo)
+    check(f"runner: {label}: --apply exits 0", done.returncode == 0, done.stderr)
+    check(
+        f"runner: {label}: ci.yml is the stub",
+        after.get(".github/workflows/ci.yml") == CI,
+        after.get(".github/workflows/ci.yml", ""),
+    )
+    check(f"runner: {label}: the report says why", why in done.stderr, done.stderr)
+
+# Two files on one runner, only one of them liftable: carried whatever the order.
+FLOW_FLEET = FLEET_CI.replace(
+    FLEET_CI[FLEET_CI.index("  sdlc:\n") : FLEET_CI.index("  gourmand:\n")],
+    "  sdlc: {name: sdlc ci, runs-on: "
+    + json.dumps(yaml.safe_load(FLEET_CI)["jobs"]["sdlc"]["runs-on"])
+    + ", steps: [{run: .sdlc/bin/sdlc ci}]}\n\n",
+    1,
+)
+for first, second in (("a.yml", "b.yml"), ("b.yml", "a.yml")):
+    repo = make_repo(
+        {
+            ".pre-commit-config.yaml": PINNED_HOOKS,
+            ".specify/memory/constitution.md": CONSTITUTION,
+            f".github/workflows/{first}": FLOW_FLEET,
+            f".github/workflows/{second}": FLEET_CI,
+        }
+    )
+    done = convert(repo, apply=True)
+    ci = snapshot(repo).get(".github/workflows/ci.yml", "")
+    check(
+        f"runner: one runner, the liftable file is {second}: it is carried",
+        "Same-repo PRs run on our cached" in ci and "runner:" not in done.stderr,
+        done.stderr + ci,
     )
 
 # The stub's own runner, or none at all, is no move: nothing to report.
