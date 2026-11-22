@@ -20,6 +20,7 @@ ARG GATEHOUSE_VERSION=0.31.0
 ARG UV_VERSION=0.13.7
 ARG HADOLINT_VERSION=2.14.0
 ARG GRYPE_VERSION=0.121.0
+ARG LYCHEE_VERSION=0.24.2
 
 FROM quay.io/crunchtools/gourmand:${GOURMAND_VERSION} AS gourmand
 FROM quay.io/crunchtools/gatehouse:${GATEHOUSE_VERSION} AS gatehouse
@@ -30,6 +31,8 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 # which release it is, and the contract test asserts the two agree.
 FROM ghcr.io/hadolint/hadolint:v${HADOLINT_VERSION}@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e AS hadolint
 FROM docker.io/anchore/grype:v${GRYPE_VERSION}@sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea AS grype
+# The docs stack's link checker, a static Rust binary, the same way.
+FROM docker.io/lycheeverse/lychee:${LYCHEE_VERSION}@sha256:e2d19e57cf6ab037026f20b8e449a1f30d9d7f81eef4194763aab2eab20bd28d AS lychee
 
 FROM quay.io/hummingbird/python:3.14-builder
 
@@ -39,19 +42,25 @@ ARG GATEHOUSE_VERSION=0.31.0
 ARG UV_VERSION=0.13.7
 ARG HADOLINT_VERSION=2.14.0
 ARG GRYPE_VERSION=0.121.0
+ARG LYCHEE_VERSION=0.24.2
 ARG RUFF_VERSION=0.17.1
 ARG SEMGREP_VERSION=1.177.0
 ARG PIP_AUDIT_VERSION=2.9.0
 ARG PYYAML_VERSION=6.0.3
 ARG CODEQL_BUNDLE=codeql-bundle-v2.27.4
+# The node stack's runtime. Pinned to the MAJOR, the way the base pins Python
+# to 3.14: Hummingbird ships one nodejs24 at a time and drops the old build, so
+# an exact RPM version would fail the weekly rebuild that exists to take errata.
+ARG NODE_MAJOR=24
+ARG MARKDOWNLINT_CLI2_VERSION=0.24.0
 
 # The base runs non-root; installing needs root. The image drops back at the end.
 USER root
 
 LABEL maintainer="fatherlinux <scott.mccarty@crunchtools.com>"
-LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest, Gourmand, Gatehouse, Semgrep, CodeQL, pip-audit, hadolint, grype and the constitution validator."
+LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest, Gourmand, Gatehouse, Semgrep, CodeQL, pip-audit, hadolint, grype, node and npm, markdownlint, lychee and the constitution validator."
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/sdlc"
-LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python and container repos."
+LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python, container, node, bootc and docs repos."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 LABEL version="0.11.0"
 
@@ -66,6 +75,9 @@ LABEL com.crunchtools.sdlc.codeql="${CODEQL_BUNDLE}"
 LABEL com.crunchtools.sdlc.uv="${UV_VERSION}"
 LABEL com.crunchtools.sdlc.hadolint="${HADOLINT_VERSION}"
 LABEL com.crunchtools.sdlc.grype="${GRYPE_VERSION}"
+LABEL com.crunchtools.sdlc.node="${NODE_MAJOR}"
+LABEL com.crunchtools.sdlc.markdownlint-cli2="${MARKDOWNLINT_CLI2_VERSION}"
+LABEL com.crunchtools.sdlc.lychee="${LYCHEE_VERSION}"
 
 # The commit and build time. NOT optional, and the reason is a trap trentina hit
 # in #689: its promote job refuses a release unless it can read
@@ -90,7 +102,10 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
     SDLC_CODEQL_BUNDLE=${CODEQL_BUNDLE} \
     SDLC_UV_VERSION=${UV_VERSION} \
     SDLC_HADOLINT_VERSION=${HADOLINT_VERSION} \
-    SDLC_GRYPE_VERSION=${GRYPE_VERSION}
+    SDLC_GRYPE_VERSION=${GRYPE_VERSION} \
+    SDLC_NODE_VERSION=${NODE_MAJOR} \
+    SDLC_MARKDOWNLINT_CLI2_VERSION=${MARKDOWNLINT_CLI2_VERSION} \
+    SDLC_LYCHEE_VERSION=${LYCHEE_VERSION}
 
 # git-core, not git: no perl, no tk, and nothing here runs `git send-email`.
 # tar and zstd are for the CodeQL bundle below.
@@ -110,7 +125,10 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
 # crunchtools/claude-agent) declare `Requires: jq` in their own packages. That
 # is a shared protocol, not one repo's quirk.
 #
-# A test that reaches for socat, nc, node, or a repo's own runtime is an
+# Node is here for the node stack (and the docs stack's markdownlint), not for
+# the toolbox: a shell test that reaches for it is still the case below.
+#
+# A test that reaches for socat, nc, or a repo's own runtime is an
 # integration test: it runs through the `pytest-in-image` kind against the
 # repo's OWN built image, or it gets a new kind. It does not get a package
 # here. Without that line this list becomes a host-tools grab bag, one repo at
@@ -119,6 +137,20 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
 RUN dnf install -y git-core tar zstd which jq \
  && dnf clean all \
  && rm -rf /var/cache/dnf
+
+# Node and npm are their own step, with --no-best, because Hummingbird publishes
+# them as separate RPMs that do not always land together: when this was written
+# the newest nodejs24-npm required nodejs24 build 0.1 while the repo's newest
+# nodejs24 was build 1, and `dnf install` of both refused outright, failing the
+# weekly rebuild. --no-best lets dnf take the newest PAIR that installs. It is
+# not applied to the line above, where it could also skip a missing toolbox
+# package, and the version checks below fail the build if either binary is not
+# there afterwards.
+RUN dnf install -y --no-best "nodejs${NODE_MAJOR}" "nodejs${NODE_MAJOR}-npm" \
+ && dnf clean all \
+ && rm -rf /var/cache/dnf \
+ && node --version | grep -q "^v${NODE_MAJOR}\." \
+ && npm --version
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 
@@ -153,6 +185,24 @@ COPY --from=gourmand /usr/local/sbin/gourmand /usr/local/bin/gourmand
 # container engine in here.
 COPY --from=hadolint /bin/hadolint /usr/local/bin/hadolint
 COPY --from=grype /grype /usr/local/bin/grype
+
+# The docs stack. markdownlint-cli2 is installed from npm at an EXACT version
+# into a prefix of its own, so it shares nothing with a repo's node_modules and
+# the node stack's tools can move independently; --omit=dev --no-audit --no-fund
+# keep the layer to what runs, and the npm cache is removed because /root/.npm
+# would otherwise ship in the image. Its transitive dependencies resolve at
+# build time (the package ships no lockfile to npm); the weekly rebuild takes
+# their patch releases, the same trade the dnf installs make.
+#
+# lychee is a Rust binary that links only libc, libm and libgcc (rustls, no
+# OpenSSL), so like Gourmand it is portable out of its image onto this glibc
+# base; the contract test runs it here rather than trusting that.
+RUN npm install -g --prefix /opt/markdownlint-cli2 --omit=dev --no-audit --no-fund \
+        "markdownlint-cli2@${MARKDOWNLINT_CLI2_VERSION}" \
+ && ln -s /opt/markdownlint-cli2/bin/markdownlint-cli2 /usr/local/bin/markdownlint-cli2 \
+ && rm -rf /root/.npm \
+ && markdownlint-cli2 --help | head -1
+COPY --from=lychee /usr/local/bin/lychee /usr/local/bin/lychee
 
 # Gatehouse is a Python app in a self-contained venv. Copying it works ONLY
 # because that image and this one are both Hummingbird with python3.14 at the

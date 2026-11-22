@@ -553,13 +553,19 @@ def refuse_links(repo: Path, paths: list[Path]) -> None:
 # Containerfile that CI cannot build without secrets. The planner's own rules,
 # mirrored here, decide which repos those are.
 
-PLANNED_STACKS = ("node", "bootc", "docs")
+PLANNED_STACKS: tuple[str, ...] = ()
 CONTAINERFILES = ("Containerfile", "Dockerfile")
 CONTAINER_CI = ["container-build", "container-smoke", "container-scan"]
+# A bootc image is built and scanned like a container but linted rather than
+# smoke-run, so the same build chain is a different list of checks.
+BOOTC_CI = ["container-build", "bootc-lint", "container-scan"]
 # A build that needs a secret CI does not hand `sdlc ci`: a BuildKit secret
-# mount, or Red Hat subscription content. The publish workflow keeps building
-# these with the secrets it has.
-BUILD_SECRETS = re.compile(r"--mount=type=secret|subscription-manager|\brhsm\b", re.I)
+# mount, Red Hat subscription content, or a base image registry.redhat.io will
+# not serve without a login. The publish workflow keeps building these with the
+# secrets it has.
+BUILD_SECRETS = re.compile(
+    r"--mount=type=secret|subscription-manager|\brhsm\b|registry\.redhat\.io/", re.I
+)
 SKIP_STACKS_NOTE = (
     "# Written by crunchtools/sdlc's scripts/convert_repo.py: the image has no\n"
     "# checks for these stacks yet, and a stack it cannot check makes every run\n"
@@ -620,8 +626,9 @@ def convert_config(repo: Path, planned: dict[Path, str | None], notes: list[str]
     unbuilt = sorted({s for s in active if s in PLANNED_STACKS})
     ci = cfg.get("ci") or {}
     cf = next((repo / f for f in CONTAINERFILES if (repo / f).is_file()), None)
+    chain = BOOTC_CI if "bootc" in active else CONTAINER_CI
     secrets = (
-        "container" in active
+        ("container" in active or "bootc" in active)
         and cf is not None
         and needs_build_secrets(cf.read_text(errors="replace"))
         and "container-build" not in (ci.get("skip") or [])
@@ -638,9 +645,9 @@ def convert_config(repo: Path, planned: dict[Path, str | None], notes: list[str]
         if "skip" in ci:
             raise RefusedError(
                 f"{rel(repo, path)} [tool.sdlc.ci] skip exists; the Containerfile needs build "
-                f"secrets, so add {', '.join(CONTAINER_CI)} to it by hand"
+                f"secrets, so add {', '.join(chain)} to it by hand"
             )
-        text = with_key(text, "tool.sdlc.ci", "skip", CONTAINER_CI, SKIP_BUILD_NOTE)
+        text = with_key(text, "tool.sdlc.ci", "skip", chain, SKIP_BUILD_NOTE)
         notes.append(f"skip in ci: the container checks, in {rel(repo, path)} (build secrets)")
     if not (unbuilt or secrets):
         return
@@ -651,7 +658,7 @@ def convert_config(repo: Path, planned: dict[Path, str | None], notes: list[str]
     except tomllib.TOMLDecodeError as exc:
         raise RefusedError(f"{rel(repo, path)} would not be TOML: {exc}") from exc
     if not set(unbuilt) <= set(after.get("skip-stacks") or []) or (
-        secrets and not set(CONTAINER_CI) <= set((after.get("ci") or {}).get("skip") or [])
+        secrets and not set(chain) <= set((after.get("ci") or {}).get("skip") or [])
     ):
         raise RefusedError(f"{rel(repo, path)}: the keys written did not read back as meant")
     planned[path] = text

@@ -154,9 +154,9 @@ off its files:
 |---|---|---|
 | `pyproject.toml` | python | checked |
 | `Containerfile` or `Dockerfile` | container | checked |
-| `package.json` | node | not yet |
-| a Containerfile whose `FROM` is a bootc image | bootc | not yet |
-| none of these | docs | not yet |
+| `package.json` | node | checked |
+| a Containerfile whose `FROM` is a bootc image | bootc | checked |
+| none of these | docs | checked |
 
 Gourmand, Gatehouse, the constitution validator and `hooks-installed` belong to
 no stack and run everywhere. A repo can add or drop a stack, and nothing more:
@@ -190,6 +190,49 @@ refused.
 | `container-scan` | ci | grype over the built image's filesystem, mounted read-only by podman; fails on a fixable Critical by default, and the repo's `.grype.yaml` applies |
 
 Build, smoke and scan are one lane, beside everything else.
+
+### The node stack
+
+A root `package.json` turns it on. It has no commit-tier check: an install is not seconds, offline or free.
+
+| Check | Command | What it does |
+|---|---|---|
+| `npm-lint` | push, ci | `npm run lint` in each listed package that defines a `lint` script. If none does, exit 2 (add one, or skip `npm-lint`): a check that ran nothing does not pass |
+| `npm-test` | push, ci | `npm run test` in each listed package that defines a `test` script, with `CI=true` set so watch-mode runners exit. Words after `--` go to the script. None defined is exit 2 |
+| `npm-audit` | push, ci | `npm audit --json` per package, judged at `level` (default `high`). A finding prints the package, severity, advisory and fix. A registry failure is retried, then exit 2, never a pass |
+
+The repo is mounted read-only, so the scripts run in a workspace in the cache volume: a copy of the tracked and not-ignored files with its own `node_modules`, refreshed on every run. `npm ci` runs again only when a package's `package-lock.json`, `package.json` or the Node major changes. A package without a `package-lock.json` is exit 2: the gate will not test whatever is newest today. Lifecycle scripts run during `npm ci`, as they do in CI. Tests run at a path under `/cache`, not `/repo`, and see no `.git`.
+
+For a monorepo, `packages` (default `["."]`) lists the package directories, each with its own lockfile and each installed. Set it in each check's table. A root script that fans out (`npm run lint --prefix frontend`) needs those packages installed, so list them instead of the root:
+
+```toml
+[tool.sdlc.push.npm-lint]
+packages = ["frontend", "backend"]
+```
+
+### The bootc stack
+
+A Containerfile whose `FROM` names a bootc image is a host, not an app, so it
+gets `containerfile-lint`, `container-build` and `container-scan` as above, no
+`container-smoke` (its PID 1 is systemd), and one check of its own:
+
+| Check | Command | What it does |
+|---|---|---|
+| `bootc-lint` | ci | `bootc container lint` inside the built image: no network, never pulls, and under the launcher's `--cap-drop=all`, which it does not need. Lint failures exit 1. Warnings pass unless `fatal_warnings = true`; a stock bootc base warns on its own |
+
+It is in the build's lane, after `container-build`.
+
+### The docs stack
+
+A repo with none of the files above is judged as documentation. Both checks
+read every `.md` file outside `node_modules`, `vendor` and `.git`, honour
+`.gitignore`, and run on the read-only tree. Neither fixes anything, so neither
+runs at commit.
+
+| Check | Command | What it does |
+|---|---|---|
+| `markdown-lint` | push, ci | markdownlint-cli2. Without a markdownlint config the fleet defaults judge correctness and not taste: line length, inline HTML, bare URLs, blank lines around blocks, first-line heading, duplicate headings and the like are off; a skipped heading level, a reversed link, a broken `#fragment` or reference link, or a table row with the wrong cell count fail. A repo's own `.markdownlint.{json,jsonc,yaml,yml,cjs,mjs}` or `.markdownlint-cli2.{jsonc,yaml,cjs,mjs}` replaces all of that. |
+| `link-check` | push, ci | lychee, offline: relative links, root-relative links (`/docs/x.md`, against the repo root) and `#fragments` must resolve. Remote links are not fetched, so the verdict needs no network. A `lychee.toml` is merged over those defaults key by key, and `.lycheeignore` applies |
 
 ## What a repo gets with no config at all
 
@@ -349,6 +392,11 @@ tests = ["tests/image/"]
 | `container-build` | the `image-build` kind's settings; `containerfile` defaults to the root one |
 | `container-smoke` | `gate` (default `false`: findings are advisory), `seconds` (default 10), `args`, `env`, `network` (default `false`), `image` |
 | `container-scan` | `fail_on` (default `critical`), `only_fixed` (default `true`), `image` |
+| `npm-lint`, `npm-test` | `packages` (default `["."]`) |
+| `npm-audit` | `packages`, `level` (`info`, `low`, `moderate`, `high`, `critical`; default `high`), `omit_dev` (default `false`: devDependencies are audited too) |
+| `bootc-lint` | `fatal_warnings` (default `false`), `skip` (lint names, see `bootc container lint --list`), `image` |
+| `markdown-lint` | `globs` (default `["**/*.md"]`) |
+| `link-check` | `globs` (default `["."]`, the repo as a directory), `external` (default `false`: `true` also fetches remote links, over the network; a timeout or a 429 is accepted, any other bad answer is a finding, and `.lycheeignore` is how a flaky host is excused) |
 
 ### Kinds, for a repo's own checks
 
@@ -507,7 +555,8 @@ sees it. `sdlc codeql-baseline` writes it from the current findings. See
 | ruff, semgrep, pip-audit | this image |
 | Gourmand, Gatehouse | this image, copied from their official images |
 | CodeQL | this image (the Python-only bundle, 110 MB rather than 1.75 GB) |
-| hadolint, grype | this image, copied from their official images |
+| hadolint, grype, lychee | this image, copied from their official images |
+| markdownlint-cli2 | this image, from npm at an exact version |
 | constitution validator | the repo — cloned at the release its own manifest names |
 | mypy, pytest | the repo's `uv.lock`, because they load the project's own plugins |
 

@@ -29,6 +29,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -587,16 +588,17 @@ check(
     stacks_of({"Containerfile": CF}) == ("container",),
 )
 check("a Dockerfile counts too", stacks_of({"Dockerfile": CF}) == ("container",))
-msg = stacks_of({"Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n"})
-check("a bootc Containerfile is not the container stack", "bootc" in str(msg), str(msg))
-msg = stacks_of({"package.json": "{}"})
-check("a stack this image cannot run yet is refused, not skipped", "node" in str(msg), str(msg))
+check(
+    "a bootc Containerfile is the bootc stack, not the container stack",
+    stacks_of({"Containerfile": "FROM quay.io/fedora/fedora-bootc:42\n"}) == ("bootc",),
+)
+check("a package.json is the node stack", stacks_of({"package.json": "{}"}) == ("node",))
 check(
     "skip-stacks accepts running without it",
     stacks_of({"package.json": "{}", "sdlc.toml": '[tool.sdlc]\nskip-stacks = ["node"]\n'}) == (),
 )
-msg = stacks_of({"README.md": "x"})
-check("a repo with nothing detected is docs, which is not here yet", "docs" in str(msg), str(msg))
+check("a repo with nothing else detected is docs", stacks_of({"README.md": "x"}) == ("docs",))
+check("every stack is implemented", S.PLANNED_STACKS == ())
 msg = stacks_of({"Containerfile": CF, "sdlc.toml": '[tool.sdlc]\nstacks = ["rust"]\n'})
 check("an unknown stack is refused", "rust" in str(msg), str(msg))
 msg = stacks_of({"pyproject.toml": PY, "sdlc.toml": "[tool.sdlc]\n"})
@@ -638,9 +640,192 @@ check(
 )
 
 
-def container_plan(target: str, sdlc_toml: str = "", **env) -> list[list[str]]:
+# The node stack. Its planned order is DEFAULTS' order, so lint is first of
+# the three, then test, and the audit sits beside the constitution at the end.
+check(
+    "the node stack alone pushes lint, test, the reviewers, the audit, the constitution",
+    S.resolve(empty, "push", ("node",))
+    == ["npm-lint", "npm-test", "gourmand", "gatehouse", "npm-audit", "constitution"],
+)
+check(
+    "ci runs the node checks and leaves the two reviewers to CI's own jobs",
+    S.resolve(empty, "ci", ("node",)) == ["npm-lint", "npm-test", "npm-audit", "constitution"],
+)
+check(
+    "commit has no node check: an install is not seconds, offline or free",
+    S.resolve(empty, "commit", ("node",)) == ["gourmand", "hooks-installed"],
+)
+msg = cannot_run(S.resolve, {"ci": {"skip": ["npm-audit"]}}, "ci", ("node",))
+check("ci may not skip npm-audit, a push verdict", msg is not None, str(msg))
+
+
+def node_repo_msg(settings: dict, files: dict[str, str] | None = None) -> str | None:
+    """The CannotRun message node_packages gives `settings`, over a tree of `files`."""
     with tempfile.TemporaryDirectory() as root:
-        Path(root, "Containerfile").write_text(CF)
+        for rel, body in (files or {"package.json": "{}"}).items():
+            Path(root, rel).parent.mkdir(parents=True, exist_ok=True)
+            Path(root, rel).write_text(body)
+        S.REPO = Path(root)
+        try:
+            S.node_packages("npm-lint", settings)
+        except S.CannotRunError as exc:
+            return str(exc)
+        return None
+
+
+msg = node_repo_msg({"packages": ["../elsewhere"]})
+check("packages refuses a path outside the repo", "outside the repository" in str(msg), str(msg))
+msg = node_repo_msg({"packages": ["/etc"]})
+check("packages refuses an absolute path", "outside the repository" in str(msg), str(msg))
+msg = node_repo_msg({"packages": ["a/../../x"]})
+check("packages refuses a ../ buried mid-path", "outside the repository" in str(msg), str(msg))
+msg = node_repo_msg({"packages": ["frontend"]})
+check("packages refuses a directory that does not exist", "does not exist" in str(msg), str(msg))
+msg = node_repo_msg({"packages": ["docs"]}, {"package.json": "{}", "docs/readme.txt": "x"})
+check("packages refuses a directory with no package.json", "no package.json" in str(msg), str(msg))
+msg = node_repo_msg({"packages": []})
+check("an empty packages list is refused", "packages is empty" in str(msg), str(msg))
+msg = node_repo_msg({"packages": "frontend"})
+check("packages must be a list", "must be a list" in str(msg), str(msg))
+check("packages defaults to the repo root", node_repo_msg({}) is None)
+check(
+    "packages takes several package directories",
+    node_repo_msg(
+        {"packages": ["frontend", "backend"]},
+        {"frontend/package.json": "{}", "backend/package.json": "{}"},
+    )
+    is None,
+)
+
+# `npm audit --json`, as npm 10 prints it, trimmed to what the classifier reads.
+AUDIT_CLEAN = json.dumps(
+    {"auditReportVersion": 2, "vulnerabilities": {}, "metadata": {"vulnerabilities": {"total": 0}}}
+)
+AUDIT_FOUND = json.dumps(
+    {
+        "auditReportVersion": 2,
+        "vulnerabilities": {
+            "lodash": {
+                "name": "lodash",
+                "severity": "high",
+                "range": "<4.17.21",
+                "via": [{"title": "Prototype Pollution in lodash", "severity": "high"}],
+                "fixAvailable": True,
+            },
+            "express": {
+                "name": "express",
+                "severity": "critical",
+                "range": "<4.0.0",
+                "via": ["qs"],
+                "fixAvailable": {"name": "express", "version": "4.19.2", "isSemVerMajor": True},
+            },
+            "debug": {
+                "name": "debug",
+                "severity": "low",
+                "range": "<2.6.9",
+                "via": [{"title": "ReDoS in debug"}],
+                "fixAvailable": False,
+            },
+        },
+    }
+)
+AUDIT_ERROR = json.dumps(
+    {"error": {"code": "ENOTFOUND", "summary": "request to registry failed", "detail": "x"}}
+)
+AUDIT_LOW = json.dumps({"vulnerabilities": {"debug": {"severity": "low"}}})
+
+check(
+    "npm audit: an empty report is clean", S.classify_npm_audit(AUDIT_CLEAN, "high")[0] == "clean"
+)
+verdict, detail = S.classify_npm_audit(AUDIT_FOUND, "high")
+check("npm audit: high and critical are found at level high", verdict == "found", verdict)
+check(
+    "npm audit: the summary names the packages, worst first, with titles and fixes",
+    detail.index("express") < detail.index("lodash")
+    and "Prototype Pollution in lodash" in detail
+    and "express@4.19.2 (breaking)" in detail
+    and "debug" not in detail,
+    detail,
+)
+check(
+    "npm audit: a low finding is below level high, so clean",
+    S.classify_npm_audit(AUDIT_LOW, "high")[0] == "clean",
+)
+check(
+    "npm audit: the same low finding is found at level low",
+    S.classify_npm_audit(AUDIT_LOW, "low")[0] == "found",
+)
+check(
+    "npm audit: level critical leaves the high finding out",
+    "lodash" not in S.classify_npm_audit(AUDIT_FOUND, "critical")[1],
+)
+verdict, detail = S.classify_npm_audit(AUDIT_ERROR, "high")
+check("npm audit: an error object is an error, never clean", verdict == "error", verdict)
+check("npm audit: the error names its code", "ENOTFOUND" in detail, detail)
+check("npm audit: empty output is an error", S.classify_npm_audit("", "high")[0] == "error")
+check(
+    "npm audit: non-JSON output is an error", S.classify_npm_audit("<html>", "high")[0] == "error"
+)
+check(
+    "npm audit: JSON with no vulnerabilities report is an error, not a pass",
+    S.classify_npm_audit("{}", "high")[0] == "error",
+)
+
+
+def npm_audit_run(level: str, outputs: list[str]) -> tuple[int | str, int]:
+    """t_npm_audit with npm replaced by canned outputs: (its result, npm audit runs)."""
+    with tempfile.TemporaryDirectory() as root:
+        Path(root, "package.json").write_text("{}")
+        saved = (S.node_install, S.npm_audit_once, S.time.sleep, S.REPO)
+        calls: list[int] = []
+
+        def once(*args):
+            lvl = args[2]
+            calls.append(1)
+            return S.classify_npm_audit(outputs[min(len(calls), len(outputs)) - 1], lvl)
+
+        S.REPO = Path(root)
+        S.node_install = lambda *_a: Path(root)
+        S.npm_audit_once = once
+        S.time.sleep = lambda _s: None
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                result: int | str = S.t_npm_audit({"level": level})
+        except S.CannotRunError as exc:
+            result = str(exc)
+        finally:
+            S.node_install, S.npm_audit_once, S.time.sleep, S.REPO = saved
+        return result, len(calls)
+
+
+check("t_npm_audit: clean is 0", npm_audit_run("high", [AUDIT_CLEAN]) == (S.CLEAN, 1))
+check(
+    "t_npm_audit: a finding is 1, and is not retried",
+    npm_audit_run("high", [AUDIT_FOUND]) == (S.FOUND, 1),
+)
+check(
+    "t_npm_audit: an error then a clean answer is a pass after a retry",
+    npm_audit_run("high", [AUDIT_ERROR, AUDIT_CLEAN]) == (S.CLEAN, 2),
+)
+result, runs = npm_audit_run("high", [AUDIT_ERROR])
+check(
+    "t_npm_audit: an error on every attempt is CANNOT_RUN, never a verdict",
+    isinstance(result, str)
+    and "neither a pass nor a finding" in result
+    and runs == len(S.NPM_AUDIT_BACKOFF) + 1,
+    f"{result} after {runs}",
+)
+result, runs = npm_audit_run("severe", [AUDIT_CLEAN])
+check(
+    "t_npm_audit: a level npm does not have is refused before anything runs",
+    isinstance(result, str) and "severe" in result and runs == 0,
+    str(result),
+)
+
+
+def container_plan(target: str, sdlc_toml: str = "", *, cf: str = CF, **env) -> list[list[str]]:
+    with tempfile.TemporaryDirectory() as root:
+        Path(root, "Containerfile").write_text(cf)
         if sdlc_toml:
             Path(root, "sdlc.toml").write_text(sdlc_toml)
         S.REPO = Path(root)
@@ -668,7 +853,7 @@ by_check = {r[0]: r for r in rows}
 check("every container plan line has four fields", all(len(r) == PLAN_FIELDS for r in rows))
 check(
     "build, smoke and scan are one lane, off the main lane",
-    len({by_check[c][1] for c in S.CI_DEFAULTS}) == 1
+    len({by_check[c][1] for c in S.CI_DEFAULTS if c in by_check}) == 1
     and by_check["container-build"][1] != S.MAIN_LANE,
     str([(r[0], r[1]) for r in rows]),
 )
@@ -826,6 +1011,78 @@ scan_words = next(r[3] for r in rows if r[0] == "container-scan").split(S.UNIT_S
 check("scan puts the gate image after --", scan_words[-3:] == ["--", S.GATE_IMAGE, "scan-rootfs"])
 
 
+# ------------------------------------------------------------------ bootc stack
+BOOTC_CF = "FROM quay.io/fedora/fedora-bootc:42\n"
+check(
+    "the bootc stack pushes hadolint and the common checks",
+    S.resolve(empty, "push", ("bootc",))
+    == ["containerfile-lint", "gourmand", "gatehouse", "constitution"],
+)
+bootc_ci = S.resolve(empty, "ci", ("bootc",))
+check(
+    "the bootc stack builds, lints and scans in ci, and never smoke-runs",
+    bootc_ci
+    == ["containerfile-lint", "constitution", "container-build", "bootc-lint", "container-scan"],
+    str(bootc_ci),
+)
+rows = container_plan("ci", cf=BOOTC_CF)
+by_check = {r[0]: r for r in rows}
+check("a bootc plan has no container-smoke", "container-smoke" not in by_check, str(list(by_check)))
+lint = by_check["bootc-lint"]
+lint_words = lint[3].split(S.UNIT_SEPARATOR)
+check("bootc-lint is a gating host step", lint[2] == "host", str(lint))
+check(
+    "bootc-lint never pulls, and has no network",
+    "--pull=never" in lint_words and lint_words[lint_words.index("--network") + 1] == "none",
+    str(lint_words),
+)
+check(
+    "bootc-lint runs bootc in the built tag, image after --",
+    lint_words[lint_words.index("--") + 1 :] == ["localhost/fx:sdlc", "container", "lint"]
+    and lint_words[lint_words.index("--entrypoint") + 1] == "bootc",
+    str(lint_words),
+)
+check(
+    "bootc-lint is in container-build's lane, off the main lane",
+    lint[1] == by_check["container-build"][1] != S.MAIN_LANE,
+    str([(r[0], r[1]) for r in rows]),
+)
+check(
+    "bootc-lint judges the image setting like smoke and scan",
+    "quay.io/x/y:1"
+    in next(
+        r[3]
+        for r in container_plan(
+            "ci", '[tool.sdlc.ci.bootc-lint]\nimage = "quay.io/x/y:1"\n', cf=BOOTC_CF
+        )
+        if r[0] == "bootc-lint"
+    ).split(S.UNIT_SEPARATOR),
+)
+tuned = next(
+    r[3]
+    for r in container_plan(
+        "ci",
+        '[tool.sdlc.ci.bootc-lint]\nfatal_warnings = true\nskip = ["nonempty-boot"]\n',
+        cf=BOOTC_CF,
+    )
+    if r[0] == "bootc-lint"
+).split(S.UNIT_SEPARATOR)
+check(
+    "fatal_warnings and skip become bootc's own flags, after the image",
+    tuned[-3:] == ["--fatal-warnings", "--skip", "nonempty-boot"]
+    and tuned.index("--fatal-warnings") > tuned.index("--"),
+    str(tuned),
+)
+for bad_cfg in ('fatal_warnings = "yes"', 'skip = ["--rootfs=/"]', 'skip = "x"', 'image = "-x"'):
+    check(
+        f"bootc-lint refuses {bad_cfg}",
+        cannot_run(
+            lambda b=bad_cfg: container_plan("ci", f"[tool.sdlc.ci.bootc-lint]\n{b}\n", cf=BOOTC_CF)
+        )
+        is not None,
+    )
+
+
 # ------------------------------------------------------------- [tool.sdlc] image
 #
 # bin/sdlc reads the key with awk before this script runs. If TOML and awk
@@ -862,6 +1119,279 @@ check("image: a number is not a tag", msg is not None and "must be a tag" in msg
 msg = image_error("[tool.ruff]\n", "main")
 check("image: a launcher reading one that TOML lacks is refused", msg is not None, str(msg))
 check("image: none set anywhere is fine", image_error("[tool.ruff]\n", None) is None)
+
+
+# ------------------------------------------------------------- the docs stack
+#
+# Markdown and nothing else is the docs stack: markdownlint then links, after
+# the common checks, and no commit-tier work because neither check fixes.
+
+check(
+    "the docs stack pushes markdown-lint, the common checks, then link-check",
+    S.resolve(empty, "push", ("docs",))
+    == ["markdown-lint", "gourmand", "gatehouse", "link-check", "constitution"],
+    str(S.resolve(empty, "push", ("docs",))),
+)
+check(
+    "ci is the docs push minus the reviewers",
+    S.resolve(empty, "ci", ("docs",)) == ["markdown-lint", "link-check", "constitution"],
+    str(S.resolve(empty, "ci", ("docs",))),
+)
+check(
+    "commit has nothing from the docs stack",
+    S.resolve(empty, "commit", ("docs",)) == ["gourmand", "hooks-installed"],
+)
+check(
+    "the docs checks are the built-in implementations",
+    S.BUILTINS["markdown-lint"] is S.t_markdown_lint and S.BUILTINS["link-check"] is S.t_link_check,
+)
+
+# FAKE_BIN records its argv, and the contents of every file named after -c or
+# --config, then prints FAKE_OUT and exits FAKE_RC.
+FAKE_DOCS_TOOL = """#!/bin/sh
+printf '%s\\n' "$@" > "$FAKE_DIR/argv"
+prev=
+for a in "$@"; do
+  case "$prev" in -c|--config) cat "$a" >> "$FAKE_DIR/configs" ;; esac
+  prev=$a
+done
+cat "$FAKE_DIR/out"
+exit "$(cat "$FAKE_DIR/rc")"
+"""
+
+
+def docs_run(  # noqa: PLR0913 -- a fixture builder: tool, verdict, output, tree, settings
+    check_fn,
+    tool: str,
+    rc: int,
+    *,
+    out: str = "",
+    files: dict[str, str] | None = None,
+    s: dict | None = None,
+) -> tuple[int | str, list[str], str]:
+    """Run a docs check against a tree, with a fake `tool` on PATH."""
+    files = {"README.md": "# x\n"} if files is None else files
+    with tempfile.TemporaryDirectory() as root:
+        repo = Path(root, "repo")
+        repo.mkdir()
+        for name, text in files.items():
+            Path(repo, name).parent.mkdir(parents=True, exist_ok=True)
+            Path(repo, name).write_text(text)
+        bindir = Path(root, "bin")
+        bindir.mkdir()
+        fake = bindir / tool
+        fake.write_text(FAKE_DOCS_TOOL)
+        fake.chmod(0o755)
+        Path(root, "rc").write_text(str(rc))
+        Path(root, "out").write_text(out)
+        # The check writes its generated configs under the temp dir; keep them
+        # inside this one so the run leaves nothing behind.
+        scratch = Path(root, "tmp")
+        scratch.mkdir()
+        saved = (dict(os.environ), S.REPO, tempfile.tempdir)
+        os.environ.update({"PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_DIR": root})
+        S.REPO = repo
+        tempfile.tempdir = str(scratch)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                got: int | str = check_fn(s or {})
+        except S.CannotRunError as exc:
+            got = str(exc)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved[0])
+            S.REPO, tempfile.tempdir = saved[1:]
+        argv_file = Path(root, "argv")
+        argv = argv_file.read_text().split("\n") if argv_file.is_file() else []
+        cfg_file = Path(root, "configs")
+        configs = cfg_file.read_text() if cfg_file.is_file() else ""
+    return got, argv, configs
+
+
+def repo_config_of(*names: str) -> str | None:
+    with tempfile.TemporaryDirectory() as root:
+        for name in names:
+            Path(root, name).write_text("{}")
+        saved, S.REPO = S.REPO, Path(root)
+        try:
+            return S.repo_markdownlint_config()
+        finally:
+            S.REPO = saved
+
+
+check("no markdownlint config is None", repo_config_of() is None)
+for _name in S.MARKDOWNLINT_CONFIGS:
+    check(f"{_name} is the repo's own markdownlint config", repo_config_of(_name) == _name)
+check("a .markdownlintignore is not a config", repo_config_of(".markdownlintignore") is None)
+
+
+def has_markdown_in(files: dict[str, str], *, git: bool, ignore: str = "") -> bool:
+    """has_markdown() over a tree of `files`, a git checkout or a plain directory."""
+    with tempfile.TemporaryDirectory() as root:
+        for rel, body in files.items():
+            Path(root, rel).parent.mkdir(parents=True, exist_ok=True)
+            Path(root, rel).write_text(body)
+        if ignore:
+            Path(root, ".gitignore").write_text(ignore)
+        if git:
+            subprocess.run(["git", "init", "-q", root], check=True)
+        saved, S.REPO = S.REPO, Path(root)
+        try:
+            return S.has_markdown()
+        finally:
+            S.REPO = saved
+
+
+for _git in (True, False):
+    _how = "git" if _git else "a plain directory"
+    check(f"has_markdown, {_how}: a README", has_markdown_in({"README.md": "# x"}, git=_git))
+    check(
+        f"has_markdown, {_how}: nested Markdown counts",
+        has_markdown_in({"docs/a/guide.md": "# x"}, git=_git),
+    )
+    check(f"has_markdown, {_how}: no Markdown", not has_markdown_in({"a.txt": "x"}, git=_git))
+    check(
+        f"has_markdown, {_how}: Markdown only under node_modules or vendor does not count",
+        not has_markdown_in(
+            {"node_modules/p/README.md": "# x", "vendor/v/README.md": "# x"}, git=_git
+        ),
+    )
+check(
+    "has_markdown: git's ignore rules are honoured",
+    not has_markdown_in({"build/out.md": "# x"}, git=True, ignore="build/\n"),
+)
+
+_fleet = json.loads(S.markdownlint_fleet_config())
+check(
+    "fleet markdownlint config turns the style rules off and honours the ignore file",
+    _fleet["gitignore"] is True
+    and _fleet["config"]["default"] is True
+    and _fleet["config"]["MD013"] is False
+    and _fleet["config"]["MD024"] is False,
+    str(_fleet),
+)
+check(
+    "fleet markdownlint config keeps the correctness rules",
+    not {"MD001", "MD011", "MD042", "MD051", "MD052", "MD053", "MD056"}
+    & set(S.MARKDOWNLINT_FLEET_OFF),
+)
+
+got, argv, configs = docs_run(S.t_markdown_lint, "markdownlint-cli2", 0)
+check("markdown-lint: exit 0 is clean", got == S.CLEAN, str(got))
+check(
+    "markdown-lint without a repo config passes the fleet defaults from /tmp",
+    "--config" in argv and "sdlc-docs-" in argv[argv.index("--config") + 1],
+    str(argv),
+)
+check(
+    "markdown-lint reads every Markdown file and skips vendored trees",
+    "**/*.md" in argv and "#node_modules" in argv and "#.git" in argv,
+    str(argv),
+)
+got, argv, _ = docs_run(
+    S.t_markdown_lint,
+    "markdownlint-cli2",
+    0,
+    files={"README.md": "# x\n", ".markdownlint.yaml": "MD013: true\n"},
+)
+check(
+    "markdown-lint with a repo config passes no --config of its own",
+    "--config" not in argv,
+    str(argv),
+)
+got, _, _ = docs_run(S.t_markdown_lint, "markdownlint-cli2", 1)
+check("markdown-lint: exit 1 is a finding", got == S.FOUND, str(got))
+got, _, _ = docs_run(S.t_markdown_lint, "markdownlint-cli2", 2)
+check(
+    "markdown-lint: any other exit could not run",
+    isinstance(got, str) and "exit 2" in got,
+    str(got),
+)
+got, argv, _ = docs_run(S.t_markdown_lint, "markdownlint-cli2", 1, files={"main.py": "x = 1\n"})
+check(
+    "markdown-lint on a repo with no Markdown is clean and runs nothing",
+    got == S.CLEAN and argv == [],
+    str(got),
+)
+got, argv, _ = docs_run(
+    S.t_markdown_lint, "markdownlint-cli2", 1, files={"node_modules/p/README.md": "#x\n"}
+)
+check("Markdown only under node_modules is not the repo's", got == S.CLEAN and argv == [], str(got))
+got, argv, _ = docs_run(S.t_markdown_lint, "markdownlint-cli2", 0, s={"globs": ["docs/*.md"]})
+check(
+    "markdown-lint takes `globs` over the default",
+    "docs/*.md" in argv and "**/*.md" not in argv,
+    str(argv),
+)
+
+FOUND_OUT = (
+    "Issues found in 1 input. Find details below.\n\n[README.md]:\n[ERROR] x | File not found\n"
+)
+check("lychee 0 is clean", S.lychee_verdict(0, "") == S.CLEAN)
+check(
+    "lychee 2 with its broken-links header is a finding", S.lychee_verdict(2, FOUND_OUT) == S.FOUND
+)
+check(
+    "lychee 2 with plural inputs is a finding",
+    S.lychee_verdict(2, "Issues found in 3 inputs. Find details below.\n") == S.FOUND,
+)
+for _rc, _out in (
+    (2, "error: unexpected argument '--bogus' found\n"),
+    (2, ""),
+    (3, "[ERROR] Error while loading config: Cannot load configuration file\n"),
+    (1, "Issues found in 1 input.\n"),
+):
+    check(
+        f"lychee {_rc} without a verdict could not run: {_out[:30]!r}",
+        cannot_run(S.lychee_verdict, _rc, _out) is not None,
+    )
+
+got, argv, configs = docs_run(S.t_link_check, "lychee", 0)
+check("link-check: exit 0 is clean", got == S.CLEAN, str(got))
+check(
+    "link-check is offline and checks fragments by default",
+    "offline = true" in configs
+    and 'include_fragments = "anchor-only"' in configs
+    and "--offline=false" not in argv,
+    f"{configs} {argv}",
+)
+check("link-check resolves root-relative links against the repo", "--root-dir" in argv, str(argv))
+check(
+    "link-check walks the repo as a directory, so lychee reads the ignore file",
+    argv[-2] == "." and "--hidden" in argv and "md" in argv,
+    str(argv),
+)
+got, argv, _ = docs_run(S.t_link_check, "lychee", 0, s={"external": True})
+check(
+    "link-check with external = true goes online and accepts timeouts",
+    "--offline=false" in argv and "--accept-timeouts" in argv,
+    str(argv),
+)
+got, argv, configs = docs_run(
+    S.t_link_check, "lychee", 0, files={"README.md": "# x\n", "lychee.toml": 'exclude = ["x"]\n'}
+)
+check(
+    "a repo's lychee.toml is merged over the fleet defaults, last",
+    argv.count("--config") > 1 and argv[-2] == "." and "exclude" in configs,
+    f"{argv} {configs}",
+)
+check(
+    "the fleet defaults come before the repo's lychee.toml",
+    configs.index("offline = true") < configs.index("exclude"),
+    configs,
+)
+got, _, _ = docs_run(S.t_link_check, "lychee", 2, out=FOUND_OUT)
+check("link-check: broken links are a finding", got == S.FOUND, str(got))
+got, _, _ = docs_run(S.t_link_check, "lychee", 2, out="error: unexpected argument\n")
+check("link-check: a lychee usage error could not run", isinstance(got, str), str(got))
+got, _, _ = docs_run(S.t_link_check, "lychee", 0, s={"external": "yes"})
+check(
+    "link-check: external must be a boolean", isinstance(got, str) and "external" in got, str(got)
+)
+got, argv, _ = docs_run(S.t_link_check, "lychee", 2, files={})
+check(
+    "link-check with no Markdown is clean and runs nothing", got == S.CLEAN and argv == [], str(got)
+)
 
 
 # -------------------------------------------------------------- scan-rootfs

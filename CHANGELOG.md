@@ -6,6 +6,22 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- The node stack: a repo with a root `package.json` gets `npm-lint`, `npm-test` and
+  `npm-audit` in push and ci. They run the repo's own `lint` and `test` scripts and
+  `npm audit` in a cache-volume workspace (`npm ci` only when the lockfile changes),
+  with `packages` for monorepos and `level`/`omit_dev` for the audit.
+- The bootc stack. `bootc-lint` runs `bootc container lint` inside the image
+  `container-build` built, with no network and the launcher's dropped
+  capabilities (`fatal_warnings`, `skip`, `image` settings); a bootc image is
+  never smoke-run. `tests/test_bootc_stack.sh` proves it against a real bootc base.
+- The docs stack: `markdown-lint` (markdownlint-cli2, fleet defaults that judge
+  correctness and not taste unless the repo has its own config) and `link-check`
+  (lychee, offline by default; `external = true` adds remote links), both in
+  push and ci for a repo with nothing else to be. The image carries
+  markdownlint-cli2 0.24.0 and lychee 0.24.2.
+
 ### Changed
 
 - The repo is `crunchtools/sdlc` and the image `quay.io/crunchtools/sdlc`

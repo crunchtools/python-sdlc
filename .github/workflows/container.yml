@@ -90,7 +90,8 @@ jobs:
           set -eu
           podman run --rm -v "$PWD:/mnt:ro,z" -w /mnt \
             docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d bin/sdlc tests/contract.sh \
-            tests/test_host_contract.sh tests/test_container_stack.sh scripts/release-version.sh \
+            tests/test_host_contract.sh tests/test_container_stack.sh tests/test_node_stack.sh \
+            tests/test_bootc_stack.sh tests/test_docs_stack.sh scripts/release-version.sh \
             scripts/revision-of.sh tests/test_revision_of.sh bin/sdlc-bootstrap \
             tests/test_bootstrap.sh scripts/sign-digest.sh tests/test_sign_digest.sh
           tests/test_host_contract.sh
@@ -144,6 +145,22 @@ jobs:
       - name: Container stack end to end
         if: env.IS_TAG != 'true'
         run: tests/test_container_stack.sh "localhost/sdlc:$GITHUB_SHA"
+
+      - name: Node stack end to end
+        if: env.IS_TAG != 'true'
+        run: tests/test_node_stack.sh "localhost/python-sdlc:$GITHUB_SHA"
+
+      # The bootc stack the same way: `bootc container lint` inside a real
+      # bootc image, under the launcher's dropped capabilities.
+      - name: Bootc stack end to end
+        if: env.IS_TAG != 'true'
+        run: tests/test_bootc_stack.sh "localhost/python-sdlc:$GITHUB_SHA"
+
+      # The docs stack the same way: markdownlint-cli2 and lychee, read-only
+      # and offline, each failing on the defect it owns.
+      - name: Docs stack end to end
+        if: env.IS_TAG != 'true'
+        run: tests/test_docs_stack.sh "localhost/python-sdlc:$GITHUB_SHA"
 
       - name: Log in to Quay
         if: github.event_name != 'pull_request'
