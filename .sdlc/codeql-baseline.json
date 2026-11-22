@@ -1,0 +1,7 @@
+[
+  {
+    "rule": "py/clear-text-storage-sensitive-data",
+    "path": "tests/test_cutover.py",
+    "fingerprint": "c2189db2583c826c:1"
+  }
+]

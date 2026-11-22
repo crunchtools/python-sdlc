@@ -49,7 +49,9 @@ from types import ModuleType
 try:
     import yaml
 except ImportError:  # fleet_wave.py's main() says so, before any repo
-    yaml = None
+    HAS_YAML = False
+else:
+    HAS_YAML = True
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE_TEMPLATE = ROOT / "examples" / "release.yml"
@@ -107,6 +109,8 @@ class Result:
 def load(path: Path, name: str) -> ModuleType:
     """A script by path: fleet-bump.py and validate-constitution.py have hyphens."""
     spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise OSError(f"{path}: not a loadable Python file")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -163,7 +167,9 @@ def job_span(lines: list[str], job_id: str) -> tuple[int, int, int] | None:
         ),
         None,
     )
-    start = None if child is None else find_key(lines, job_id, child, top + 1, end)
+    if child is None:
+        return None
+    start = find_key(lines, job_id, child, top + 1, end)
     if start is None:
         return None
     return start, block_end(lines, start, child), child
@@ -260,6 +266,8 @@ def signed_job(lines: list[str], job_id: str) -> list[str]:
             if not re.search(rf"^\s*{s}:", have, re.M)
         ]
     span = job_span(lines, job_id)
+    if span is None:  # the secrets edit above keeps the job; this is for mypy
+        raise ValueError(f"no job `{job_id}` under `jobs:` after adding its secrets")
     start, end, indent = span
     at = find_key(lines, "with", key, start + 1, end)
     note = "".join(f"{' ' * (key + 2)}{line}\n" for line in SIGN_NOTE.splitlines())

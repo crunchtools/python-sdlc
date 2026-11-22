@@ -76,13 +76,18 @@ import urllib.parse
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # loaded by path below; this names its types for mypy
+    import cutover
 
 # cutover.py beside this script, by path: not an installed package, and no
 # sys.path entry left behind for whoever imports this.
 _CUTOVER = importlib.util.spec_from_file_location(
     "cutover", Path(__file__).resolve().parent / "cutover.py"
 )
+if _CUTOVER is None or _CUTOVER.loader is None:
+    raise ImportError("scripts/cutover.py is missing beside fleet_wave.py")
 cutover = importlib.util.module_from_spec(_CUTOVER)
 sys.modules["cutover"] = cutover  # dataclasses look their module up there
 _CUTOVER.loader.exec_module(cutover)
