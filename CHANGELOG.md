@@ -26,6 +26,10 @@ All notable changes to this project are documented here, following
   the current bootstrap, so `scripts/fleet_wave.py` can run the wave over the
   whole fleet. The wave skips this repo under either name, and its commit and
   pull request text says what the rename changes.
+- `constitution.yml` calls `validate.yml@v1`, the constitution's floating
+  major tag, as `examples/constitution.yml` does, in place of `@v1.41.0`.
+  v1.60.0 lists `sdlc` beside `python-sdlc` in the fleet lists, which the
+  rename had dropped this repo from.
 
 ## [0.11.0] - 2026-11-22
 
