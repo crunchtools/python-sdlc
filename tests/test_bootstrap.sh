@@ -101,7 +101,7 @@ reset
 touch "$W/unsigned"
 boot versions
 if [ "$RC" -eq 2 ] && [ ! -e "$W/ran" ] && ! grep -q ' launcher ' "$W/log" \
-   && printf '%s' "$OUT" | grep -q 'GATE CANNOT RUN: .* is not signed by the crunchtools fleet key' \
+   && printf '%s' "$OUT" | grep -q 'GATE CANNOT RUN: .* could not be verified as signed by the crunchtools fleet key' \
    && printf '%s' "$OUT" | grep -q 'no signatures found' \
    && [ ! -d "$W/cache/sdlc/verified" ]; then
   ok "an unsigned image is a 2, says why, runs nothing and is not remembered"

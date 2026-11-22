@@ -119,7 +119,7 @@ if [ -z "$seen" ] || [ ! -e "$seen/$hex" ]; then
          -- "$COSIGN" verify --key /fleet.pub --insecure-ignore-tlog=true "$pinned" \
          > /dev/null 2> "$dir/verify"; then
     sed 's/^/sdlc:   /' "$dir/verify" >&2
-    cannot "$pinned ($image) is not signed by the crunchtools fleet key"
+    cannot "$pinned ($image) could not be verified as signed by the crunchtools fleet key"
   fi
   [ -z "$seen" ] || { mkdir -p "$seen" && : > "$seen/$hex"; } 2> /dev/null || :
 fi
