@@ -55,6 +55,12 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `convert_repo.py` no longer carries a `runs-on` that reads `matrix`,
+  `inputs`, `needs` or `strategy` into examples/ci.yml, whose `sdlc` job has
+  none of them; and every time ci.yml falls back to `ubuntu-latest` from a
+  runner of the repo's own, it says why in a `runner:` note that `fleet_wave.py`
+  files as hand work in report.md and the PR body (a1019, #97).
+
 - `scripts/convert_repo.py` renamed `quay.io/crunchtools/python-sdlc`, and
   refused a clone of sdlc, only when no period followed the name, so a
   reference ending a sentence was missed. A period is now a boundary unless a

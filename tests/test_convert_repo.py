@@ -1202,6 +1202,70 @@ for label, files in (
     )
 
 
+check(
+    "runner: two covered workflows disagree: the report says so",
+    "runner: ci.yml takes ubuntu-latest"
+    in convert(
+        make_repo(
+            {
+                ".pre-commit-config.yaml": PINNED_HOOKS,
+                ".specify/memory/constitution.md": CONSTITUTION,
+                ".github/workflows/ci.yml": FLEET_CI,
+                ".github/workflows/sdlc.yml": CI.split("  gourmand:\n", 1)[0].rstrip("\n") + "\n",
+            }
+        )
+    ).stderr,
+)
+
+# A runner read from a context the stub's job has none of would leave it with
+# nothing to run on: the stub keeps its own, and the report says so.
+for context, runner in (
+    # A job with a matrix has `strategy:`, so it floats in place; this one does not.
+    ("matrix", "    runs-on: ${{ matrix.on }}\n"),
+    ("inputs", "    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}\n"),
+    ("needs", "    runs-on: >-\n      ${{ fromJSON(needs.pick.outputs.runner)\n      }}\n"),
+    ("strategy", "    runs-on: [self-hosted, '${{ strategy.job-index }}']\n"),
+):
+    repo = make_repo(
+        {
+            ".pre-commit-config.yaml": PINNED_HOOKS,
+            ".specify/memory/constitution.md": CONSTITUTION,
+            ".github/workflows/ci.yml": CI.replace("    runs-on: ubuntu-latest\n", runner, 1),
+        }
+    )
+    done = convert(repo, apply=True)
+    after = snapshot(repo)
+    check(f"runner: {context}: --apply exits 0", done.returncode == 0, done.stderr)
+    check(
+        f"runner: {context}: ci.yml is the stub",
+        after.get(".github/workflows/ci.yml") == CI,
+        after.get(".github/workflows/ci.yml", ""),
+    )
+    check(
+        f"runner: {context}: the report names the context",
+        f"runner: ci.yml takes ubuntu-latest, the `sdlc ci` job's runs-on reads `{context}`"
+        in done.stderr,
+        done.stderr,
+    )
+
+# The stub's own runner, or none at all, is no move: nothing to report.
+for label, old_ci in (
+    ("ubuntu-latest", CI),
+    ("no runner", CI.replace("    runs-on: ubuntu-latest\n", "", 1)),
+    ("a plain label", CI.replace("ubuntu-latest", "self-hosted", 1)),
+):
+    done = convert(
+        make_repo(
+            {
+                ".pre-commit-config.yaml": PINNED_HOOKS,
+                ".specify/memory/constitution.md": CONSTITUTION,
+                ".github/workflows/ci.yml": old_ci,
+            }
+        )
+    )
+    check(f"runner: {label}: no runner note", "runner:" not in done.stderr, done.stderr)
+
+
 def main() -> int:
     print()
     if FAILED:
