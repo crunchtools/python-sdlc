@@ -321,6 +321,21 @@ else
   ok "the hook's pin is removed when the gate ends"
 fi
 
+# And when the gate does not pass: a finding returns through run_plan, a step
+# that cannot run dies through its trap. Neither may leave the pin behind.
+for case_ in rc-five evil; do
+  printf '#!/bin/sh\nPATH="%s" exec sh "%s" %s\n' "$SHIM" "$PWD/bin/sdlc" "$case_" \
+    > "$PR/.git/hooks/pre-commit"
+  printf '%s\n' "$case_" >> "$PR/.gemini/config.yaml"
+  git -C "$PR" commit -q -a -m "$case_" > "$RUN/out" 2>&1 && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$(git -C "$PR" log -1 --format=%s)" = two ] \
+     && ! git -C "$PR" rev-parse --verify --quiet refs/sdlc/hook-index >/dev/null; then
+    ok "a $case_ gate stops the commit and removes the pin"
+  else
+    bad "a $case_ gate left the pin or made the commit (exit $rc)"
+  fi
+done
+
 printf '\n== a run given time to stay up\n\n'
 
 # container-smoke's step: `host-up`, seconds and then a podman run. The
