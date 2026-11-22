@@ -6,6 +6,15 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `sdlc gatehouse` mounts the file named by `OPENROUTER_API_KEY_FILE` in
+  `gatehouse.env` read-only at the same path, so an OpenRouter key delivered
+  as a file reaches Gatehouse as a file and never as an environment value
+  (a968). A relative path, one holding `:` or `,`, or a missing file stops the
+  gate before it runs. Without the variable nothing changes. Needs Gatehouse
+  0.9.0 or later in the image; it ships 0.31.0.
+
 ### Changed
 
 - The repo is `crunchtools/sdlc` and the image `quay.io/crunchtools/sdlc`

@@ -552,11 +552,32 @@ t_gatehouse() {
     *) die "git could not compute $_base...HEAD" ;;
   esac
 
+  # A key that is a file stays a file (a968): gatehouse.env names it with
+  # OPENROUTER_API_KEY_FILE and carries no value, so the file is mounted
+  # read-only at the same path and the key never enters the container's
+  # environment. Gatehouse reads the variable itself; the file wins over
+  # OPENROUTER_API_KEY. Without the variable, nothing here changes.
+  _keymount=
+  _keyfile=$(sed -n 's/^OPENROUTER_API_KEY_FILE=//p' "$_env" | sed -n '$p')
+  if [ -n "$_keyfile" ]; then
+    # It becomes a -v argument, whose fields are split on : and ,.
+    case "$_keyfile" in
+      /*) ;;
+      *) die "$_env: OPENROUTER_API_KEY_FILE must be an absolute path" ;;
+    esac
+    case "$_keyfile" in
+      *:*|*,*) die "$_env: OPENROUTER_API_KEY_FILE cannot hold : or , (it is a mount)" ;;
+    esac
+    [ -f "$_keyfile" ] && [ -r "$_keyfile" ] \
+      || die "$_env names OPENROUTER_API_KEY_FILE=$_keyfile, which is not a readable file"
+    _keymount="$_keyfile:$_keyfile:ro,z"
+  fi
+
   step "gatehouse over $_base...HEAD"
   # The diff goes in on stdin so the container needs no git credentials and no
   # network to origin.
   git diff "$_base...HEAD" | run_in_image ro stdin \
-    --env-file "$_env" -i "$IMAGE" gatehouse
+    --env-file "$_env" ${_keymount:+-v "$_keymount"} -i "$IMAGE" gatehouse
 }
 
 # ------------------------------------------------------------------- the record
