@@ -905,7 +905,7 @@ check(
 
 
 def node_sync_modules() -> tuple[str | None, list[str]]:
-    """node_sync with node_modules under a listed package, two unlisted, and behind a link.
+    """node_sync with node_modules under a listed package, two unlisted, behind a link, and as one.
 
     Returns the CannotRun message and the node_modules paths the tree still holds.
     """
@@ -917,7 +917,11 @@ def node_sync_modules() -> tuple[str | None, list[str]]:
         # walking into it would delete what the link points at.
         Path(root, "ext", "node_modules", "d").mkdir(parents=True)
         Path(repo, "lib").symlink_to(Path(root, "ext"))
-        for planted in ("web/node_modules/a", "node_modules/b", "web/src/node_modules/c"):
+        # A node_modules that is itself a link: a stale entry, unlinked, its target kept.
+        Path(root, "ext2", "e").mkdir(parents=True)
+        Path(tree, "web").mkdir(parents=True)
+        Path(tree, "node_modules").symlink_to(Path(root, "ext2"))
+        for planted in ("web/node_modules/a", "src/node_modules/b", "web/src/node_modules/c"):
             Path(tree, planted).mkdir(parents=True)
             Path(tree, planted, "index.js").write_text("x")
         saved_repo, saved_files = S.REPO, S.node_source_files
@@ -932,13 +936,18 @@ def node_sync_modules() -> tuple[str | None, list[str]]:
             S.REPO, S.node_source_files = saved_repo, saved_files
         held = sorted(str(d.relative_to(tree)) for d in tree.rglob("node_modules") if d.is_dir())
         linked = Path(tree, "lib").is_symlink() and Path(root, "ext", "node_modules", "d").is_dir()
-    return msg, held + (["lib -> ext/node_modules"] if linked else [])
+        unlinked = not Path(tree, "node_modules").is_symlink() and Path(root, "ext2", "e").is_dir()
+        return msg, held + (["lib -> ext/node_modules"] if linked else []) + (
+            ["node_modules link unlinked, ext2 kept"] if unlinked else []
+        )
 
 
 msg, held = node_sync_modules()
 check(
     "node_sync removes every node_modules but a listed package's own, never following a link",
-    msg is None and held == ["web/node_modules", "lib -> ext/node_modules"],
+    msg is None
+    and held
+    == ["web/node_modules", "lib -> ext/node_modules", "node_modules link unlinked, ext2 kept"],
     f"{msg} {held}",
 )
 
