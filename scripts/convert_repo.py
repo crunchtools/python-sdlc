@@ -537,34 +537,56 @@ def runner_block(text: str, job_id: str) -> tuple[list[str], int] | None:
     return lines[start:end], indent
 
 
-def with_runner(template: str, covered: list[Path]) -> str:
+# The contexts a job's `runs-on` may read that examples/ci.yml's `sdlc` job does not
+# have: copied across, the expression has nothing to resolve against.
+FOREIGN_CONTEXTS = re.compile(r"\$\{\{(?:(?!\}\}).)*\b(matrix|inputs|needs|strategy)\b", re.S)
+
+
+def with_runner(template: str, covered: list[Path], notes: list[str]) -> str:
     """examples/ci.yml, on the runner the repo's own `sdlc ci` job chose.
 
     A fleet job routes same-repo pull requests to the cached self-hosted runner
     and pushes to the uncached one; the template's `ubuntu-latest` would move every
     run to GitHub's hosted runners, about three times slower and billed for a
-    private repo. One runner across the covered files is kept; none, or two
-    that disagree, leave the template as it is.
+    private repo. One runner across the covered files is kept; two that disagree,
+    one the stub cannot carry, or one that reads `matrix`, `inputs`, `needs` or
+    `strategy` leave the template as it is, and say so in `notes`.
     """
     runners = {}
     for path in covered:
         text = path.read_text()
         jobs = jobs_of(parse(path.name, text))
         job_id = next((k for k, j in jobs.items() if is_sdlc_job(j)), None)
-        found = None if job_id is None else runner_block(text, str(job_id))
-        if found is not None:
-            runs_on = jobs[job_id].get("runs-on")
-            runners[json.dumps(runs_on, sort_keys=True)] = (runs_on, found)
-    if len(runners) != 1:
+        runs_on = None if job_id is None else jobs[job_id].get("runs-on")
+        key = json.dumps(runs_on, sort_keys=True)
+        if runs_on is not None and runners.get(key, (None, None))[1] is None:
+            # Two files on one runner: the block either can lift serves.
+            runners[key] = (runs_on, runner_block(text, str(job_id)))
+
+    def fallback(why: str) -> str:
+        notes.append(f"runner: ci.yml takes {TEMPLATE_RUNNER}, {why}")
         return template
-    [(want, (block, indent))] = runners.values()
+
+    if not runners:
+        return template
+    if len(runners) > 1:
+        return fallback("the covered workflows' `sdlc ci` jobs disagree on theirs")
+    [(key, (want, found))] = runners.items()
     if want == TEMPLATE_RUNNER:
         return template
+    if found is None:
+        return fallback("the `sdlc ci` job's runs-on could not be lifted out")
+    if (m := FOREIGN_CONTEXTS.search(key)) is not None:
+        return fallback(f"the `sdlc ci` job's runs-on reads `{m[1]}`, which the stub has none of")
+    block, indent = found
     shift = 4 - indent  # the template's job keys sit at four spaces
     moved = [(" " * shift + x if shift >= 0 else x[-shift:]) if x.strip() else x for x in block]
     new = template.replace(f"    runs-on: {TEMPLATE_RUNNER}\n", "".join(moved), 1)
-    got = jobs_of(yaml.safe_load(new)).get("sdlc", {}).get("runs-on")
-    return new if got == want else template
+    try:  # an alias whose anchor stayed behind does not load at all
+        got = jobs_of(yaml.safe_load(new)).get("sdlc", {}).get("runs-on")
+    except yaml.YAMLError:
+        got = None
+    return new if got == want else fallback("the `sdlc ci` job's runs-on did not read back")
 
 
 def convert_workflows(repo: Path, planned: dict[Path, str | None], notes: list[str]) -> None:
@@ -595,7 +617,7 @@ def convert_workflows(repo: Path, planned: dict[Path, str | None], notes: list[s
                 f"own workflow, then convert"
             )
         planned.update(dict.fromkeys(covered))
-        planned[ci] = with_runner(CI_TEMPLATE.read_text(), covered)
+        planned[ci] = with_runner(CI_TEMPLATE.read_text(), covered, notes)
 
     gatehouse = wf_dir / "gatehouse.yml"
     canonical = GATEHOUSE_TEMPLATE.read_text()

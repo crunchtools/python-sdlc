@@ -402,12 +402,15 @@ def convert(wave: Wave, repo: str, default: str, checkout: Path) -> list[str]:
         raise RuntimeError(f"convert_repo.py exited {code}: {err.strip()[-300:]}")
     elif diff:
         # convert_repo.py's notes, `convert_repo: <repo>: <note>`.
-        report.changes += [
-            f"float: {note}"
+        notes = [
+            note
             for line in err.splitlines()
             if (note := line.removeprefix(f"convert_repo: {checkout.name}: ")) != line
             and not note.startswith("kept: ")  # what it left alone is not a change
         ]
+        # A job moved to GitHub's runners is the repo's to move back.
+        report.changes += [f"float: {n}" for n in notes if not n.startswith("runner: ")]
+        report.hand += [f"float: {n}" for n in notes if n.startswith("runner: ")]
     # The diff shows no modes: a bootstrap committed without +x is still work.
     if wave.target is None and not diff and bootstrap_mode(checkout) == "100755":
         raise LeftAloneError("noop", "already floating")

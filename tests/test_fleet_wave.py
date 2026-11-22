@@ -556,9 +556,22 @@ out_dir = Path(tempfile.mkdtemp())
 origin(base, "clean", CUTTABLE)
 origin(base, "handy", {**CUTTABLE, ".github/workflows/push.yml": PUSHER})
 origin(base, "odd", {**UNKNOWN_SHAPE, ".github/workflows/container.yml": CONTAINER})
-api = FakeApi(None, routes(clean="main", handy="main", odd="main"))
+# A runner the stub cannot carry: the repo moves to GitHub's, which is hand work.
+INPUTS_CI = PINNED_CI.replace(
+    "    runs-on: ubuntu-latest\n",
+    "    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}\n",
+    1,
+)
+origin(base, "hosted", {**CUTTABLE, ".github/workflows/ci.yml": INPUTS_CI})
+api = FakeApi(None, routes(clean="main", handy="main", odd="main", hosted="main"))
 counts, ledger, _ = wave_run(
-    api, base, ["clean", "handy", "odd"], apply=False, target=TARGET, sdlc="0.9.0", out=out_dir
+    api,
+    base,
+    ["clean", "handy", "odd", "hosted"],
+    apply=False,
+    target=TARGET,
+    sdlc="0.9.0",
+    out=out_dir,
 )
 got = rows(ledger)
 wave = LAST[0]
@@ -609,6 +622,13 @@ check(
     and "{" not in fields["title"],
     fields["body"][:300],
 )
+check(
+    "cutover: a runner left behind is hand work, not a change",
+    got["hosted"][1] == "would-open"
+    and any(h.startswith("float: runner: ") for h in wave.reports["hosted"].hand)
+    and not any("runner:" in c for c in wave.reports["hosted"].changes),
+    str((got["hosted"], wave.reports["hosted"])),
+)
 check("cutover: the title is the commit's first line", "constitution 1.60.0" in fields["title"])
 
 # The report: clean repos apart from the ones that need a human.
@@ -618,13 +638,13 @@ W.write_report(wave, write_to, "node,bootc")
 text = write_to.read_text()
 check(
     "report: the clean repos are listed apart from hand work",
-    "**Clean** (1): clean" in text and "**Hand work** (3):" in text,
+    "**Clean** (1): clean" in text and "**Hand work** (4):" in text,
     text[:400],
 )
 hand_line = next(x for x in text.splitlines() if x.startswith("- **Hand work**"))
 check(
-    "report: handy, odd and the skipped repo are the hand work",
-    all(r in hand_line for r in ("handy", "odd", "gone"))
+    "report: handy, odd, hosted and the skipped repo are the hand work",
+    all(r in hand_line for r in ("handy", "odd", "hosted", "gone"))
     and "clean" not in hand_line.split(":", 1)[1],
     hand_line,
 )
@@ -638,7 +658,8 @@ check(
     "## clean: would-open" in text
     and "- signing:" in text
     and "- HAND signing:" in text
-    and "- HAND float:" in text,
+    and "- HAND float:" in text
+    and "- HAND float: runner: ci.yml takes ubuntu-latest" in text,
     text,
 )
 check("report: a skipped repo says why", "not a non-archived repo" in text)
