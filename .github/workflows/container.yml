@@ -92,10 +92,13 @@ jobs:
             docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d bin/sdlc tests/contract.sh \
             tests/test_host_contract.sh tests/test_container_stack.sh scripts/release-version.sh \
             scripts/revision-of.sh tests/test_revision_of.sh bin/sdlc-bootstrap \
-            tests/test_bootstrap.sh scripts/sign-digest.sh tests/test_sign_digest.sh
+            tests/test_bootstrap.sh scripts/sign-digest.sh tests/test_sign_digest.sh \
+            scripts/attest-digest.sh tests/test_attest_digest.sh
           tests/test_host_contract.sh
           tests/test_bootstrap.sh
           tests/test_sign_digest.sh
+          tests/test_attest_digest.sh
+          tests/test_provenance.py
           tests/test_revision_of.sh
           tests/test_release_version.py
 
@@ -105,16 +108,27 @@ jobs:
           # A commit-driven build uses the cache; a rebuild that no commit
           # triggered must not, or it ships nothing new.
           NO_CACHE: ${{ github.event_name != 'push' && github.event_name != 'pull_request' }}
+          # The build record promote's provenance names (a997): THIS run, not
+          # the later tag run that promotes the digest without building it.
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+          # Not a reusable workflow, so the workflow that ran is the builder.
+          BUILDER: ${{ github.workflow_ref }}
         run: |
           set -eu
           args=""
           if [ "$NO_CACHE" = "true" ]; then args="--no-cache"; fi
           # The revision label is what promote reads to refuse a backwards
           # move; without it the label is "unknown" and the guard is blind.
+          # The com.crunchtools.build.* labels are constitution's (#204), read
+          # by scripts/provenance.py; in the config, so the signature covers them.
           # shellcheck disable=SC2086
           podman build $args -f Containerfile \
             --build-arg "REVISION=$GITHUB_SHA" \
             --build-arg "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label "com.crunchtools.build.run=$RUN" \
+            --label "com.crunchtools.build.builder=$BUILDER" \
+            --label "com.crunchtools.build.workflow=$BUILDER" \
+            --label "com.crunchtools.build.commit=$GITHUB_SHA" \
             -t "localhost/sdlc:$GITHUB_SHA" .
 
       # The central test for THIS image: its whole purpose is "these
@@ -281,6 +295,32 @@ jobs:
           set -eu
           printf '%s' "$QUAY_PASSWORD" | cosign login quay.io -u "$QUAY_USERNAME" --password-stdin
           scripts/sign-digest.sh "${REF#*@}" "$QUAY" "$MIRROR"
+
+      # The SBOM and provenance are attested to the same digest with the same
+      # key, before any tag moves, as constitution's container-release.yml
+      # does for every other image (#203, #204). cosign v2 keeps each as a
+      # separate .att object, so the manifest the fleet pulls is unchanged.
+      # syft reads the digest with the login cosign wrote above.
+      - name: Install syft v1.57.0
+        run: |
+          set -eu
+          curl -fsSLo "$RUNNER_TEMP/syft.tar.gz" https://github.com/anchore/syft/releases/download/v1.57.0/syft_1.57.0_linux_amd64.tar.gz
+          echo "9c077a7d43029b3b13e98a8db720661e700c4d58db6352153a06395ae4a2a704  $RUNNER_TEMP/syft.tar.gz" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/syft.tar.gz" -C "$RUNNER_TEMP" syft
+          install -D -m 0755 "$RUNNER_TEMP/syft" "$RUNNER_TEMP/bin/syft"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # scripts/attest-digest.sh: one SBOM and one predicate, attested in both
+      # repositories (an attestation, like a signature, stays in the one it
+      # was made in), already-attested skipped, every attestation verified
+      # (tests/test_attest_digest.sh). Provenance names the run that BUILT
+      # the digest, read off its labels (scripts/provenance.py).
+      - name: Attest the SBOM and provenance of the digest being promoted
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          REF: ${{ needs.build.outputs.ref }}
+        run: scripts/attest-digest.sh "${REF#*@}" "$QUAY" "$MIRROR"
 
       # Copies the tested digest. No rebuild, so the bytes that were verified
       # are the bytes that get the tag.

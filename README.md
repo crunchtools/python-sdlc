@@ -64,7 +64,9 @@ Promote signs every digest before a tag moves onto it, so `:latest`, `:main`
 and every release since #81 are signed. Older release tags are not,
 so `SDLC_IMAGE=<old release>` is refused. A digest verified once is remembered in
 `${XDG_CACHE_HOME:-~/.cache}/sdlc/verified/`, so an offline seat keeps working.
-CI always verifies.
+CI always verifies. Promote also attests an SPDX SBOM and SLSA v1 provenance
+to the digest with the same key; `cosign verify-attestation
+--insecure-ignore-tlog --type spdxjson` (or `slsaprovenance1`) reads them.
 
 `.pre-commit-config.yaml` is
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
