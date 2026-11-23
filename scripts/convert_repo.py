@@ -12,25 +12,35 @@ applies this the last one: what the gates run changes when the image does.
                            the standalone
                            Gourmand and Gatehouse hooks, become the two hooks of
                            examples/pre-commit-floating.yaml, which run it
-  .github/workflows/       a workflow whose every job the stubs cover -- the
-                           `sdlc ci` job, the Gourmand job -- is replaced by
-                           examples/ci.yml; gatehouse.yml becomes
-                           examples/gatehouse.yml when it differs from it only in
-                           comments. Everything else (publish, release, a
-                           container build) is kept. An `sdlc ci` job that
-                           shares its workflow with jobs the stub does not cover
-                           keeps its place and has its step rewritten instead.
+  .github/workflows/       examples/ci.yml, byte for byte, as ci.yml, and every other
+                           workflow deleted -- when each of its jobs is a row of
+                           the table in docs/marketplace-free-ci.md ("What `sdlc
+                           event` runs"): the `sdlc ci` job, a call of one of an
+                           allowlist of the fleet's reusable workflows (constitution,
+                           gatehouse, ashigaru), gatehouse.yml and release.yml as the
+                           examples have them, an inline CodeQL, PyPI publish or
+                           Dependabot automerge job. Triggers do not matter: ci.yml
+                           answers every event. A workflow with any other job is
+                           named and the repo refused, whole -- a conversion that
+                           deletes some and keeps the rest would run both. The
+                           RPM, Pages and repo-specific ones belong in
+                           [tool.sdlc.commands] (`sdlc run <name>`), by hand
+  [tool.sdlc]              what a deleted workflow said per repo: `publish = "pypi"`
+                           for a PyPI publish job, a container-release call's inputs
+                           (but `sign` and `downstream`) as [tool.sdlc.image]. A
+                           value already there that differs is refused, never replaced
   the old name             the repo was crunchtools/python-sdlc: its image
                            (quay.io/crunchtools/python-sdlc) and a reusable
                            workflow's `uses: crunchtools/python-sdlc/...@` become
-                           crunchtools/sdlc's, in workflows, config and the hooks
-                           file. The hooks `repo:` pin needs no rename: it is
+                           crunchtools/sdlc's, in config and the hooks file. The hooks
+                           `repo:` pin needs no rename: it is
                            replaced, under either name. A repo already floating
                            gets this, and the current bootstrap, alone
 
 Deterministic and offline: the same checkout gives the same diff. It prints
 that diff and changes nothing without --apply. It never touches .specify/,
-the per-repo constitution.
+the per-repo constitution, and sets no variable, ruleset, PyPI publisher or
+repo setting: a Pages source is a human step.
 
 Exit 0 when it converted (or there was nothing to do), 2 when the repo has a
 shape it will not guess at -- named, so it can be converted by hand.
@@ -43,11 +53,13 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import functools
 import json
 import os
 import re
 import sys
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TypeGuard
 
@@ -84,13 +96,8 @@ RENAMED = (
 )
 # The pinned hooks repo under either name: GitHub redirects the old one.
 SDLC_REPO = re.compile(r"^https://github\.com/crunchtools/(?:python-)?sdlc(?:\.git)?/?$")
-# A clone of sdlc under either name, over https or ssh.
-CLONES_SDLC = re.compile(
-    r"git clone\b.*github\.com[:/]crunchtools/(?:python-)?sdlc(?:\.git)?(?![\w-]|\.[\w-])"
-)
 STANDALONE_HOOKS = {"gourmand", "gatehouse"}
 SDLC_HOOKS = {"sdlc-commit", "sdlc-push"}
-GOURMAND_CALL = re.compile(r"^crunchtools/gatehouse/\.github/workflows/gourmand\.yml@")
 SDLC_CI_LINE = re.compile(r"^\s*[\"']?(?:\S*/)?sdlc[\"']?\s+ci\b", re.M)
 
 # The step every converted repo's `sdlc ci` job runs today, rev read from the
@@ -108,22 +115,6 @@ PINNED_BODY = (
     r"[ \t]*(?P<q>\"?)\$RUNNER_TEMP/sdlc/bin/sdlc(?P=q) ci\n"
 )
 PINNED_STEP = re.compile(r"^" + PINNED_BODY, re.M)
-STEP_NAME = re.compile(r"^(?P<i>[ \t]*)- name: sdlc ci\n(?P<j>[ \t]*)run: \|\n", re.M)
-# The whole pinned step: its name, a `set -eu` the old form opened with, and
-# the pinned body, with no line after it still inside the `run: |` block. The
-# validator wants the step's run to be exactly the launcher, so the block goes.
-WHOLE_STEP = re.compile(
-    r"^(?P<i>[ \t]*)- name: sdlc ci\n(?P<j>[ \t]*)run: \|\n"
-    r"(?:[ \t]*set -eu\n)?" + PINNED_BODY + r"(?!(?P=j)[ \t]+\S)",
-    re.M,
-)
-# What an earlier convert_repo.py left: the launcher still inside a block that
-# opens with `set -eu`, which v1.46.0's exact-run check fails.
-LEFTOVER_RUN = re.compile(
-    rf"^(?P<j>[ \t]*)run: \|\n[ \t]*set -eu\n[ \t]*{re.escape(FLOATING_CI_LINE)}\n"
-    r"(?!(?P=j)[ \t]+\S)",
-    re.M,
-)
 
 
 class RefusedError(Exception):
@@ -297,11 +288,27 @@ def convert_hooks(text: str) -> str:
 
 
 # ------------------------------------------------------------------ workflows
+#
+# examples/ci.yml answers every event, so a repo's own workflows go: each job of
+# each one is a row of the spec's "What `sdlc event` runs" table, or the repo is
+# refused. Be strict here -- deleting real work is the danger, refusing is safe.
 
 
 def jobs_of(parsed: dict) -> dict:
     jobs = parsed.get("jobs")
     return jobs if isinstance(jobs, dict) else {}
+
+
+def keys_within(value: object, allowed: set[str]) -> bool:
+    """An absent mapping, or one with no key outside `allowed`; anything else is not."""
+    return value is None or (isinstance(value, dict) and set(value) <= allowed)
+
+
+def run_lines(step: dict) -> list[str]:
+    """A `run:` as its commands: continuations joined, comments and blank lines gone."""
+    joined = str(step.get("run", "")).replace("\\\n", " ")
+    lines = (line.strip() for line in joined.splitlines())
+    return [line for line in lines if line and not line.startswith("#")]
 
 
 def is_sdlc_job(job: object) -> TypeGuard[dict]:
@@ -315,27 +322,30 @@ def is_sdlc_job(job: object) -> TypeGuard[dict]:
     )
 
 
-def is_gourmand_job(job: object) -> TypeGuard[dict]:
-    return isinstance(job, dict) and bool(GOURMAND_CALL.match(str(job.get("uses", ""))))
-
-
-# What examples/ci.yml replaces whole: a job with nothing on it but these keys,
-# and steps that are only the checkout and the `sdlc ci` step. Anything more --
-# another step, a service, an env, a matrix -- is something ci.yml would
-# drop, so that workflow keeps its place and only its step is rewritten.
+# The inline `sdlc ci` job: a job with nothing on it but these keys, and steps
+# that are only the checkout and the `sdlc ci` step. Anything more -- another
+# step, a service, an env, a matrix -- is work ci.yml would drop.
 COVERED_SDLC_KEYS = {"name", "runs-on", "steps", "permissions", "timeout-minutes"}
-COVERED_GOURMAND_KEYS = {"name", "uses"}
-COVERED_WORKFLOW_KEYS = {"name", True, "on", "permissions", "jobs"}  # YAML 1.1 reads on: as True
+COVERED_WORKFLOW_KEYS = {"name", "run-name", True, "on", "permissions", "concurrency", "jobs"}
 CHECKOUT = re.compile(r"^actions/checkout@")
+FLOATING_ENV = {"SDLC_IMAGE": "${{ vars.SDLC_IMAGE }}"}
+READ_ONLY = {"contents": "read"}
+
+
+def is_checkout(step: dict) -> bool:
+    """The plain checkout: it keeps no credentials the later steps could use, or its depth."""
+    return (
+        CHECKOUT.match(str(step.get("uses", ""))) is not None
+        and set(step) <= {"name", "uses", "with"}
+        and keys_within(step.get("with"), {"persist-credentials", "fetch-depth"})
+    )
 
 
 def is_covered_step(step: object) -> bool:
     if not isinstance(step, dict):
         return False
-    if CHECKOUT.match(str(step.get("uses", ""))):
-        return set(step) <= {"uses", "with"} and set(step.get("with") or {}) <= {
-            "persist-credentials"
-        }
+    if "uses" in step:
+        return is_checkout(step)
     run = str(step.get("run", "")) + "\n"
     rest = PINNED_STEP.sub("", run, count=1).replace("set -eu\n", "", 1).strip()
     pinned = PINNED_STEP.search(run) is not None and not rest
@@ -345,24 +355,7 @@ def is_covered_step(step: object) -> bool:
     return set(step) <= {"name", "run", "env"} and env_kept and (pinned or floating)
 
 
-FLOATING_ENV = {"SDLC_IMAGE": "${{ vars.SDLC_IMAGE }}"}
-GOURMAND_JOB_NAME = "Code Quality (Gourmand)"  # a required check: never renamed by this
-# The events a floated `sdlc ci` step may run under. The bootstrap now comes
-# from the checkout, so under any event that hands secrets to code a pull
-# request controls (pull_request_target, workflow_run, issue_comment and the
-# rest) it would run that code with them. An allowlist, not a denylist: an
-# event added to GitHub later is refused until someone has looked at it.
-FLOATABLE_EVENTS = {"push", "pull_request", "workflow_dispatch", "schedule", "merge_group"}
-READ_ONLY = {"contents": "read"}
-# The events examples/ci.yml answers. A workflow that also runs on a schedule, a
-# release, another branch or a path filter would lose that by being replaced.
-STUB_BRANCHES = {"main", "master"}
-
-
-def is_covered_job(job: object) -> bool:
-    """A job examples/ci.yml has in full, so replacing it loses nothing."""
-    if is_gourmand_job(job):
-        return set(job) <= COVERED_GOURMAND_KEYS and job.get("name") == GOURMAND_JOB_NAME
+def is_covered_sdlc_job(job: object) -> bool:
     return (
         is_sdlc_job(job)
         and set(job) <= COVERED_SDLC_KEYS
@@ -371,55 +364,306 @@ def is_covered_job(job: object) -> bool:
     )
 
 
-def is_covered_trigger(on: object) -> bool:
-    """`on:` asks for no more than examples/ci.yml answers."""
-    if isinstance(on, str):
-        on = {on: None}
-    if isinstance(on, list):
-        on = dict.fromkeys(on)
-    if not isinstance(on, dict) or not set(on) <= {"push", "pull_request", "workflow_dispatch"}:
+# A job that only calls a reusable workflow, whose repo and file name a row of
+# the table. A name not listed is refused: nothing here guesses what it did.
+REUSABLE = {
+    # validate.yml: check's constitution + zizmor; container-release.yml: image,
+    # promote; dependency-audit.yml: the weekly audit; dependabot-automerge.yml:
+    # Renovate's automerge replaces it
+    "constitution": {
+        "validate.yml",
+        "container-release.yml",
+        "dependency-audit.yml",
+        "dependabot-automerge.yml",
+    },
+    # gourmand.yml: check's gourmand; review.yml: ai's review; triage.yml: gate's
+    # triage; retriage.yml: gate on a collaborator's review comment
+    "gatehouse": {"gourmand.yml", "review.yml", "triage.yml", "retriage.yml"},
+    # router.yml and the five before it: ai and write's review, fix, triage, code;
+    # release.yml: write's release PR; release-tag.yml: write's tag
+    "ashigaru": {
+        "router.yml",
+        "triage.yml",
+        "code.yml",
+        "fix.yml",
+        "review.yml",
+        "release.yml",
+        "release-tag.yml",
+    },
+}
+CALL = re.compile(
+    r"^crunchtools/(?P<repo>[\w.-]+)/\.github/workflows/(?P<file>[\w.-]+\.ya?ml)@\S+$"
+)
+LOCAL_CALL = re.compile(r"^\./\.github/workflows/(?P<file>[\w.-]+\.ya?ml)$")
+CALL_KEYS = {"name", "uses", "permissions", "secrets", "needs", "if", "concurrency"}
+IMAGE_CALL = ("constitution", "container-release.yml")
+# container-release's inputs that are not config: the promote job signs always,
+# and a child polls for its parent's digest instead of being dispatched.
+IMAGE_DROPPED = {"sign", "downstream"}
+
+
+def call_of(job: dict, local: set[str]) -> tuple[str, str] | None:
+    """(repo, file) of the allowlisted workflow a job calls; repo is "" for this repo's own."""
+    uses = job.get("uses")
+    if not isinstance(uses, str):
+        return None
+    if (found := LOCAL_CALL.match(uses)) is not None:
+        # Its own callee is judged as a workflow of its own: refused, it refuses the repo.
+        return ("", found["file"]) if found["file"] in local else None
+    if (found := CALL.match(uses)) is None:
+        return None
+    repo = "sdlc" if found["repo"] == "python-sdlc" else found["repo"]  # the old name
+    return (repo, found["file"]) if found["file"] in REUSABLE.get(repo, ()) else None
+
+
+# The `if:` conditions the canonical callers put on a call (constitution's
+# gatehouse.yml, gatehouse-retriage.yml and pre-router ashigaru.yml), whitespace
+# folded: each only picks the event that `sdlc event` routes to the same row.
+# Any other condition narrows the call in a way the fleet file would drop -- a
+# release branch, a path, a label -- so the workflow is refused, not deleted.
+# `needs` and `concurrency` only order and serialize jobs that are all covered.
+CALL_CONDITIONS = {
+    "always()",
+    "github.event_name == 'pull_request_target'",
+    "github.event.workflow_run.event == 'pull_request_review_comment'",
+    "github.event_name == 'issues' && (github.event.action == 'opened' "
+    "|| github.event.label.name == 'ready-for-triage')",
+    "always() && github.event_name == 'issues' && (needs.triage.outputs.auto_code == 'true' "
+    "|| (github.event.action == 'labeled' && github.event.label.name == 'ready-to-code'))",
+    "github.event_name == 'workflow_run' && github.event.workflow_run.event == "
+    "'pull_request_target' && github.event.workflow_run.head_repository.full_name == "
+    "github.repository && startsWith(github.event.workflow_run.head_branch, 'ashigaru/')",
+}
+
+
+def is_covered_call(job: dict, local: set[str]) -> bool:
+    call = call_of(job, local)
+    known_if = "if" not in job or " ".join(str(job["if"]).split()) in CALL_CONDITIONS
+    # `with:` is config, and only container-release's has a home to move to.
+    keys = CALL_KEYS | ({"with"} if call == IMAGE_CALL else set())
+    return call is not None and known_if and set(job) <= keys
+
+
+def image_inputs(where: str, job: dict) -> dict:
+    """A container-release call's `with:` as config: all but what is dropped."""
+    given = job.get("with") or {}
+    if not isinstance(given, dict):
+        raise RefusedError(f"{where}: `with:` is not a mapping")
+    out = {}
+    for key, value in given.items():
+        if key in IMAGE_DROPPED:
+            continue
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", key):
+            raise RefusedError(f"{where}: input {key!r} is not a name config can hold")
+        if not isinstance(value, (str, int, float, bool)):
+            raise RefusedError(f"{where}: input {key} has no plain value to write as config")
+        if isinstance(value, str) and "${{" in value:
+            raise RefusedError(f"{where}: input {key} is an expression; it cannot be config")
+        out[key] = value
+    return out
+
+
+# examples/release.yml and release-open.yml, as copied into a repo: the default
+# branch was substituted at `refs/heads/main` and `--base main`, so a job is
+# the example's when it is the same once the example is given the file's own.
+BRANCH = re.compile(r"'refs/heads/([\w./-]+)'")
+
+
+@functools.cache
+def release_jobs(branch: str) -> tuple[dict, ...]:
+    jobs: list[dict] = []
+    for name in ("release.yml", "release-open.yml"):
+        text = (EXAMPLES / name).read_text()
+        text = text.replace("refs/heads/main", f"refs/heads/{branch}")
+        text = text.replace("--base main", f"--base {branch}")
+        jobs += jobs_of(yaml.safe_load(text)).values()
+    return tuple(jobs)
+
+
+# An inline CodeQL job: the checkout and the three steps of github/codeql-action.
+CODEQL = re.compile(r"^github/codeql-action/(?:init|autobuild|analyze)@\S+$")
+CODEQL_KEYS = {"name", "runs-on", "permissions", "steps", "timeout-minutes", "strategy"}
+
+
+def is_codeql_job(job: dict) -> bool:
+    steps = job.get("steps")
+    strategy = job.get("strategy")
+    if not isinstance(steps, list) or not set(job) <= CODEQL_KEYS:
         return False
-    # examples/ci.yml answers every pull request, so a pull_request limited to the
-    # default branch loses nothing by being replaced; a push must be to one.
-    return not on.get("workflow_dispatch") and all(
-        isinstance(on.get(event) or {}, dict)
-        and set(on.get(event) or {}) <= {"branches"}
-        and set((on.get(event) or {}).get("branches") or []) <= STUB_BRANCHES
-        for event in ("push", "pull_request")
-    )
+    if strategy is not None and not (
+        isinstance(strategy, dict) and set(strategy) <= {"fail-fast", "matrix"}
+    ):
+        return False
+    analyzes = False
+    for step in steps:
+        if not isinstance(step, dict) or not set(step) <= {"name", "id", "uses", "with"}:
+            return False
+        uses = str(step.get("uses", ""))
+        if CODEQL.match(uses):
+            analyzes = analyzes or uses.startswith("github/codeql-action/analyze@")
+        elif not is_checkout(step):
+            return False
+    return analyzes
 
 
-def is_covered_workflow(parsed: dict, jobs: list) -> bool:
-    """A workflow examples/ci.yml replaces with nothing lost: events, permissions, jobs."""
-    return (
-        bool(jobs)
-        and set(parsed) <= COVERED_WORKFLOW_KEYS
-        and is_covered_trigger(parsed.get("on", parsed.get(True)))
-        and parsed.get("permissions", READ_ONLY) == READ_ONLY
-        and all(is_covered_job(j) for j in jobs)
-    )
+# An inline PyPI publish: the build, the artifact handed between jobs, the
+# upload. Each `run:` line is one of these and nothing else; a token or an
+# `env:` would be a credential the OIDC publish in examples/ci.yml replaces.
+PYPI_USES = re.compile(
+    r"^(?:astral-sh/setup-uv|actions/setup-python|actions/upload-artifact"
+    r"|actions/download-artifact)@\S+$"
+)
+PYPI_ACTION = "pypa/gh-action-pypi-publish@"
+PYPI_ACTION_WITH = {"packages-dir", "skip-existing", "print-hash", "attestations", "verbose"}
+PYPI_KEYS = {
+    "name",
+    "runs-on",
+    "permissions",
+    "steps",
+    "timeout-minutes",
+    "environment",
+    "needs",
+    "if",
+}
+UV_BUILD = re.compile(r"^uv build(?: --(?:sdist|wheel|no-sources))*(?: --out-dir [\w./-]+)?$")
+PY_BUILD = re.compile(r"^python3? -m build(?: --(?:sdist|wheel))*$")
+UV_PUBLISH = re.compile(r"^uv publish(?: --trusted-publishing (?:always|automatic))?(?: dist/\*)?$")
+PIP_BUILD = re.compile(r"^(?:python3? -m )?pip install(?: --upgrade| -U)*(?: pip)? build$")
+SET_E = re.compile(r"^set -[eu]+(?: -o pipefail)?$")
 
 
-def float_sdlc_step(name: str, text: str) -> str:
-    """The pinned `sdlc ci` step of a workflow the stub cannot replace, floated."""
-    if not PINNED_STEP.search(text):
-        if LEFTOVER_RUN.search(text):
-            return LEFTOVER_RUN.sub(lambda m: f"{m.group('j')}run: {FLOATING_CI_LINE}\n", text)
-        if re.search(rf"^\s*run: {re.escape(FLOATING_CI_LINE)}\s*$", text, re.M):
-            return text  # already floating
-        raise RefusedError(
-            f"{name}: its `sdlc ci` step is not the pinned form this script rewrites"
-        )
-    found = WHOLE_STEP.search(text)
-    if found is None or len(STEP_NAME.findall(text)) != 1:
-        raise RefusedError(
-            f"{name}: no single `- name: sdlc ci` step whose `run: |` is the pinned "
-            f"form and nothing else"
-        )
-    i, j = found.group("i"), found.group("j")
-    env = f"{j}env:\n{j}  SDLC_IMAGE: ${{{{ vars.SDLC_IMAGE }}}}\n"
-    floated = f"{i}- name: sdlc ci\n{env}{j}run: {FLOATING_CI_LINE}\n"
-    return text[: found.start()] + floated + text[found.end() :]
+def pypi_run(step: dict) -> str | None:
+    """A `run:` step of a publish workflow: "publish", "build", "", None if a line is other."""
+    if "uses" in step or "with" in step:
+        return None
+    kinds = set()
+    for line in run_lines(step):
+        if UV_PUBLISH.match(line):
+            kinds.add("publish")
+        elif UV_BUILD.match(line) or PY_BUILD.match(line):
+            kinds.add("build")
+        elif not (PIP_BUILD.match(line) or SET_E.match(line)):
+            return None
+    return "publish" if "publish" in kinds else "build" if kinds else ""
+
+
+def pypi_step(step: object) -> str | None:
+    """ "publish", "build", "" for a step that is neither but allowed, None for any other."""
+    if not isinstance(step, dict) or not set(step) <= {"name", "id", "uses", "with", "run", "if"}:
+        return None
+    if "run" in step:
+        return pypi_run(step)
+    uses = str(step.get("uses", ""))
+    if uses.startswith(PYPI_ACTION):
+        return "publish" if keys_within(step.get("with"), PYPI_ACTION_WITH) else None
+    if CHECKOUT.match(uses):
+        return "" if is_checkout(step) else None
+    return "" if PYPI_USES.match(uses) else None
+
+
+def pypi_job_kind(job: dict) -> str | None:
+    steps = job.get("steps")
+    if not isinstance(steps, list) or not steps or not set(job) <= PYPI_KEYS:
+        return None
+    kinds = [pypi_step(step) for step in steps]
+    if None in kinds:
+        return None
+    return "publish" if "publish" in kinds else "build" if "build" in kinds else None
+
+
+# An inline Dependabot automerge: its `if:` is about the bot, and its steps are
+# fetch-metadata and `gh pr merge` or `gh pr review --approve`, with the token.
+GH_PR = re.compile(
+    r"""^gh pr (?:merge|review --approve)(?: (?:--[\w-]+|"?\$[A-Za-z_]\w*"?"""
+    r"""|"?\$\{[A-Za-z_]\w*\}"?|"?\$\{\{ ?[\w.]+ ?\}\}"?))*$"""
+)
+AUTOMERGE_ENV = re.compile(
+    r"^\$\{\{ ?(?:github\.token|secrets\.GITHUB_TOKEN"
+    r"|github\.event\.pull_request\.(?:html_url|number)) ?\}\}$"
+)
+AUTOMERGE_KEYS = {"name", "runs-on", "permissions", "steps", "timeout-minutes", "if", "needs"}
+
+
+def is_automerge_job(job: dict) -> bool:
+    steps = job.get("steps")
+    if not isinstance(steps, list) or not steps or not set(job) <= AUTOMERGE_KEYS:
+        return False
+    if "dependabot[bot]" not in str(job.get("if", "")):
+        return False
+    for step in steps:
+        if not isinstance(step, dict) or not set(step) <= {
+            "name",
+            "id",
+            "uses",
+            "with",
+            "run",
+            "if",
+            "env",
+        }:
+            return False
+        env = step.get("env") or {}
+        if not isinstance(env, dict) or not all(
+            isinstance(v, str) and AUTOMERGE_ENV.match(v) for v in env.values()
+        ):
+            return False
+        if "uses" in step:
+            ok = str(step["uses"]).startswith("dependabot/fetch-metadata@")
+            ok = ok and "run" not in step and keys_within(step.get("with"), {"github-token"})
+        else:
+            lines = run_lines(step)
+            ok = bool(lines) and all(GH_PR.match(line) for line in lines) and "with" not in step
+        if not ok:
+            return False
+    return True
+
+
+def job_kind(job: object, branch: str, local: set[str]) -> str | None:
+    """Which row of the table a job is, or None: sdlc, call, release, codeql, automerge, ..."""
+    if not isinstance(job, dict):
+        return None
+    for kind, found in (
+        ("sdlc", is_covered_sdlc_job(job)),
+        ("call", is_covered_call(job, local)),
+        ("release", job in release_jobs(branch)),
+        ("codeql", is_codeql_job(job)),
+        ("automerge", is_automerge_job(job)),
+    ):
+        if found:
+            return kind
+    return pypi_job_kind(job)  # publish, build, or None
+
+
+class Judged:
+    """What one workflow file is: the jobs no row covers, and the config its jobs held."""
+
+    def __init__(self) -> None:
+        self.uncovered: list[str] = []
+        self.publish = False
+        self.images: list[tuple[str, dict]] = []  # (job id, container-release's inputs)
+        self.dropped: list[str] = []  # inputs of a container-release call, not moved
+
+
+def judge(where: str, parsed: dict, text: str, local: set[str]) -> Judged:
+    out = Judged()
+    extra = sorted(str(k) for k in set(parsed) - COVERED_WORKFLOW_KEYS)
+    if extra:
+        out.uncovered.append(f"(workflow-level {', '.join(extra)})")
+    jobs = jobs_of(parsed)
+    branch = (BRANCH.search(text) or ["", "main"])[1]
+    kinds = {str(jid): job_kind(job, branch, local) for jid, job in jobs.items()}
+    # A build alone is the publish workflow's first half, and only there.
+    out.publish = "publish" in kinds.values()
+    out.uncovered += [
+        jid for jid, kind in kinds.items() if kind is None or (kind == "build" and not out.publish)
+    ]
+    if not jobs:
+        out.uncovered.append("(no jobs)")
+    if not out.uncovered:
+        for jid, job in jobs.items():
+            if call_of(job, local) == IMAGE_CALL:
+                out.images.append((str(jid), image_inputs(f"{where} job {jid}", job)))
+                out.dropped += sorted(IMAGE_DROPPED & set(job.get("with") or {}))
+    return out
 
 
 # gatehouse#150's change to the guard's script, from new back to old: the one
@@ -451,7 +695,10 @@ def same_gatehouse(current: dict, canonical: dict) -> bool:
     """
     if current == canonical:
         return True
-    guard = (current.get("jobs") or {}).get("guard")
+    jobs = current.get("jobs")
+    if not isinstance(jobs, dict):
+        return False
+    guard = jobs.get("guard")
     new = (canonical.get("jobs") or {}).get("guard") or {}
     if not isinstance(guard, dict):
         return False
@@ -469,170 +716,61 @@ def same_gatehouse(current: dict, canonical: dict) -> bool:
         else step
         for step, want in zip(steps, new["steps"], strict=True)
     ]
-    jobs = {**current["jobs"], "guard": {**guard, "steps": updated}}
+    jobs = {**jobs, "guard": {**guard, "steps": updated}}
     return {**current, "jobs": jobs} == canonical
 
 
-def classify(files: list[Path]) -> tuple[list[Path], list[Path]]:
-    """Workflows the CI stub covers whole, and ones that share an `sdlc ci` job."""
-    covered: list[Path] = []
-    mixed: list[Path] = []
-    for path in files:
-        if path.name.startswith("gatehouse"):
-            continue
-        parsed = parse(path.name, path.read_text())
-        jobs = list(jobs_of(parsed).values())
-        if is_covered_workflow(parsed, jobs):
-            covered.append(path)
-        elif any(is_sdlc_job(j) for j in jobs):
-            mixed.append(path)
-    return covered, mixed
-
-
-TEMPLATE_RUNNER = "ubuntu-latest"
-
-
-def runner_block(text: str, job_id: str) -> tuple[list[str], int] | None:
-    """The `runs-on:` lines of job `job_id`, the comment just above them
-    included, and their indent."""
-    lines = text.splitlines(keepends=True)
-
-    def indent_of(x: str) -> int:
-        return len(x) - len(x.lstrip())
-
-    top = next((i for i, x in enumerate(lines) if re.match(r"jobs:\s*$", x)), None)
-    head = next(
-        (
-            i
-            for i in range((top or 0) + 1, len(lines))
-            if re.match(rf"\s+{re.escape(job_id)}:\s*$", lines[i])
-        ),
-        None,
-    )
-    if top is None or head is None:
-        return None
-    stop = next(
-        (
-            i
-            for i in range(head + 1, len(lines))
-            if lines[i].strip()
-            and not lines[i].lstrip().startswith("#")
-            and indent_of(lines[i]) <= indent_of(lines[head])
-        ),
-        len(lines),
-    )
-    at = next((i for i in range(head + 1, stop) if lines[i].lstrip().startswith("runs-on:")), None)
-    if at is None:
-        return None
-    indent = indent_of(lines[at])
-    start = at
-    while (
-        start > head + 1
-        and lines[start - 1].strip().startswith("#")
-        and indent_of(lines[start - 1]) == indent
-    ):
-        start -= 1
-    end = at + 1
-    while end < stop and lines[end].strip() and indent_of(lines[end]) > indent:
-        end += 1
-    return lines[start:end], indent
-
-
-# The contexts a job's `runs-on` may read that examples/ci.yml's `sdlc` job does not
-# have: copied across, the expression has nothing to resolve against.
-FOREIGN_CONTEXTS = re.compile(r"\$\{\{(?:(?!\}\}).)*\b(matrix|inputs|needs|strategy)\b", re.S)
-
-
-def with_runner(template: str, covered: list[Path], notes: list[str]) -> str:
-    """examples/ci.yml, on the runner the repo's own `sdlc ci` job chose.
-
-    A fleet job routes same-repo pull requests to the cached self-hosted runner
-    and pushes to the uncached one; the template's `ubuntu-latest` would move every
-    run to GitHub's hosted runners, about three times slower and billed for a
-    private repo. One runner across the covered files is kept; two that disagree,
-    one the stub cannot carry, or one that reads `matrix`, `inputs`, `needs` or
-    `strategy` leave the template as it is, and say so in `notes`.
-    """
-    runners: dict[str, tuple[object, tuple[list[str], int] | None]] = {}
-    for path in covered:
-        text = path.read_text()
-        jobs = jobs_of(parse(path.name, text))
-        job_id = next((k for k, j in jobs.items() if is_sdlc_job(j)), None)
-        runs_on = None if job_id is None else jobs[job_id].get("runs-on")
-        key = json.dumps(runs_on, sort_keys=True)
-        if runs_on is not None and runners.get(key, (None, None))[1] is None:
-            # Two files on one runner: the block either can lift serves.
-            runners[key] = (runs_on, runner_block(text, str(job_id)))
-
-    def fallback(why: str) -> str:
-        notes.append(f"runner: ci.yml takes {TEMPLATE_RUNNER}, {why}")
-        return template
-
-    if not runners:
-        return template
-    if len(runners) > 1:
-        return fallback("the covered workflows' `sdlc ci` jobs disagree on theirs")
-    [(key, (want, found))] = runners.items()
-    if want == TEMPLATE_RUNNER:
-        return template
-    if found is None:
-        return fallback("the `sdlc ci` job's runs-on could not be lifted out")
-    if (m := FOREIGN_CONTEXTS.search(key)) is not None:
-        return fallback(f"the `sdlc ci` job's runs-on reads `{m[1]}`, which the stub has none of")
-    block, indent = found
-    shift = 4 - indent  # the template's job keys sit at four spaces
-    moved = [(" " * shift + x if shift >= 0 else x[-shift:]) if x.strip() else x for x in block]
-    new = template.replace(f"    runs-on: {TEMPLATE_RUNNER}\n", "".join(moved), 1)
-    try:  # an alias whose anchor stayed behind does not load at all
-        got = jobs_of(yaml.safe_load(new)).get("sdlc", {}).get("runs-on")
-    except yaml.YAMLError:
-        got = None
-    return new if got == want else fallback("the `sdlc ci` job's runs-on did not read back")
-
-
-def convert_workflows(repo: Path, planned: dict[Path, str | None], notes: list[str]) -> None:
+def convert_workflows(repo: Path, planned: dict[Path, str | None], notes: list[str]) -> Judged:
+    """Plan ci.yml in, every other workflow out, or refuse; what they held, as config to move."""
     wf_dir = repo / ".github" / "workflows"
     files = sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else []
-    covered, mixed = classify(files)
-    if mixed:
-        # The `sdlc ci` job stays where it is, beside jobs examples/ci.yml does not
-        # have; writing ci.yml as well would run it twice. Nothing is deleted.
-        for path in mixed:
-            parsed = parse(path.name, path.read_text())
-            on = parsed.get("on", parsed.get(True))
-            events = set(on) if isinstance(on, (dict, list)) else {on}
-            if not events <= FLOATABLE_EVENTS:
-                others = ", ".join(sorted(map(str, events - FLOATABLE_EVENTS)))
-                raise RefusedError(
-                    f"{rel(repo, path)} runs on {others}; "
-                    f"its `sdlc ci` step could run a pull request's .sdlc/bin/sdlc with secrets"
-                )
-            planned[path] = float_sdlc_step(rel(repo, path), path.read_text())
-            notes.append(f"floated: {rel(repo, path)} (its `sdlc ci` job shares the file)")
-        notes += [f"kept: {rel(repo, p)} (no ci.yml stub to take its jobs)" for p in covered]
-    else:
-        ci = wf_dir / "ci.yml"
-        if ci.exists() and ci not in covered:
-            raise RefusedError(
-                f"{rel(repo, ci)} has jobs the stub does not cover; move them to their "
-                f"own workflow, then convert"
-            )
-        planned.update(dict.fromkeys(covered))
-        planned[ci] = with_runner(CI_TEMPLATE.read_text(), covered, notes)
-
-    gatehouse = wf_dir / "gatehouse.yml"
-    canonical = GATEHOUSE_TEMPLATE.read_text()
-    current = gatehouse.read_text() if gatehouse.exists() else canonical
-    if same_gatehouse(parse(gatehouse.name, current), parse(GATEHOUSE_TEMPLATE.name, canonical)):
-        planned[gatehouse] = canonical
-    else:
-        notes.append(f"kept: {rel(repo, gatehouse)} (differs from the stub in more than comments)")
-
+    local = {path.name for path in files}
+    template = CI_TEMPLATE.read_text()
+    canonical = parse(GATEHOUSE_TEMPLATE.name, GATEHOUSE_TEMPLATE.read_text())
+    ci = wf_dir / "ci.yml"
+    refused: list[tuple[Path, list[str]]] = []
+    pages = False
+    held = Judged()
+    for path in files:
+        text = path.read_text()
+        if path == ci and text == template:
+            continue
+        parsed = parse(rel(repo, path), text)
+        if path.name in ("gatehouse.yml", "gatehouse.yaml") and same_gatehouse(parsed, canonical):
+            continue
+        judged = judge(rel(repo, path), parsed, text, local)
+        if judged.uncovered:
+            refused.append((path, judged.uncovered))
+            pages = pages or re.search(r"actions/deploy-pages\b", text) is not None
+            continue
+        held.publish = held.publish or judged.publish
+        held.images += judged.images
+        held.dropped += judged.dropped
+    if refused:
+        named = "; ".join(f"{rel(repo, p)} (jobs: {', '.join(ids)})" for p, ids in refused)
+        why = (
+            f"workflows with jobs `sdlc event` does not run: {named}. Move what they do to "
+            f"[tool.sdlc.commands] (run as `sdlc run <name>`) by hand, then convert"
+        )
+        if pages:
+            why += "; the Pages source (actions/deploy-pages) is then a human step in the settings"
+        raise RefusedError(why)
+    planned.update(dict.fromkeys(files))
+    planned[ci] = template
     notes += [
-        f"kept: {rel(repo, path)}"
-        for path in files
-        if path not in planned and path not in covered and path != gatehouse
+        f"deleted: {rel(repo, p)} (every job is a row of `sdlc event`)" for p in files if p != ci
     ]
+    if held.dropped:
+        notes.append(
+            f"dropped: {', '.join(sorted(set(held.dropped)))} of the container-release call "
+            f"(promote always signs; children poll, nothing dispatches them)"
+        )
+    if len({json.dumps(inputs, sort_keys=True) for _, inputs in held.images}) > 1:
+        raise RefusedError(
+            "more than one container-release call, with different inputs; "
+            "one [tool.sdlc.image] cannot hold both"
+        )
+    return held
 
 
 # ---------------------------------------------------------------- the repo
@@ -787,13 +925,22 @@ def detected_stacks(repo: Path) -> list[str]:
     return found or ["docs"]
 
 
-def with_key(text: str, table: str, key: str, value: list[str], note: str) -> str:
-    """`text` with `key = value` set in `[table]`, written by line, not by a TOML writer."""
-    line = note + f"{key} = {json.dumps(value)}\n"
+def toml_value(value: object) -> str:
+    """A TOML value for a string, bool, number or list of them."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def with_keys(text: str, table: str, items: Sequence[tuple[str, object]], note: str) -> str:
+    """`text` with each `key = value` set in `[table]`, written by line, not by a TOML writer."""
+    lines = note + "".join(f"{key} = {toml_value(value)}\n" for key, value in items)
     header = re.search(rf"^\[{re.escape(table)}\][ \t]*(#.*)?$\n?", text, re.M)
     if header is None:
-        return text.rstrip("\n") + ("\n\n" if text.strip() else "") + f"[{table}]\n{line}"
-    return text[: header.end()] + line + text[header.end() :]
+        return text.rstrip("\n") + ("\n\n" if text.strip() else "") + f"[{table}]\n{lines}"
+    return text[: header.end()] + lines + text[header.end() :]
 
 
 SKIP_STACKS_LINE = re.compile(r"^(skip-stacks[ \t]*=[ \t]*)\[[^\]\n]*\]([ \t]*#.*)?[ \t]*\n?", re.M)
@@ -823,20 +970,85 @@ def drop_checked(
     return without_stacks(text, kept, where)
 
 
+MOVED_NOTE = "# Written by crunchtools/sdlc's scripts/convert_repo.py: moved from the workflows.\n"
+
+
+def config_file(repo: Path) -> Path:
+    pyproject = repo / "pyproject.toml"
+    return pyproject if pyproject.is_file() else repo / "sdlc.toml"
+
+
+def refuse_clashes(where: str, cfg: dict, held: Judged, image: dict) -> dict:
+    """The [tool.sdlc.image] already there, or a refusal when a value differs from the call's."""
+    have = cfg.get("image", {})
+    if not isinstance(have, dict):
+        raise RefusedError(f"{where}: [tool.sdlc] image is not a table")
+    if held.publish and cfg.get("publish", "pypi") != "pypi":
+        raise RefusedError(f"{where}: [tool.sdlc] publish is {cfg['publish']!r}, not 'pypi'")
+    clash = sorted(k for k, v in image.items() if k in have and have[k] != v)
+    if clash:
+        raise RefusedError(
+            f"{where}: [tool.sdlc.image] {', '.join(clash)} differ from the container-release call"
+        )
+    return have
+
+
+def move_config(
+    repo: Path, planned: dict[Path, str | None], notes: list[str], held: Judged
+) -> None:
+    """What the deleted workflows said per repo, as [tool.sdlc]: publish, and the image's inputs.
+
+    The spec says only that it "moves into [tool.sdlc]": `publish = "pypi"` for a
+    deleted PyPI publish, and a container-release call's inputs (but `sign` and
+    `downstream`) as `[tool.sdlc.image]`. A key already there with another value
+    is refused, never overwritten; the same value is nothing to do.
+    """
+    image = held.images[0][1] if held.images else {}
+    if not (held.publish or image):
+        return
+    path = config_file(repo)
+    text = planned.get(path) or (path.read_text() if path.is_file() else "")
+    where = rel(repo, path)
+    try:
+        cfg = tomllib.loads(text).get("tool", {}).get("sdlc", {})
+    except tomllib.TOMLDecodeError as exc:
+        raise RefusedError(f"{where} is not TOML: {exc}") from exc
+    have = refuse_clashes(where, cfg, held, image)
+    publish = [("publish", "pypi")] if held.publish and "publish" not in cfg else []
+    new = [(k, v) for k, v in image.items() if k not in have]
+    if publish:
+        text = with_keys(text, "tool.sdlc", publish, MOVED_NOTE)
+        notes.append(f'publish = "pypi" in {where} (the PyPI publish job went)')
+    if new:
+        text = with_keys(text, "tool.sdlc.image", new, MOVED_NOTE)
+        notes.append(f"[tool.sdlc.image] in {where}: {', '.join(k for k, _ in new)}")
+    if not (publish or new):
+        return
+    try:
+        after = tomllib.loads(text).get("tool", {}).get("sdlc", {})
+    except tomllib.TOMLDecodeError as exc:
+        raise RefusedError(f"{where} would not be TOML: {exc}") from exc
+    back = after.get("image") or {}
+    if after.get("publish") != ("pypi" if held.publish else cfg.get("publish")) or any(
+        back.get(k) != v for k, v in image.items()
+    ):
+        raise RefusedError(f"{where}: the keys written did not read back as meant")
+    planned[path] = text
+
+
 def convert_config(
     repo: Path,
     planned: dict[Path, str | None],
     notes: list[str],
     unbuilt_stacks: tuple[str, ...] = (),
 ) -> None:
-    pyproject = repo / "pyproject.toml"
-    path = pyproject if pyproject.is_file() else repo / "sdlc.toml"
+    path = config_file(repo)
     text = planned.get(path) or (path.read_text() if path.is_file() else "")
     try:
         cfg = tomllib.loads(text).get("tool", {}).get("sdlc", {})
     except tomllib.TOMLDecodeError as exc:
         raise RefusedError(f"{rel(repo, path)} is not TOML: {exc}") from exc
-    if pyproject.is_file() and "stacks" not in cfg and "skip-stacks" not in cfg:
+    if (repo / "pyproject.toml").is_file() and "stacks" not in cfg and "skip-stacks" not in cfg:
         return  # a Python repo naming no stacks runs the python stack alone
     drop = set(cfg.get("skip-stacks") or [])
     active = [s for s in [*detected_stacks(repo), *(cfg.get("stacks") or [])] if s not in drop]
@@ -860,7 +1072,7 @@ def convert_config(
                 f"{rel(repo, path)} skip-stacks does not name {', '.join(unbuilt)}, "
                 f"which this image cannot check yet; add them by hand"
             )
-        text = with_key(text, "tool.sdlc", "skip-stacks", unbuilt, SKIP_STACKS_NOTE)
+        text = with_keys(text, "tool.sdlc", [("skip-stacks", unbuilt)], SKIP_STACKS_NOTE)
         notes.append(f"skip-stacks: {', '.join(unbuilt)} in {rel(repo, path)} (not checked yet)")
     text = drop_checked(text, kept, checked, rel(repo, path), notes)
     if secrets:
@@ -869,7 +1081,7 @@ def convert_config(
                 f"{rel(repo, path)} [tool.sdlc.ci] skip exists; the Containerfile needs build "
                 f"secrets, so add {', '.join(chain)} to it by hand"
             )
-        text = with_key(text, "tool.sdlc.ci", "skip", chain, SKIP_BUILD_NOTE)
+        text = with_keys(text, "tool.sdlc.ci", [("skip", chain)], SKIP_BUILD_NOTE)
         notes.append(f"skip in ci: the container checks, in {rel(repo, path)} (build secrets)")
     if not (unbuilt or secrets or checked):
         return
@@ -897,14 +1109,16 @@ def plan(
     notes: list[str] = []
     hooks = repo / ".pre-commit-config.yaml"
     wf_dir = repo / ".github" / "workflows"
-    refuse_links(repo, [hooks, *planned, wf_dir, repo / "pyproject.toml", repo / "sdlc.toml"])
+    flows = sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else []
+    refuse_links(
+        repo, [hooks, *planned, wf_dir, *flows, repo / "pyproject.toml", repo / "sdlc.toml"]
+    )
     planned[hooks] = convert_hooks(hooks.read_text() if hooks.exists() else "")
-    convert_workflows(repo, planned, notes)
+    move_config(repo, planned, notes, convert_workflows(repo, planned, notes))
     convert_config(repo, planned, notes, unbuilt_stacks)
     notes.append(f"writes: {BOOTSTRAP_AT}, executable (crunchtools/sdlc's bin/sdlc-bootstrap)")
     # The old name in anything that survives, and in the repo's config.
     candidates = [hooks, repo / "pyproject.toml", repo / "sdlc.toml"]
-    candidates += sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else []
     refuse_links(repo, candidates)
     for path in candidates:
         if not path.exists() or planned.get(path, "") is None:
@@ -947,45 +1161,27 @@ def verify(repo: Path, planned: dict[Path, str | None]) -> None:
     """Refuse a plan whose files do not load, or do not wire what they should.
 
     Every YAML file this writes is parsed back, and the result is held to the
-    wiring itself -- the floating hooks, both hook types, a job named `sdlc ci`
-    running the bootstrap -- rather than to how the text was produced.
+    wiring itself -- the floating hooks, both hook types, ci.yml as the example,
+    no other workflow -- rather than to how the text was produced.
     """
     parse_back(repo, planned)
     verify_hooks(planned[repo / ".pre-commit-config.yaml"] or "")
     if planned[repo / BOOTSTRAP_AT] != BOOTSTRAP.read_text():
         raise RefusedError(f"{BOOTSTRAP_AT} would not be bin/sdlc-bootstrap")
     wf_dir = repo / ".github" / "workflows"
-    texts = {p: text for p, text in planned.items() if p.parent == wf_dir and text}
-    texts |= {
-        p: p.read_text()
-        for p in (sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else [])
-        if p not in planned
+    if planned.get(wf_dir / "ci.yml") != CI_TEMPLATE.read_text():
+        raise RefusedError("ci.yml would not be examples/ci.yml")
+    # One workflow, and no `uses:` in it: a marketplace action or reusable
+    # workflow left anywhere is a version the fleet file exists to have none of.
+    flows = sorted(wf_dir.glob("*.y*ml")) if wf_dir.is_dir() else []
+    survivors = {
+        p for p in [*flows, *planned] if p.parent == wf_dir and planned.get(p, "") is not None
     }
-    # Nothing may still clone sdlc, under either name, at the hooks file's rev:
-    # the rev is gone, so such a step would exit 2 on every run from now on.
-    for path, text in texts.items():
-        if (
-            PINNED_STEP.search(text)
-            or "github.com/crunchtools/python-sdlc" in text
-            or CLONES_SDLC.search(text)
-        ):
-            raise RefusedError(
-                f"{rel(repo, path)} still fetches sdlc by the rev this removes; "
-                f"convert that step by hand"
-            )
-    # Exactly the launcher, as constitution v1.46.0's check_floating_ci reads it:
-    # a `set -eu` beside it fails the required check.
-    if not any(
-        is_sdlc_job(job)
-        and any(
-            str(step.get("run", "")).strip() == FLOATING_CI_LINE for step in job.get("steps") or []
-        )
-        for path, text in texts.items()
-        for job in jobs_of(parse(rel(repo, path), text)).values()
-    ):
-        raise RefusedError(
-            "no converted workflow has a job named `sdlc ci` running .sdlc/bin/sdlc ci"
-        )
+    if survivors != {wf_dir / "ci.yml"}:
+        left = ", ".join(sorted(rel(repo, p) for p in survivors - {wf_dir / "ci.yml"}))
+        raise RefusedError(f"workflows would survive the conversion: {left}")
+    if re.search(r"^[^#\n]*\buses:", CI_TEMPLATE.read_text(), re.M):
+        raise RefusedError("ci.yml has a `uses:`")
 
 
 def diff(repo: Path, planned: dict[Path, str | None]) -> str:

@@ -1237,15 +1237,15 @@ else
 fi
 rm -rf "$FLOAT"
 
-# A converted repo carries the bootstrap as .sdlc/bin/sdlc, and its hooks and
-# CI job start that file -- a script in the repo, which is what XII's host
-# contract lets a `system` hook run -- and nothing else.
+# A converted repo carries the bootstrap as .sdlc/bin/sdlc, and its hooks start
+# that file -- a script in the repo, which is what XII's host contract lets a
+# `system` hook run -- and nothing else. CI runs `sdlc event` in sdlc-boot.
 if grep -q '^        entry: \.sdlc/bin/sdlc commit$' examples/pre-commit-floating.yaml \
    && grep -q '^        entry: \.sdlc/bin/sdlc push$' examples/pre-commit-floating.yaml \
-   && grep -q '^        run: \.sdlc/bin/sdlc ci$' examples/ci.yml; then
-  ok "the floating hooks and the CI stub run .sdlc/bin/sdlc"
+   && grep -q '^    steps: &event \[{ id: e, run: sdlc event }\]$' examples/ci.yml; then
+  ok "the floating hooks run .sdlc/bin/sdlc, and the fleet file runs sdlc event"
 else
-  bad "examples/ do not run .sdlc/bin/sdlc as the hooks and the CI job"
+  bad "examples/ do not run .sdlc/bin/sdlc as the hooks, or sdlc event as CI"
 fi
 
 # container-scan runs the gate's own image as a host step, and only the
