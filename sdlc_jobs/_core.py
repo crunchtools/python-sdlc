@@ -6,6 +6,7 @@ can hand a job a fake one: no test runs podman, cosign or the GitHub API.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -28,6 +29,8 @@ CLEAN = 0
 FOUND = 1
 CANNOT_RUN = 2
 DEFERRED = 3
+PODMAN_CANNOT_CREATE = 125  # podman's own error, before anything in the container ran
+TIMED_OUT = 124  # what Tools.run reports for a process it stopped at its timeout
 
 FROM_AS_WORDS = 3  # image, AS, name
 
@@ -69,6 +72,7 @@ class RunOptions(TypedDict, total=False):
     env: Mapping[str, str] | None
     cwd: str | None
     stream: bool
+    timeout: float | None
 
 
 @dataclass
@@ -86,7 +90,7 @@ class Response:
 class Tools:
     """The real processes and network. Suites pass a fake with the same methods."""
 
-    def run(
+    def run(  # noqa: PLR0913 -- RunOptions, keyword-only
         self,
         argv: list[str],
         *,
@@ -94,9 +98,11 @@ class Tools:
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
         stream: bool = False,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """argv's verdict. `stream` sends its output straight to the job log instead of
-        holding it, for the long runs (gates) whose output nothing parses."""
+        holding it, for the long runs (gates) whose output nothing parses. A process
+        still running at `timeout` seconds is killed and reported as exit TIMED_OUT."""
         try:
             return subprocess.run(
                 argv,
@@ -106,7 +112,10 @@ class Tools:
                 capture_output=not stream,
                 text=True,
                 check=False,
+                timeout=timeout,
             )
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(argv, TIMED_OUT, "", f"timed out after {timeout}s")
         except OSError as exc:
             cannot(f"could not start {argv[0]}: {exc}")
 
@@ -117,12 +126,13 @@ class Tools:
         *,
         timeout: int,
         env: Mapping[str, str] | None = None,
-    ) -> tuple[dict[int, dict], str]:
-        """Speak JSON-RPC lines on argv's stdio, then kill it: ({id: reply}, why it stopped).
+    ) -> tuple[dict[int, dict], str, int | None]:
+        """Speak JSON-RPC lines on argv's stdio, then kill it: ({id: reply}, why, exit).
 
         Each message is written in turn, and one with an `id` waits for its reply;
         `why` is "" when every reply came within `timeout` seconds, else what went
         wrong with the tail of its stderr. Lines that are not JSON are logs, skipped.
+        `exit` is the process's own exit code when it ended before it was killed.
         """
         with tempfile.TemporaryFile(mode="w+") as errlog:
             try:
@@ -137,7 +147,11 @@ class Tools:
             except OSError as exc:
                 cannot(f"could not start {argv[0]}: {exc}")
             try:
-                return converse_on(proc, messages, timeout, errlog)
+                replies, why = converse_on(proc, messages, timeout, errlog)
+                if why:  # its stdout closed or it went silent: let an exit land
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=2)
+                return replies, why, proc.poll()
             finally:
                 proc.kill()
                 proc.wait()

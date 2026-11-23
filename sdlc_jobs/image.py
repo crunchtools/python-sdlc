@@ -50,6 +50,8 @@ from sdlc_jobs._core import (
     FOUND,
     FROM_AS_WORDS,
     IMAGE_NOT_ENFORCED,
+    PODMAN_CANNOT_CREATE,
+    RunOptions,
     Tools,
     cannot,
     expand_build_vars,
@@ -102,7 +104,6 @@ RUN_VALUED = (
 EVENTS = ("push", "schedule", "workflow_dispatch")  # what the workflow's `if:` lets in
 PLAN_FIELDS = 4  # name, stage, mode, argv
 STATE_FIELDS = 3  # running, exit code, OOM-killed
-PODMAN_CANNOT_CREATE = 125
 HADOLINT_UNPARSED = 4  # containerfile-lint: hadolint could not parse the file
 SYSTEMD = ("/sbin/init", "/usr/sbin/init", "/lib/systemd/systemd", "/usr/lib/systemd/systemd")
 
@@ -125,11 +126,18 @@ class Job:
     boot: Boot | None = None  # its boot gate, checked; None is none asked for
 
     def run(
-        self, argv: list[str], *, input: str | None = None, stream: bool = False
+        self,
+        argv: list[str],
+        *,
+        input: str | None = None,
+        stream: bool = False,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return self.tools.run(
-            argv, input=input, env=self.child_env, cwd=str(self.root), stream=stream
-        )
+        kw: RunOptions = {"input": input, "env": self.child_env, "cwd": str(self.root)}
+        kw["stream"] = stream
+        if timeout is not None:  # only the boot gate's calls bound it
+            kw["timeout"] = timeout
+        return self.tools.run(argv, **kw)
 
     def must(self, argv: list[str], *, input: str | None = None) -> str:
         return must(self.tools, argv, input=input, env=self.child_env, cwd=str(self.root))

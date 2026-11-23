@@ -12,8 +12,10 @@
 container-release ran this in a job with no credentials. This one runs in the job
 that holds the registry secrets and the runner's socket, and anything that can
 drive that socket can read them (`podman inspect` of the job's own container). So
-the repo supplies data, never code or a podman option of its own choosing:
-`boot-run-args` is held to `RUN_FLAGS` and `RUN_VALUED`, the MCP clients are this
+the repo supplies data, never code or a podman option of its own choosing.
+Every boot container is confined as run_gate's are (`CONFINED`; systemd gets
+`SYSTEMD_CONFINED`), `boot-run-args` is held to `RUN_FLAGS` and `RUN_VALUED`, a
+volume is walked on disk before it is mounted, the MCP clients are this
 module's, and the HTTP one runs in a container of the sdlc image that joins the
 server's network namespace, because the server's loopback is not this container's.
 `boot: command` and `contract-test` are shell: they are not run here, and the job
@@ -27,14 +29,17 @@ before anything is built.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
+import stat
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sdlc_jobs._core import cannot, show, step
+from sdlc_jobs._core import PODMAN_CANNOT_CREATE, cannot, show, step
 
 if TYPE_CHECKING:
     from sdlc_jobs.image import Job
@@ -46,14 +51,19 @@ TIMEOUT_MAX = 1800
 PORT_MAX = 65535
 POLL_SECONDS = 2
 HTTP_TIMEOUT = 10  # seconds per request to the server under test
+EXEC_TIMEOUT = 30  # seconds for one `podman exec` into a booted container
+GRACE = 60  # seconds past boot-timeout a client may take before it is not judged
 LOG_TAIL = 4000  # characters of a failed container's log worth showing
 ENV_LINE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=[^\x00-\x1f]*")
 UNIT = re.compile(r"[\w@:.\\-]+")
 # A tmpfs at an absolute path, with podman's options after the colon.
 TMPFS = re.compile(r"/[\w./-]*(?::[\w=,.-]+)?")
 # A volume from the checkout only, read-only or as an overlay, so the container
-# sees the repo's fixture and cannot write it: ./<path>:/<dest>:<ro|O>[,z|,Z].
-REPO_VOLUME = re.compile(r"\./[\w./-]*:/[\w./-]*:(?:ro|O)(?:,[zZ])?")
+# sees the repo's fixture and cannot write it: ./<path>:/<dest>:<ro|O>. No z or
+# Z: a relabel rewrites the host's SELinux labels. The path is also walked on
+# disk before it is mounted (`checkout_path`): a committed symlink is refused.
+REPO_VOLUME = re.compile(r"\./[\w./-]*:/[\w./-]*:(?:ro|O)")
+VOLUME_OPTS = ("-v", "--volume")
 SETTLED = ("running", "degraded", "maintenance", "stopping", "offline")
 sleep: Callable[[float], None] = time.sleep  # the suites make it instant
 
@@ -75,6 +85,31 @@ RUN_VALUED: dict[str, Callable[[str], bool]] = {
     "-v": lambda v: REPO_VOLUME.fullmatch(v) is not None and ".." not in v.split(":")[0],
     "--volume": lambda v: REPO_VOLUME.fullmatch(v) is not None and ".." not in v.split(":")[0],
 }
+# Every boot container runs as run_gate's gates do: no capability, no new
+# privilege, no network but its own loopback (mcp-http's client joins that).
+CONFINED = ["--cap-drop=all", "--security-opt=no-new-privileges", "--network=none"]
+# systemd as PID 1 needs podman's default capabilities back, named here and no
+# others, and keeps no-new-privileges off: units exec setuid helpers (httpd's
+# suexec, ping, sudo) that the flag would break.
+SYSTEMD_CAPS = (
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "NET_BIND_SERVICE",
+    "SETFCAP",
+    "SETGID",
+    "SETPCAP",
+    "SETUID",
+    "SYS_CHROOT",
+)
+SYSTEMD_CONFINED = [
+    "--cap-drop=all",
+    *(f"--cap-add={cap}" for cap in SYSTEMD_CAPS),
+    "--network=none",
+    "--systemd=always",
+]
 
 
 @dataclass
@@ -188,7 +223,7 @@ def boot_gate(job: Job, spec: Boot, image: str) -> bool:
     if spec.profile == "command":
         print('boot: NOT ENFORCED: boot = "command" is shell (crunchtools/sdlc#118)')
         return True
-    spec.run_args = [on_host(job, w) for w in spec.run_args]
+    spec.run_args = on_host(job, spec.run_args)
     finding = PROFILE_RUN[spec.profile](job, spec, image)
     if finding:
         print(f"boot: REFUSED: {finding}", flush=True)
@@ -196,14 +231,48 @@ def boot_gate(job: Job, spec: Boot, image: str) -> bool:
     return True
 
 
-def on_host(job: Job, word: str) -> str:
-    """A checked `./path:...` volume word, `-v=` form too, with the checkout's host path."""
-    opt, eq, value = word.partition("=")
-    if eq and opt in ("-v", "--volume"):
-        return f"{opt}={on_host(job, value)}"
-    if not word.startswith("./"):
-        return word
-    return f"{job.host_root}/{word[2:]}"
+def on_host(job: Job, words: list[str]) -> list[str]:
+    """boot-run-args with each volume's source walked on disk and given its host path.
+
+    Only the value of -v/--volume is rewritten: `--entrypoint ./x` stays a word.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        opt, eq, value = words[i].partition("=")
+        i += 1
+        if opt not in VOLUME_OPTS:
+            out.append(words[i - 1])
+            continue
+        if not eq:
+            value, i = words[i], i + 1
+        source, _, rest = value.partition(":")
+        mounted = f"{job.host_root}/{checkout_path(job.root, source)}:{rest}"
+        out += [f"{opt}={mounted}"] if eq else [opt, mounted]
+    return out
+
+
+def checkout_path(root: Path, source: str) -> str:
+    """`./a/b` as `a/b` when every component is a real file or directory in `root`; or a 2.
+
+    Each component is lstat'ed from the checkout root, so a committed symlink
+    anywhere on the way (`link -> /`) is refused rather than followed out of it.
+    """
+    parts = [p for p in source.removeprefix("./").split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        cannot(f"[tool.sdlc.image] boot-run-args volume {source!r} is not a path in the checkout")
+    here = root
+    for part in parts:
+        here = here / part
+        try:
+            mode = os.lstat(here).st_mode
+        except OSError:
+            cannot(f"[tool.sdlc.image] boot-run-args volume {source!r}: {part} does not exist")
+        if stat.S_ISLNK(mode):
+            cannot(f"[tool.sdlc.image] boot-run-args volume {source!r} goes through a symlink")
+    if not here.resolve().is_relative_to(root.resolve()):
+        cannot(f"[tool.sdlc.image] boot-run-args volume {source!r} is outside the checkout")
+    return "/".join(parts)
 
 
 def initialize() -> dict:
@@ -234,14 +303,25 @@ def judge_tools(init: object, listed: object) -> str:
 
 def boot_mcp(job: Job, spec: Boot, image: str) -> str:
     """The server on stdio: initialize, notifications/initialized, tools/list."""
-    argv = [*job.podman, "run", "--rm", "-i", "--pull=never", *spec.args(), image, *spec.cmd]
+    name = boot_name(job)
+    argv = [*job.podman, "run", "--rm", "-i", "--name", name, "--pull=never", *CONFINED]
+    argv += [*spec.args(), image, *spec.cmd]
     msgs = [
         initialize(),
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
-    replies, why = job.tools.converse(argv, msgs, timeout=spec.timeout, env=job.child_env)
+    try:
+        replies, why, rc = job.tools.converse(argv, msgs, timeout=spec.timeout, env=job.child_env)
+    finally:
+        job.run([*job.podman, "rm", "-f", "-v", name])
+    if rc == PODMAN_CANNOT_CREATE:
+        cannot(f"boot: podman could not run the server (exit {rc}); nothing was judged:\n{why}")
     return why or judge_tools(replies.get(1), replies.get(2))
+
+
+def boot_name(job: Job) -> str:
+    return f"sdlc-boot-{job.volume}"
 
 
 # Run inside the sdlc image, in the server container's network namespace: the
@@ -315,7 +395,8 @@ def boot_mcp_http(job: Job, spec: Boot, image: str) -> str:
                 spec.path,
                 str(spec.timeout),
                 json.dumps(initialize()),
-            ]
+            ],
+            timeout=spec.timeout + GRACE,
         )
         try:
             got = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -328,36 +409,35 @@ def boot_mcp_http(job: Job, spec: Boot, image: str) -> str:
             return str(got["error"])
         return judge_tools(got.get("init"), got.get("tools"))
 
-    return detached(job, spec, image, check)
+    return detached(job, spec, image, check, *CONFINED)
 
 
 def boot_systemd(job: Job, spec: Boot, image: str) -> str:
     """systemd as PID 1 reaches `running`, and every boot-unit is active."""
 
+    def systemctl(name: str, *args: str) -> str:
+        argv = [*job.podman, "exec", name, "systemctl", *args]
+        return job.run(argv, timeout=EXEC_TIMEOUT).stdout
+
     def check(name: str) -> str:
         state = ""
+        deadline = time.monotonic() + spec.timeout
         for _ in range(max(1, spec.timeout // POLL_SECONDS)):
-            proc = job.run([*job.podman, "exec", name, "systemctl", "is-system-running"])
-            state = proc.stdout.strip()
-            if state in SETTLED:
+            state = systemctl(name, "is-system-running").strip()
+            if state in SETTLED or time.monotonic() > deadline:
                 break
             sleep(POLL_SECONDS)
         if state != "running":
-            failed = job.run([*job.podman, "exec", name, "systemctl", "--failed", "--no-legend"])
+            failed = systemctl(name, "--failed", "--no-legend")
             shown = state or "unreachable"
-            return f"systemd is {shown!r}, not running. Failed units:\n{failed.stdout}"
-        inactive = [
-            unit
-            for unit in spec.units
-            if job.run([*job.podman, "exec", name, "systemctl", "is-active", unit]).stdout.strip()
-            != "active"
-        ]
+            return f"systemd is {shown!r}, not running. Failed units:\n{failed}"
+        inactive = [u for u in spec.units if systemctl(name, "is-active", u).strip() != "active"]
         if inactive:
             return f"units not active: {', '.join(inactive)}"
         print(f"  systemd running; {len(spec.units)} required unit(s) active")
         return ""
 
-    return detached(job, spec, image, check, "--systemd=always")
+    return detached(job, spec, image, check, *SYSTEMD_CONFINED)
 
 
 def boot_healthcheck(job: Job, spec: Boot, image: str) -> str:
@@ -373,18 +453,20 @@ def boot_healthcheck(job: Job, spec: Boot, image: str) -> str:
 
     def check(name: str) -> str:
         for _ in range(max(1, spec.timeout // POLL_SECONDS)):
-            if job.run([*job.podman, "healthcheck", "run", name]).returncode == 0:
+            ran = job.run([*job.podman, "healthcheck", "run", name], timeout=EXEC_TIMEOUT)
+            if ran.returncode == 0:
                 print("  healthy")
                 return ""
             sleep(POLL_SECONDS)
         return f"not healthy within {spec.timeout}s"
 
-    return detached(job, spec, image, check)
+    return detached(job, spec, image, check, *CONFINED)
 
 
-def detached(job: Job, spec: Boot, image: str, check: Callable[[str], str], *extra: str) -> str:
-    """Start the image detached, run `check(name)`, show its log on a finding, remove it."""
-    name = f"sdlc-boot-{job.volume}"
+def detached(job: Job, spec: Boot, image: str, check: Callable[[str], str], *confined: str) -> str:
+    """Start the image detached with `confined` words, run `check(name)`, show its log on a
+    finding, remove it. podman's own failure to create it is a 2, not a verdict."""
+    name = boot_name(job)
     started = job.run(
         [
             *job.podman,
@@ -393,13 +475,16 @@ def detached(job: Job, spec: Boot, image: str, check: Callable[[str], str], *ext
             "--name",
             name,
             "--pull=never",
-            *extra,
+            *confined,
             *spec.args(),
             image,
             *spec.cmd,
         ]
     )
     try:
+        if started.returncode == PODMAN_CANNOT_CREATE:
+            show(started)
+            cannot("boot: podman could not create the container (exit 125); nothing was judged")
         if started.returncode != 0:
             show(started)
             return "the image could not be started"

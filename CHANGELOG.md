@@ -33,10 +33,14 @@ All notable changes to this project are documented here, following
   from a client in the server's network namespace), `systemd`, `healthcheck` and
   `none`, and honours `boot-env`, `boot-cmd`, `boot-units`, `boot-port`,
   `boot-path`, `boot-timeout` and `boot-none-reason`. A failed boot pushes
-  nothing. `boot-run-args` may only hold `--env`, `--tmpfs`, `--read-only`,
+  nothing, and podman's own failure (exit 125) is a 2, not a verdict. Every boot
+  container drops all capabilities and runs with no-new-privileges and no
+  network, as the other gates do; systemd gets podman's default capabilities
+  back by name. `boot-run-args` may only hold `--env`, `--tmpfs`, `--read-only`,
   `--user`, `--workdir`, `--entrypoint`, `--shm-size` and a read-only or overlay
-  volume from the checkout, because the job holds the registry secrets and the
-  runner's socket. `build-args` reach the build as `--build-arg`.
+  volume from the checkout, without relabelling, whose path is walked on disk
+  and refused if any part is a symlink. The job holds the registry secrets and
+  the runner's socket. `build-args` reach the build as `--build-arg`.
 - `boot = "command"`, `boot-command`, `contract-test` and `free-disk` are still
   accepted and printed as not enforced. They are repo shell or the host's disk,
   and they need a job of their own that holds no secret (#118).
