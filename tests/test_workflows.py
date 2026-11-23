@@ -26,6 +26,10 @@ to review:
   - and of the fleet file: no `uses:` at all, top-level `permissions: {}`,
     every job that holds a secret has an environment and runs on
     ubuntu-latest, and `check` and `gate` hold none
+  - `renovate`, the one secret-holding job on our runners, runs only in
+    crunchtools/constitution, on the weekly cron or a bare default-branch
+    dispatch, on the uncached runner (never the cached one), and holds the
+    Renovate App key alone: no GITHUB_TOKEN, `permissions: {}`
 
 sdlc's own ci.yml and `sdlc event` land in their own pull requests; until
 each exists, the checks that read it are reported as skipped, not passed.
@@ -235,6 +239,8 @@ for job_id, job in fleet.items():
     holds = bool(SECRET.search(yaml.safe_dump(job)))
     if holds:
         check(f"fleet: {job_id} holds secrets only in an environment", bool(job.get("environment")))
+        if job_id == "renovate":
+            continue  # the one exception, pinned below
         on_hosted = job.get("runs-on") == "ubuntu-latest"
         check(f"fleet: {job_id} holds secrets on ubuntu-latest", on_hosted)
 for job_id in ("check", "gate"):
@@ -273,6 +279,52 @@ routes = (
 for label, ctx, want in routes:
     got = evaluate(check_runner, ctx)
     check(f"fleet: check runs {label} on {want}", got == want, str(got))
+
+# renovate: the org's Renovate, from the constitution only, holding its App key alone.
+renovate = fleet["renovate"]
+renovate_if = str(renovate["if"])
+home = {"github.repository": "crunchtools/constitution"}
+weekly = {"github.event.schedule": "17 6 * * 1"}
+for label, ctx in {
+    "the weekly cron": event("schedule", **home, **weekly),
+    "a bare default-branch dispatch": event("workflow_dispatch", **home, **{"inputs.version": ""}),
+}.items():
+    check(f"fleet: renovate runs on {label}", bool(evaluate(renovate_if, ctx)))
+for label, ctx in {
+    "the weekly cron in another repo": event("schedule", **weekly),
+    "the 6-hourly poll": event("schedule", **home, **{"github.event.schedule": "47 */6 * * *"}),
+    "a version dispatch": event("workflow_dispatch", **home, **{"inputs.version": "1.2.3"}),
+    "a dispatch from a branch": event(
+        "workflow_dispatch", **home, **{"inputs.version": "", "github.ref": "refs/heads/topic"}
+    ),
+    "a push": event("push", **home),
+    "pull_request": event("pull_request", **home),
+    "pull_request_target": event("pull_request_target", **home),
+}.items():
+    check(f"fleet: renovate does not run on {label}", not evaluate(renovate_if, ctx))
+renovate_runner = str(renovate["runs-on"])
+check(
+    "fleet: renovate runs on the uncached runner",
+    evaluate(renovate_runner, event("schedule")) == "gha-uncached",
+    renovate_runner,
+)
+check(
+    "fleet: renovate falls back to ubuntu-latest, never the cached runner",
+    evaluate(renovate_runner, event("schedule", **{"vars.UNCACHED_RUNNER_LABEL": ""}))
+    == "ubuntu-latest"
+    and "CACHED_RUNNER_LABEL" not in renovate_runner.replace("UNCACHED_RUNNER_LABEL", ""),
+    renovate_runner,
+)
+check(
+    "fleet: renovate holds the Renovate App key and nothing else",
+    renovate.get("env") == {"RENOVATE_APP_KEY": "${{ secrets.RENOVATE_APP_KEY }}"},
+    str(renovate.get("env")),
+)
+check("fleet: renovate's token is granted nothing", renovate.get("permissions") == {})
+check(
+    "fleet: renovate's key is in the renovate environment",
+    renovate.get("environment") == "renovate",
+)
 
 # gate: required, so it runs on pull_request_target and on a review comment
 # only from someone with write access, and on nothing else.

@@ -3,7 +3,7 @@
 # quay.io/crunchtools/sdlc:<major>, verifies it against sdlc's own key and a
 # minimum version, and runs it through the runner's container socket. Every
 # secret lives in an environment that admits the default branch only, and every
-# job that holds one runs on GitHub's machines.
+# job that holds one runs on GitHub's machines, but `renovate`, on our uncached ones.
 name: CI
 on:
   push:
@@ -93,4 +93,17 @@ jobs:
     container: *boot
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
+    steps: *event
+  renovate:  # the Renovate App key alone, no GITHUB_TOKEN; the constitution only: the weekly run for real, a bare dispatch dry
+    if: >-
+      github.repository == 'crunchtools/constitution'
+      && (github.event.schedule == '17 6 * * 1'
+          || github.event_name == 'workflow_dispatch' && !inputs.version && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    concurrency: { group: renovate, queue: max }
+    timeout-minutes: 150
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}  # an org-wide token: storage that starts empty, never the cached runner
+    environment: renovate
+    container: *boot
+    permissions: {}
+    env: { RENOVATE_APP_KEY: "${{ secrets.RENOVATE_APP_KEY }}" }
     steps: *event

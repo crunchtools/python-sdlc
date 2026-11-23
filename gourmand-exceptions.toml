@@ -282,3 +282,15 @@ justification = """
   identifier. They sign an image and convert a repository; there is no \
   helper to extract.
 """
+
+# A REST route, not a filesystem path.
+[[exceptions]]
+check = "CH001-absolute_paths"
+path = "sdlc_jobs/renovate.py"
+classification = "gourmand_bug"
+justification = """
+  The flagged literal is GitHub's REST route for a user by login, called through \
+  the Api object to read the Renovate App's bot id for its commit author, the \
+  same shape as every '/repos/...' route the other jobs call. Nothing in the \
+  module names a file on disk by absolute path.
+"""

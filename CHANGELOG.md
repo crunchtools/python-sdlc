@@ -6,6 +6,21 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- The fleet's self-hosted Renovate runs from this image (a1099). `renovate` is
+  installed from npm at `RENOVATE_VERSION` (44.221.0, the version the
+  constitution validates its config with), and `sdlc versions` and the contract
+  test report it. The fleet file gains an eighth job, `renovate`: in
+  crunchtools/constitution only, the weekly cron is the real run and a bare
+  dispatch from the default branch a dry run. It holds the Renovate App key from
+  the `renovate` environment and nothing else, no `GITHUB_TOKEN` included, and
+  runs on the uncached runners, the one secret-holding job allowed there.
+  `sdlc_jobs/renovate.py` mints the App's org-wide token in-process
+  (`_app_token.org_token`), clones the constitution at the run's sha for
+  `renovate/self-hosted.json`, runs Renovate and writes the step summary the
+  old workflow did. The constitution's `renovate.yml` is retired.
+
 ### Changed
 
 - `examples/ci.yml` is the fleet file of `docs/marketplace-free-ci.md` (a1051):

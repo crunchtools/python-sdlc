@@ -4,11 +4,11 @@ Design for a1051. Nothing here is implemented: it is the target that
 `convert_repo.py` and `cutover.py` will be changed to write, and the list of
 `sdlc` internals that have to exist first.
 
-## The fleet file: 90 lines, seven jobs
+## The fleet file: 103 lines, eight jobs
 
 Every fleet repo carries exactly this `.github/workflows/ci.yml`, byte for
 byte, whatever kind of repo it is. The one exception is crunchtools/sdlc
-itself, below. The file is 90 lines without comments. It contains no `uses:`
+itself, below. The file is 103 lines without comments. It contains no `uses:`
 of any kind: no `actions/checkout`, no reusable-workflow call and no
 third-party action. Every job runs one image, the sdlc **bootstrap**, by a
 literal digest, and one command, `sdlc event`. That command reads
@@ -21,7 +21,7 @@ that trust level does for that event in this repo.
 # quay.io/crunchtools/sdlc:<major>, verifies it against sdlc's own key and a
 # minimum version, and runs it through the runner's container socket. Every
 # secret lives in an environment that admits the default branch only, and every
-# job that holds one runs on GitHub's machines.
+# job that holds one runs on GitHub's machines, but `renovate`, on our uncached ones.
 name: CI
 on:
   push:
@@ -111,6 +111,19 @@ jobs:
     container: *boot
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
+    steps: *event
+  renovate:  # the Renovate App key alone, no GITHUB_TOKEN; the constitution only: the weekly run for real, a bare dispatch dry
+    if: >-
+      github.repository == 'crunchtools/constitution'
+      && (github.event.schedule == '17 6 * * 1'
+          || github.event_name == 'workflow_dispatch' && !inputs.version && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    concurrency: { group: renovate, queue: max }
+    timeout-minutes: 150
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}  # an org-wide token: storage that starts empty, never the cached runner
+    environment: renovate
+    container: *boot
+    permissions: {}
+    env: { RENOVATE_APP_KEY: "${{ secrets.RENOVATE_APP_KEY }}" }
     steps: *event
 ```
 
@@ -510,6 +523,7 @@ tag ruleset stays as it is today.
 | `promote` | | `cosign-signing`: cosign key, quay; queued | after `image`, and after `write` on a release; `ubuntu-latest` | an App key, a build |
 | `pypi` | | `pypi`: OIDC only | a release merge that publishes to PyPI; `ubuntu-latest` | anything else |
 | `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; `ubuntu-latest` | any secret |
+| `renovate` | | `renovate`: Renovate App key; no `GITHUB_TOKEN`; queued | crunchtools/constitution only: the weekly schedule, a bare dispatch from the default branch; our **uncached** runners | a token of this repo's, a build |
 
 This table is the fleet file. In crunchtools/sdlc alone, the required
 `sdlc / check (pull_request)` is `test`: `pull_request` only,
@@ -518,11 +532,22 @@ This table is the fleet file. In crunchtools/sdlc alone, the required
 `pull_request` (under "sdlc's own workflow").
 
 **Runners.** Every job that holds a secret runs on `ubuntu-latest`, always,
-including in a private repo. Only `check`, which holds none, may use our
-runners, and only the **uncached** kind. The cached runner's persistent layer
+including in a private repo, with one exception, `renovate` (below). Only
+`check`, which holds none, and `renovate` may use our runners, and only the
+**uncached** kind. The cached runner's persistent layer
 storage would let one same-repo PR's build poison a later check, so PR checks
 leave it. A fork's PR always gets `ubuntu-latest`. This design does not use
 `CACHED_RUNNER_LABEL` at all.
+
+`renovate` is the exception, on purpose (a1099). Its run walks every repo in
+the org for up to two hours a week. It builds nothing, its package managers
+run with install scripts off (Renovate's `allowScripts` is false), and the only
+credential it holds is the App token it mints, revoked when Renovate exits. The uncached
+class's per-job storage starts empty and is wiped after, so nothing a job
+leaves reaches it, and it never sees the cached runners. The class can also
+mount the read-only warm image store (`GHA_SHARED_IMAGES`, gha-runner's
+deploy/exedore), which holds `sdlc:latest`, so the job starts without pulling
+the image once that is switched on for the uncached units.
 
 **Private repos and the org's plan.** The plan could not be verified from this
 seat: the org's `plan` field needs an admin token. Two facts point to GitHub
@@ -637,6 +662,8 @@ CodeQL uploads as `/language:python`, and zizmor as `zizmor`.
 | pypi | release merge push | re-verifies, `uv build` nested, `uv publish` by OIDC | publish.yml |
 | gate | pull_request_target | fails unless `ai` and `write` succeeded; workflow guard; triage, which needs a review of the head SHA | gatehouse.yml guard, triage.yml |
 | gate | collaborator review comment | re-runs `gate` in the PR's `pull_request_target` run with `GITHUB_TOKEN` | gatehouse-retriage.yml |
+| renovate | schedule `17 6 * * 1`, constitution only | mints the Renovate App's org-wide token, runs the image's `renovate` with the constitution's `renovate/self-hosted.json` at this commit | the constitution's renovate.yml |
+| renovate | workflow_dispatch without `version`, constitution only | the same as a dry run, read-only token, the weekly window ignored | renovate.yml's dispatch |
 
 ## Required checks: from five to two
 
