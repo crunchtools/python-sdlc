@@ -79,8 +79,10 @@ ARG PYJWT_VERSION=2.15.1
 ARG GH_VERSION=2.104.0
 ARG GH_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
 # What sdlc_jobs runs: Ashigaru's scripts, prompts and schemas, and the
-# constitution's scripts, each at a release tag.
-ARG ASHIGARU_VERSION=5.3.0
+# constitution's scripts, each at a release. Ashigaru by its release commit:
+# v5.4.0, tag pending. write depends on 5.4.0's staged_refusal patch filter.
+ARG ASHIGARU_VERSION=5.4.0
+ARG ASHIGARU_COMMIT=499e50cff233c7a40455f4304718247475e4a73d
 ARG CONSTITUTION_VERSION=1.60.0
 
 # The base runs non-root; installing needs root. The image drops back at the end.
@@ -339,11 +341,13 @@ RUN set -eu; \
     gh --version | head -1
 
 # Ashigaru's scripts, prompts and schemas, and the constitution's scripts, at
-# the release tags above: the paths sdlc_jobs/_tools.py names. Data the jobs
+# the releases above (Ashigaru's VERSION file must agree with its ARG): the paths sdlc_jobs/_tools.py names. Data the jobs
 # run, not packages, so a shallow clone of the tag and nothing of its history.
 RUN set -eu; \
-    git -c advice.detachedHead=false clone -q --depth 1 --branch "v${ASHIGARU_VERSION}" \
-      https://github.com/crunchtools/ashigaru /tmp/ashigaru; \
+    git init -q /tmp/ashigaru; \
+    git -C /tmp/ashigaru fetch -q --depth 1 https://github.com/crunchtools/ashigaru "${ASHIGARU_COMMIT}"; \
+    git -C /tmp/ashigaru -c advice.detachedHead=false checkout -q FETCH_HEAD; \
+    [ "$(cat /tmp/ashigaru/VERSION)" = "${ASHIGARU_VERSION}" ]; \
     mkdir -p /opt/ashigaru; \
     cp -r /tmp/ashigaru/scripts /tmp/ashigaru/prompts /tmp/ashigaru/schemas /opt/ashigaru/; \
     git -c advice.detachedHead=false clone -q --depth 1 --branch "v${CONSTITUTION_VERSION}" \

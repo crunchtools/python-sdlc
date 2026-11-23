@@ -13,7 +13,7 @@ All notable changes to this project are documented here, following
   zizmor 1.32.0, the claude CLI 2.1.323 (auto-updater off), gh 2.104.0, and PyJWT
   2.15.1 with cryptography 50.0.2 in the interpreter `sdlc` runs under, each an ARG
   pin with a label and a contract test. For `sdlc event`'s handlers it also carries
-  Ashigaru v5.3.0's scripts, prompts and schemas at `/opt/ashigaru`, the constitution
+  Ashigaru 5.4.0 (its release commit, tag pending)'s scripts, prompts and schemas at `/opt/ashigaru`, the constitution
   v1.60.0's scripts at `/opt/constitution/scripts`, and `sdlc_jobs` on the path.
 - `sdlc-boot` (`boot/`): the fleet's trust root. It resolves
   `quay.io/crunchtools/sdlc:<major>`, verifies it against sdlc's own key and a baked
