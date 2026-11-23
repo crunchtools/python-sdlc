@@ -340,8 +340,8 @@ check(
 
 # ======================================================================= the API
 
-# Two fixtures from the real fleet file, whatever digest it pins: one with the
-# placeholder it carried before sdlc-bootstrap's first release, which every
+# Two fixtures from the real fleet file, whatever digest it pins: one carrying
+# the `<digest>` marker it had before sdlc-bootstrap's first release, which every
 # mode must refuse, and one pinned to a stand-in digest for the API tests.
 PLACEHOLDER = "sdlc-bootstrap@sha256:<digest>"
 FLEET_TEXT = re.sub(r"sdlc-bootstrap@sha256:[0-9a-f]{64}", PLACEHOLDER, cut.FLEET_FILE.read_text())
