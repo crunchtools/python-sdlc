@@ -22,6 +22,11 @@
 
 set -eu
 
+# Run as a pre-commit hook, this inherits the outer commit's GIT_INDEX_FILE, and
+# the scratch repos below would `git add` into that index: `git commit -a` here
+# then fails on a blob (.gemini/config.yaml) that only the scratch repo holds.
+for var in $(git rev-parse --local-env-vars); do unset "$var"; done
+
 cd "$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 FAILED=0
 ok()  { printf 'ok   %s\n' "$*"; }

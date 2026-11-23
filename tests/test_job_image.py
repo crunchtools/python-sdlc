@@ -373,15 +373,20 @@ def test_builder_stage_is_verified_and_pinned() -> None:
 def test_builder_stage_on_an_untrusted_registry_refused() -> None:
     t = FakeTools()
     cf = "FROM docker.io/library/golang:1 AS b\nRUN true\nFROM scratch\nCOPY --from=b /a /a\n"
-    assert "docker.io" in refused(t, cf)
+    assert refused(t, cf) == (
+        "the parent docker.io/library/golang:1 is on docker.io, "
+        "which this job does not trust: refused"
+    )
     assert not t.built()
-    for cf in (
-        "FROM quay.io/hummingbird-community/minio:1 AS b\nFROM scratch\n",
-        "FROM quay.io/hummingbird/x/go:1 AS b\nFROM scratch\n",
-        "FROM quay.io/other/go:1 AS b\nFROM scratch\n",
+    for ref in (
+        "quay.io/hummingbird-community/minio:1",
+        "quay.io/hummingbird/x/go:1",
+        "quay.io/other/go:1",
     ):
         t = FakeTools()
-        assert "quay.io" in refused(t, cf), cf
+        assert refused(t, f"FROM {ref} AS b\nFROM scratch\n") == (
+            f"the parent {ref} is on quay.io, which this job does not trust: refused"
+        )
         assert not t.built()
 
 
