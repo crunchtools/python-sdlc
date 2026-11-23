@@ -124,7 +124,7 @@ and tests/contract.sh asserts the major. Every tool a check runs \
 agent = "constitution"
 category = "constitution"
 file = "examples/ci.yml"
-evidence = "container: &boot { image: \"quay.io/crunchtools/sdlc-boot@sha256:<digest>\", volumes: [\"/var/run/docker.sock:/var/run/docker.sock\"] }"
+evidence = "image: \"quay.io/crunchtools/sdlc-boot@sha256:<digest>\""
 status = "not-a-bug"
 reason = """
 The fleet file is docs/marketplace-free-ci.md's YAML byte for byte, and the \
