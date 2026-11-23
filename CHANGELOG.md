@@ -8,6 +8,8 @@ All notable changes to this project are documented here, following
 
 ### Added
 
+- sdlc-boot now trusts sdlc's own cosign key (`boot/keys/sdlc.pub`); the private half lives only in the `sdlc-signing` environment.
+
 - The fleet's self-hosted Renovate runs from this image (a1099). `renovate` is
   installed by `npm ci --ignore-scripts` from a committed lockfile,
   `npm/renovate/`, at `RENOVATE_VERSION` (44.221.0, the version the
