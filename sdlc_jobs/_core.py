@@ -108,6 +108,8 @@ class Tools:
             )
         except subprocess.TimeoutExpired as exc:
             out, err = text_of(exc.stdout), text_of(exc.stderr)
+            if err and not err.endswith("\n"):
+                err += "\n"
             return subprocess.CompletedProcess(
                 argv, TIMED_OUT, out, f"{err}timed out after {timeout}s"
             )

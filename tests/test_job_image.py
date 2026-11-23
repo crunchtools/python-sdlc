@@ -1101,6 +1101,10 @@ def test_boot_hung_check_asks_the_engine() -> None:
         t = FakeTools()
         t.exec_rc = t.health_rc = 124
         assert run_boot(t, profile) == 1 and not t.pushed(), profile
+        t = FakeTools()  # it hung because the container died: that is the finding
+        t.exec_rc = t.health_rc = 124
+        t.boot_running = "false"
+        assert run_boot(t, profile) == 1 and "the container exited" in t.log, profile
 
 
 def test_boot_container_that_exits_during_a_check_is_a_finding() -> None:

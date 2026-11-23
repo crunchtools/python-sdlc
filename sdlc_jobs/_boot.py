@@ -270,7 +270,7 @@ def checkout_path(root: Path, source: str) -> str:
         except FileNotFoundError:
             cannot(f"[tool.sdlc.image] boot-run-args volume {source!r}: {part} does not exist")
         except OSError as exc:
-            cannot(f"boot: cannot read the volume {source!r} in the checkout: {exc}")
+            cannot(f"[tool.sdlc.image] boot-run-args volume {source!r}: cannot read {part}: {exc}")
         if stat.S_ISLNK(mode):
             cannot(f"[tool.sdlc.image] boot-run-args volume {source!r} goes through a symlink")
     if not here.resolve().is_relative_to(root.resolve()):
@@ -340,9 +340,9 @@ def engine(job: Job, proc: subprocess.CompletedProcess[str], name: str) -> str:
     """'' unless a check's podman call failed in podman itself (125) or hung (TIMED_OUT).
 
     Either way the engine is asked whether the container still runs: an engine
-    that cannot answer is a 2. After a 125, a live container is a 2 too, and a
-    gone one the finding "the container exited". A hung call into a live
-    container is the image's to answer for, so the check goes on judging it.
+    that cannot answer is a 2, and a gone container the finding "the container
+    exited". After a 125 a live container is a 2 too; a hung call into a live
+    one is the image's to answer for, so the check goes on judging it.
     126 and 127 come from inside the container (#116): verdicts, not here.
     """
     if proc.returncode not in (PODMAN_CANNOT_CREATE, TIMED_OUT):
@@ -351,12 +351,12 @@ def engine(job: Job, proc: subprocess.CompletedProcess[str], name: str) -> str:
     if state.returncode != 0:
         show(state)
         cannot(f"boot: podman cannot inspect {name} (exit {state.returncode}); nothing was judged")
-    if proc.returncode == TIMED_OUT:
-        return ""
-    if state.stdout.strip() == "true":
+    if state.stdout.strip() != "true":
+        return "the container exited before it was judged"
+    if proc.returncode == PODMAN_CANNOT_CREATE:
         show(proc)
         cannot(f"boot: podman failed on the running {name} (exit 125); nothing was judged")
-    return "the container exited before it was judged"
+    return ""
 
 
 # Run inside the sdlc image, in the server container's network namespace: the

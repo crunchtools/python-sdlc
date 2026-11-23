@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sdlc_jobs import _boot
-from sdlc_jobs._core import TIMED_OUT, Tools, await_reply, converse_on
+from sdlc_jobs._core import TIMED_OUT, Tools, await_reply, converse_on, text_of
 
 PY = sys.executable
 PODMAN_FAILED = 125  # what the image job reads as podman's own failure, not a verdict
@@ -154,6 +154,24 @@ def test_run_timeout() -> None:
     assert proc.returncode == TIMED_OUT, proc.returncode
     assert "timed out" in proc.stderr
     assert time.monotonic() - start < SOON
+
+
+def test_run_timeout_keeps_what_the_process_said() -> None:
+    script = (
+        "import sys, time; print('partial out', flush=True); "
+        "sys.stderr.write('partial err'); sys.stderr.flush(); time.sleep(5)"
+    )
+    proc = Tools().run([PY, "-c", script], timeout=1)
+    assert proc.returncode == TIMED_OUT
+    assert proc.stdout == "partial out\n", repr(proc.stdout)
+    assert proc.stderr == "partial err\ntimed out after 1s", repr(proc.stderr)
+
+
+def test_text_of_every_shape_timeout_expired_keeps() -> None:
+    assert text_of(b"caf\xc3\xa9") == "caf\u00e9"
+    assert text_of(b"\xff") == "\ufffd"
+    assert text_of("already text") == "already text"
+    assert text_of(None) == ""
 
 
 class Server:
