@@ -10,7 +10,10 @@ here, the second guard behind the workflow's own `if:`.
 as the final one's, is resolved and verified here:
 `quay.io/crunchtools/*` with the fleet key and `-a repo=<parent repo>`, Red Hat's
 registries with Red Hat's release key (gha-runner's `policy.json`, run through
-`skopeo --policy`), and any other registry is refused. The build then runs FROM that
+`skopeo --policy`), and any other registry is refused. `quay.io/hummingbird/<name>`
+is Hummingbird's unsigned mirror of `registry.access.redhat.com/hi/<name>`: the same
+digest is verified there with Red Hat's key, and the build uses the mirror's bytes by
+that digest. The build then runs FROM that
 verified `@sha256:` digest whatever tag the Containerfile names: `--from` when the stage
 is the only registry stage and the first, and a rewritten copy of the Containerfile
 otherwise, because podman's `--from` only replaces the FIRST stage's FROM.
@@ -61,6 +64,8 @@ from sdlc_jobs._core import (
 QUAY = "quay.io"
 ORG = "crunchtools"
 RED_HAT = ("registry.redhat.io", "registry.access.redhat.com")
+HUMMINGBIRD = "hummingbird"  # quay.io/hummingbird/<name> mirrors HUMMINGBIRD_SIGNED/<name>
+HUMMINGBIRD_SIGNED = "registry.access.redhat.com/hi"
 RH_KEY = "/etc/pki/sigstore/SIGSTORE-redhat-release3"
 RH_REKOR = "/etc/pki/sigstore/REKOR-signing-key"
 US = "\x1f"  # the plan's argv separator
@@ -296,7 +301,10 @@ def verify_parent(job: Job, parent: Parent) -> None:
     step(f"parent: {image}")
     host, path = split_ref(image)
     name = f"{host}/{path}"
-    digest = job.must(["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{image}"]).strip()
+    # skopeo refuses `name:tag@sha256:...`; the digest alone names the image, the tag
+    # is documentation.
+    ref = f"{name}@{image.partition('@')[2]}" if "@" in image else image
+    digest = job.must(["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{ref}"]).strip()
     if not DIGEST.fullmatch(digest):
         cannot(f"{image} resolved to {digest!r}, not a sha256 digest")
     pinned = f"{name}@{digest}"
@@ -306,37 +314,56 @@ def verify_parent(job: Job, parent: Parent) -> None:
         argv = ["cosign", "verify", "--insecure-ignore-tlog", "--key", str(key)]
         job.must([*argv, "-a", f"repo={path}", pinned])
     elif host in RED_HAT:
-        policy = job.scratch / "policy.json"
-        entry = [
-            {
-                "type": "sigstoreSigned",
-                "keyPath": job.env.get("SDLC_RH_KEY", RH_KEY),
-                "rekorPublicKeyPath": job.env.get("SDLC_RH_REKOR_KEY", RH_REKOR),
-            }
-        ]
-        policy.write_text(
-            json.dumps(
-                {
-                    "default": [{"type": "insecureAcceptAnything"}],
-                    "transports": {"docker": dict.fromkeys(RED_HAT, entry)},
-                }
-            )
-        )
-        job.must(
-            [
-                "skopeo",
-                "--policy",
-                str(policy),
-                "copy",
-                "-q",
-                f"docker://{pinned}",
-                f"dir:{job.scratch / f'parent-{parent.index}'}",
-            ]
-        )
+        red_hat_verify(job, parent, pinned)
+    elif host == QUAY and path.startswith(f"{HUMMINGBIRD}/") and path.count("/") == 1:
+        # The mirror carries no signature; Red Hat signs the same digest under hi/.
+        # A digest names the bytes, so verifying it there verifies the mirror's copy.
+        signed = f"{HUMMINGBIRD_SIGNED}/{path.partition('/')[2]}"
+        if "@" not in image:
+            # A tag is resolved at hi/, not the unsigned mirror: a stale or tampered
+            # mirror could otherwise roll the build back to any older signed digest.
+            tag = image.rpartition("/")[2].partition(":")[2] or "latest"
+            at_hi = job.must(
+                ["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{signed}:{tag}"]
+            ).strip()
+            if at_hi != digest:
+                cannot(f"{image} is {digest} on the mirror but {at_hi!r} at {signed}:{tag}")
+        red_hat_verify(job, parent, f"{signed}@{digest}")
     else:
         cannot(f"the parent {image} is on {host}, which this job does not trust: refused")
     parent.pinned, parent.digest = pinned, digest
     print(f"parent verified: {pinned}", flush=True)
+
+
+def red_hat_verify(job: Job, parent: Parent, signed: str) -> None:
+    """Verify `signed` (a Red Hat registry @digest) with Red Hat's release key, or a 2."""
+    policy = job.scratch / "policy.json"
+    entry = [
+        {
+            "type": "sigstoreSigned",
+            "keyPath": job.env.get("SDLC_RH_KEY", RH_KEY),
+            "rekorPublicKeyPath": job.env.get("SDLC_RH_REKOR_KEY", RH_REKOR),
+        }
+    ]
+    policy.write_text(
+        json.dumps(
+            {
+                "default": [{"type": "reject"}],
+                "transports": {"docker": dict.fromkeys(RED_HAT, entry)},
+            }
+        )
+    )
+    job.must(
+        [
+            "skopeo",
+            "--policy",
+            str(policy),
+            "copy",
+            "-q",
+            f"docker://{signed}",
+            f"dir:{job.scratch / f'parent-{parent.index}'}",
+        ]
+    )
 
 
 def labels(job: Job, parent: Parent | None) -> dict[str, str]:

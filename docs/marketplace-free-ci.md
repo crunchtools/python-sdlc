@@ -160,6 +160,9 @@ where a dispatch took minutes.
     `-a repo=<parent repo>`.
   - A `registry.redhat.io` or `registry.access.redhat.com` parent is checked
     with Red Hat's release key, as gha-runner's `policy.json` already does.
+  - A `quay.io/hummingbird/<name>` parent is unsigned, being a mirror, so
+    its digest is checked at `registry.access.redhat.com/hi/<name>` with the
+    same key.
   - The build then runs `FROM` that verified `@sha256:` digest, whatever tag
     the Containerfile names.
 - **Quiet repos stay scheduled.** GitHub disables a public repo's schedule
@@ -666,8 +669,8 @@ CodeQL uploads as `/language:python`, and zizmor as `zizmor`.
 | pypi | release merge push | re-verifies, `uv build` nested, `uv publish` by OIDC | publish.yml |
 | gate | pull_request_target | fails unless `ai` and `write` succeeded; workflow guard; triage, which needs a review of the head SHA | gatehouse.yml guard, triage.yml |
 | gate | collaborator review comment | re-runs `gate` in the PR's `pull_request_target` run with `GITHUB_TOKEN` | gatehouse-retriage.yml |
-| renovate | schedule `17 6 * * 1`, constitution only | mints the Renovate App's org-wide token, runs the image's `renovate` with the constitution's `renovate/self-hosted.json` at this commit | the constitution's renovate.yml |
-| renovate | workflow_dispatch without `version`, constitution only | the same as a dry run, read-only token, the weekly window ignored | renovate.yml's dispatch |
+| renovate | schedule `17 6 * * 1`, constitution only | `sdlc_jobs/renovate.py`: mints the Renovate App's org-wide token and runs `renovate` in a nested container of this image (no socket, no key), with the constitution's `renovate/self-hosted.json` at this commit as `RENOVATE_CONFIG` | the constitution's renovate.yml |
+| renovate | workflow_dispatch without `version`, constitution only | the same as a dry run: a read-only token, the weekly window ignored; a dispatch with `version` is refused | renovate.yml's dispatch |
 
 ## Required checks: from five to two
 

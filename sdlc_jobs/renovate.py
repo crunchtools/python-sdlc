@@ -39,7 +39,7 @@ import subprocess
 import tempfile
 import time
 import urllib.parse
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -99,7 +99,9 @@ def main(event_name: str, event: dict[str, Any], env: Mapping[str, str]) -> int:
     # First of all, whatever follows: the key is held by the mint below and
     # nowhere else from here on.
     key = env.get("RENOVATE_APP_KEY", "")
-    os.environ.pop("RENOVATE_APP_KEY", None)
+    for holder in (env, os.environ):
+        if isinstance(holder, MutableMapping):
+            holder.pop("RENOVATE_APP_KEY", None)
     real = is_real(event_name, event, env)
     repo = repo_of(event, env)
     if repo != HOME_REPO:

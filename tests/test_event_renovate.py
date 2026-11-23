@@ -109,8 +109,12 @@ check(
 )
 check("no App key is a 2", quiet(renovate.main, "schedule", weekly, base_env) == 2)
 os.environ["RENOVATE_APP_KEY"] = "PEM-KEY"
-quiet(renovate.main, "schedule", weekly, {**base_env, "GITHUB_REPOSITORY": "crunchtools/x"})
-check("main drops the App key from the job's environment", "RENOVATE_APP_KEY" not in os.environ)
+handed = {**base_env, "GITHUB_REPOSITORY": "crunchtools/x", "RENOVATE_APP_KEY": "PEM-KEY"}
+quiet(renovate.main, "schedule", weekly, handed)
+check(
+    "main drops the App key from the process and from the env it was handed",
+    "RENOVATE_APP_KEY" not in os.environ and "RENOVATE_APP_KEY" not in handed,
+)
 
 
 # ------------------------------------------------------------------ a run
@@ -331,6 +335,36 @@ check(
 )
 check("org_token masks the token", "::add-mask::org-tok" in printed.getvalue())
 check("org_token revokes on exit", len(app.made("DELETE", "/installation/token")) == 1)
+
+# ------------------------------------------------------------------- stream
+
+log = TMP / "stream.log"
+shell = ["sh", "-c", "echo out; echo err >&2; exit 3"]
+code = quiet(renovate.stream, shell, {"PATH": "/usr/bin:/bin"}, log)
+check("stream returns the child's status", code == 3)
+check("stream keeps stdout and stderr in the log", log.read_text().split() == ["out", "err"])
+check(
+    "a command that cannot start is a 2, not a status",
+    refusal(renovate.stream, [str(TMP / "no-such-renovate")], {}, log) is not None,
+)
+
+
+class TaggedSocket(FakeSocket):
+    def run(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        doc = [{"ImageName": "quay.io/crunchtools/sdlc:latest", "Image": "f" * 64}]
+        return subprocess.CompletedProcess(argv, 0, json.dumps(doc), "")
+
+
+tagged = renovate.Job(
+    Site(HOME, {**base_env, "HOSTNAME": "self-id"}, FakeRunner(), TMP),
+    Minter(),
+    TaggedSocket(),
+    FakeRenovate(),
+)
+check(
+    "an image not pinned by digest is a 2",
+    "not pinned by digest" in (refusal(tagged.image) or ""),
+)
 
 check("the suite tests this checkout's job", Path(renovate.__file__).resolve() == JOB_FILE)
 
