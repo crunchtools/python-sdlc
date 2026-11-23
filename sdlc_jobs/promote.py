@@ -60,6 +60,9 @@ RELEASED_REF = re.compile(r"refs/heads/.+")
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
 WORKFLOW = ".github/workflows/ci.yml@"
 OK = 200
+NOT_FOUND = 404
+HANDLED_EVENTS = ("push", "schedule", "workflow_dispatch")  # image's `if:` less pull_request
+BUILT_LABELS = ("org.opencontainers.image.revision", "com.crunchtools.build.commit")
 SECRET_KEYS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 
 
@@ -79,7 +82,11 @@ class Job:
 
     def child(self, *, key: bool = False) -> dict[str, str]:
         """The environment for a tool; the cosign key only when it must have it."""
-        env = {k: v for k, v in self.env.items() if key or k not in SECRET_KEYS}
+        env = {
+            k: v
+            for k, v in self.env.items()
+            if k != "GITHUB_TOKEN" and (key or k not in SECRET_KEYS)
+        }
         env["DOCKER_CONFIG"] = str(self.scratch / "docker")
         env["REGISTRY_AUTH_FILE"] = str(self.scratch / "docker" / "config.json")
         return env
@@ -140,10 +147,14 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     CannotRunError, exit 2, when an input is malformed or would move a version
     backwards, or a signing or tagging step fails.
     """
-    del event_name, event  # the job contract passes them; promote reads only the environment
+    del event  # the job contract passes it; promote reads only the environment
+    if event_name not in HANDLED_EVENTS:
+        cannot(f"promote does not run on {event_name!r}: only {', '.join(HANDLED_EVENTS)}")
     repo = env.get("GITHUB_REPOSITORY", "")
     if repo.count("/") != 1:
         cannot("GITHUB_REPOSITORY is not owner/name")
+    if not env.get("GITHUB_TOKEN"):
+        cannot("GITHUB_TOKEN is required: a tag read without it fails open on a private repo")
     ref, digest = validate_image(env, repo)
     version = release_version(env, plan(env).get("release"))
     scratch = Path(tempfile.mkdtemp(prefix="sdlc-promote-", dir=env.get("RUNNER_TEMP") or None))
@@ -153,6 +164,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     try:
         login(job)
         job.labels = inspect_labels(job)
+        verify_built(job)
         if version:
             refuse_mislabelled(job, version)
         moves = plan_tags(job, version)
@@ -181,6 +193,21 @@ def inspect_labels(job: Job) -> dict[str, str]:
     return doc.get("Labels") or {}
 
 
+def verify_built(job: Job) -> None:
+    """The image at the digest is this run's commit, and `image` pushed it as gated-<sha>.
+
+    Both are refusals, never skips: a digest that is not what this commit built does not
+    get signed or attested.
+    """
+    sha = job.env.get("GITHUB_SHA", "")
+    for label in BUILT_LABELS:
+        if job.labels.get(label) != sha:
+            cannot(f"{job.at} carries {label}={job.labels.get(label)!r}, not this run's {sha}")
+    gated = digest_of(job, f"gated-{sha}")
+    if gated != job.digest:
+        cannot(f"{job.ref}:gated-{sha} is {gated or 'missing'}, not the digest {job.digest}")
+
+
 def label_version(labels: Mapping[str, str]) -> tuple[int, int, int] | None:
     raw = next((labels[k] for k in VERSION_LABELS if labels.get(k)), "")
     m = SEMVER.fullmatch(raw.strip().removeprefix("v"))
@@ -204,8 +231,7 @@ def refuse_mislabelled(job: Job, version: str) -> None:
     if carried is None or carried == tuple_of(version):
         return
     name = "{}.{}.{}".format(*carried)
-    resp = call(job.tools, job.env, "GET", f"/repos/{job.repo}/git/ref/tags/v{name}")
-    if resp.status == OK:
+    if get(job, f"/repos/{job.repo}/git/ref/tags/v{name}").status == OK:
         cannot(f"release {version} would publish an image labelled {name}, another release")
 
 
@@ -341,6 +367,14 @@ def latest_is_newer(job: Job, new: tuple[int, int, int] | None) -> bool:
     return current is not None and current > new
 
 
+def get(job: Job, path: str) -> Response:
+    """One authenticated GET; a 404 is an answer, anything but 200 or 404 is a 2."""
+    resp = call(job.tools, job.env, "GET", path)
+    if resp.status not in (OK, NOT_FOUND):
+        cannot(f"GET {path} answered {resp.status}: {resp.body[:300]!r}")
+    return resp
+
+
 def ref_object(resp: Response) -> dict:
     doc = resp.json() if resp.status == OK else None
     obj = doc.get("object") if isinstance(doc, dict) else None
@@ -349,11 +383,9 @@ def ref_object(resp: Response) -> dict:
 
 def tagged_here(job: Job, version: str) -> bool:
     """Is the tag vX.Y.Z on this run's commit? A rebuild of the release, not a later push."""
-    obj = ref_object(call(job.tools, job.env, "GET", f"/repos/{job.repo}/git/ref/tags/v{version}"))
+    obj = ref_object(get(job, f"/repos/{job.repo}/git/ref/tags/v{version}"))
     if obj.get("type") == "tag":  # annotated: one more hop to the commit
-        obj = ref_object(
-            call(job.tools, job.env, "GET", f"/repos/{job.repo}/git/tags/{obj.get('sha')}")
-        )
+        obj = ref_object(get(job, f"/repos/{job.repo}/git/tags/{obj.get('sha')}"))
     return obj.get("sha") == job.env.get("GITHUB_SHA")
 
 

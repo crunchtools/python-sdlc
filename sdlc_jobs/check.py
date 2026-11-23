@@ -55,6 +55,10 @@ SDLC = "sdlc"  # this image's own in-image half, found on PATH
 ACCEPTED = 202
 WEEKLY = "17 6 * * 1"
 POLL = "47 */6 * * *"
+# The events ci.yml's `check` job runs on (its `if:`); anything else is not this job's.
+EVENTS = ("pull_request", "push", "schedule", "workflow_dispatch")
+# A job's outputs are capped at 1 MiB; the plan stays well under it.
+PLAN_LIMIT = 900_000
 RELEASE_REF = "ashigaru/release-"
 # The line `sdlc pip-audit -- --report` prints its JSON report on; the same in `sdlc`.
 AUDIT_REPORT = "SDLC-AUDIT-REPORT "
@@ -75,15 +79,18 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     GitHub API (a fake in the suites). 0 clean, 1 a gate found something, and
     CannotRunError, exit 2, when a gate or the plan could not be made.
     """
+    if event_name not in EVENTS:
+        cannot(f"check runs on {', '.join(EVENTS)}, not {event_name!r}")
     root = workspace(env)
     repo = env.get("GITHUB_REPOSITORY", "")
     default_push = event_name == "push" and env.get("GITHUB_REF") == (
         f"refs/heads/{(event.get('repository') or {}).get('default_branch', '')}"
     )
     cron = event.get("schedule") if event_name == "schedule" else None
-    set_output(env, "result", json.dumps(make_plan(tools, env, root, default_push, cron)))
+    plan = fit(make_plan(tools, env, root, default_push, cron))
+    set_output(env, "result", plan)
 
-    if event_name not in ("pull_request", "push", "workflow_dispatch"):
+    if event_name == "schedule":
         return CLEAN
     rc = gates(tools, env, root)
     if default_push:
@@ -117,6 +124,24 @@ def make_plan(
     # A clean report goes to `write` too: it is what closes the alert issue.
     out["write"] = bool(out["release"]) or out["audit"] is not None
     return out
+
+
+def fit(plan: dict[str, Any]) -> str:
+    """The plan as JSON, small enough for a job output.
+
+    A big audit report is cut to its vulnerable dependencies, the only ones
+    `audit_alert` reads (name, version, vulns); if that is still too big, a 2.
+    """
+    text = json.dumps(plan)
+    audit_report = plan["audit"]
+    if len(text.encode()) <= PLAN_LIMIT or audit_report is None:
+        return text
+    deps = audit_report["dependencies"]
+    plan["audit"] = {**audit_report, "dependencies": [d for d in deps if d.get("vulns")]}
+    text = json.dumps(plan)
+    if len(text.encode()) > PLAN_LIMIT:
+        cannot(f"the plan is {len(text.encode())} bytes even with only the vulnerable dependencies")
+    return text
 
 
 def containerfile(root: Path) -> str | None:

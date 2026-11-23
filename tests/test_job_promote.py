@@ -65,6 +65,9 @@ class FakeTools(Tools):
         self.release_tags: dict[str, str] = {}  # "1.2.3" -> commit
         self.annotated: dict[str, str] = {}  # "1.2.3" -> the commit its tag object points at
         self.key = FLEET_PUBLIC_KEY
+        self.gated: str | None = NEW  # what gated-<sha> resolves to; None: no such tag
+        self.api_status: int | None = None  # every GitHub answer, when set
+        self.headers: list[Mapping[str, str]] = []
         self.image_missing = False  # the registry has no manifest at the digest
         self.stdin: list[str | None] = []
         self.cwds: list[str | None] = []
@@ -93,6 +96,8 @@ class FakeTools(Tools):
         target = argv[-1].removeprefix("docker://")
         if argv[1] == "inspect" and "--format" in argv:
             tag = target.rpartition(":")[2]
+            if tag == f"gated-{SHA}":
+                return cp(0, self.gated) if self.gated else cp(1, "", "manifest unknown")
             return cp(0, self.tags[tag]) if tag in self.tags else cp(1, "", "manifest unknown")
         if argv[1] == "inspect" and self.image_missing:
             return cp(1, "", "manifest unknown")
@@ -122,7 +127,12 @@ class FakeTools(Tools):
                 rc = 0 if (digest, kind) in self.attested else 1
         return cp(rc, out)
 
-    def http(self, method: str, url: str, _headers: object, _data: bytes | None = None) -> Response:
+    def http(
+        self, method: str, url: str, headers: Mapping[str, str], _data: bytes | None = None
+    ) -> Response:
+        self.headers.append(headers)
+        if self.api_status is not None:
+            return Response(self.api_status, b"{}")
         path = url.removeprefix("https://api.github.com")
         tag_object = f"/repos/{REPO}/git/tags/"
         if path.startswith(tag_object):  # the hop an annotated tag takes to its commit
@@ -157,9 +167,11 @@ def go(
     **extra: str,
 ) -> int:
     planned = plan_version or release
+    event_name = extra.pop("event_name", "push")  # the job's event, not an env var
     env = {
         "GITHUB_REPOSITORY": REPO,
         "GITHUB_SHA": SHA,
+        "GITHUB_TOKEN": "tok",
         "SDLC_CHECK": json.dumps(
             {"image": True, "release": {"version": planned} if planned else None}
         ),
@@ -176,7 +188,7 @@ def go(
     }
     with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
         env["RUNNER_TEMP"] = tmp
-        return promote.run("push", {}, env, tools=tools)
+        return promote.run(event_name, {}, env, tools=tools)
 
 
 def refused(
@@ -295,6 +307,65 @@ def test_mislabelled_release_refused() -> None:
     assert go(t, release="1.2.3") == 0
 
 
+def test_tag_lookup_failure_is_a_2_and_404_is_no_tag() -> None:
+    for status in (403, 500):
+        t = FakeTools()  # a release whose image is labelled another version asks the API
+        t.labels[NEW] = built_labels("1.2.2")
+        t.api_status = status
+        assert str(status) in refused(t, release="1.2.3"), status
+        t = FakeTools()  # a rebuild asks whether v1.2.3 is on this commit
+        t.api_status = status
+        assert str(status) in refused(t), status
+    t = FakeTools()
+    t.api_status = 404
+    assert go(t) == 0 and "1.2.3" not in t.tags
+    t = FakeTools()
+    t.labels[NEW] = built_labels("1.2.2")
+    t.api_status = 404
+    assert go(t, release="1.2.3") == 0
+
+
+def test_token_is_sent_to_the_api_and_never_to_a_tool() -> None:
+    t = FakeTools()
+    assert go(t) == 0
+    assert t.headers and all(h["Authorization"] == "Bearer tok" for h in t.headers)
+    assert not any("GITHUB_TOKEN" in env for env in t.envs)
+    t = FakeTools()
+    assert "GITHUB_TOKEN is required" in refused(t, GITHUB_TOKEN="")
+    assert not t.argvs
+
+
+def test_label_mismatch_is_refused_not_skipped() -> None:
+    for label in promote.BUILT_LABELS:
+        for wrong in (OTHER_SHA, None):
+            t = FakeTools()
+            labels = built_labels()
+            if wrong is None:
+                del labels[label]
+            else:
+                labels[label] = wrong
+            t.labels[NEW] = labels
+            assert label in refused(t), (label, wrong)
+            assert not t.attested, "attested a mismatched image"
+
+
+def test_gated_tag_must_resolve_to_the_digest() -> None:
+    for gated in (OLD, None):
+        t = FakeTools()
+        t.gated = gated
+        assert f"gated-{SHA}" in refused(t, release="1.2.3"), gated
+        assert not t.attested, "attested a digest the gated tag does not name"
+
+
+def test_unhandled_event_is_refused() -> None:
+    for name in ("pull_request", "pull_request_target", "issues", "release", ""):
+        t = FakeTools()
+        assert "does not run on" in refused(t, event_name=name), name
+        assert not t.argvs, "an unhandled event reached a tool"
+    for name in promote.HANDLED_EVENTS:
+        assert go(FakeTools(), event_name=name) == 0, name
+
+
 def test_non_release_moves_latest_only() -> None:
     t = FakeTools()
     t.tags["latest"] = OLD
@@ -375,7 +446,7 @@ def test_syft_runs_without_the_key_and_nothing_executes_the_image() -> None:
 
 def test_no_provenance_without_a_build_record() -> None:
     t = FakeTools()
-    t.labels[NEW] = {"org.opencontainers.image.version": "1.2.3"}
+    t.labels[NEW] = dict.fromkeys(promote.BUILT_LABELS, SHA)
     assert go(t) == 0
     assert t.attested == {(NEW, "spdxjson")}
 

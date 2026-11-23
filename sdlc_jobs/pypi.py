@@ -32,6 +32,7 @@ from sdlc_jobs._core import (
 from sdlc_jobs._verify_release import verify_release
 
 INDEX_CHECK = "https://pypi.org/simple/"
+EVENTS = ("push",)  # ci.yml's `pypi` job runs on a push and nothing else
 
 
 def parse_release(raw: str | None) -> dict:
@@ -46,8 +47,20 @@ def parse_release(raw: str | None) -> dict:
     return doc
 
 
-def build(tools: Tools, env: Mapping[str, str], root: Path, version: str) -> list[Path]:
-    """`uv build` in a nested container; the dist/ files, each carrying the version."""
+def project_name(root: Path) -> str:
+    """[project].name from pyproject.toml; read before the build, which can rewrite it."""
+    try:
+        doc = tomllib.loads((root / "pyproject.toml").read_text())
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        cannot(f"pyproject.toml is not readable: {exc}")
+    name = (doc.get("project") or {}).get("name")
+    if not isinstance(name, str) or not name:
+        cannot("pyproject.toml has no [project].name to publish")
+    return name
+
+
+def build(tools: Tools, env: Mapping[str, str], root: Path, version: str, name: str) -> list[Path]:
+    """`uv build` in a nested container; the dist/ files, each carrying `name` and the version."""
     host, image = host_mount(tools, env, root)
     out = root / "dist"
     if out.exists():
@@ -79,12 +92,11 @@ def build(tools: Tools, env: Mapping[str, str], root: Path, version: str) -> lis
             "dist",
         ],
     )
-    return dist_files(root, out, version)
+    return dist_files(out, name, version)
 
 
-def dist_files(root: Path, out: Path, version: str) -> list[Path]:
+def dist_files(out: Path, name: str, version: str) -> list[Path]:
     """The files `uv build` left in `out`, each named for this project at this version."""
-    name = tomllib.loads((root / "pyproject.toml").read_text())["project"]["name"]
     stem = re.sub(r"[-_.]+", "_", name).lower()
     files = sorted(p for p in out.glob("*") if p.is_file())
     same = stem.replace("_", "[-_.]")  # sdists of older backends keep the hyphens
@@ -97,15 +109,15 @@ def dist_files(root: Path, out: Path, version: str) -> list[Path]:
 def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
     """Re-verify the release `write` made and publish it to PyPI by OIDC; 0 published.
 
-    `event_name` must be `push`. `env` carries SDLC_RELEASE ({version, sha} from
+    `event_name` must be one of `EVENTS`. `env` carries SDLC_RELEASE ({version, sha} from
     `write`), GITHUB_REPOSITORY and the OIDC request variables. `tools` runs
     the GitHub API, the build and the upload (a fake in the suites). Raises
     CannotRunError, exit 2, when the release does not verify from the API or
     a step fails.
     """
     del event  # the job contract passes it; a push needs nothing from it
-    if event_name != "push":
-        cannot(f"pypi runs on a push, not {event_name!r}")
+    if event_name not in EVENTS:
+        cannot(f"pypi runs on {', '.join(EVENTS)}, not {event_name!r}")
     needed("write", env.get("SDLC_WRITE"))
     release = parse_release(env.get("SDLC_RELEASE"))
     sha = env.get("GITHUB_SHA", "")
@@ -124,8 +136,9 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     if verified["version"] != release["version"]:
         cannot(f"the API says {verified['version']}, write said {release['version']}")
 
+    name = project_name(root)  # before the build gets the workspace read-write
     step(f"pypi: build {verified['version']} in a nested container")
-    files = build(tools, env, root, verified["version"])
+    files = build(tools, env, root, verified["version"], name)
 
     step(f"pypi: publish {len(files)} files by trusted publishing")
     # --check-url makes a re-run succeed: files already on PyPI with the same

@@ -320,15 +320,23 @@ def run_job(job: ModuleType, event_name: str, event: dict, env: Mapping[str, str
     """Run a job module's `main` (ai, write, gate), which makes its own tools, or
     its `run` with the real tools, the one place `Tools` is made.
 
-    Its verdict must be one of the exit codes; anything else is a 2.
+    Its verdict must be one of the exit codes; anything else, and any exception
+    that is not a CannotRunError, is a 2.
     """
     # `main` first: ai.py has a `run` of its own with another signature.
-    if hasattr(job, "main"):
-        verdict = job.main(event_name, event, env)
-    elif hasattr(job, "run"):
-        verdict = job.run(event_name, event, env, Tools())
-    else:
-        cannot(f"job {job.__name__} has neither run nor main")
+    try:
+        if hasattr(job, "main"):
+            verdict = job.main(event_name, event, env)
+        elif hasattr(job, "run"):
+            verdict = job.run(event_name, event, env, Tools())
+        else:
+            cannot(f"job {job.__name__} has neither run nor main")
+    except Exception as exc:
+        # A refusal stands; any other exception is a bug in the job, and a bug
+        # is never a verdict: not a 1 (FOUND).
+        if isinstance(exc, CannotRunError):
+            raise
+        cannot(f"job {job.__name__} raised {type(exc).__name__}: {exc}")
     if verdict == DEFERRED:
         cannot(f"job {job.__name__} deferred to CI, and a job is CI: nothing was judged")
     if verdict not in (CLEAN, FOUND, CANNOT_RUN):

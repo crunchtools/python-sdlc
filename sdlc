@@ -516,16 +516,23 @@ RESERVED = (
 )
 
 
+PUBLISH_TARGETS = ("pypi",)
+
+
 def sdlc_config() -> dict:
     """`[tool.sdlc]`, checked for shape before anything trusts it."""
     cfg = config_document().get("tool", {}).get("sdlc", {}) or {}
-    stray = sorted(set(cfg) - set(COMMANDS) - {"project", "stacks", "skip-stacks", "image"})
+    stray = sorted(
+        set(cfg) - set(COMMANDS) - {"project", "stacks", "skip-stacks", "image", "publish"}
+    )
     if stray:
         cannot(
             f"[tool.sdlc] has {', '.join(stray)}; the only keys are "
             f"[tool.sdlc.commit], [tool.sdlc.push], [tool.sdlc.ci], `project`, "
-            f"`stacks`, `skip-stacks` and `image`"
+            f"`stacks`, `skip-stacks`, `image` and `publish`"
         )
+    if "publish" in cfg and cfg["publish"] not in PUBLISH_TARGETS:
+        cannot(f'[tool.sdlc] publish must be "pypi", not {cfg["publish"]!r}')
     config_image(cfg)
     project_dir()  # validated here, so a bad path is caught on the next commit
     stacks = active_stacks(cfg)

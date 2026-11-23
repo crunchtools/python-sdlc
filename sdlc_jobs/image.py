@@ -3,16 +3,17 @@
 It holds the registry secrets (quay, RHSM, registry.redhat.io) and the runner's
 container socket, never the cosign key. It runs on a default-branch push, the
 schedule or a dispatch, so the Containerfile it builds is reviewed, merged code; a
-pull request's is built only by `check`, which holds no secret. `pull_request` is a 2
-here as the second guard behind the workflow's own `if:`.
+pull request's is built only by `check`, which holds no secret. Any other event is a 2
+here, the second guard behind the workflow's own `if:`.
 
-`check`'s plan only says this job runs. The parent is resolved and verified here:
+`check`'s plan only says this job runs. Every registry FROM, a builder stage's as much
+as the final one's, is resolved and verified here:
 `quay.io/crunchtools/*` with the fleet key and `-a repo=<parent repo>`, Red Hat's
 registries with Red Hat's release key (gha-runner's `policy.json`, run through
 `skopeo --policy`), and any other registry is refused. The build then runs FROM that
 verified `@sha256:` digest whatever tag the Containerfile names: `--from` when the stage
-is the first, and a rewritten copy of the Containerfile otherwise, because podman's
-`--from` only replaces the FIRST stage's FROM and the image that ships is the last.
+is the only registry stage and the first, and a rewritten copy of the Containerfile
+otherwise, because podman's `--from` only replaces the FIRST stage's FROM.
 
 The gates are the ones `sdlc ci` plans for this repo. `sdlc plan ci` is asked for the
 build argv (so `[tool.sdlc.ci.container-build]` settings still hold) and for smoke, scan
@@ -32,7 +33,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,9 +42,11 @@ from sdlc_jobs._core import (
     DIGEST,
     FLEET_PUBLIC_KEY,
     FOUND,
+    FROM_AS_WORDS,
     IMAGE_NOT_ENFORCED,
     Tools,
     cannot,
+    expand_build_vars,
     final_stage,
     host_mount,
     image_settings,
@@ -73,8 +76,21 @@ SECRETS = (
     "GITHUB_TOKEN",
 )
 FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE)
-# Podman options a repo's config must not be able to put on a host step.
-DENIED = ("--privileged", "--cap-add", "--device", "--userns", "--pid", "--ipc", "--uts")
+# The `podman run` options the planner emits for a host step (container-smoke,
+# container-scan, bootc-lint), and nothing else: a repo's config cannot add one.
+RUN_FLAGS = ("--rm", "--read-only")
+RUN_VALUED = (
+    "--pull",
+    "--network",
+    "-e",
+    "-v",
+    "--volume",
+    "--mount",
+    "-w",
+    "--entrypoint",
+    "--tmpfs",
+)
+EVENTS = ("push", "schedule", "workflow_dispatch")  # what the workflow's `if:` lets in
 PLAN_FIELDS = 4  # name, stage, mode, argv
 STATE_FIELDS = 3  # running, exit code, OOM-killed
 PODMAN_CANNOT_CREATE = 125
@@ -112,7 +128,8 @@ class Job:
 def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
     """Build, gate and push this commit's image; 0 pushed, 1 a gate found something.
 
-    `event_name` must not be `pull_request`: this job holds the registry secrets.
+    `event_name` must be one of `EVENTS`: this job holds the registry secrets, so any
+    other (`pull_request` above all) is a 2.
     `event` is unused, because everything comes from `env`: GITHUB_REPOSITORY,
     GITHUB_SHA, GITHUB_WORKSPACE, HOSTNAME (this container, for the host path),
     QUAY_*, RHSM_* and REGISTRY_REDHAT_IO_*. `tools` runs podman, skopeo and cosign
@@ -120,8 +137,8 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     malformed, the parent does not verify, or a step that is not a gate fails.
     """
     del event  # the job contract passes it; image reads only the environment
-    if event_name == "pull_request":
-        cannot("image never runs on pull_request: it holds the registry secrets")
+    if event_name not in EVENTS:
+        cannot(f"image does not run on {event_name!r}, only on {', '.join(EVENTS)}")
     repo = env.get("GITHUB_REPOSITORY", "")
     sha = env.get("GITHUB_SHA", "")
     if repo.count("/") != 1 or not SHA.fullmatch(sha):
@@ -162,15 +179,16 @@ def build_and_push(job: Job) -> int:
     text = (job.root / containerfile).read_text(encoding="utf-8", errors="replace")
     login(job)
     parent = parent_stage(text)
-    if parent is not None:
-        verify_parent(job, parent)
+    stages = [*([parent] if parent else []), *builder_stages(text, parent.index if parent else -1)]
+    for stage in stages:
+        verify_parent(job, stage)
     step("map the workspace and plan the gates")
     job.host_root, job.image_id = host_mount(job.tools, job.env, job.root)
     plan = gate_plan(job)
     if "container-build" not in plan:
         cannot("`sdlc plan ci` plans no container-build for this repo")
     found = lint(job)
-    tag = build(job, plan, text, parent)
+    tag = build(job, plan, text, parent, stages)
     for name in GATES:
         if name in plan and not run_gate(job, name, *plan[name]):
             found = True
@@ -232,6 +250,33 @@ def parent_stage(text: str) -> Parent | None:
     return None if image.lower() == "scratch" else Parent(index, image)
 
 
+def builder_stages(text: str, final: int) -> list[Parent]:
+    """Every other FROM that names a registry image: a builder stage ships bytes too.
+
+    Not scratch, not a reference to an earlier stage's alias, not the `final` FROM
+    that `parent_stage` already has; the same variable expansion as `final_stage`.
+    """
+    args: dict[str, str] = {}
+    aliases: list[str] = []
+    found: list[Parent] = []
+    index = -1
+    for raw in re.sub(r"\\\n", " ", text).splitlines():
+        words = raw.split()
+        op = words[0].upper() if words else ""
+        if op == "ARG" and index < 0:
+            args.update(
+                {k: v.strip("\"'") for k, eq, v in (w.partition("=") for w in words[1:]) if eq}
+            )
+        elif op == "FROM" and (rest := [w for w in words[1:] if not w.startswith("--")]):
+            index += 1
+            image = expand_build_vars(rest[0], args, strict=True).strip("\"'")
+            if index != final and image.lower() != "scratch" and image.lower() not in aliases:
+                found.append(Parent(index, image))
+            if len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS":
+                aliases.append(rest[2].lower())
+    return found
+
+
 def split_ref(image: str) -> tuple[str, str]:
     """(registry host, repository path) of a reference, tag and digest dropped."""
     first, _, rest = image.partition("/")
@@ -285,7 +330,7 @@ def verify_parent(job: Job, parent: Parent) -> None:
                 "copy",
                 "-q",
                 f"docker://{pinned}",
-                f"dir:{job.scratch / 'parent'}",
+                f"dir:{job.scratch / f'parent-{parent.index}'}",
             ]
         )
     else:
@@ -351,20 +396,21 @@ def pinned_file(job: Job) -> Path:
     return job.root / f".sdlc-pinned-{job.sha[:12]}.Containerfile"
 
 
-def pin_args(job: Job, text: str, parent: Parent | None, argv: list[str]) -> list[str]:
-    """podman build words that put the verified digest in the parent's FROM."""
-    if parent is None:
+def pin_args(job: Job, text: str, stages: list[Parent], argv: list[str]) -> list[str]:
+    """podman build words that put each verified digest in its stage's FROM."""
+    if not stages:
         return argv
-    if parent.index == 0:
-        return ["--from", parent.pinned, *argv]
+    if len(stages) == 1 and stages[0].index == 0:
+        return ["--from", stages[0].pinned, *argv]
+    pinned = {stage.index: stage.pinned for stage in stages}
     kept: list[str] = []
     seen = -1
     for line in text.splitlines(keepends=True):
         m = FROM_LINE.match(line)
         if m:
             seen += 1
-        if m and seen == parent.index:
-            kept.append(f"{m[1]}{parent.pinned}{line[m.end() :]}")
+        if m and seen in pinned:
+            kept.append(f"{m[1]}{pinned[seen]}{line[m.end() :]}")
         else:
             kept.append(line)
     copy = pinned_file(job)
@@ -376,7 +422,13 @@ def pin_args(job: Job, text: str, parent: Parent | None, argv: list[str]) -> lis
     return out
 
 
-def build(job: Job, plan: dict[str, tuple[str, str]], text: str, parent: Parent | None) -> str:
+def build(
+    job: Job,
+    plan: dict[str, tuple[str, str]],
+    text: str,
+    parent: Parent | None,
+    stages: list[Parent],
+) -> str:
     """Build through the socket at the tag smoke and scan read; return that tag."""
     step("build")
     words = plan["container-build"][1].split(US)
@@ -413,7 +465,7 @@ def build(job: Job, plan: dict[str, tuple[str, str]], text: str, parent: Parent 
             argv += ["--secret", f"id={sid},src={job.scratch / fname}"]
     copy = pinned_file(job)
     try:
-        argv += pin_args(job, text, parent, words[2:])
+        argv += pin_args(job, text, stages, words[2:])
         proc = job.run(argv, stream=True)  # a build's log goes to the job log, unbuffered
     finally:
         copy.unlink(missing_ok=True)
@@ -447,21 +499,43 @@ def run_gate(job: Job, name: str, mode: str, payload: str) -> bool:
 
 
 def check_words(job: Job, name: str, words: list[str]) -> None:
-    """The planner validated these; a job with a socket holds the same line again."""
-    allowed = (f"{job.volume}:", f"{job.host_root}:")
-    for i, word in enumerate(words):
+    """The planner validated these; a job with a socket holds the same line again.
+
+    An allowlist: only the options the planner emits, `--opt=value` and `--opt value`
+    read alike. An unknown option, a stray word or a value off its rule is a 2.
+    """
+    sources = (f"{job.volume}:", f"{job.host_root}:")
+    i = 0
+    while i < len(words):
+        word = words[i]
+        i += 1
         if word == "--":
             break
-        prev = words[i - 1] if i else ""
-        bad = (
-            word.split("=")[0] in DENIED
-            or (word in ("--network", "--net") and words[i + 1 : i + 2] != ["none"])
-            or (word.startswith(("--network=", "--net=")) and word.split("=", 1)[1] != "none")
-            or (prev in ("-v", "--volume") and not word.startswith(allowed))
-            or (prev == "--mount" and not word.startswith("type=image,"))
-        )
-        if bad:
-            cannot(f"{name}: refused podman option {word!r} in a host step")
+        opt, eq, value = word.partition("=")
+        if opt in RUN_FLAGS and not eq:
+            continue
+        shown = word
+        if opt in RUN_VALUED:
+            if not eq and i < len(words):
+                value, i = words[i], i + 1
+            elif not eq:
+                value = ""
+            shown = value
+            if run_value_ok(opt, value, sources):
+                continue
+        cannot(f"{name}: refused podman option {shown!r} in a host step")
+
+
+def run_value_ok(opt: str, value: str, sources: tuple[str, ...]) -> bool:
+    """An allowlisted option's value: the planner's own, or any non-empty one."""
+    rules: dict[str, Callable[[str], bool]] = {
+        "--pull": lambda v: v == "never",
+        "--network": lambda v: v == "none",
+        "-v": lambda v: v.startswith(sources),
+        "--volume": lambda v: v.startswith(sources),
+        "--mount": lambda v: v.startswith("type=image,"),
+    }
+    return rules.get(opt, bool)(value)
 
 
 def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: int) -> bool:
@@ -523,12 +597,13 @@ def push(job: Job, tag: str, pinned: str) -> int:
     ref = job.settings.get("image") or f"{QUAY}/{ORG}/{job.name}"
     gated = f"gated-{job.sha}"
     step(f"push {ref}:{gated}")
-    job.must([*job.podman, "push", "--authfile", str(job.auth), tag, f"docker://{ref}:{gated}"])
-    digest = job.must(
-        ["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{ref}:{gated}"]
-    ).strip()
+    # The digest podman reports for what it pushed, not whatever the tag names later.
+    digestfile = job.scratch / "pushed.digest"
+    argv = [*job.podman, "push", "--authfile", str(job.auth), "--digestfile", str(digestfile)]
+    job.must([*argv, tag, f"docker://{ref}:{gated}"])
+    digest = digestfile.read_text().strip() if digestfile.is_file() else ""
     if not DIGEST.fullmatch(digest):
-        cannot(f"{ref}:{gated} resolved to {digest!r}, not a sha256 digest")
+        cannot(f"podman push of {ref}:{gated} reported {digest!r}, not a sha256 digest")
     result = {"ref": ref, "digest": digest, "sha": job.sha, "tag": gated, "parent": pinned}
     set_output(job.env, "result", json.dumps(result, separators=(",", ":")))
     print(f"built once: {ref}@{digest} ({gated})", flush=True)

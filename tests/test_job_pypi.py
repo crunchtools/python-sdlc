@@ -54,6 +54,7 @@ class FakeTools(Tools):
         self.urls: list[str] = []
         self.dist = [f"mcp_example-{VERSION}.tar.gz", f"mcp_example-{VERSION}-py3-none-any.whl"]
         self.head = SHA
+        self.rewrite: str | None = None  # what a hostile build backend writes to pyproject.toml
 
     def run(
         self,
@@ -79,6 +80,8 @@ class FakeTools(Tools):
             )
         elif argv[:2] == ["podman", "run"]:
             (self.root / "dist").mkdir()
+            if self.rewrite is not None:
+                (self.root / "pyproject.toml").write_text(self.rewrite)
             for name in self.dist:
                 (self.root / "dist" / name).write_text("x")
         elif argv[:2] == ["git", "rev-parse"]:
@@ -177,7 +180,15 @@ def test_happy_path() -> None:
 def test_not_a_push() -> None:
     tools, env, tmp = make()
     with tmp:
-        assert "runs on a push" in refusal(tools, env, "pull_request")
+        assert "runs on push" in refusal(tools, env, "pull_request")
+        assert not tools.argvs
+
+
+def test_other_events_are_refused() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        for event in ("pull_request", "pull_request_target", "issues", "schedule"):
+            assert "runs on push" in refusal(tools, env, event), event
         assert not tools.argvs
 
 
@@ -262,6 +273,22 @@ def test_bad_dist_names() -> None:
         msg = refusal(tools, env)
         assert "dist/" in msg
         assert "uv publish" not in " ".join(tools.verbs())
+
+
+def test_name_is_read_before_the_build() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        tools.rewrite = PYPROJECT.replace("mcp-example", "evil")
+        tools.dist = [f"evil-{VERSION}.tar.gz"]
+        msg = refusal(tools, env)
+        assert "dist/" in msg and "mcp_example" in msg
+        assert "uv publish" not in " ".join(tools.verbs())
+
+
+def test_missing_name_is_a_refusal() -> None:
+    no_name = PYPROJECT.replace('name = "mcp-example"\n', "")
+    msg = refused(pyproject=no_name)
+    assert "[project].name" in msg
 
 
 def test_checkout_not_at_sha() -> None:

@@ -72,6 +72,16 @@ All notable changes to this project are documented here, following
 - The jobs read `sdlc.toml`'s `[tool.sdlc]` tables; they read its top level.
 - A gate's `--network=host` / `--net=host` is refused like the two-word form.
 - `containerfile-lint` exit 4 (hadolint could not parse) is a 2, not a pass.
+- `[tool.sdlc] publish = "pypi"` no longer fails config as a stray key.
+- `promote` sends `GITHUB_TOKEN` and refuses any tag-API status but 200/404;
+  it requires the image's revision labels and `gated-<sha>` to match the digest.
+- `image` takes the digest from `podman push --digestfile`, checks gate options
+  against an allowlist (`--opt=value` included), and verifies and pins every
+  registry FROM, builder stages too: an untrusted builder is now a 2.
+- Every job names the events it runs on and refuses the rest; an unexpected
+  exception in a job is a 2, never a 1.
+- `check` caps the audit report under GitHub's output limit (only vulnerable
+  dependencies when large); `pypi` reads `[project].name` before the build.
 
 ## [0.11.1] - 2026-11-23
 

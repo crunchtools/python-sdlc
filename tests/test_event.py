@@ -177,6 +177,16 @@ def test_job_failures_are_a_2() -> None:
     check("a job that returns nothing is a 2", isinstance(rc, str), str(rc))
 
 
+def test_an_unexpected_exception_is_a_2() -> None:
+    fake_job("ev_bug", KeyError("name"))
+    rc, _ = event("ev_bug", {})
+    check(
+        "a job raising KeyError is a 2 naming the job and class",
+        isinstance(rc, str) and "ev_bug" in rc and "KeyError" in rc,
+        str(rc),
+    )
+
+
 class FakeReply(io.BytesIO):
     """What urlopen yields: a context manager with a status and a body."""
 
@@ -246,6 +256,7 @@ def main() -> int:
         test_a_main_job_is_called_as_main,
         test_write_with_digest_does_nothing,
         test_job_failures_are_a_2,
+        test_an_unexpected_exception_is_a_2,
         test_http_returns_a_https_response,
         test_http_error_status_is_a_response,
         test_http_network_failure_is_a_2,

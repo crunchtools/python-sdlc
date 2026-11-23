@@ -96,6 +96,7 @@ class FakeTools(Tools):
         self.built_file = ""
         self.plan = ""  # the plan `sdlc plan ci` prints; empty is the stock one
         self.stdin: list[str | None] = []
+        self.digest: str | None = PUSHED  # what `podman push --digestfile` writes; None, none
 
     def run(
         self,
@@ -138,6 +139,9 @@ class FakeTools(Tools):
                 out = (
                     ("true 0 false" if up else "false 1 false") if state_query else str(up).lower()
                 )
+            case "push":
+                if self.digest is not None:
+                    Path(sub[sub.index("--digestfile") + 1]).write_text(self.digest + "\n")
             case "run" if "-d" not in sub:
                 rc = self.scan_rc
         return cp(rc, out)
@@ -149,7 +153,7 @@ class FakeTools(Tools):
                 self.policy = json.loads(Path(argv[2]).read_text())
                 rc = self.verify_rc
             case "inspect":
-                out = PUSHED if ":gated-" in argv[-1] else PARENT
+                out = PARENT
         return cp(rc, out)
 
     def pushed(self) -> bool:
@@ -226,6 +230,16 @@ def test_pull_request_refused() -> None:
     assert not t.argvs, "a pull request ran something"
 
 
+def test_only_the_workflow_events_run() -> None:
+    for event in ("pull_request_target", "issues", "repository_dispatch", ""):
+        t = FakeTools()
+        assert "does not run on" in refused(t, QUAY_PARENT, event=event)
+        assert not t.argvs, f"{event!r} ran something"
+    for event in image.EVENTS:
+        assert go(FakeTools(), QUAY_PARENT, event=event)[0] == 0, event
+    assert image.EVENTS == ("push", "schedule", "workflow_dispatch")
+
+
 def test_crunchtools_parent_verified() -> None:
     t = FakeTools()
     rc, _ = go(t, QUAY_PARENT)
@@ -277,14 +291,43 @@ def test_build_pinned_to_digest() -> None:
 def test_final_stage_not_first_is_rewritten() -> None:
     t = FakeTools()
     cf = (
-        "FROM quay.io/hummingbird/python:3.14-builder AS b\nRUN true\n"
+        "FROM quay.io/crunchtools/builder:1 AS b\nRUN true\n"
         "FROM quay.io/crunchtools/ubi10-core:latest\nCOPY --from=b /a /a\n"
     )
     go(t, cf)
     argv = t.build_argv()
     assert "--from" not in argv
     lines = t.built_file.splitlines()
-    assert lines[0].endswith("AS b") and lines[2] == f"FROM quay.io/crunchtools/ubi10-core@{PARENT}"
+    assert lines[2] == f"FROM quay.io/crunchtools/ubi10-core@{PARENT}"
+
+
+def test_builder_stage_is_verified_and_pinned() -> None:
+    t = FakeTools()
+    cf = (
+        "ARG V=1\nFROM --platform=linux/amd64 registry.redhat.io/ubi10/go:${V} AS b\nRUN true\n"
+        "FROM b AS c\nFROM scratch AS s\n"
+        "FROM quay.io/crunchtools/ubi10-core:latest\nCOPY --from=b /a /a\n"
+    )
+    rc, result = go(t, cf)
+    lines = t.built_file.splitlines()
+    assert lines[1] == f"FROM --platform=linux/amd64 registry.redhat.io/ubi10/go@{PARENT} AS b"
+    assert lines[5] == f"FROM quay.io/crunchtools/ubi10-core@{PARENT}"
+    assert lines[3] == "FROM b AS c" and lines[4] == "FROM scratch AS s"
+    assert "--from" not in t.build_argv()
+    pulled = [a[-2] for a in t.argvs if a[1:2] == ["--policy"]]
+    assert pulled == [f"docker://registry.redhat.io/ubi10/go@{PARENT}"]
+    assert any(a[:2] == ["cosign", "verify"] for a in t.argvs)
+    assert rc == 0 and result is not None and result["parent"].startswith("quay.io/crunchtools/")
+
+
+def test_builder_stage_on_an_untrusted_registry_refused() -> None:
+    t = FakeTools()
+    cf = "FROM docker.io/library/golang:1 AS b\nRUN true\nFROM scratch\nCOPY --from=b /a /a\n"
+    assert "docker.io" in refused(t, cf)
+    assert not t.built()
+    t = FakeTools()
+    assert "quay.io" in refused(t, "FROM quay.io/hummingbird/go:1 AS b\nFROM scratch\n")
+    assert not t.built()
 
 
 def test_stage_alias_followed_to_registry_parent() -> None:
@@ -356,7 +399,21 @@ def test_output_shape() -> None:
     }
     push = next(a for a in t.argvs if a[4:5] == ["push"])
     assert push[-1] == f"docker://quay.io/crunchtools/demo:gated-{SHA}"
+    assert "--digestfile" in push
+    assert not any(a[0] == "skopeo" and a[1] == "inspect" and ":gated-" in a[-1] for a in t.argvs)
     assert t.argvs.index(push) > max(i for i, a in enumerate(t.argvs) if a[4:5] == ["run"])
+
+
+def test_pushed_digest_missing_or_malformed_refused() -> None:
+    for digest in (None, "", "sha256:abc", "latest", PUSHED.upper()):
+        t = FakeTools()
+        t.digest = digest
+        msg = ""
+        try:
+            go(t, QUAY_PARENT)
+        except CannotRunError as exc:
+            msg = str(exc)
+        assert "not a sha256 digest" in msg, (digest, msg)
 
 
 def test_scratch_has_no_parent() -> None:
@@ -393,6 +450,28 @@ def test_gate_network_is_refused_unless_none() -> None:
     assert rc == 0
 
 
+def test_gate_unlisted_options_are_refused() -> None:
+    for words in (
+        ["--volume=/:/host"],
+        ["-v=/:/host"],
+        ["--mount=type=bind,source=/,destination=/host"],
+        ["--volumes-from", "x"],
+        ["--security-opt", "label=disable"],
+        ["--cgroupns=host"],
+        ["--systemd=always"],
+        ["--privileged"],
+        ["--network=host"],
+        ["--net=host"],
+        ["--net", "none"],
+        ["--cap-add=all"],
+        ["--pull=always"],
+        ["--rm=true"],
+        ["stray"],
+        ["-v"],
+    ):
+        assert "refused podman option" in gate_refused(*words), words
+
+
 def test_gate_volume_outside_the_allowed_sources_is_refused() -> None:
     assert "'/etc:/etc:ro'" in gate_refused("-v", "/etc:/etc:ro")
     assert "'/:/host'" in gate_refused("--volume", "/:/host")
@@ -407,6 +486,14 @@ def test_gate_mount_that_is_not_an_image_is_refused() -> None:
 def test_gate_allowed_mounts_pass() -> None:
     t = FakeTools()
     t.plan = plan_text().replace("--rm", US.join(["--rm", "-v", f"{HOST}:/x:ro,z"]), 1)
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0 and t.pushed()
+
+
+def test_gate_planner_options_pass_in_both_spellings() -> None:
+    t = FakeTools()
+    extra = ["--read-only", "-w", "/repo", "-e=A=b", f"--volume={HOST}:/y:ro", "--tmpfs=/t"]
+    t.plan = plan_text().replace("--rm", US.join(["--rm", *extra]), 1)
     rc, _ = go(t, QUAY_PARENT)
     assert rc == 0 and t.pushed()
 

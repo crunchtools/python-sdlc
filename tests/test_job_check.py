@@ -19,6 +19,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -161,8 +162,24 @@ SARIF = {"sarif/codeql-results.sarif": '{"runs": [{}]}'}  # what the CodeQL gate
 PYPI = {"pyproject.toml": '[tool.sdlc]\npublish = "pypi"\n'}
 
 
+def refusal(event_name: str, tools: FakeTools, **kwargs: Any) -> str:
+    """The message of the CannotRunError `go` raises, or a failed assertion."""
+    try:
+        go(event_name, tools, **kwargs)
+    except CannotRunError as exc:
+        return str(exc)
+    raise AssertionError("expected a refusal (exit 2)")
+
+
 def uploads(tools: FakeTools) -> list[tuple[str, str, bytes | None]]:
     return [c for c in tools.calls if c[1].endswith("/code-scanning/sarifs")]
+
+
+def test_other_events_are_refused() -> None:
+    for event_name in ("issues", "pull_request_target", "pull_request_review_comment"):
+        t = FakeTools()
+        assert event_name in refusal(event_name, t)
+        assert not t.argvs and not t.calls
 
 
 def test_pull_request() -> None:
@@ -228,6 +245,38 @@ def test_weekly_audit_found() -> None:
     plan = go("schedule", t, files=PYPI, cron=check.WEEKLY)[1]
     assert plan["audit"]["dependencies"][0]["vulns"][0]["id"] == "CVE-1"
     assert plan["write"] is True
+
+
+def audit_of(deps: list[dict]) -> str:
+    return f"{check.AUDIT_REPORT}{json.dumps({'dependencies': deps})}\n"
+
+
+def test_big_audit_keeps_only_the_vulnerable() -> None:
+    clean = [
+        {"name": f"pkg{i}", "version": "1.0", "vulns": [], "pad": "x" * 200} for i in range(6000)
+    ]
+    bad = {"name": "foo", "version": "1.0", "vulns": [{"id": "CVE-1", "fix_versions": ["2.0"]}]}
+    t = FakeTools()
+    t.audit_out = audit_of([*clean, bad])
+    rc, plan = go("schedule", t, files={"pyproject.toml": "[project]\n"}, cron=check.WEEKLY)
+    assert rc == 0 and plan["audit"]["dependencies"] == [bad]
+
+
+def test_small_audit_is_left_whole() -> None:
+    deps = [{"name": "foo", "version": "1.0", "vulns": []}]
+    t = FakeTools()
+    t.audit_out = audit_of(deps)
+    _, plan = go("schedule", t, files={"pyproject.toml": "[project]\n"}, cron=check.WEEKLY)
+    assert plan["audit"]["dependencies"] == deps
+
+
+def test_audit_too_big_even_when_cut_cannot_run() -> None:
+    vuln = {"id": "CVE-1", "fix_versions": ["x" * 1000]}
+    deps = [{"name": f"p{i}", "version": "1", "vulns": [vuln] * 10} for i in range(100)]
+    t = FakeTools()
+    t.audit_out = audit_of(deps)
+    msg = refusal("schedule", t, files={"pyproject.toml": "[project]\n"}, cron=check.WEEKLY)
+    assert "bytes" in msg
 
 
 def test_weekly_no_python_project_audits_nothing() -> None:

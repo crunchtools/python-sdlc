@@ -168,6 +168,13 @@ check("a typo in ci is found on commit", msg is not None and "typo" in msg, str(
 msg = config_error('[tool.sdlc.ci]\nskip = ["mypy"]\n')
 check("a ci skip of a verdict is found on commit", msg is not None and "mypy" in msg, str(msg))
 
+msg = config_error('[tool.sdlc]\npublish = "pypi"\n')
+check("publish = pypi is a known key", msg is None, str(msg))
+msg = config_error('[tool.sdlc]\npublish = "npm"\n')
+check("another publish target is refused", msg is not None and "must be" in msg, str(msg))
+msg = config_error("[tool.sdlc]\npublish = true\n")
+check("a non-string publish is refused", msg is not None and "must be" in msg, str(msg))
+
 # --------------------------------------------------- project in a subdirectory
 #
 # The uv-driven checks can live one directory down. The value is validated when
