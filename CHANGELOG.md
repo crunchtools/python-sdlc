@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-23
+
+### Changed
+
+- sdlc-bootstrap base core-runtime:2-builder sha256:3d625fad86d7 -> sha256:3f42474b6433.
+
 ### Changed
 
 - Every fleet secret stays an org secret: the fleet file names no `ai`,
