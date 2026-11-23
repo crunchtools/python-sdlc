@@ -55,7 +55,7 @@ jobs:
     steps: *event
   image:  # verifies the parent itself, builds FROM @digest through the socket, gates, pushes gated-<sha>
     needs: check
-    if: fromJSON(needs.check.outputs.result || '{}').image && github.event_name != 'pull_request'
+    if: needs.check.result == 'success' && fromJSON(needs.check.outputs.result || '{}').image && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: registry
     container: *boot
@@ -262,7 +262,7 @@ jobs:
       - &fetch { run: 'git init -q . && git fetch -q --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA" && git checkout -q FETCH_HEAD' }
       - run: scripts/self.sh  # podman build, then `sdlc ci` and the contract test from the built digest
   check:  # default-branch code only: builds it, runs `sdlc ci` from it, plans, uploads SARIF, keeps the schedule alive
-    name: sdlc / check (${{ github.event_name }})
+    name: sdlc / plan (${{ github.event_name }})  # never the required name: test reports that
     if: >-
       github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
@@ -503,6 +503,12 @@ tag ruleset stays as it is today.
 | `promote` | | `cosign-signing`: cosign key, quay; queued | after `image`, and after `write` on a release; `ubuntu-latest` | an App key, a build |
 | `pypi` | | `pypi`: OIDC only | a release merge that publishes to PyPI; `ubuntu-latest` | anything else |
 | `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; `ubuntu-latest` | any secret |
+
+This table is the fleet file. In crunchtools/sdlc alone, the required
+`sdlc / check (pull_request)` is `test`: `pull_request` only,
+`contents: read`, no socket and no secret. sdlc's `check` is named
+`sdlc / plan`, holds the socket and `security-events`, and never runs on
+`pull_request` (under "sdlc's own workflow").
 
 **Runners.** Every job that holds a secret runs on `ubuntu-latest`, always,
 including in a private repo. Only `check`, which holds none, may use our
