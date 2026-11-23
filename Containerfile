@@ -16,7 +16,7 @@
 # pin what the image actually carries instead of guessing.
 
 ARG GOURMAND_VERSION=1.1.0
-ARG GATEHOUSE_VERSION=0.31.0
+ARG GATEHOUSE_VERSION=0.33.0
 ARG UV_VERSION=0.13.7
 ARG HADOLINT_VERSION=2.14.0
 ARG GRYPE_VERSION=0.121.0
@@ -38,7 +38,7 @@ FROM quay.io/hummingbird/python:3.14-builder
 
 # Repeated after FROM: an ARG before the first FROM is out of scope here.
 ARG GOURMAND_VERSION=1.1.0
-ARG GATEHOUSE_VERSION=0.31.0
+ARG GATEHOUSE_VERSION=0.33.0
 ARG UV_VERSION=0.13.7
 ARG HADOLINT_VERSION=2.14.0
 ARG GRYPE_VERSION=0.121.0
@@ -52,7 +52,7 @@ ARG CODEQL_BUNDLE=codeql-bundle-v2.27.4
 # to 3.14: Hummingbird ships one nodejs24 at a time and drops the old build, so
 # an exact RPM version would fail the weekly rebuild that exists to take errata.
 ARG NODE_MAJOR=24
-ARG MARKDOWNLINT_CLI2_VERSION=0.24.0
+ARG MARKDOWNLINT_CLI2_VERSION=0.24.2
 
 # The base runs non-root; installing needs root. The image drops back at the end.
 USER root
@@ -62,7 +62,7 @@ LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/sdlc"
 LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python, container, node, bootc and docs repos."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
-LABEL version="0.11.0"
+LABEL version="0.11.1"
 
 # What the image carries, readable without starting anything. `sdlc versions`
 # prints these and a consuming repo's CI pins them.

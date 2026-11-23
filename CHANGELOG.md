@@ -6,6 +6,13 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-23
+
+### Changed
+
+- gatehouse 0.31.0 -> 0.33.0.
+- markdownlint-cli2 0.24.0 -> 0.24.2.
+
 ### Added
 
 - The node stack: a repo with a root `package.json` gets `npm-lint`, `npm-test` and
