@@ -73,6 +73,12 @@ BAKED = {
     "node": os.environ.get("SDLC_NODE_VERSION", "unknown"),
     "markdownlint-cli2": os.environ.get("SDLC_MARKDOWNLINT_CLI2_VERSION", "unknown"),
     "lychee": os.environ.get("SDLC_LYCHEE_VERSION", "unknown"),
+    "docker": os.environ.get("SDLC_DOCKER_VERSION", "unknown"),
+    "cosign": os.environ.get("SDLC_COSIGN_VERSION", "unknown"),
+    "syft": os.environ.get("SDLC_SYFT_VERSION", "unknown"),
+    "zizmor": os.environ.get("SDLC_ZIZMOR_VERSION", "unknown"),
+    "claude-code": os.environ.get("SDLC_CLAUDE_CODE_VERSION", "unknown"),
+    "cryptography": os.environ.get("SDLC_CRYPTOGRAPHY_VERSION", "unknown"),
 }
 
 
@@ -88,6 +94,16 @@ VERSION_PROBE = {
     "node": ["node", "--version"],
     "markdownlint-cli2": ["markdownlint-cli2", "--help"],
     "lychee": ["lychee", "--version"],
+    "docker": ["docker", "--version"],
+    "cosign": ["cosign", "version"],
+    "syft": ["syft", "--version"],
+    "zizmor": ["zizmor", "--version"],
+    "claude-code": ["claude", "--version"],
+    "cryptography": [
+        "/opt/apptoken-venv/bin/python3",
+        "-c",
+        "import cryptography; print(cryptography.__version__)",
+    ],
     # gatehouse has no --version flag; its usage line is all it offers.
     "gatehouse": None,
 }

@@ -6,6 +6,20 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- The image half of the marketplace-free CI (a1088, docs/marketplace-free-ci.md).
+  The image gains podman-remote, skopeo, the docker CLI, cosign 2.6.5, syft 1.57.0,
+  zizmor 1.32.0, the claude CLI 2.1.323 (auto-updater off) and cryptography 50.0.2
+  in `/opt/apptoken-venv`, each an ARG pin with a label and a contract test.
+- `sdlc-boot` (`boot/`): the fleet's trust root. It resolves
+  `quay.io/crunchtools/sdlc:<major>`, verifies it against sdlc's own key and a baked
+  minimum version, and runs it by digest beside the job container. Every refusal
+  is a 2. Built and smoke-tested by container.yml; nothing publishes it yet.
+- `scripts/self.sh`: the test, check, image and sign steps of sdlc's own new
+  ci.yml, which waits in `examples/sdlc-ci.yml` until the cutover. sign runs cosign
+  from a digest-pinned image and never runs the image it signs.
+
 ## [0.11.1] - 2026-11-23
 
 ### Changed

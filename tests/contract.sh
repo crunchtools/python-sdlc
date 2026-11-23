@@ -71,6 +71,14 @@ for probe in \
   "npm:npm --version" \
   "markdownlint-cli2:markdownlint-cli2 --help | head -1" \
   "lychee:lychee --version" \
+  "podman-remote:podman-remote --version" \
+  "skopeo:skopeo --version" \
+  "docker:docker --version" \
+  "cosign:cosign version" \
+  "syft:syft --version" \
+  "zizmor:zizmor --version" \
+  "claude:claude --version" \
+  "apptoken-python:/opt/apptoken-venv/bin/python3 -c 'import cryptography; print(cryptography.__version__)'" \
   "git:git --version" \
   "jq:jq --version" \
   "curl:curl --version" \
@@ -124,6 +132,29 @@ check_version markdownlint-cli2 "$(inside sh -c 'printf %s "$SDLC_MARKDOWNLINT_C
                         "$(inside sh -c 'markdownlint-cli2 --help' 2>&1 | head -1)"
 check_version lychee    "$(inside sh -c 'printf %s "$SDLC_LYCHEE_VERSION"')" \
                         "$(inside sh -c 'lychee --version' 2>&1)"
+
+# podman-remote and skopeo float with the Hummingbird repo, so there is no pin
+# to compare; they must run (above) and be the Hummingbird majors.
+check_version podman-remote "podman-remote version 6." "$(inside sh -c 'podman-remote --version' 2>&1)"
+check_version skopeo    "skopeo version 1." "$(inside sh -c 'skopeo --version' 2>&1)"
+check_version docker    "$(inside sh -c 'printf %s "$SDLC_DOCKER_VERSION"')" \
+                        "$(inside sh -c 'docker --version' 2>&1)"
+check_version cosign    "$(inside sh -c 'printf %s "$SDLC_COSIGN_VERSION"')" \
+                        "$(inside sh -c 'cosign version' 2>&1)"
+check_version syft      "$(inside sh -c 'printf %s "$SDLC_SYFT_VERSION"')" \
+                        "$(inside sh -c 'syft --version' 2>&1)"
+check_version zizmor    "$(inside sh -c 'printf %s "$SDLC_ZIZMOR_VERSION"')" \
+                        "$(inside sh -c 'zizmor --version' 2>&1)"
+check_version claude    "$(inside sh -c 'printf %s "$SDLC_CLAUDE_CODE_VERSION"')" \
+                        "$(inside sh -c 'claude --version' 2>&1)"
+check_version cryptography "$(inside sh -c 'printf %s "$SDLC_CRYPTOGRAPHY_VERSION"')" \
+                        "$(inside sh -c '/opt/apptoken-venv/bin/python3 -c "import cryptography; print(cryptography.__version__)"' 2>&1)"
+# An image must not update itself.
+if [ "$(inside sh -c 'printf %s "$DISABLE_AUTOUPDATER"')" = 1 ]; then
+  ok "claude's auto-updater is disabled"
+else
+  bad "DISABLE_AUTOUPDATER is not 1 in the image"
+fi
 
 # codeql's bundle name is codeql-bundle-vX.Y.Z and the CLI reports X.Y.Z.
 _bundle=$(inside sh -c 'printf %s "$SDLC_CODEQL_BUNDLE"')
@@ -587,7 +618,13 @@ for row in \
   "grype:SDLC_GRYPE_VERSION" \
   "node:SDLC_NODE_VERSION" \
   "markdownlint-cli2:SDLC_MARKDOWNLINT_CLI2_VERSION" \
-  "lychee:SDLC_LYCHEE_VERSION"
+  "lychee:SDLC_LYCHEE_VERSION" \
+  "docker:SDLC_DOCKER_VERSION" \
+  "cosign:SDLC_COSIGN_VERSION" \
+  "syft:SDLC_SYFT_VERSION" \
+  "zizmor:SDLC_ZIZMOR_VERSION" \
+  "claude-code:SDLC_CLAUDE_CODE_VERSION" \
+  "cryptography:SDLC_CRYPTOGRAPHY_VERSION"
 do
   tool=${row%%:*}
   var=${row#*:}
