@@ -6,6 +6,16 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-23
+
+### Fixed
+
+- `scripts/self.sh` makes the registry login it mounts for cosign readable by
+  cosign's nonroot user. `podman login` writes it 0600, so every cosign call
+  failed: the 0.12.0 bootstrap's sign job could not sign, and a verify read as
+  "not signed". The login sits in mktemp's 0700 directory, so nothing else on
+  the host can reach it.
+
 ## [0.12.0] - 2026-11-23
 
 ### Added
