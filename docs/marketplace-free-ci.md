@@ -637,7 +637,9 @@ ashigaru#254, which should take this list.
 **What crosses between jobs.** `ai` gzips and base64-encodes its result, then
 splits it into four outputs of at most 112,500 bytes each, 450,000 bytes in
 all. That stays under Linux's 128 KiB `MAX_ARG_STRLEN` per environment
-variable. `write` reads the four as `SDLC_AI_0..3`.
+variable. `write` reads the four as `SDLC_AI_0..3`. Spike #103 confirmed the
+limit: a step given the whole 450 KB as one variable fails to exec, so the
+split stays at four chunks.
 - **A result over 450,000 bytes encoded** fails `ai` loudly; it is never
   truncated. The admin override is a person: `ai`'s failure labels the issue
   or PR `needs-human`, with the size, and an admin applies the change by hand.
@@ -687,9 +689,10 @@ are one control.
 **No skipped job can carry a required name.** A skipped job still reports a
 check, and a skipped check counts as passing. With the event in `name:`, the
 skipped `gate` in a `pull_request` run is `sdlc / gate (pull_request)`, and
-nothing requires that. If GitHub shows a skipped job's name unevaluated, the
-literal text still differs from the required name. Spike #103 checks which.
-Within its own event, neither required job can no-op.
+nothing requires that. Spike #103 (a1058) settled how: a skipped job's check
+carries its `name:` literally, `sdlc / gate (${{ github.event_name }})`
+unevaluated, and that differs from every required name. Within its own event,
+neither required job can no-op.
 
 **The gate stays on `pull_request_target`**, as Josui Prime agreed: a
 `pull_request` run would let a fork edit the guard out of its own run. A fork's
@@ -953,7 +956,7 @@ default branches, 2026-11-22). Counts are repos / `uses:` lines.
 | `anthropics/claude-code-action/base-action` | ashigaru: 6 | the `claude` CLI (`@anthropic-ai/claude-code`, exact version, npm), run by `sdlc ashigaru *` with the same `--model`, `--max-turns`, `--allowedTools`, `--json-schema` and settings the action is given | no |
 | `anthropics/claude-code-action` | mcp-atlassian `claude.yml` (inherited from upstream) | delete; Ashigaru is the fleet's agent | n/a |
 | `dependabot/fetch-metadata` | 2: automerge | delete. Renovate's own automerge replaces it, and from constitution v1.60.0 Dependabot fails validation anyway | n/a |
-| `docker/login-action`, `setup-buildx-action`, `build-push-action` | trentina `l2-train`, rotv `tests` | `podman login` / `podman build` / `podman push` in `sdlc image` or a repo-defined command | no: podman, buildah, skopeo and cosign have to come in |
+| `docker/login-action`, `setup-buildx-action`, `build-push-action` | trentina `l2-train`, rotv `tests` | `docker login` / `docker build` / `docker push` through the socket in `sdlc image`, or a repo-defined command | no: the docker CLI, skopeo and cosign have to come in |
 | `actions/upload-pages-artifact`, `deploy-pages` | packages `publish.yml` | `sdlc pages`: push the built site to a `gh-pages` branch, Pages source set to "Deploy from a branch" | no |
 | `actions/stale` | mcp-atlassian (upstream) | delete | n/a |
 | `OWASP/cve-lite-cli` | rotv | grype and `npm audit`, both already in `sdlc ci` | yes |
@@ -973,9 +976,12 @@ Every item below is an ordinary pinned version in this repo's `Containerfile`,
 permission alone. `scripts/update_tools.py` and `update-tools.yml` are retired
 in favour of Renovate `customManagers` on the `ARG` lines.
 
-- **The podman remote client and skopeo**: for driving the runner's socket
-  (builds, nested runs, `podman login`) and for copying by digest. There is
-  no engine inside the image: the socket is the engine.
+- **The docker CLI and skopeo**: for driving the runner's socket (builds,
+  nested runs, `docker login`) and for copying by digest. There is no engine
+  inside the image: the socket is the engine. Not the podman remote client:
+  spike #103 found `podman --remote` fails against the Docker 29 socket on
+  GitHub-hosted runners, while the docker CLI drives both that and
+  gha-runner's podman API.
 - **cosign v2.6.5** (copied from its digest-pinned image), and **syft**: for
   `sdlc image promote`. They do what `scripts/sign-digest.sh` and
   `scripts/attest-digest.sh` already do in sdlc's own `container.yml`.
@@ -986,7 +992,7 @@ in favour of Renovate `customManagers` on the `ARG` lines.
 - **cryptography** (or PyJWT): in an isolated venv, for App tokens.
 - **The bootstrap** is a second, separate image (`sdlc-boot`), built from
   this repo. It holds cosign, sdlc's own public key (two during a rotation),
-  the major it follows, the minimum version and a podman remote client, and
+  the major it follows, the minimum version and the docker CLI, and
   nothing else. It changes rarely, and each
   change is a fleet edit of one digest.
 - **gh** is not needed: sdlc calls the REST API itself, as `release_publish.py`
@@ -1052,7 +1058,11 @@ socket, and nothing runs `--privileged`.
 The bootstrap and `sdlc event` drive the socket. Repo code (tests, a
 Containerfile build) runs only in the nested containers they start:
 `--cap-drop=all`, `--network=none` where the check allows, no token, no
-secret, and never the socket itself. The model runs nested too, holding the
+secret, and never the socket itself. One exception to `--network=none`: on
+an Exedore runner a Containerfile's `RUN` steps cannot have it. The runner's
+rootless podman builds with chroot isolation, which cannot take
+`--network=none` (spike #103), so a `RUN` step there has the runner's
+network. It still gets no socket, token or secret. The model runs nested too, holding the
 Claude token it needs to call the API and nothing else: not the socket, not a
 GitHub write token, not an App key. That is today's `run_in_image`, moved
 from the host into a job container.
