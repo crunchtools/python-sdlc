@@ -101,7 +101,9 @@ case $1 in
         esac
         _f=$W/reg/tag/$(san "$_ref")
         if [ -s "$_f" ]; then cat "$_f"; else echo 'Error: manifest unknown' >&2; exit 1; fi ;;
-      *image.revision*) cat "$W/reg/rev/$(san "$_ref")" 2> /dev/null || : ;;
+      *image.revision*)
+        [ ! -e "$W/rev-fails" ] || { echo 'Error: unauthorized: authentication required' >&2; exit 1; }
+        cat "$W/reg/rev/$(san "$_ref")" 2> /dev/null || : ;;
       *) cat "$W/reg/label/$(san "$_ref")" 2> /dev/null || : ;;
     esac ;;
   copy)
@@ -156,7 +158,7 @@ git -C "$W/repo" -c user.name=t -c user.email=t@t commit -q -m init
 REV=$(git -C "$W/repo" rev-parse HEAD)
 
 reset() {
-  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/tags" \
+  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/rev-fails" "$W/tags" \
          "$W/ls-remote-fails" "$W/curl-stdin" "$W/login-stdin" "$W/repo/boot/keys/"*
   mkdir -p "$W/reg/tag" "$W/reg/label"
   write_tree
@@ -245,6 +247,22 @@ if [ "$RC" -eq 0 ] && in_log "^podman build -f $W/repo/Containerfile" && in_log 
    && in_log 'stub tests/test_self.sh' && [ ! -e "$W/out" ]; then
   ok "test builds, runs every suite, the contract test and sdlc ci, and plans nothing"
 else bad "test: exit $RC"; dump; fi
+
+# The git-init fetch has no origin, and the constitution validator names the
+# repo from it (#105): test and check add one, and never replace one.
+# The raw config, not `remote get-url`, which applies a seat's url.insteadOf.
+origin() { git -C "$W/repo" config --get remote.origin.url 2> /dev/null || :; }
+git -C "$W/repo" remote remove origin 2> /dev/null || :
+reset; run test test GITHUB_EVENT_NAME=pull_request
+check "no origin: test adds the github.com default" [ "$(origin)" = https://github.com/crunchtools/sdlc ]
+git -C "$W/repo" remote remove origin
+reset; run check check GITHUB_EVENT_NAME=schedule GITHUB_SERVER_URL=https://ghe.example \
+  GITHUB_REPOSITORY=o/r GITHUB_TOKEN=t GITHUB_API_URL=https://api
+check "no origin: check adds GITHUB_SERVER_URL/GITHUB_REPOSITORY" [ "$(origin)" = https://ghe.example/o/r ]
+git -C "$W/repo" remote set-url origin https://example.org/keep
+reset; run test test GITHUB_EVENT_NAME=pull_request GITHUB_SERVER_URL=https://ghe.example GITHUB_REPOSITORY=o/r
+check "an existing origin is kept" [ "$(origin)" = https://example.org/keep ]
+git -C "$W/repo" remote remove origin
 SRVENV="GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=crunchtools/sdlc"
 reset; : > "$W/tags"
 # shellcheck disable=SC2086
@@ -338,6 +356,10 @@ else bad "weekly image: exit $RC"; dump; fi
 reset; carry "$D0" 0.13.0; reg_rev "$A@$D0" "v0.13.0"
 run image weekly GITHUB_EVENT_NAME=schedule GITHUB_SERVER_URL="file://$W" GITHUB_REPOSITORY=repo
 refused "weekly: a revision label that is not a commit sha is refused" "is not a commit sha"
+reset; carry "$D0" 0.13.0; touch "$W/rev-fails"
+run image weekly GITHUB_EVENT_NAME=schedule GITHUB_SERVER_URL="file://$W" GITHUB_REPOSITORY=repo
+refused "weekly: a revision label that cannot be read is refused" "cannot read the revision label"
+check "  and nothing was fetched or built" sh -c "! grep -q '^git .*fetch\|^podman build' '$W/log'"
 reset
 run image weekly GITHUB_EVENT_NAME=schedule GITHUB_SERVER_URL="file://$W" GITHUB_REPOSITORY=repo
 refused "weekly: no :0 means no release to rebuild" "does not exist"
@@ -456,6 +478,8 @@ refused ":0's annotation and label disagreeing is refused" "must agree"
 wk_setup; reg_rev "$A@$D1" "$(printf 'f%.0s' $(seq 40))"; wk
 refused "a rebuild of another commit than :0's is refused" "was built from $REV"
 check "  and nothing was signed" [ "$(n_log ' sign --yes ')" -eq 0 ]
+wk_setup; touch "$W/rev-fails"; wk
+refused "a revision label sign cannot read is refused" "cannot read the revision label"
 wk_setup; wk
 if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0.13.0")" = "$D1" ] && [ "$(tag_of "$A:0")" = "$D1" ] \
    && [ -z "$(tag_of "$A:latest")" ] && [ "$(n_log ' sign --yes ')" -eq 1 ] \

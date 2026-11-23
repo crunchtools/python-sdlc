@@ -351,13 +351,17 @@ RUN set -eu; \
     git init -q /tmp/ashigaru; \
     git -C /tmp/ashigaru fetch -q --depth 1 https://github.com/crunchtools/ashigaru "${ASHIGARU_COMMIT}"; \
     git -C /tmp/ashigaru -c advice.detachedHead=false checkout -q FETCH_HEAD; \
-    [ "$(cat /tmp/ashigaru/VERSION)" = "${ASHIGARU_VERSION}" ]; \
+    got=$(cat /tmp/ashigaru/VERSION); \
+    [ "$got" = "${ASHIGARU_VERSION}" ] || { \
+      echo "ASHIGARU_COMMIT ${ASHIGARU_COMMIT} is version $got, not ASHIGARU_VERSION ${ASHIGARU_VERSION}" >&2; exit 1; }; \
     mkdir -p /opt/ashigaru; \
     cp -r /tmp/ashigaru/scripts /tmp/ashigaru/prompts /tmp/ashigaru/schemas /opt/ashigaru/; \
     git init -q /tmp/constitution; \
     git -C /tmp/constitution fetch -q --depth 1 https://github.com/crunchtools/constitution "${CONSTITUTION_COMMIT}"; \
     git -C /tmp/constitution -c advice.detachedHead=false checkout -q FETCH_HEAD; \
-    grep -qx "> \*\*Version:\*\* ${CONSTITUTION_VERSION}" /tmp/constitution/constitution.md; \
+    got=$(sed -n 's/^> \*\*Version:\*\* //p' /tmp/constitution/constitution.md | head -1); \
+    [ "$got" = "${CONSTITUTION_VERSION}" ] || { \
+      echo "CONSTITUTION_COMMIT ${CONSTITUTION_COMMIT} is version '$got', not CONSTITUTION_VERSION ${CONSTITUTION_VERSION}" >&2; exit 1; }; \
     mkdir -p /opt/constitution; \
     cp -r /tmp/constitution/scripts /opt/constitution/; \
     rm -rf /tmp/ashigaru /tmp/constitution
