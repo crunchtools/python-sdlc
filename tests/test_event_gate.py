@@ -438,9 +438,9 @@ for assoc in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", ""):
     )
 # A literal, not gate.TRUSTED_ASSOCIATIONS: CodeQL reads "trusted" in a name as
 # a secret and flags it reaching check()'s print. The pin keeps the two in step.
-RERUN_ROLES = ("OWNER", "MEMBER", "COLLABORATOR")
-check("re-run associations pinned", gate.TRUSTED_ASSOCIATIONS == RERUN_ROLES)
-for assoc in RERUN_ROLES:
+RERUN_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+check("re-run associations pinned", gate.TRUSTED_ASSOCIATIONS == RERUN_ASSOCIATIONS)
+for assoc in RERUN_ASSOCIATIONS:
     api = retriage_api([run_row(1, 1)])
     check(
         f"association {assoc} re-runs",
