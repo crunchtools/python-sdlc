@@ -87,6 +87,7 @@ class FakeTools(Tools):
         self.argvs: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
         self.verify_rc = 0
+        self.signed_tag = PARENT  # what a hi/<name>:<tag> resolves to
         self.scan_rc = 0
         self.smoke_up = "true"
         self.build_rc = 0
@@ -153,7 +154,7 @@ class FakeTools(Tools):
                 self.policy = json.loads(Path(argv[2]).read_text())
                 rc = self.verify_rc
             case "inspect":
-                out = PARENT
+                out = self.signed_tag if "registry.access.redhat.com/hi/" in argv[-1] else PARENT
         return cp(rc, out)
 
     def pushed(self) -> bool:
@@ -282,6 +283,25 @@ def test_hummingbird_mirror_verified_at_red_hat() -> None:
     assert result["parent"] == f"quay.io/hummingbird/python@{PARENT}"
     inspected = [a[-1] for a in t.argvs if a[:2] == ["skopeo", "inspect"]]
     assert f"docker://quay.io/hummingbird/python@{PARENT}" in inspected  # no tag: skopeo refuses
+    # the tag-only FROM is resolved at hi/ as well; the digest-pinned one is not
+    assert "docker://registry.access.redhat.com/hi/python:3.14" in inspected
+    assert not any(
+        i.startswith("docker://registry.access.redhat.com/hi/python:3.14-") for i in inspected
+    )
+    assert t.policy["default"] == [{"type": "reject"}]
+
+
+def test_hummingbird_mirror_tag_must_match_hi() -> None:
+    """A mirror tag that names a different digest than hi/ does is a rollback: refused."""
+    t = FakeTools()
+    t.signed_tag = "sha256:" + "c" * 64
+    msg = refused(t, "FROM quay.io/hummingbird/python:3.14-builder\nRUN true\n")
+    assert "registry.access.redhat.com/hi/python:3.14-builder" in msg, msg
+    assert not any(a[1:2] == ["--policy"] for a in t.argvs)
+    t = FakeTools()
+    t.signed_tag = "sha256:" + "c" * 64
+    refused(t, "FROM quay.io/hummingbird/core-runtime\nRUN true\n")
+    assert "docker://registry.access.redhat.com/hi/core-runtime:latest" in [a[-1] for a in t.argvs]
 
 
 def test_hummingbird_unverified_pushes_nothing() -> None:

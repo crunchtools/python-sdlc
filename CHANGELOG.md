@@ -13,6 +13,10 @@ All notable changes to this project are documented here, following
   digest at `registry.access.redhat.com/hi/<name>` with Red Hat's release key
   and builds from the mirror by that digest. A mirror digest Red Hat has not
   signed, `quay.io/hummingbird-community` and any other registry still refuse.
+  A tag-only `FROM` must name the same digest at `hi/<name>:<tag>` as on the
+  mirror, so a stale mirror cannot roll a build back to an older signed digest.
+- The Red Hat verification policy now rejects by default, so only the listed
+  Red Hat registries ever pass it.
 - The `image` job resolves a `name:tag@sha256:` parent by its digest alone.
   skopeo refuses a reference with both, so every tag-and-digest `FROM` was a 2.
 

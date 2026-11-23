@@ -318,7 +318,17 @@ def verify_parent(job: Job, parent: Parent) -> None:
     elif host == QUAY and path.startswith(f"{HUMMINGBIRD}/") and path.count("/") == 1:
         # The mirror carries no signature; Red Hat signs the same digest under hi/.
         # A digest names the bytes, so verifying it there verifies the mirror's copy.
-        red_hat_verify(job, parent, f"{HUMMINGBIRD_SIGNED}/{path.partition('/')[2]}@{digest}")
+        signed = f"{HUMMINGBIRD_SIGNED}/{path.partition('/')[2]}"
+        if "@" not in image:
+            # A tag is resolved at hi/, not the unsigned mirror: a stale or tampered
+            # mirror could otherwise roll the build back to any older signed digest.
+            tag = image.rpartition("/")[2].partition(":")[2] or "latest"
+            at_hi = job.must(
+                ["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{signed}:{tag}"]
+            ).strip()
+            if at_hi != digest:
+                cannot(f"{image} is {digest} on the mirror but {at_hi!r} at {signed}:{tag}")
+        red_hat_verify(job, parent, f"{signed}@{digest}")
     else:
         cannot(f"the parent {image} is on {host}, which this job does not trust: refused")
     parent.pinned, parent.digest = pinned, digest
@@ -338,7 +348,7 @@ def red_hat_verify(job: Job, parent: Parent, signed: str) -> None:
     policy.write_text(
         json.dumps(
             {
-                "default": [{"type": "insecureAcceptAnything"}],
+                "default": [{"type": "reject"}],
                 "transports": {"docker": dict.fromkeys(RED_HAT, entry)},
             }
         )
