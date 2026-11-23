@@ -132,6 +132,28 @@ def test_routes_on_github_job() -> None:
     check("an argument overrides GITHUB_JOB", rc == 1 and len(CALLS) == 1, str(rc))
 
 
+def test_a_main_job_is_called_as_main() -> None:
+    """ai, write and gate expose main(event_name, event, env); ai has a `run` too."""
+
+    def main(event_name: str, event: dict, env: object) -> int:
+        CALLS.append((event_name, event))
+        SEEN.append((env, None))
+        return 1
+
+    def run(*_: object) -> int:
+        raise AssertionError("run was called on a job that has main")
+
+    module = types.ModuleType("sdlc_jobs.ev_main")
+    vars(module).update(main=main, run=run)
+    sys.modules["sdlc_jobs.ev_main"] = module
+    CALLS.clear()
+    SEEN.clear()
+    rc, _ = event(None, {"GITHUB_JOB": "ev_main", "GITHUB_EVENT_NAME": "push"}, {"n": 1})
+    check("main is called, not run, and its verdict is the exit", rc == 1, str(rc))
+    check("main gets the event and the environment", CALLS == [("push", {"n": 1})], str(CALLS))
+    check("main gets no Tools", SEEN[0][0] is os.environ, str(SEEN))
+
+
 def test_write_with_digest_does_nothing() -> None:
     fake_job("write", 0)
     CALLS.clear()
@@ -221,6 +243,7 @@ def main() -> int:
         test_refuses_without_an_event,
         test_missing_module_names_it,
         test_routes_on_github_job,
+        test_a_main_job_is_called_as_main,
         test_write_with_digest_does_nothing,
         test_job_failures_are_a_2,
         test_http_returns_a_https_response,

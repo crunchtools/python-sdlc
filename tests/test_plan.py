@@ -55,7 +55,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 def cannot_run(fn, *args) -> str | None:
-    """The CannotRun message `fn` raised, or None if it did not raise."""
+    """The CannotRunError message `fn` raised, or None if it did not raise."""
     try:
         fn(*args)
     except S.CannotRunError as exc:
@@ -561,7 +561,7 @@ check(
 
 
 def stacks_of(files: dict[str, str]) -> tuple[str, ...] | str:
-    """active_stacks() over a tree holding `files`, or the CannotRun message."""
+    """active_stacks() over a tree holding `files`, or the CannotRunError message."""
     with tempfile.TemporaryDirectory() as root:
         for name, text in files.items():
             Path(root, name).parent.mkdir(parents=True, exist_ok=True)
@@ -696,7 +696,7 @@ check("ci may not skip npm-audit, a push verdict", msg is not None, str(msg))
 
 
 def node_repo_msg(settings: dict, files: dict[str, str] | None = None) -> str | None:
-    """The CannotRun message node_packages gives `settings`, over a tree of `files`."""
+    """The CannotRunError message node_packages gives `settings`, over a tree of `files`."""
     with tempfile.TemporaryDirectory() as root:
         for rel, body in (files or {"package.json": "{}"}).items():
             Path(root, rel).parent.mkdir(parents=True, exist_ok=True)
@@ -821,7 +821,7 @@ check(
 def node_sync_with(rmdir_errno: int | None) -> tuple[str | None, list[str]]:
     """node_sync over a stale and a kept directory, rmdir failing with `rmdir_errno`.
 
-    Returns the CannotRun message (None when it succeeded) and what the tree holds.
+    Returns the CannotRunError message (None when it succeeded) and what the tree holds.
     """
     with tempfile.TemporaryDirectory() as root:
         repo, tree = Path(root, "repo"), Path(root, "tree")
@@ -872,7 +872,7 @@ check(
 def node_sync_links() -> tuple[str | None, list[str], bool]:
     """node_sync over a wanted and a stale symlink to a directory.
 
-    Returns the CannotRun message, what the tree holds, and whether `lib` is still a link.
+    Returns the CannotRunError message, what the tree holds, and whether `lib` is still a link.
     """
     with tempfile.TemporaryDirectory() as root:
         repo, tree = Path(root, "repo"), Path(root, "tree")
@@ -907,7 +907,7 @@ check(
 def node_sync_modules() -> tuple[str | None, list[str]]:
     """node_sync with node_modules under a listed package, two unlisted, behind a link, and as one.
 
-    Returns the CannotRun message and the node_modules paths the tree still holds.
+    Returns the CannotRunError message and the node_modules paths the tree still holds.
     """
     with tempfile.TemporaryDirectory() as root:
         repo, tree = Path(root, "repo"), Path(root, "tree")

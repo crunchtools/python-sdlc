@@ -314,11 +314,18 @@ def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, s
 
 
 def run_job(job: ModuleType, event_name: str, event: dict, env: Mapping[str, str]) -> int:
-    """Run a job module's `run` with the real tools, the one place `Tools` is made.
+    """Run a job module's `main` (ai, write, gate), which makes its own tools, or
+    its `run` with the real tools, the one place `Tools` is made.
 
     Its verdict must be one of the exit codes; anything else is a 2.
     """
-    verdict = job.run(event_name, event, env, Tools())
+    # `main` first: ai.py has a `run` of its own with another signature.
+    if hasattr(job, "main"):
+        verdict = job.main(event_name, event, env)
+    elif hasattr(job, "run"):
+        verdict = job.run(event_name, event, env, Tools())
+    else:
+        cannot(f"job {job.__name__} has neither run nor main")
     if verdict == DEFERRED:
         cannot(f"job {job.__name__} deferred to CI, and a job is CI: nothing was judged")
     if verdict not in (CLEAN, FOUND, CANNOT_RUN):

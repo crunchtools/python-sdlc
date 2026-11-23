@@ -29,7 +29,7 @@ from sdlc_jobs._core import (
     tool_sdlc,
     workspace,
 )
-from sdlc_jobs._release import verify_release
+from sdlc_jobs._verify_release import verify_release
 
 INDEX_CHECK = "https://pypi.org/simple/"
 

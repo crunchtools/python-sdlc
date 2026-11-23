@@ -24,6 +24,9 @@ dev = [
     "mypy>=1.18",
     "pytest>=8.4",
     "pyyaml>=6.0",
+    # sdlc_jobs/_app_token.py signs the Ashigaru App's JWT with it; the image
+    # carries the same pin for `write`. The tests sign with a fake.
+    "pyjwt[crypto]>=2.10",
     # Pinned to a release past the fleet's 7-day cooldown.
     "types-pyyaml==6.0.12.20261113",
 ]
@@ -36,6 +39,12 @@ scripts_are_modules = true
 # What `sdlc push` checks when it runs mypy bare. tests/ is not here yet: the
 # suites load `sdlc` through importlib, so mypy sees a module of Any.
 files = ["sdlc", "validate", "scripts", "sdlc_jobs"]
+
+# sdlc_jobs/_gatehouse_shim.py runs under gatehouse's own interpreter in the
+# image (/app/venv/bin/python), the only place gatehouse is installed.
+[[tool.mypy.overrides]]
+module = ["gatehouse", "gatehouse.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -91,3 +100,7 @@ max-complexity = 10
 # The same fixtures, and counts asserted as the numbers they are.
 "tests/test_fleet_wave.py" = ["S101", "E501", "PLR2004"]
 "tests/test_cutover.py" = ["S101", "E501", "PLR2004"]
+# The sdlc_jobs suites assert counts as the numbers they are, and hand the jobs
+# fake credentials ("tok", a fake App key) so nothing real is ever near a test.
+"tests/test_event_*.py" = ["S101", "PLR2004", "S105", "S106"]
+"tests/fake_github.py" = ["S101", "PLR2004", "S105", "S106"]
