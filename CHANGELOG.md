@@ -20,6 +20,13 @@ All notable changes to this project are documented here, following
   ci.yml, which waits in `examples/sdlc-ci.yml` until the cutover. sign runs cosign
   from a digest-pinned image and never runs the image it signs.
 
+### Changed
+
+- Inherits constitution v1.60.0. The pre-commit Gourmand and Gatehouse hooks float
+  (`:main`, `:latest`) with `--pull=newer`, and the Dependabot config and its
+  automerge workflow are gone (Renovate, XV). With `self.sh` naming the fetch's
+  origin, `sdlc ci` on sdlc itself passes the constitution check (#105).
+
 ## [0.11.1] - 2026-11-23
 
 ### Changed

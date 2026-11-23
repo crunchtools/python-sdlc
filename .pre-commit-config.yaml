@@ -51,17 +51,12 @@ repos:
         stages: [pre-commit, pre-merge-commit]
 
   # Fleet-owned wiring from crunchtools/gatehouse/examples/pre-commit.yaml per
-  # constitution XII, with ONE change: the tags are exact, not `:latest`.
+  # constitution XII. The tags float, with `--pull=newer`, as XV rule 5 asks
+  # from v1.60.0 on. They were exact once, because podman's default `missing`
+  # never refreshed a cached `:latest` and trentina's local Gatehouse ran two
+  # weeks stale. `--pull=newer` closes that hole without a pin to bump.
   #
-  # XII says to copy that file unchanged, and this deviates on purpose, because
-  # `:latest` there is the bug this whole repo exists to delete. podman's
-  # default pull policy is `missing`, so a cached `:latest` is never refreshed:
-  # trentina's local Gatehouse had been a two-week-old reviewer while CI pulled
-  # fresh. Gatehouse's own constitution agent flags the floating tags here, and
-  # it is right. The validator matches the image NAME, so exact tags still pass
-  # `Constitution / Validate constitution`.
-  #
-  # A SECOND deviation, for the reason bin/sdlc's run_in_image states: `z`, not
+  # One deviation, for the reason bin/sdlc's run_in_image states: `z`, not
   # `Z`. `Z` relabels the worktree with a category pair private to one
   # container, taking it out from under every other container that mounts the
   # same tree -- including a plain `-v .:/mnt:ro` in another hook or workflow
@@ -74,7 +69,7 @@ repos:
     hooks:
       - id: gourmand
         name: Gourmand (AI slop detection)
-        entry: podman --events-backend=none run --rm --log-driver=none -v .:/src:z -w /src quay.io/crunchtools/gourmand:1.0.0 check --full
+        entry: podman --events-backend=none run --rm --log-driver=none --pull=newer -v .:/src:z -w /src quay.io/crunchtools/gourmand:main check --full
         language: system
         pass_filenames: false
         always_run: true
@@ -82,7 +77,7 @@ repos:
 
       - id: gatehouse
         name: Gatehouse (AI code review, staged diff)
-        entry: bash -c 'git diff --cached | podman --events-backend=none run --rm --log-driver=none -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,z -w /src quay.io/crunchtools/gatehouse:0.26.0 --stdin'
+        entry: bash -c 'git diff --cached | podman --events-backend=none run --rm --log-driver=none --pull=newer -i --env-file "$HOME/.config/mcp-env/gatehouse.env" -v .:/src:ro,z -w /src quay.io/crunchtools/gatehouse:latest --stdin'
         language: system
         pass_filenames: false
         always_run: true

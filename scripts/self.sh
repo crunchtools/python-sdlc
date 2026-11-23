@@ -256,8 +256,19 @@ retag() {
 
 # --------------------------------------------------------------------- modes
 
+# The workflow's fetch is `git init` plus a fetch by URL, so the checkout has
+# no origin. The constitution validator names the repo from origin and falls
+# back to the directory, which `sdlc ci` mounts as /repo: without this, sdlc's
+# `sdlc_exempt` entry never matches and XII judges it as a fleet repo (#105).
+name_origin() {
+  git -C "$here" remote get-url origin > /dev/null 2>&1 \
+    || git -C "$here" remote add origin \
+         "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-crunchtools/sdlc}"
+}
+
 mode_test() {
   [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || die "test runs on pull_request only"
+  name_origin
   _sha=$(git -C "$here" rev-parse HEAD)
   build "$here" "localhost/sdlc:$_sha" "localhost/sdlc-boot:$_sha"
   test_all "localhost/sdlc:$_sha" "localhost/sdlc-boot:$_sha"
@@ -266,6 +277,7 @@ mode_test() {
 mode_check() {
   case ${GITHUB_EVENT_NAME:-} in push|schedule|workflow_dispatch) ;;
     *) die "check never runs on ${GITHUB_EVENT_NAME:-no event}: a PR's code runs only in test" ;; esac
+  name_origin
   _sha=$(git -C "$here" rev-parse HEAD)
   build "$here" "localhost/sdlc:$_sha" "localhost/sdlc-boot:$_sha"
   test_all "localhost/sdlc:$_sha" "localhost/sdlc-boot:$_sha"
