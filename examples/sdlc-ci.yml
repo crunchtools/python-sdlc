@@ -60,7 +60,7 @@ jobs:
   write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
     needs: [check, ai]
     if: >-
-      always() && !cancelled() && !inputs.digest && !inputs.bootstrap
+      always() && !cancelled() && !inputs.digest
       && (github.event_name == 'pull_request_target' || github.event_name == 'issues'
           || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
