@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import secrets
 import subprocess
+import tempfile
+import threading
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -18,7 +22,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import NoReturn, TypedDict, Unpack
+from typing import IO, NoReturn, TypedDict, Unpack
 
 CLEAN = 0
 FOUND = 1
@@ -106,6 +110,38 @@ class Tools:
         except OSError as exc:
             cannot(f"could not start {argv[0]}: {exc}")
 
+    def converse(
+        self,
+        argv: list[str],
+        messages: list[dict],
+        *,
+        timeout: int,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[dict[int, dict], str]:
+        """Speak JSON-RPC lines on argv's stdio, then kill it: ({id: reply}, why it stopped).
+
+        Each message is written in turn, and one with an `id` waits for its reply;
+        `why` is "" when every reply came within `timeout` seconds, else what went
+        wrong with the tail of its stderr. Lines that are not JSON are logs, skipped.
+        """
+        with tempfile.TemporaryFile(mode="w+") as errlog:
+            try:
+                proc = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=errlog,
+                    text=True,
+                    env=None if env is None else dict(env),
+                )
+            except OSError as exc:
+                cannot(f"could not start {argv[0]}: {exc}")
+            try:
+                return converse_on(proc, messages, timeout, errlog)
+            finally:
+                proc.kill()
+                proc.wait()
+
     def http(
         self, method: str, url: str, headers: Mapping[str, str], payload: bytes | None = None
     ) -> Response:
@@ -119,6 +155,66 @@ class Tools:
             return Response(exc.code, exc.read())
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             cannot(f"{method} {url}: {exc}")
+
+
+def converse_on(
+    proc: subprocess.Popen[str], messages: list[dict], timeout: int, errlog: IO[str]
+) -> tuple[dict[int, dict], str]:
+    """`Tools.converse` on a started process; readline() blocks, so a thread reads."""
+    stdin, stdout = proc.stdin, proc.stdout
+    if stdin is None or stdout is None:
+        cannot("the process was started without stdio pipes")
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def pump() -> None:
+        for line in stdout:
+            lines.put(line)
+        lines.put(None)
+
+    def tail() -> str:
+        errlog.seek(0)
+        return errlog.read()[-4000:]
+
+    threading.Thread(target=pump, daemon=True).start()
+    deadline = time.monotonic() + timeout
+    replies: dict[int, dict] = {}
+    for msg in messages:
+        try:
+            stdin.write(json.dumps(msg) + "\n")
+            stdin.flush()
+        except BrokenPipeError:
+            return replies, f"the server exited before {msg['method']}:\n{tail()}"
+        if "id" in msg and (why := await_reply(lines, msg, replies, deadline, timeout)):
+            return replies, f"{why}:\n{tail()}"
+    return replies, ""
+
+
+def await_reply(
+    lines: queue.Queue[str | None],
+    msg: dict,
+    replies: dict[int, dict],
+    deadline: float,
+    timeout: int,
+) -> str:
+    """Read lines into `replies` until `msg`'s id is answered: '' then, else why not."""
+    while msg["id"] not in replies:
+        try:
+            line = lines.get(timeout=max(deadline - time.monotonic(), 0.1))
+        except queue.Empty:
+            return f"no reply to {msg['method']} within {timeout}s"
+        if line is None:
+            return f"the server exited without answering {msg['method']}"
+        reply = json_line(line)  # a log line on stdout is skipped
+        if isinstance(reply, dict) and isinstance(reply.get("id"), int):
+            replies[reply["id"]] = reply
+    return ""
+
+
+def json_line(line: str) -> object:
+    try:
+        return json.loads(line)
+    except ValueError:
+        return None
 
 
 def must(tools: Tools, argv: list[str], **kw: Unpack[RunOptions]) -> str:
@@ -203,13 +299,18 @@ def tool_sdlc(root: Path) -> dict:
 
 
 # A container-release call's inputs, which scripts/convert_repo.py moves into
-# [tool.sdlc.image]. The image job enforces the first group; the boot gate's
-# inputs are named so a converted repo is not refused for them, and printed as
-# not enforced: container-smoke is the boot gate here (crunchtools/sdlc#110).
-IMAGE_ENFORCED = {"image", "containerfile", "context", "rhsm", "redhat-registry", "format"}
-IMAGE_NOT_ENFORCED = {
+# [tool.sdlc.image]. The image job enforces the first group (the boot keys through
+# sdlc_jobs/_boot.py). The second is shell, or the host's disk, which a job that
+# holds the registry secrets and the socket cannot run: accepted so a converted
+# repo is not refused, and printed as not enforced (crunchtools/sdlc#118).
+IMAGE_ENFORCED = {
+    "image",
+    "containerfile",
+    "context",
+    "rhsm",
+    "redhat-registry",
+    "format",
     "build-args",
-    "free-disk",
     "boot",
     "boot-env",
     "boot-run-args",
@@ -218,10 +319,9 @@ IMAGE_NOT_ENFORCED = {
     "boot-port",
     "boot-path",
     "boot-timeout",
-    "boot-command",
     "boot-none-reason",
-    "contract-test",
 }
+IMAGE_NOT_ENFORCED = {"boot-command", "contract-test", "free-disk"}
 
 
 def image_settings(root: Path, repo: str) -> dict:

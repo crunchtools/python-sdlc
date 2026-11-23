@@ -27,6 +27,19 @@ All notable changes to this project are documented here, following
   podman's own 50-minute limit; SIGTERM and SIGINT raise, so on every path,
   a cancel included, it is removed and the token revoked. It writes the step
   summary the old workflow did. The constitution's `renovate.yml` is retired.
+- The `image` job enforces container-release's boot gate from
+  `[tool.sdlc.image]` before it pushes (#110, a1108). It runs `boot` = `mcp`
+  (the stdio handshake and tools/list), `mcp-http` (the same over streamable HTTP,
+  from a client in the server's network namespace), `systemd`, `healthcheck` and
+  `none`, and honours `boot-env`, `boot-cmd`, `boot-units`, `boot-port`,
+  `boot-path`, `boot-timeout` and `boot-none-reason`. A failed boot pushes
+  nothing. `boot-run-args` may only hold `--env`, `--tmpfs`, `--read-only`,
+  `--user`, `--workdir`, `--entrypoint`, `--shm-size` and a read-only or overlay
+  volume from the checkout, because the job holds the registry secrets and the
+  runner's socket. `build-args` reach the build as `--build-arg`.
+- `boot = "command"`, `boot-command`, `contract-test` and `free-disk` are still
+  accepted and printed as not enforced. They are repo shell or the host's disk,
+  and they need a job of their own that holds no secret (#118).
 
 ### Fixed
 

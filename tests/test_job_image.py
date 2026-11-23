@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sdlc_jobs import image
+from sdlc_jobs import _boot, image
 from sdlc_jobs._core import CannotRunError, Tools
 
 REPO = "crunchtools/demo"
@@ -32,6 +32,11 @@ PUSHED = "sha256:" + "b" * 64
 US = "\x1f"
 HOST = "/host/ws"
 INSPECT_ME = 2  # `inspect <container id>`, not a state query
+TAG = "localhost/demo:sdlc"  # what the plan's container-build tags, and the boot gate runs
+BOOT = "sdlc-boot-sdlc-cache-7-1"  # the boot container: sdlc-boot-<the job's volume>
+_boot.sleep = lambda _seconds: None  # the boot gate polls; the tests do not wait
+INIT_OK = {"result": {"serverInfo": {"name": "demo", "version": "1"}}}
+TOOLS_OK = {"result": {"tools": [{"name": "t"}]}}
 
 
 def cp(rc: int = 0, out: str = "", err: str = "") -> subprocess.CompletedProcess[str]:
@@ -98,6 +103,16 @@ class FakeTools(Tools):
         self.plan = ""  # the plan `sdlc plan ci` prints; empty is the stock one
         self.stdin: list[str | None] = []
         self.digest: str | None = PUSHED  # what `podman push --digestfile` writes; None, none
+        self.replies: dict[int, dict] = {1: INIT_OK, 2: TOOLS_OK}  # what the MCP server says
+        self.why = ""  # what `converse` says went wrong; empty, nothing
+        self.conversed: list[tuple[list[str], list[dict], dict]] = []
+        self.boot_rc = 0  # what `podman run -d --name sdlc-boot-...` exits
+        self.healthcheck = '{"Test": ["CMD", "true"]}'  # the image's .Config.Healthcheck
+        self.health_rc = 0  # what `podman healthcheck run` exits
+        self.systemd = "running"  # what `systemctl is-system-running` prints
+        self.inactive: set[str] = set()  # units `systemctl is-active` says are not
+        self.http_rc = 0  # what the mcp-http client container exits
+        self.http_out = json.dumps({"init": INIT_OK, "tools": TOOLS_OK})
 
     def run(
         self,
@@ -123,6 +138,18 @@ class FakeTools(Tools):
         assert argv[:3] == ["podman", "--remote", "--url"], argv
         return self.podman(argv[4:], cwd or ".")
 
+    def converse(
+        self,
+        argv: list[str],
+        messages: list[dict],
+        *,
+        timeout: int,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[dict[int, dict], str]:
+        self.argvs.append(argv)
+        self.conversed.append((argv, messages, {"timeout": timeout, "env": dict(env or {})}))
+        return self.replies, self.why
+
     def podman(self, sub: list[str], cwd: str) -> subprocess.CompletedProcess[str]:
         rc, out = 0, ""
         up = self.smoke_up == "true"
@@ -134,7 +161,7 @@ class FakeTools(Tools):
                 self.built_file = (Path(cwd) / sub[sub.index("-f") + 1]).read_text()
                 rc = self.build_rc
             case "image":
-                out = "{}"
+                out = self.healthcheck if "{{json .Config.Healthcheck}}" in sub else "{}"
             case "inspect":
                 state_query = "ExitCode" in sub[-2]
                 out = (
@@ -143,8 +170,26 @@ class FakeTools(Tools):
             case "push":
                 if self.digest is not None:
                     Path(sub[sub.index("--digestfile") + 1]).write_text(self.digest + "\n")
+            case "run" | "exec" | "healthcheck":
+                return self.podman_boot(sub)
+        return cp(rc, out)
+
+    def podman_boot(self, sub: list[str]) -> subprocess.CompletedProcess[str]:
+        """`run` (a gate, or the boot gate's server and client), `exec` and `healthcheck`."""
+        rc, out = 0, ""
+        match sub[0]:
+            case "run" if "python3" in sub:  # the mcp-http client, in the server's namespace
+                rc, out = self.http_rc, self.http_out
+            case "run" if "--name" in sub and sub[sub.index("--name") + 1].startswith("sdlc-boot-"):
+                rc = self.boot_rc
             case "run" if "-d" not in sub:
                 rc = self.scan_rc
+            case "exec" if sub[3:] == ["is-system-running"]:
+                out = self.systemd + "\n"
+            case "exec" if sub[3:4] == ["is-active"]:
+                out = "inactive\n" if sub[4] in self.inactive else "active\n"
+            case "healthcheck":
+                rc = self.health_rc
         return cp(rc, out)
 
     def skopeo(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -162,6 +207,14 @@ class FakeTools(Tools):
 
     def built(self) -> bool:
         return any(a[4:5] == ["build"] for a in self.argvs)
+
+    def boot_calls(self) -> list[list[str]]:
+        """The podman words (after --remote --url <url>) of what named the boot container."""
+        return [a[4:] for a in self.argvs if BOOT in a or any(BOOT in w for w in a)]
+
+    def boot_start(self) -> list[str]:
+        """The `podman run -d` that started the boot container (not the smoke one)."""
+        return next(a for a in self.argvs if a[4:5] == ["run"] and BOOT in a)
 
     def build_argv(self) -> list[str]:
         return next(a for a in self.argvs if a[4:5] == ["build"])
@@ -713,8 +766,393 @@ def test_settings_refuses_what_it_cannot_honour() -> None:
 
 def test_settings_boot_inputs_are_accepted() -> None:
     body = 'boot = "mcp"\nboot-env = "K=v\\n"\nboot-timeout = 240\n'
-    rc, _ = go(FakeTools(), QUAY_PARENT, files=settings(body))
-    assert rc == 0
+    t = FakeTools()
+    rc, _ = go(t, QUAY_PARENT, files=settings(body))
+    assert rc == 0 and t.conversed[0][2]["timeout"] == int("240")
+
+
+def test_settings_contract_test_and_free_disk_are_accepted() -> None:
+    t = FakeTools()
+    body = 'contract-test = "pytest tests/contract"\nfree-disk = true\n'
+    rc, _ = go(t, QUAY_PARENT, files=settings(body))
+    assert rc == 0 and t.pushed()
+
+
+# ------------------------------------------------------------------ the boot gate
+
+
+def boot(profile: str, **keys: object) -> dict[str, str]:
+    """pyproject.toml with `boot = profile` and the boot-* keys (`boot_env` is `boot-env`)."""
+    body = f"boot = {json.dumps(profile)}\n"
+    body += "".join(f"{k.replace('_', '-')} = {json.dumps(v)}\n" for k, v in keys.items())
+    return settings(body)
+
+
+def run_boot(t: FakeTools, profile: str, **keys: object) -> int:
+    return go(t, QUAY_PARENT, files=boot(profile, **keys))[0]
+
+
+def boot_refused(profile: str, **keys: object) -> str:
+    t = FakeTools()
+    msg = refused(t, QUAY_PARENT, files=boot(profile, **keys))
+    assert not t.argvs, "something ran before the settings were refused"
+    return msg
+
+
+def test_boot_absent_is_no_gate() -> None:
+    t = FakeTools()
+    assert go(t, QUAY_PARENT)[0] == 0
+    assert not t.conversed and not t.boot_calls() and t.pushed()
+
+
+def test_boot_mcp_passes_and_pushes() -> None:
+    t = FakeTools()
+    assert run_boot(t, "mcp") == 0 and t.pushed()
+    argv, msgs, _ = t.conversed[0]
+    assert [m.get("method") for m in msgs] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+    ]
+    assert t.argvs.index(argv) < t.argvs.index(next(a for a in t.argvs if a[4:5] == ["push"]))
+
+
+def test_boot_mcp_argv_carries_env_run_args_and_cmd() -> None:
+    t = FakeTools()
+    keys = {
+        "boot_env": "A=1\n\nB=two words\n",
+        "boot_run_args": "--read-only -e C=3 --tmpfs /run",
+        "boot_cmd": "serve --stdio",
+        "boot_timeout": 30,
+    }
+    assert run_boot(t, "mcp", **keys) == 0
+    argv, _, seen = t.conversed[0]
+    i = argv.index(TAG)
+    assert argv[4:8] == ["run", "--rm", "-i", "--pull=never"]
+    assert argv[8:i] == [
+        *["--env", "A=1", "--env", "B=two words"],
+        *["--read-only", "-e", "C=3", "--tmpfs", "/run"],
+    ]
+    assert argv[i + 1 :] == ["serve", "--stdio"]
+    assert seen["timeout"] == keys["boot_timeout"]
+    assert "QUAY_PASSWORD" not in seen["env"], "the boot client was handed a secret"
+
+
+def test_boot_mcp_findings_push_nothing() -> None:
+    for replies, why in (
+        ({}, ""),
+        ({1: {"error": {"code": -32600}}, 2: TOOLS_OK}, ""),
+        ({1: INIT_OK, 2: {"result": {"tools": []}}}, ""),
+        ({1: INIT_OK}, ""),
+        ({1: INIT_OK, 2: TOOLS_OK}, "no reply to tools/list within 180s"),
+    ):
+        t = FakeTools()
+        t.replies, t.why = replies, why
+        rc, result = go(t, QUAY_PARENT, files=boot("mcp"))
+        assert rc == 1 and result is None and not t.pushed(), (replies, why)
+
+
+def test_boot_mcp_http_sidecar_joins_the_servers_namespace() -> None:
+    t = FakeTools()
+    keys = {"boot_port": 9000, "boot_path": "/rpc", "boot_timeout": 60, "boot_cmd": "serve"}
+    assert run_boot(t, "mcp-http", **keys) == 0 and t.pushed()
+    start = t.boot_start()
+    assert start[4:] == ["run", "-d", "--name", BOOT, "--pull=never", TAG, "serve"]
+    client = next(a for a in t.argvs if "python3" in a)
+    assert client[client.index("--network") + 1] == f"container:{BOOT}"
+    assert client[client.index("--entrypoint") + 1] == "python3"
+    assert client[client.index("python3") + 1] == "imgid", "the client is not the job's image"
+    assert TAG not in client
+    assert client[-4:-1] == ["9000", "/rpc", "60"]
+    assert json.loads(client[-1])["method"] == "initialize"
+    assert "--cap-drop=all" in client and "--security-opt=no-new-privileges" in client
+    assert t.argvs[-1][4:] == ["volume", "rm", "-f", "sdlc-cache-7-1"]
+    assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_mcp_http_defaults_to_8080_mcp() -> None:
+    t = FakeTools()
+    assert run_boot(t, "mcp-http") == 0
+    client = next(a for a in t.argvs if "python3" in a)
+    assert client[-4:-1] == ["8080", "/mcp", str(_boot.TIMEOUT)]
+
+
+def test_boot_mcp_http_findings_push_nothing() -> None:
+    for out in (
+        json.dumps({"error": "127.0.0.1:8080/mcp never answered initialize"}),
+        json.dumps({"init": INIT_OK, "tools": {"result": {"tools": []}}}),
+        json.dumps({"init": None, "tools": None}),
+    ):
+        t = FakeTools()
+        t.http_out = out
+        assert run_boot(t, "mcp-http") == 1 and not t.pushed(), out
+        assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+        assert ["logs", BOOT] in t.boot_calls(), "a failed boot showed no log"
+
+
+def test_boot_mcp_http_client_that_cannot_run_is_refused() -> None:
+    for rc, out in ((1, ""), (0, "not json"), (0, "[1]")):
+        t = FakeTools()
+        t.http_rc, t.http_out = rc, out
+        assert "could not run" in refused(t, QUAY_PARENT, files=boot("mcp-http")), (rc, out)
+        assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_systemd_passes_with_every_unit_active() -> None:
+    t = FakeTools()
+    assert run_boot(t, "systemd", boot_units="a.service\nb@x.service") == 0 and t.pushed()
+    start = t.boot_start()
+    assert start[4:] == ["run", "-d", "--name", BOOT, "--pull=never", "--systemd=always", TAG]
+    active = [a[-1] for a in t.argvs if a[4:5] == ["exec"] and "is-active" in a]
+    assert active == ["a.service", "b@x.service"]
+
+
+def test_boot_systemd_inactive_unit_is_a_finding() -> None:
+    t = FakeTools()
+    t.inactive = {"b.service"}
+    rc, result = go(t, QUAY_PARENT, files=boot("systemd", boot_units="a.service b.service"))
+    assert rc == 1 and result is None and not t.pushed()
+    assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_systemd_not_running_is_a_finding() -> None:
+    for state in ("degraded", "starting", "", "maintenance"):
+        t = FakeTools()
+        t.systemd = state
+        assert run_boot(t, "systemd", boot_timeout=4) == 1 and not t.pushed(), state
+        assert any("--failed" in a for a in t.argvs), "the failed units were not asked for"
+
+
+def test_boot_systemd_polls_until_settled() -> None:
+    t = FakeTools()
+    states = iter(["starting", "starting", "running"])
+    original = t.podman
+
+    def podman(sub: list[str], cwd: str) -> subprocess.CompletedProcess[str]:
+        if sub[:1] == ["exec"] and sub[3:] == ["is-system-running"]:
+            return cp(0, next(states))
+        return original(sub, cwd)
+
+    t.podman = podman  # type: ignore[method-assign]
+    assert run_boot(t, "systemd") == 0 and t.pushed()
+
+
+def test_boot_healthcheck_passes() -> None:
+    t = FakeTools()
+    assert run_boot(t, "healthcheck") == 0 and t.pushed()
+    assert ["healthcheck", "run", BOOT] in t.boot_calls()
+
+
+def test_boot_healthcheck_undeclared_is_a_finding() -> None:
+    for declared in ("", "null", "<nil>", "{}"):
+        t = FakeTools()
+        t.healthcheck = declared
+        assert run_boot(t, "healthcheck") == 1 and not t.pushed(), declared
+        assert not t.boot_calls(), "a container was started for an image with no HEALTHCHECK"
+
+
+def test_boot_healthcheck_unhealthy_is_a_finding() -> None:
+    t = FakeTools()
+    t.health_rc = 1
+    assert run_boot(t, "healthcheck", boot_timeout=6) == 1 and not t.pushed()
+    assert sum(a[4:5] == ["healthcheck"] for a in t.argvs) == len(range(0, 6, 2))
+    assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_container_that_cannot_start_is_a_finding() -> None:
+    for profile in ("systemd", "healthcheck"):
+        t = FakeTools()
+        t.boot_rc = 125
+        assert run_boot(t, profile) == 1 and not t.pushed(), profile
+        assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_none_needs_its_reason() -> None:
+    assert "boot-none-reason" in boot_refused("none")
+    assert "boot-none-reason" in boot_refused("none", boot_none_reason="  ")
+    t = FakeTools()
+    assert run_boot(t, "none", boot_none_reason="a library, nothing to run") == 0
+    assert t.pushed() and not t.conversed and not t.boot_calls()
+
+
+def test_boot_command_needs_boot_command_and_is_not_run() -> None:
+    assert "boot-command" in boot_refused("command")
+    assert "boot-command" in boot_refused("command", boot_command=" ")
+    t = FakeTools()
+    assert run_boot(t, "command", boot_command="./test.sh") == 0
+    assert t.pushed() and not t.conversed and not t.boot_calls()
+    assert not any("./test.sh" in w for a in t.argvs for w in a), "the command was run"
+
+
+def test_boot_command_prints_not_enforced() -> None:
+    t = FakeTools()
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "ws"
+        ws.mkdir()
+        (ws / "Containerfile").write_text(QUAY_PARENT)
+        (ws / "pyproject.toml").write_text(boot("command", boot_command="x")["pyproject.toml"])
+        env = {
+            "GITHUB_WORKSPACE": str(ws),
+            "GITHUB_OUTPUT": str(Path(tmp) / "out"),
+            "GITHUB_REPOSITORY": REPO,
+            "GITHUB_SHA": SHA,
+            "GITHUB_RUN_ID": "7",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_REF": f"{REPO}/.github/workflows/ci.yml@refs/heads/main",
+            "HOSTNAME": "cid",
+            "RUNNER_TEMP": tmp,
+            "QUAY_USERNAME": "robot",
+            "QUAY_PASSWORD": "pw",
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = image.run("push", {}, env, tools=t)
+    assert rc == 0 and "NOT ENFORCED" in out.getvalue(), out.getvalue()
+
+
+def test_boot_unknown_profile_refused() -> None:
+    assert "boot must be one of" in boot_refused("shell")
+    assert "boot must be one of" in boot_refused("MCP")
+
+
+def test_boot_keys_without_boot_refused() -> None:
+    for body in ('boot-env = "A=1"\n', "boot-port = 80\n", 'boot-none-reason = "x"\n'):
+        t = FakeTools()
+        msg = refused(t, QUAY_PARENT, files=settings(body))
+        assert "no boot profile" in msg and body.split()[0] in msg, msg
+        assert not t.argvs
+
+
+def test_boot_bad_values_refused() -> None:
+    for keys, said in (
+        ({"boot_env": "NOEQUALS"}, "boot-env"),
+        ({"boot_env": "1A=b"}, "boot-env"),
+        ({"boot_env": "A-B=c"}, "boot-env"),
+        ({"boot_env": 5}, "boot-env must be a string"),
+        ({"boot_timeout": 0}, "boot-timeout"),
+        ({"boot_timeout": -5}, "boot-timeout"),
+        ({"boot_timeout": _boot.TIMEOUT_MAX + 1}, "boot-timeout"),
+        ({"boot_timeout": True}, "boot-timeout"),
+        ({"boot_timeout": "30"}, "boot-timeout"),
+        ({"boot_timeout": 1.5}, "boot-timeout"),
+        ({"boot_port": 0}, "boot-port"),
+        ({"boot_port": 65536}, "boot-port"),
+        ({"boot_port": True}, "boot-port"),
+        ({"boot_path": "mcp"}, "boot-path"),
+        ({"boot_path": "/a b"}, "boot-path"),
+        ({"boot_units": "-x.service"}, "boot-units"),
+        ({"boot_units": "a;b"}, "boot-units"),
+        ({"boot_cmd": "'unclosed"}, "does not split"),
+    ):
+        assert said in boot_refused("mcp", **keys), keys
+
+
+def test_boot_limits_are_accepted() -> None:
+    keys = {"boot_timeout": _boot.TIMEOUT_MAX, "boot_port": 65535, "boot_path": "/"}
+    assert run_boot(FakeTools(), "mcp-http", **keys) == 0
+    assert run_boot(FakeTools(), "mcp-http", boot_timeout=1, boot_port=1) == 0
+
+
+def test_boot_run_args_allowed_are_accepted() -> None:
+    for args in (
+        "--read-only",
+        "--tmpfs /run",
+        "--tmpfs=/run",
+        "-e A=b --env C=d --env=E=f",
+        "-u 1000:1000 --user app -w /app --workdir=/srv --shm-size 64m",
+        "--entrypoint /bin/sh",
+        "-v ./tests/image/home:/app/.openclaw:O",
+        "--volume ./x:/y:ro,z",
+    ):
+        t = FakeTools()
+        assert run_boot(t, "mcp", boot_run_args=args) == 0, args
+
+
+def test_boot_run_args_tmpfs_with_options_is_accepted() -> None:
+    for args in (
+        "--tmpfs /tmp:rw,nosuid,size=256m",
+        "--tmpfs=/tmp:rw,nosuid,size=256m",
+        "--tmpfs /data:mode=1777",
+    ):
+        assert run_boot(FakeTools(), "mcp", boot_run_args=args) == 0, args
+
+
+def test_boot_run_args_repo_volumes_are_rewritten_to_the_host_path() -> None:
+    t = FakeTools()
+    args = "-v ./tests/image/home:/app/.openclaw:O --volume=./x:/y:ro --read-only"
+    assert run_boot(t, "healthcheck", boot_run_args=args) == 0
+    start = t.boot_start()
+    assert start[start.index("--pull=never") + 1 : start.index(TAG)] == [
+        "-v",
+        f"{HOST}/tests/image/home:/app/.openclaw:O",
+        f"--volume={HOST}/x:/y:ro",
+        "--read-only",
+    ]
+    t = FakeTools()
+    assert run_boot(t, "mcp", boot_run_args="-v ./x:/y:ro") == 0
+    argv = t.conversed[0][0]
+    assert argv[argv.index("-v") + 1] == f"{HOST}/x:/y:ro"
+
+
+def test_boot_run_args_that_reach_the_host_are_refused() -> None:
+    for args in (
+        "--privileged",
+        "--network host",
+        "--network=host",
+        "--net host",
+        "--device /dev/fuse",
+        "--pid=host",
+        "--cap-add=all",
+        "--security-opt seccomp=unconfined",
+        "-v /:/host:ro",
+        "-v /etc:/etc:ro",
+        "-v ./../x:/y:ro",
+        "-v ./x/../../y:/y:ro",
+        "-v ./x:/y",
+        "-v ./x:/y:rw",
+        "--volume=./x:/y",
+        "-v named:/y:ro",
+        "--mount type=bind,source=/,destination=/h",
+        "--tmpfs relative",
+        "-w relative",
+        "-e",
+        "-e NOEQUALS",
+        "-e 1A=b",
+        "--read-only=false",
+        "--user",
+        "stray",
+        "--rm",
+    ):
+        t = FakeTools()
+        msg = refused(t, QUAY_PARENT, files=boot("mcp", boot_run_args=args))
+        assert "boot-run-args" in msg, (args, msg)
+        assert not t.argvs, f"{args!r} ran something before it was refused"
+        assert not t.conversed
+
+
+def test_boot_run_args_refused_for_every_profile() -> None:
+    for profile in _boot.PROFILES:
+        keys = {"boot_run_args": "--privileged"}
+        if profile == "none":
+            keys["boot_none_reason"] = "x"
+        if profile == "command":
+            keys["boot_command"] = "x"
+        assert "boot-run-args" in boot_refused(profile, **keys), profile
+
+
+def test_build_args_become_build_arg_words() -> None:
+    t = FakeTools()
+    go(t, QUAY_PARENT, files=settings('build-args = "A=1\\n\\n  B=two words  \\n"\n'))
+    argv = t.build_argv()
+    pairs = [argv[i + 1] for i, w in enumerate(argv) if w == "--build-arg"]
+    assert pairs == ["A=1", "B=two words"]
+
+
+def test_build_args_bad_line_refused() -> None:
+    for body in ('build-args = "NOEQUALS"\n', 'build-args = "A=1\\n1B=2"\n', "build-args = 5\n"):
+        t = FakeTools()
+        msg = refused(t, QUAY_PARENT, files=settings(body))
+        assert "build-args" in msg and not t.argvs, (body, msg)
 
 
 def main() -> int:
