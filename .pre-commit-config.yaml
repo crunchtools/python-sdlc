@@ -21,12 +21,12 @@ repos:
     rev: v0.17.1
     hooks:
       - id: ruff-check
-        args: [--fix, sdlc, validate, tests, scripts]
+        args: [--fix, sdlc, validate, tests, scripts, sdlc_jobs]
         pass_filenames: false
         always_run: true
         stages: [pre-commit, pre-merge-commit]
       - id: ruff-format
-        args: [sdlc, validate, tests, scripts]
+        args: [sdlc, validate, tests, scripts, sdlc_jobs]
         pass_filenames: false
         always_run: true
         stages: [pre-commit, pre-merge-commit]
