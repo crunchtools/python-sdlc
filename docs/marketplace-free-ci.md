@@ -889,10 +889,11 @@ stays in sdlc.
 
 **8. No variable chooses code.** A repo variable can be written by anyone
 with write access to the repo, and it overrides the org's. So the image is a
-literal digest in the file, never `vars.*`. Only `check`, which holds
-nothing, reads a runner label from a variable (`UNCACHED_RUNNER_LABEL`). The
-secret jobs compare that variable with the literal `crunchtools-uncached`, so it
-can turn Exedore off for them and never point them anywhere else.
+literal digest in the file, never `vars.*`. `check`, which holds nothing,
+takes its runner label from a variable (`UNCACHED_RUNNER_LABEL`). The secret
+jobs read the same variable only as a switch: they run on the literal
+`crunchtools-uncached` when it equals that, and on `ubuntu-latest` otherwise,
+so it can turn Exedore off for them and never point them anywhere else.
 
 **9. Check names.** A required check is matched by name, and a plain job's
 check takes the job's `name:`. The constitution records that a reusable
