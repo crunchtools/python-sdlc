@@ -29,7 +29,8 @@ B=quay.io/crunchtools/sdlc-bootstrap
 CI=ghcr.io/sigstore/cosign/cosign@$(hex e)
 
 # Fakes, steered by files in $W. All of them append their argv to $W/log.
-# podman: `login` keeps stdin; `build` is a no-op; `push --digestfile F` writes
+# podman: `login` keeps stdin and writes --authfile 0600, as podman does;
+# `build` is a no-op; `push --digestfile F` writes
 # digest-sdlc or digest-boot; `run ... -- IMAGE ARGS` is cosign: public-key
 # prints secret.pub, verify succeeds for a ref that has signed/<ref>__<repo>
 # (one version per line) and prints cosign's JSON, sign records one.
@@ -37,7 +38,10 @@ CI=ghcr.io/sigstore/cosign/cosign@$(hex e)
 printf 'podman %s\n' "$*" >> "$W/log"
 san() { printf '%s' "$1" | tr '/:@' '___'; }
 case $1 in
-  login) cat > "$W/login-stdin" ;;
+  login) cat > "$W/login-stdin"
+         _af=; _next=
+         for _a; do [ "$_next" != 1 ] || _af=$_a; _next=; [ "$_a" != --authfile ] || _next=1; done
+         [ -z "$_af" ] || { printf '{}' > "$_af"; chmod 0600 "$_af"; } ;;
   build) ;;
   push) _f= _dest= _next=
         for _a; do
@@ -47,6 +51,12 @@ case $1 in
         done
         case $_dest in *sdlc-bootstrap*) cat "$W/digest-boot" ;; *) cat "$W/digest-sdlc" ;; esac > "$_f" ;;
   run) shift
+       # cosign runs as nonroot: it reads the mounted login only if others may.
+       for _a; do case $_a in
+         *:/auth:*) _ad=${_a%%:/auth:*}
+                    [ ! -e "$_ad/config.json" ] \
+                      || printf 'authmode %s %s\n' "$(stat -c %a "$_ad")" "$(stat -c %a "$_ad/config.json")" >> "$W/log" ;;
+       esac; done
        while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
        [ $# -gt 0 ] || exit 0          # shellcheck, test suites: not cosign
        shift 2
@@ -387,6 +397,9 @@ refused "no registry password is refused before cosign runs" "SDLC_QUAY_PASSWORD
 
 printf '\n%s\n' '-- sign release'
 rel_setup; rel
+if in_log '^authmode ' && ! grep '^authmode ' "$W/log" | grep -qv '^authmode 755 644$'; then
+  ok "cosign's nonroot user can read the registry login it is handed"
+else bad "authmode"; grep '^authmode' "$W/log" | sed 's/^/     | /'; fi
 if [ "$RC" -eq 0 ] \
    && in_log "-a repo=crunchtools/sdlc -a version=0.13.0 $A@$D1\$" \
    && in_log "-a repo=crunchtools/sdlc-bootstrap -a version=0.13.0 $B@$DB\$" \

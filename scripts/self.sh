@@ -198,6 +198,11 @@ login() {
     || die "no SDLC_QUAY_USERNAME/SDLC_QUAY_PASSWORD: sdlc's own robot is the only writer of $QUAY"
   printf '%s' "$SDLC_QUAY_PASSWORD" \
     | podman login --authfile "$AUTH" -u "$SDLC_QUAY_USERNAME" --password-stdin quay.io > /dev/null
+  # cosign's image runs as nonroot, and podman login writes the file 0600:
+  # unreadable, cosign fails every call, and a verify reads as "not signed".
+  # $work is mktemp's 0700, so nobody else on the host can reach it.
+  chmod 0755 "$work/auth"
+  chmod 0644 "$AUTH"
 }
 
 # sdlc's public keys, the ones sdlc-bootstrap trusts (two during a rotation).
