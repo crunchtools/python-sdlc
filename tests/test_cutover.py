@@ -1070,6 +1070,33 @@ class FakeConnection:
         pass
 
 
+class PagedApi(cut.Api):
+    """Answers a commit's runs with one more page of check runs than was read."""
+
+    def call(self, method: str, path: str, _body: object = None) -> tuple[int, object]:
+        if (method, path) != ("POST", "/graphql"):
+            return 404, None
+        status, answer = runs_as_graphql((200, {"check_runs": []}))
+        answer["data"]["repository"]["object"]["checkSuites"]["nodes"] = [
+            {
+                "app": {"slug": "github-actions"},
+                "checkRuns": {"pageInfo": {"hasNextPage": True}, "nodes": []},
+            }
+        ]
+        return status, answer
+
+
+try:
+    cut.commit_runs(PagedApi(TOKEN), "app", SHA)
+    paged = ""
+except cut.ApiError as exc:
+    paged = str(exc)
+check(
+    "commit_runs: a run past the first page is an error, not a refusal",
+    "more than 100" in paged,
+    paged,
+)
+
 conn = FakeConnection()
 try:
     cut.Api(TOKEN, connect=lambda: conn).call("GET", "/orgs/crunchtools/repos")

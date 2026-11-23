@@ -146,13 +146,13 @@ class FakeApi(W.Api):
         self.pr_exists = pr_exists or set()
 
     def call(self, method: str, path: str, body: object = None) -> tuple[int, object]:
-        # The GraphQL repo listing is a read, and is recorded as one.
-        reads = method == "GET" or path == "/graphql"
+        # The GraphQL repo listing is a read, and is recorded as one; only a POST is.
+        reads = method == "GET" or (method, path) == ("POST", "/graphql")
         self.calls.append(("GET" if reads else method, path, body))
         if not reads:
             return self.write(method, path)
         listing = "/orgs/crunchtools/repos?type=all&per_page=100&page=1"
-        return as_graphql(self.read(listing)) if path == "/graphql" else self.read(path)
+        return as_graphql(self.read(listing)) if method == "POST" else self.read(path)
 
     def read(self, path: str) -> tuple[int, object]:
         for prefix, answer in self.routes.items():

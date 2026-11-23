@@ -782,7 +782,11 @@ RUNS_QUERY = """query($owner: String!, $name: String!, $oid: GitObjectID!) {
     object(oid: $oid) {
       ... on Commit {
         checkSuites(first: 100) {
-          nodes { app { slug } checkRuns(first: 100) { nodes { databaseId name conclusion } } }
+          pageInfo { hasNextPage }
+          nodes {
+            app { slug }
+            checkRuns(first: 100) { pageInfo { hasNextPage } nodes { databaseId name conclusion } }
+          }
         }
       }
     }
@@ -802,6 +806,12 @@ def commit_runs(api: Api, repo: str, sha: str) -> list[dict]:
         raise ApiError(
             f"POST /graphql (check runs of {sha[:7]}): HTTP {status} {errors or ''}".rstrip()
         )
+    suites = commit["checkSuites"]
+    if suites.get("pageInfo", {}).get("hasNextPage") or any(
+        s["checkRuns"].get("pageInfo", {}).get("hasNextPage") for s in suites["nodes"]
+    ):
+        # A required run on a page not read would refuse a good cutover; say why instead.
+        raise ApiError(f"{sha[:7]} has more than 100 check suites or runs in one; check by hand")
     return [
         {
             "id": r["databaseId"],

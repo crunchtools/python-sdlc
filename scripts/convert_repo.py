@@ -704,7 +704,11 @@ def known_variants(doc: dict, canonical: dict) -> dict:
         jobs["guard"] = {**guard, "runs-on": guard_want.get("runs-on")}
     triage = jobs.get("triage")
     passed = triage.get("with") if isinstance(triage, dict) else None
-    if isinstance(passed, dict) and passed.get("review_result") == TRIAGE_REVIEW_RESULT:
+    if (
+        isinstance(triage, dict)
+        and isinstance(passed, dict)
+        and passed.get("review_result") == TRIAGE_REVIEW_RESULT
+    ):
         rest = {k: v for k, v in passed.items() if k != "review_result"}
         jobs["triage"] = {k: v for k, v in triage.items() if k != "with"} | (
             {"with": rest} if rest else {}
