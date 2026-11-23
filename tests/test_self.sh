@@ -540,8 +540,9 @@ if [ "$RC" -eq 0 ] && grep -qxF "$WANT" "$W/out" \
 else bad "bootstrap image: exit $RC"; dump; fi
 bs_setup; printf 'x\trefs/tags/v0.13.0\n%s\trefs/tags/v0.13.0^{}\n' "$REV" > "$W/tags"; bimg
 check "bootstrap image: an annotated tag is read at its peeled commit" rc_is 0
+bs_setup
 # shellcheck disable=SC2086
-bs_setup; run image bootstrap $SRVENV GITHUB_EVENT_NAME=push VERSION=0.13.0 APPROVED=success
+run image bootstrap $SRVENV GITHUB_EVENT_NAME=push VERSION=0.13.0 APPROVED=success
 refused "bootstrap image on push is refused" "does not go with event"
 bs_setup; bimg APPROVED=
 refused "bootstrap image without approval is refused" "sdlc-approval"
