@@ -61,7 +61,7 @@ BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflo
 WORKFLOW = ".github/workflows/ci.yml@"
 OK = 200
 NOT_FOUND = 404
-HANDLED_EVENTS = ("push", "schedule", "workflow_dispatch")  # image's `if:` less pull_request
+EVENTS = ("push", "schedule", "workflow_dispatch")  # image's `if:` less pull_request
 BUILT_LABELS = ("org.opencontainers.image.revision", "com.crunchtools.build.commit")
 SECRET_KEYS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 
@@ -148,8 +148,8 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     backwards, or a signing or tagging step fails.
     """
     del event  # the job contract passes it; promote reads only the environment
-    if event_name not in HANDLED_EVENTS:
-        cannot(f"promote does not run on {event_name!r}: only {', '.join(HANDLED_EVENTS)}")
+    if event_name not in EVENTS:
+        cannot(f"promote does not run on {event_name!r}: only {', '.join(EVENTS)}")
     repo = env.get("GITHUB_REPOSITORY", "")
     if repo.count("/") != 1:
         cannot("GITHUB_REPOSITORY is not owner/name")

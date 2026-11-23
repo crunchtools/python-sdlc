@@ -362,7 +362,7 @@ def test_unhandled_event_is_refused() -> None:
         t = FakeTools()
         assert "does not run on" in refused(t, event_name=name), name
         assert not t.argvs, "an unhandled event reached a tool"
-    for name in promote.HANDLED_EVENTS:
+    for name in promote.EVENTS:
         assert go(FakeTools(), event_name=name) == 0, name
 
 

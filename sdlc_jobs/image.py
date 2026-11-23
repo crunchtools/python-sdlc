@@ -527,7 +527,9 @@ def check_words(job: Job, name: str, words: list[str]) -> None:
 
 
 def run_value_ok(opt: str, value: str, sources: tuple[str, ...]) -> bool:
-    """An allowlisted option's value: the planner's own, or any non-empty one."""
+    """An allowlisted option's value. --pull, --network, -v/--volume and --mount
+    must be the planner's own (never, none, an allowed source, type=image,); any
+    other allowlisted option takes any non-empty value."""
     rules: dict[str, Callable[[str], bool]] = {
         "--pull": lambda v: v == "never",
         "--network": lambda v: v == "none",

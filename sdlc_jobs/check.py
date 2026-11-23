@@ -130,12 +130,15 @@ def fit(plan: dict[str, Any]) -> str:
     """The plan as JSON, small enough for a job output.
 
     A big audit report is cut to its vulnerable dependencies, the only ones
-    `audit_alert` reads (name, version, vulns); if that is still too big, a 2.
+    `audit_alert` reads (name, version, vulns); a plan still too big, with or
+    without an audit, is a 2.
     """
     text = json.dumps(plan)
     audit_report = plan["audit"]
-    if len(text.encode()) <= PLAN_LIMIT or audit_report is None:
+    if len(text.encode()) <= PLAN_LIMIT:
         return text
+    if audit_report is None:
+        cannot(f"the plan is {len(text.encode())} bytes, over GitHub's job-output limit")
     deps = audit_report["dependencies"]
     plan["audit"] = {**audit_report, "dependencies": [d for d in deps if d.get("vulns")]}
     text = json.dumps(plan)

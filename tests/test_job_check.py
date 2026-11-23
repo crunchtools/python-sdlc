@@ -279,6 +279,17 @@ def test_audit_too_big_even_when_cut_cannot_run() -> None:
     assert "bytes" in msg
 
 
+def test_oversized_plan_without_an_audit_cannot_run() -> None:
+    """The cap holds with no audit to cut: an oversized plan is a 2, not a lost output."""
+    plan = {"image": False, "release": {"version": "x" * (check.PLAN_LIMIT + 1)}, "audit": None}
+    msg = ""
+    try:
+        check.fit(plan)
+    except CannotRunError as exc:
+        msg = str(exc)
+    assert "bytes" in msg, "an oversized plan with no audit must not pass"
+
+
 def test_weekly_no_python_project_audits_nothing() -> None:
     t = FakeTools()
     plan = go("schedule", t, files=IMAGE, cron=check.WEEKLY)[1]
