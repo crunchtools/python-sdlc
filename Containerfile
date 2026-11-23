@@ -304,6 +304,13 @@ RUN npm install -g --prefix /opt/claude-code --omit=dev --no-audit --no-fund \
 # purpose. Renovate then uses JavaScript's RegExp, and re2 only guards against
 # a catastrophic regex in a config, and every config this job reads is the
 # fleet's own. renovate-config-validator comes with it. 347 MB.
+#
+# /usr/local/libexec/renovate-node is node at mode 0111, execute-only, and the
+# job starts Renovate with it (sdlc#121). The kernel marks a process that execs
+# a file it cannot read as not dumpable, so the package managers Renovate runs,
+# and the dependency code they run, same uid or not, cannot read its
+# /proc/<pid>/environ or mem, or ptrace it: the minted token stays in Renovate.
+# Outside /opt on purpose, where every file must stay readable (contract.sh).
 COPY npm/renovate/package.json npm/renovate/package-lock.json /opt/renovate/
 RUN npm ci --prefix /opt/renovate --omit=dev --ignore-scripts --no-audit --no-fund \
  && got=$(node -p 'require("/opt/renovate/node_modules/renovate/package.json").version') \
@@ -311,6 +318,7 @@ RUN npm ci --prefix /opt/renovate --omit=dev --ignore-scripts --no-audit --no-fu
       echo "npm/renovate's lockfile has renovate $got, not RENOVATE_VERSION ${RENOVATE_VERSION}" >&2; exit 1; }; } \
  && ln -s /opt/renovate/node_modules/.bin/renovate /usr/local/bin/renovate \
  && ln -s /opt/renovate/node_modules/.bin/renovate-config-validator /usr/local/bin/renovate-config-validator \
+ && install -o 0 -g 0 -m 0111 /usr/bin/node /usr/local/libexec/renovate-node \
  && rm -rf /root/.npm \
  && renovate --version
 

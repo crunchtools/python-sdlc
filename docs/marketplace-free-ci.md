@@ -578,14 +578,19 @@ therefore starts from the same state as a GitHub VM, on a machine we run.
   run on the host, without `sdlc-bootstrap`, and `sign` holds the trust root.
 
 `renovate` (a1099) shares that runner. It walks every repo in the org once a
-week, within 55 minutes, because the token it mints lives an hour. Its key is
-read once, used only to mint that token, and dropped. Renovate's package
-managers do run dependency code (a Python lock update builds an sdist, which
-runs its `setup.py`), so Renovate runs in a nested container from the job's
-own image: no socket, no `--volumes-from`, every capability dropped, a
-read-only root and an anonymous work volume, holding the minted token and
-nothing else of the job's. That container has a unique name and podman's own
-time limit, and it is removed, then the token revoked, on every path, a
+week, within 55 minutes. Its key is read once, used only to mint tokens, and
+dropped. Renovate's package managers do run dependency code (a Python lock
+update builds an sdist, which runs its `setup.py`), and Renovate hands that
+code its token on purpose: as `GIT_CONFIG_VALUE_n` to uv, poetry, pdm and
+gomod, and in the clone's origin URL. No option turns that off (sdlc#121), so
+the job lists the repos itself with a metadata-only token and gives each repo
+a nested container of its own, from the job's own image, holding a token
+minted for that repo alone: no socket, no `--volumes-from`, every capability
+dropped, a read-only root and an anonymous work volume. Renovate in it is
+started by an execute-only node, so it is not dumpable and nothing it runs can
+read its `/proc/<pid>/environ` or ptrace it; the contract test proves that
+against the built image. Each container has a unique name and podman's own
+time limit, and it is removed, then its token revoked, on every path, a
 cancel included.
 
 **Private repos and the org's plan.** The plan could not be verified from this
@@ -703,7 +708,7 @@ CodeQL uploads as `/language:python`, and zizmor as `zizmor`.
 | pypi | release merge push | re-verifies, `uv build` nested, `uv publish` by OIDC | publish.yml |
 | gate | pull_request_target | fails unless `ai` and `write` succeeded; workflow guard; triage, which needs a review of the head SHA | gatehouse.yml guard, triage.yml |
 | gate | collaborator review comment | re-runs `gate` in the PR's `pull_request_target` run with `GITHUB_TOKEN` | gatehouse-retriage.yml |
-| renovate | schedule `17 6 * * 1`, constitution only | `sdlc_jobs/renovate.py`: mints the Renovate App's org-wide token and runs `renovate` in a nested container of this image (no socket, no key), with the constitution's `renovate/self-hosted.json` at this commit as `RENOVATE_CONFIG` | the constitution's renovate.yml |
+| renovate | schedule `17 6 * * 1`, constitution only | `sdlc_jobs/renovate.py`: runs Renovate one repo at a time, each in a nested container of this image with a token minted for that repo alone (no socket, no key), with the constitution's `renovate/self-hosted.json` at this commit as `RENOVATE_CONFIG` | the constitution's renovate.yml |
 | renovate | workflow_dispatch without `version`, constitution only | the same as a dry run: a read-only token, the weekly window ignored; a dispatch with `version` is refused | renovate.yml's dispatch |
 
 ## Required checks: from five to two

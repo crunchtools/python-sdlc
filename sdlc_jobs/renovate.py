@@ -12,18 +12,30 @@ Renovate has its own App, renovate.crunchtools.com, with ordinary permissions
 and no workflows permission. Its key reaches this job from the `renovate`
 environment, which admits the default branch only. The job holds no
 GITHUB_TOKEN. The key is read once, dropped from the job's environment, and
-used only to mint the installation token: org-wide by design, read-only on a
-dry run, revoked when Renovate exits, and good for an hour, which is why the
-job's timeout is 55 minutes. It runs on the uncached runners, whose storage
-starts empty every job, or on GitHub's machines, and never on the cached ones.
+used only to mint installation tokens. It runs on the uncached runners, whose
+storage starts empty every job, or on GitHub's machines, and never on the
+cached ones.
 
-Renovate itself runs in a nested container from this job's own image, by
-digest, because its package managers run dependency code (a Python lock update
-builds an sdist, which runs that package's setup.py). That container gets no
-socket, no --volumes-from and nothing of this job's but the RENOVATE_*
-variables, the minted token among them: never the App key. It drops every
-capability, cannot gain privileges, has a read-only root, and works in an
-anonymous volume on disk, gone with the container.
+Renovate's package managers run dependency code: a Python lock update builds
+an sdist, which runs that package's setup.py. Renovate hands that code its
+token on purpose (GIT_CONFIG_VALUE_n for uv, poetry, pdm and gomod, and the
+clone's origin URL in .git/config), and no option turns that off (sdlc#121).
+So the token dependency code can reach is made worth as little as possible:
+
+  - the job lists the repositories itself, with a metadata-only token that
+    never enters a container, as Renovate's autodiscover would
+  - each repository gets a container of its own and a token minted for that
+    repository alone, read-only on a dry run, revoked when its container is
+    gone; whatever dependency code leaves running dies with the container
+  - Renovate is started by an execute-only node (the Containerfile's
+    renovate-node), so the kernel marks it not dumpable and nothing it runs can
+    read its /proc/<pid>/environ or mem, or ptrace it
+
+Each container is from this job's own image, by digest. It gets no socket, no
+--volumes-from and nothing of this job's but the RENOVATE_* variables: never
+the App key. It drops every capability, cannot gain privileges, has a
+read-only root, and works in an anonymous volume on disk, gone with it. All of
+them share 50 minutes, inside the job's 55.
 
 The global config is renovate/self-hosted.json, read from this run's own commit
 of the constitution, so a config change takes effect when it merges, and handed
@@ -32,6 +44,7 @@ to Renovate as RENOVATE_CONFIG. Renovate is the image's, at RENOVATE_VERSION.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -58,7 +71,20 @@ HOME_REPO = "crunchtools/constitution"
 # renovate.crunchtools.com's client ID. Not a secret.
 CLIENT_ID = "Iv23liH4RqEwxk282x3X"
 CONFIG = "renovate/self-hosted.json"
+# Plain owner/globs: the only autodiscoverFilter this job matches as Renovate would.
+FILTER = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.*?-]+")
+# Global options that change which repositories Renovate's autodiscover finds,
+# beyond autodiscoverFilter; the job does not repeat them, so it refuses them.
+SHAPING = (
+    "repositories",
+    "autodiscoverTopics",
+    "autodiscoverNamespaces",
+    "autodiscoverProjects",
+    "includeMirrors",
+)
 WEEKLY = "17 6 * * 1"
+# Listing the installation's repositories; this token never enters a container.
+DISCOVER = {"metadata": "read"}
 # Renovate reads issues while opening each repo, so even the dry run needs them.
 READ = {"contents": "read", "pull_requests": "read", "issues": "read"}
 WRITE = {
@@ -71,6 +97,9 @@ WRITE = {
 }
 # Renovate's working tree in the nested container: an anonymous volume, on disk.
 WORK = "/work"
+# node at mode 0111 (the Containerfile), so the Renovate it runs is not dumpable.
+NODE = "/usr/local/libexec/renovate-node"
+RENOVATE_JS = "/opt/renovate/node_modules/renovate/dist/renovate.js"
 # Passed to the nested container by name only, so no value is on a command line.
 BY_NAME = (
     "RENOVATE_TOKEN",
@@ -79,9 +108,11 @@ BY_NAME = (
     "RENOVATE_DRY_RUN",
     "RENOVATE_FORCE",
 )
-# podman stops Renovate's container after this many seconds: 50 minutes, inside
-# the job's 55 and the minted token's hour, leaving time to clean up.
+# Every repository's container shares this many seconds, 50 minutes, inside the
+# job's 55, leaving time to clean up; podman stops each at what is left.
 CONTAINER_SECONDS = 3000
+# A repository is not started with less than this left; it is reported instead.
+LEAST_SECONDS = 60
 SAMPLE_LINES = 400
 SAMPLE = re.compile(
     r"DRY-RUN: Would (create PR|commit files to branch)|Repository result:"
@@ -94,7 +125,8 @@ COUNTS = (
     ("PRs it would create", "DRY-RUN: Would create PR"),
 )
 
-Mint = Callable[[Mapping[str, str]], AbstractContextManager[tuple[str, str]]]
+# (permissions, a repository or None for the whole installation) -> (token, slug)
+Mint = Callable[[Mapping[str, str], str | None], AbstractContextManager[tuple[str, str]]]
 Stream = Callable[[Sequence[str], Mapping[str, str], Path], int]
 
 
@@ -119,8 +151,12 @@ def main(event_name: str, event: dict[str, Any], env: Mapping[str, str]) -> int:
     with tempfile.TemporaryDirectory(prefix="sdlc-renovate-") as scratch:
         site = Site(repo, env, tools.run, Path(scratch))
 
-        def mint(perms: Mapping[str, str]) -> AbstractContextManager[tuple[str, str]]:
-            return org_token(GitHub(app_jwt(CLIENT_ID, key, time.time())), ORG, perms)
+        def mint(
+            perms: Mapping[str, str], repo: str | None
+        ) -> AbstractContextManager[tuple[str, str]]:
+            names = [repo.removeprefix(f"{ORG}/")] if repo else []
+            app = GitHub(app_jwt(CLIENT_ID, key, time.time()))
+            return org_token(app, ORG, perms, repositories=names)
 
         return Job(site, mint, core.Tools()).run(real)
 
@@ -158,7 +194,7 @@ def interruptible() -> Iterator[None]:
 
 def stream(argv: Sequence[str], env: Mapping[str, str], log: Path) -> int:
     """Run argv with its output in the job log as it comes, and in `log` too."""
-    with log.open("w", encoding="utf-8") as out:
+    with log.open("a", encoding="utf-8") as out:
         try:
             proc = subprocess.Popen(
                 list(argv),
@@ -182,6 +218,17 @@ def stream(argv: Sequence[str], env: Mapping[str, str], log: Path) -> int:
                 proc.wait()
 
 
+@dataclass(frozen=True)
+class Walk:
+    """What every repository's Renovate shares in one run."""
+
+    image: str
+    settings: Mapping[str, Any]
+    author: str
+    real: bool
+    log: Path
+
+
 @dataclass
 class Job:
     """One run: the site, how a token is minted, the socket's tools (to find this
@@ -193,23 +240,51 @@ class Job:
     runner: Stream = field(default=stream)
 
     def run(self, real: bool) -> int:
-        """Renovate over the org with this commit's config; OK, or CannotRunError."""
-        config, image = self.config(), self.image()
+        """Renovate over the org with this commit's config, a repository at a
+        time; OK, or CannotRunError naming the repositories that failed."""
+        settings, image = self.settings(self.config()), self.image()
         log = self.site.work / "renovate.log"
         print(f"renovate: {'a real run' if real else 'a dry run'} of {ORG}/*, config {CONFIG}")
+        deadline = time.monotonic() + CONTAINER_SECONDS
+        with interruptible():
+            with self.mint(DISCOVER, None) as (token, slug):
+                repos = self.discover(token, settings)
+                author = self.author(token, slug)
+            print(f"renovate: {len(repos)} repositories, each with a token for it alone")
+            failed = self.each(Walk(image, settings, author, real, log), repos, deadline)
+        self.summarise(log)
+        if failed:
+            raise CannotRunError(
+                f"renovate failed in {len(failed)} of {len(repos)} repositories: "
+                f"{', '.join(failed)}; its log above says why"
+            )
+        return OK
+
+    def each(self, walk: Walk, repos: Sequence[str], deadline: float) -> list[str]:
+        """Renovate over each of `repos` in turn, until `deadline` (monotonic);
+        the ones it failed in or had no time for."""
+        failed: list[str] = []
+        for done, repo in enumerate(repos):
+            seconds = int(deadline - time.monotonic())
+            if seconds < LEAST_SECONDS:
+                return failed + [f"{left} (out of time)" for left in repos[done:]]
+            if self.one(walk, repo, seconds) != 0:
+                failed.append(repo)
+        return failed
+
+    def one(self, walk: Walk, repo: str, seconds: int) -> int:
+        """Renovate over `repo` alone, in a container of its own, with a token
+        for `repo` alone; Renovate's exit status."""
         name = f"sdlc-renovate-{secrets.token_hex(8)}"
+        alone = {**walk.settings, "autodiscover": False, "repositories": [repo]}
         # Inner to outer on every path, a signal included: the container goes,
         # then the token is revoked as the mint's context exits.
-        with interruptible(), self.mint(WRITE if real else READ) as (token, slug):
-            env = self.child(token, self.author(token, slug), config, real)
+        with self.mint(WRITE if walk.real else READ, repo) as (token, _slug):
+            env = self.child(token, walk.author, alone, walk.real)
             try:
-                rc = self.runner(self.nested(image, name), env, log)
+                return self.runner(self.nested(walk.image, name, seconds), env, walk.log)
             finally:
                 self.remove(name)
-        self.summarise(log)
-        if rc != 0:
-            raise CannotRunError(f"renovate exited {rc}; its log above says which repo")
-        return OK
 
     def config(self) -> Path:
         """renovate/self-hosted.json from this run's commit of the constitution."""
@@ -220,6 +295,51 @@ class Job:
         if not config.is_file():
             raise CannotRunError(f"{HOME_REPO}@{sha[:12]} has no {CONFIG}")
         return config
+
+    def settings(self, config: Path) -> dict[str, Any]:
+        """The global config, which must be a JSON object."""
+        try:
+            settings = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            raise CannotRunError(f"{CONFIG} does not load: {err}") from err
+        if not isinstance(settings, dict):
+            raise CannotRunError(f"{CONFIG} is not a JSON object")
+        return settings
+
+    def discover(self, token: str, settings: Mapping[str, Any]) -> list[str]:
+        """What Renovate's autodiscover would find: the installation's repositories
+        that are not archived and match autodiscoverFilter's plain owner/globs.
+        Anything else in the config that would change that set is refused."""
+        filters = settings.get("autodiscoverFilter")
+        if isinstance(filters, str):
+            filters = [filters]
+        if (
+            settings.get("autodiscover") is not True
+            or any(settings.get(option) for option in SHAPING)
+            or not isinstance(filters, list)
+            or not filters
+            or not all(isinstance(f, str) and FILTER.fullmatch(f) for f in filters)
+        ):
+            raise CannotRunError(
+                f"{CONFIG} must autodiscover by autodiscoverFilter alone, "
+                "as plain owner/globs, for this job to split the run by repository"
+            )
+        found = self.site.api_for(token).pages("/installation/repositories", "repositories")
+        repos = sorted(
+            str(r["full_name"])
+            for r in found
+            if isinstance(r, dict) and r.get("full_name") and not r.get("archived")
+        )
+        # Renovate matches case-insensitively.
+        chosen = [
+            r
+            for r in repos
+            if r.split("/", 1)[0] == ORG
+            and any(fnmatch.fnmatchcase(r.lower(), f.lower()) for f in filters)
+        ]
+        if not chosen:
+            raise CannotRunError(f"no repository of the installation matches {filters}")
+        return chosen
 
     def image(self) -> str:
         """This job's own image, by digest, found through the socket."""
@@ -240,8 +360,9 @@ class Job:
         if proc.returncode != 0:
             print(f"::warning::could not remove {name}: {(proc.stderr or proc.stdout).strip()}")
 
-    def nested(self, image: str, name: str) -> list[str]:
-        """podman's argv for Renovate's container: nothing of this job's but BY_NAME."""
+    def nested(self, image: str, name: str, seconds: int) -> list[str]:
+        """podman's argv for Renovate's container: nothing of this job's but BY_NAME,
+        and Renovate started by the execute-only node."""
         named = [arg for var in BY_NAME for arg in ("-e", var)]
         return [
             *core.podman(self.site.env),
@@ -250,7 +371,7 @@ class Job:
             "--name",
             name,
             "--timeout",
-            str(CONTAINER_SECONDS),
+            str(seconds),
             "--pull=never",
             "--log-driver=none",
             "--cap-drop=all",
@@ -270,20 +391,19 @@ class Job:
             "LOG_LEVEL=info",
             *named,
             "--entrypoint",
-            "renovate",
+            NODE,
             image,
+            RENOVATE_JS,
         ]
 
-    def child(self, token: str, author: str, config: Path, real: bool) -> dict[str, str]:
+    def child(
+        self, token: str, author: str, settings: Mapping[str, Any], real: bool
+    ) -> dict[str, str]:
         """podman's own environment: the allowlist, and the values BY_NAME hands on."""
-        try:
-            global_config = json.loads(config.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as err:
-            raise CannotRunError(f"{CONFIG} does not load: {err}") from err
         extra = {
             "RENOVATE_TOKEN": token,
             "RENOVATE_GIT_AUTHOR": author,
-            "RENOVATE_CONFIG": json.dumps(global_config),
+            "RENOVATE_CONFIG": json.dumps(settings),
         }
         if not real:
             # A dry run ignores the preset's weekly window (schedule:weekly), so

@@ -6,8 +6,12 @@
   - it runs in crunchtools/constitution only, and only on the weekly cron
     (the real run) or a dispatch from the default branch (a dry run)
   - without the key it is a 2, never a pass
-  - a dry run mints a read-only token and sets RENOVATE_DRY_RUN; the real
-    run mints the write set and keeps the preset's window
+  - the repositories are listed with a metadata-only token that never
+    reaches Renovate, as autodiscover would list them
+  - each repository gets a container of its own and a token minted for it
+    alone (sdlc#121); a dry run's is read-only and sets RENOVATE_DRY_RUN, the
+    real run's holds the write set and keeps the preset's window
+  - Renovate is started by the execute-only node, so it is not dumpable
   - Renovate's environment carries the minted token and nothing else the job
     holds: not the App key, not a GITHUB_TOKEN
   - the token is released whether Renovate passed or not, and a failed run
@@ -123,18 +127,24 @@ check(
 
 
 class Minter:
-    """Records the permissions asked for and each release; yields (token, slug)."""
+    """Records each (permissions, repository) asked for and each release; yields
+    (a token naming its repository, slug)."""
 
     def __init__(self) -> None:
-        self.perms: list[dict[str, str]] = []
+        self.asked: list[tuple[dict[str, str], str | None]] = []
         self.released = 0
 
-    def __call__(self, perms: Mapping[str, str]) -> Minter:
-        self.perms.append(dict(perms))
+    @property
+    def perms(self) -> list[dict[str, str]]:
+        return [perms for perms, _repo in self.asked]
+
+    def __call__(self, perms: Mapping[str, str], repo: str | None) -> Minter:
+        self.asked.append((dict(perms), repo))
         return self
 
     def __enter__(self) -> tuple[str, str]:
-        return "minted-tok", "renovate-crunchtools"
+        repo = self.asked[-1][1]
+        return f"minted-tok-{repo or 'org'}", "renovate-crunchtools"
 
     def __exit__(self, *_exc: object) -> None:
         self.released += 1
@@ -152,16 +162,18 @@ class FakeRenovate:
         "ERROR: Repository has unknown error (repository=crunchtools/b)\n"
     )
 
-    def __init__(self, rc: int | BaseException = 0) -> None:
-        self.rc = rc
+    def __init__(self, *rcs: int | BaseException) -> None:
+        self.rcs = list(rcs)
         self.calls: list[tuple[list[str], dict[str, str]]] = []
 
     def __call__(self, argv: Sequence[str], env: Mapping[str, str], log: Path) -> int:
         self.calls.append((list(argv), dict(env)))
-        log.write_text(self.LOG)
-        if isinstance(self.rc, BaseException):
-            raise self.rc
-        return self.rc
+        if len(self.calls) == 1:
+            log.write_text(self.LOG)
+        rc = self.rcs[len(self.calls) - 1] if len(self.calls) <= len(self.rcs) else 0
+        if isinstance(rc, BaseException):
+            raise rc
+        return rc
 
 
 IMAGE = "quay.io/crunchtools/sdlc@sha256:" + "e" * 64
@@ -180,11 +192,28 @@ class FakeSocket:
         return subprocess.CompletedProcess(argv, 0, json.dumps(doc), "")
 
 
-def scenario(*, real: bool, rc: int | BaseException = 0, config: bool = True) -> dict[str, Any]:
+GLOBAL = {"platform": "github", "autodiscover": True, "autodiscoverFilter": ["crunchtools/*"]}
+INSTALLED: list[dict[str, Any]] = [
+    {"full_name": "crunchtools/b"},
+    {"full_name": "crunchtools/A"},
+    {"full_name": "crunchtools/old", "archived": True},
+    {"full_name": "elsewhere/x"},
+    {},
+]
+REPOS = ["crunchtools/A", "crunchtools/b"]
+
+
+def scenario(
+    *,
+    real: bool,
+    rcs: Sequence[int | BaseException] = (),
+    config: dict[str, Any] | None = GLOBAL,
+    installed: list[dict[str, Any]] = INSTALLED,
+) -> dict[str, Any]:
     work = Path(tempfile.mkdtemp(dir=TMP))
-    if config:
+    if config is not None:
         (work / "repo" / "renovate").mkdir(parents=True)
-        (work / "repo" / renovate.CONFIG).write_text('{"platform": "github"}')
+        (work / "repo" / renovate.CONFIG).write_text(json.dumps(config))
     summary = work / "summary.md"
     env = {
         **base_env,
@@ -195,10 +224,21 @@ def scenario(*, real: bool, rc: int | BaseException = 0, config: bool = True) ->
         "HOME": "/h",
         "HOSTNAME": "self-id",
     }
-    api = FakeGitHub({("GET", "/users/renovate-crunchtools%5Bbot%5D"): {"id": 4242}})
+    api = FakeGitHub(
+        {
+            ("GET", "/users/renovate-crunchtools%5Bbot%5D"): {"id": 4242},
+            ("GET", "/installation/repositories"): {"repositories": installed},
+        }
+    )
     git = FakeRunner()
-    site = Site(HOME, env, git, work, api_for=lambda _tok: api)
-    mint, run = Minter(), FakeRenovate(rc)
+    tokens: list[str] = []
+
+    def api_for(tok: str) -> FakeGitHub:
+        tokens.append(tok)
+        return api
+
+    site = Site(HOME, env, git, work, api_for=api_for)
+    mint, run = Minter(), FakeRenovate(*rcs)
     sock = FakeSocket()
     job = renovate.Job(site, mint, sock, run)
     try:
@@ -213,23 +253,55 @@ def scenario(*, real: bool, rc: int | BaseException = 0, config: bool = True) ->
         "git": git,
         "summary": summary.read_text() if summary.exists() else "",
         "work": work,
+        "tokens": tokens,
     }
 
 
 dry = scenario(real=False)
 check("a dry run passes", dry["out"] == 0, repr(dry["out"]))
-check("a dry run mints the read set", dry["mint"].perms == [renovate.READ])
-check("the token is released", dry["mint"].released == 1)
+check(
+    "the repositories are listed with a metadata-only token for the whole installation",
+    dry["mint"].asked[0] == (renovate.DISCOVER, None) and set(dry["tokens"]) == {"minted-tok-org"},
+    str(dry["mint"].asked),
+)
+check(
+    "a dry run mints the read set for each repository alone, in turn",
+    dry["mint"].asked[1:] == [(renovate.READ, r) for r in REPOS],
+    str(dry["mint"].asked),
+)
+check("every token is released", dry["mint"].released == 1 + len(REPOS))
+check(
+    "archived repositories, other owners and empty entries are left out",
+    [json.loads(c["RENOVATE_CONFIG"])["repositories"] for _a, c in dry["run"].calls]
+    == [[r] for r in REPOS],
+)
 check(
     "the constitution is cloned at this run's sha, without a token",
     any(SHA in a for a in dry["git"].ran("git fetch"))
     and not any("GIT_CONFIG_VALUE_0" in e for _a, e, _c, _s in dry["git"].calls),
 )
-((argv, child),) = dry["run"].calls
+(argv, child), (argv_b, child_b) = dry["run"].calls
 check(
-    "Renovate runs in a nested container from this job's image, by digest",
-    argv[argv.index("--entrypoint") + 1 :] == ["renovate", IMAGE] and "run" in argv,
+    "Renovate runs in a nested container from this job's image, by digest, "
+    "started by the execute-only node",
+    argv[argv.index("--entrypoint") + 1 :] == [renovate.NODE, IMAGE, renovate.RENOVATE_JS]
+    and "run" in argv,
     str(argv),
+)
+check(
+    "each repository's container has a name of its own",
+    argv[argv.index("--name") + 1] != argv_b[argv_b.index("--name") + 1],
+)
+check(
+    "each repository's Renovate gets that repository's token, never another's",
+    child.get("RENOVATE_TOKEN") == "minted-tok-crunchtools/A"
+    and child_b.get("RENOVATE_TOKEN") == "minted-tok-crunchtools/b",
+)
+check(
+    "each Renovate is told its one repository and not to autodiscover",
+    json.loads(child["RENOVATE_CONFIG"])
+    == {**GLOBAL, "autodiscover": False, "repositories": ["crunchtools/A"]},
+    child["RENOVATE_CONFIG"],
 )
 check(
     "the nested container gets no socket and none of this job's mounts",
@@ -242,7 +314,7 @@ name = argv[argv.index("--name") + 1]
 check(
     "the nested container has a unique name and podman's own time limit",
     name.startswith("sdlc-renovate-")
-    and argv[argv.index("--timeout") + 1] == str(renovate.CONTAINER_SECONDS)
+    and 0 < int(argv[argv.index("--timeout") + 1]) <= renovate.CONTAINER_SECONDS
     and renovate.CONTAINER_SECONDS < 55 * 60,
     str(argv),
 )
@@ -267,7 +339,6 @@ check(
     "no key and no token on the nested command line",
     not any("PEM-KEY" in a or "minted-tok" in a or "APP_KEY" in a for a in argv),
 )
-check("Renovate gets the minted token", child.get("RENOVATE_TOKEN") == "minted-tok")
 check(
     "nothing else the job holds reaches Renovate",
     "RENOVATE_APP_KEY" not in child
@@ -282,7 +353,7 @@ check(
 )
 check(
     "the global config is self-hosted.json at that sha, as RENOVATE_CONFIG",
-    json.loads(child.get("RENOVATE_CONFIG", "null")) == {"platform": "github"}
+    json.loads(child.get("RENOVATE_CONFIG", "null"))["platform"] == "github"
     and "RENOVATE_CONFIG_FILE" not in child,
 )
 check(
@@ -306,35 +377,85 @@ check("the summary samples errors", "ERROR: Repository has unknown error" in dry
 
 real = scenario(real=True)
 check("the real run passes", real["out"] == 0)
-check("the real run mints the write set", real["mint"].perms == [renovate.WRITE])
-((_argv, child),) = real["run"].calls
+check(
+    "the real run mints the write set for each repository alone",
+    real["mint"].asked[1:] == [(renovate.WRITE, r) for r in REPOS],
+)
+check(
+    "the write set is never minted for the whole installation",
+    all(repo for perms, repo in real["mint"].asked if perms == renovate.WRITE),
+)
+(_argv, child), _ = real["run"].calls
 check(
     "the real run keeps the window and writes",
     "RENOVATE_DRY_RUN" not in child and "RENOVATE_FORCE" not in child,
 )
 
-failed = scenario(real=True, rc=1)
+failed = scenario(real=True, rcs=[1])
 check(
-    "a failed Renovate is a 2",
-    isinstance(failed["out"], CannotRunError) and "exited 1" in str(failed["out"]),
+    "a repository Renovate fails in is a 2 that names it",
+    isinstance(failed["out"], CannotRunError)
+    and "1 of 2 repositories: crunchtools/A;" in str(failed["out"]),
+    repr(failed["out"]),
 )
-check("a failed Renovate still releases its token", failed["mint"].released == 1)
+check("a failure does not stop the next repository", len(failed["run"].calls) == len(REPOS))
+check("a failed Renovate still releases every token", failed["mint"].released == 1 + len(REPOS))
 check("a failed Renovate still writes its summary", "### Renovate" in failed["summary"])
 
 for label, err in (
     ("a stop signal", CannotRunError("renovate was stopped by SIGTERM")),
     ("a crash", RuntimeError("boom")),
 ):
-    raised = scenario(real=True, rc=err)
+    raised = scenario(real=True, rcs=[err])
     ((r_argv, _env),) = raised["run"].calls
     r_name = r_argv[r_argv.index("--name") + 1]
     check(
-        f"{label} mid-run propagates, and still removes the container and revokes the token",
+        f"{label} mid-run propagates, and still removes the container and revokes the tokens",
         raised["out"] is err
         and any(c[-4:] == ["rm", "-f", "--ignore", r_name] for c in raised["sock"].calls)
-        and raised["mint"].released == 1,
+        and raised["mint"].released == 2,
         repr(raised["out"]),
     )
+
+saved_seconds = renovate.CONTAINER_SECONDS
+renovate.CONTAINER_SECONDS = renovate.LEAST_SECONDS - 1
+late = scenario(real=True)
+renovate.CONTAINER_SECONDS = saved_seconds
+check(
+    "with too little time left a repository is not started, and is reported",
+    late["run"].calls == []
+    and isinstance(late["out"], CannotRunError)
+    and "crunchtools/A (out of time)" in str(late["out"]),
+    repr(late["out"]),
+)
+
+for label, cfg in (
+    ("no autodiscover", {**GLOBAL, "autodiscover": False}),
+    ("a regex filter", {**GLOBAL, "autodiscoverFilter": ["/crunchtools/.*/"]}),
+    ("a negated filter", {**GLOBAL, "autodiscoverFilter": ["!crunchtools/x"]}),
+    ("a brace filter", {**GLOBAL, "autodiscoverFilter": ["crunchtools/{a,b}"]}),
+    ("autodiscoverTopics", {**GLOBAL, "autodiscoverTopics": ["x"]}),
+    ("autodiscoverNamespaces", {**GLOBAL, "autodiscoverNamespaces": ["x"]}),
+    ("autodiscoverProjects", {**GLOBAL, "autodiscoverProjects": ["x"]}),
+    ("includeMirrors", {**GLOBAL, "includeMirrors": True}),
+    ("fixed repositories", {**GLOBAL, "repositories": ["crunchtools/a"]}),
+):
+    odd = scenario(real=True, config=cfg)
+    check(
+        f"a config with {label} is a 2 before any write token is minted",
+        isinstance(odd["out"], CannotRunError) and renovate.WRITE not in odd["mint"].perms,
+        repr(odd["out"]),
+    )
+check(
+    "a filter given as one string is matched like a list",
+    scenario(real=False, config={**GLOBAL, "autodiscoverFilter": "crunchtools/a"})["out"] == 0,
+)
+check(
+    "no matching repository is a 2",
+    isinstance(
+        scenario(real=False, installed=[{"full_name": "elsewhere/x"}])["out"], CannotRunError
+    ),
+)
 
 with renovate.interruptible():
     stopped = refusal(os.kill, os.getpid(), signal.SIGTERM)
@@ -344,7 +465,7 @@ check(
     signal.getsignal(signal.SIGTERM) is signal.SIG_DFL,
 )
 
-missing = scenario(real=False, config=False)
+missing = scenario(real=False, config=None)
 check(
     "no self-hosted.json is a 2 before any token is minted",
     isinstance(missing["out"], CannotRunError) and missing["mint"].perms == [],
@@ -380,8 +501,18 @@ check(
     minted and minted[0][2] == {"permissions": renovate.READ},
     str(minted),
 )
+with (
+    contextlib.redirect_stdout(io.StringIO()),
+    org_token(app, "crunchtools", renovate.WRITE, repositories=["a"], api_for=lambda _t: app),
+):
+    pass
+check(
+    "org_token named repositories mints for those alone",
+    app.made("POST", "/app/installations/*")[-1][2]
+    == {"permissions": renovate.WRITE, "repositories": ["a"]},
+)
 check("org_token masks the token", "::add-mask::org-tok" in printed.getvalue())
-check("org_token revokes on exit", len(app.made("DELETE", "/installation/token")) == 1)
+check("org_token revokes each token on exit", len(app.made("DELETE", "/installation/token")) == 2)
 
 # ------------------------------------------------------------------- stream
 
