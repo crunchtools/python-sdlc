@@ -34,6 +34,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import sdlc_root
 from fake_github import FakeGitHub, FakeRunner, check, finish
@@ -241,6 +242,37 @@ def earlier_review(sha: str = EARLIER, user: str = APP_LOGIN, rid: int = 1) -> d
 
 check("main: a push is nothing, exit 0", quiet(ai.main, "push", {}, {}) == 0)
 check("main: no repository is exit 2", quiet(ai.main, "pull_request_target", pr_event(), {}) == 2)
+
+# --- main, end to end -------------------------------------------------------
+# The entry `sdlc event` calls, with only the HTTP client and the runner faked:
+# the event reaches the job and the outputs land in GITHUB_OUTPUT.
+
+with tempfile.TemporaryDirectory(prefix="ai-main-") as main_dir:
+    outputs = Path(main_dir) / "out"
+    main_env = {"GITHUB_REPOSITORY": "o/r", "GITHUB_OUTPUT": str(outputs)}
+    with (
+        mock.patch.object(ai, "GitHub", return_value=FakeGitHub()),
+        mock.patch.object(tools, "run", FakeRunner()),
+    ):
+        code = quiet(ai.main, "issues", issue_event(), main_env)
+        handed = _handoff.decode(
+            [tools.read_outputs(outputs.read_text()).get(name, "") for name in _handoff.NAMES]
+        )
+        check(
+            "main: an issue where Ashigaru is not enrolled hands on the skip, exit 0",
+            code == 0 and handed["kind"] == "issue" and handed["number"] == 9 and "skip" in handed,
+        )
+        outputs.write_text("")
+        code = quiet(ai.main, "pull_request_target", pr_event(), main_env)
+        handed = _handoff.decode(
+            [tools.read_outputs(outputs.read_text()).get(name, "") for name in _handoff.NAMES]
+        )
+        check(
+            "main: no model key is exit 2 and still hands on the failed review",
+            code == 2
+            and handed["review"]["status"] == "failed"
+            and ai.FAILED in handed["review"]["posts"][0]["body"],
+        )
 
 # --- release PR skip --------------------------------------------------------
 

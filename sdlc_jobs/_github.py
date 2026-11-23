@@ -163,9 +163,14 @@ def repo_of(event: Mapping[str, Any], env: Mapping[str, str]) -> str:
 def contract(fn: Callable[..., int]) -> Callable[..., int]:
     """Keep a job's main inside 0/1/2: a refusal or a crash is a 2, said out loud.
 
+    The message names the job (`AI CANNOT RUN`, `WRITE CANNOT RUN`, ...) from
+    the module the main lives in.
+
     A job that cannot run must never look like one that ran and passed, and a
     traceback is not a verdict.
     """
+
+    job = fn.__module__.rsplit(".", 1)[-1].upper()
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> int:
@@ -173,11 +178,11 @@ def contract(fn: Callable[..., int]) -> Callable[..., int]:
         try:
             return fn(*args, **kwargs)
         except CannotRunError as err:
-            print(f"::error::GATE CANNOT RUN: {err}", file=sys.stderr)
+            print(f"::error::{job} CANNOT RUN: {err}", file=sys.stderr)
             return CANNOT_RUN
         except Exception as err:
             traceback.print_exc()
-            print(f"::error::GATE CANNOT RUN: {type(err).__name__}: {err}", file=sys.stderr)
+            print(f"::error::{job} CANNOT RUN: {type(err).__name__}: {err}", file=sys.stderr)
             return CANNOT_RUN
 
     return wrapper

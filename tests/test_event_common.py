@@ -366,7 +366,7 @@ check("contract: passes 2 through", captured(returns, 2)[0] == 2)
 code, _, err_text = captured(refuses)
 check(
     "contract: CannotRunError is exit 2, said out loud",
-    code == CANNOT_RUN and "GATE CANNOT RUN: no key" in err_text,
+    code == CANNOT_RUN and "__MAIN__ CANNOT RUN: no key" in err_text,  # named for its module
 )
 code, _, err_text = captured(crashes)
 check(

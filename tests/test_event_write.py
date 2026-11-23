@@ -198,6 +198,37 @@ check("DIGEST: write.main exits 0 with no repo, no token, no API, no subprocess"
 code = quiet(write.main, "workflow_dispatch", {}, {"VERSION": "1.2.3"})
 check("no DIGEST: the same env without a repo is exit 2", code == 2)
 
+# --- main, end to end -------------------------------------------------------
+# The same entry without DIGEST: the event reaches its handler through the real
+# Site and Job, with only the token minting and the release call faked.
+
+opened: list[tuple[Any, ...]] = []
+main_minter = Minter()
+
+
+def record_open(*args: Any) -> int:
+    opened.append(args)
+    return 0
+
+
+with (
+    mock.patch.object(write, "app_token", lambda _env, _repo, perms: main_minter(perms)),
+    mock.patch.object(write._release, "open_release_pr", record_open),
+):
+    code = quiet(
+        write.main,
+        "workflow_dispatch",
+        {"repository": {"default_branch": "main"}},
+        {"GITHUB_REPOSITORY": "o/r", "VERSION": "1.2.3"},
+    )
+check(
+    "main: a version dispatch opens the release PR with a token for exactly that",
+    code == 0
+    and [a[1:] for a in opened] == [("o/r", "1.2.3", "main")]
+    and main_minter.perms == [write.RELEASE_PR]
+    and main_minter.released == 1,
+)
+
 # --- pull requests: posting what ai reviewed --------------------------------
 
 rig = Rig()
