@@ -2,7 +2,7 @@
 # docs/marketplace-free-ci.md specifies it, kept here until the cutover moves
 # it into place and deletes the workflows it replaces. Running it beside them
 # now would double every Gatehouse review and Ashigaru run, and its ai, write
-# and gate jobs name an sdlc-boot digest that only exists after the first
+# and gate jobs name an sdlc-bootstrap digest that only exists after the first
 # release this file publishes. scripts/self.sh is the code its test, check,
 # image and sign jobs run, and it is tested today (tests/test_self.sh).
 #
@@ -25,6 +25,7 @@ on:
     inputs:
       version: { type: string, default: "" }  # alone: open the release PR; with digest: roll :<major> back to it
       digest: { type: string, default: "" }
+      bootstrap: { type: boolean, default: false }  # with version, once: the first release, of the vX.Y.Z tag at main's head
 permissions: {}
 env: { COSIGN_IMAGE: "ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca" }  # v2.6.5
 jobs:
@@ -51,7 +52,7 @@ jobs:
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
     environment: ai
-    container: &boot { image: "quay.io/crunchtools/sdlc-boot@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
+    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", OPENROUTER_API_KEY: "${{ secrets.OPENROUTER_API_KEY }}" }
@@ -59,7 +60,7 @@ jobs:
   write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
     needs: [check, ai]
     if: >-
-      always() && !cancelled() && !inputs.digest
+      always() && !cancelled() && !inputs.digest && !inputs.bootstrap
       && (github.event_name == 'pull_request_target' || github.event_name == 'issues'
           || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
@@ -83,30 +84,33 @@ jobs:
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
     steps: *event
-  image:  # a release build only: a verified release merge, or the version :<major> carries, weekly
-    needs: [check, write]
-    if: always() && !cancelled() && needs.check.result == 'success' && (fromJSON(needs.check.outputs.result || '{}').release || github.event_name == 'schedule')
+  image:  # a release build only: a verified release merge, the version :<major> carries, weekly, or the approved bootstrap
+    needs: [check, write, approve]
+    if: >-
+      always() && !cancelled() && needs.check.result == 'success'
+      && (fromJSON(needs.check.outputs.result || '{}').release || github.event_name == 'schedule' || inputs.bootstrap && needs.approve.result == 'success')
     runs-on: ubuntu-latest
     environment: registry
     permissions: { contents: read }
     outputs: { result: "${{ steps.s.outputs.result }}" }
-    env: { GITHUB_TOKEN: "${{ github.token }}", MODE: "${{ github.event_name == 'schedule' && 'weekly' || 'release' }}", SDLC_WRITE: "${{ needs.write.result }}",
+    env: { GITHUB_TOKEN: "${{ github.token }}", MODE: "${{ inputs.bootstrap && 'bootstrap' || github.event_name == 'schedule' && 'weekly' || 'release' }}", SDLC_WRITE: "${{ needs.write.result }}",
+           VERSION: "${{ inputs.version }}", APPROVED: "${{ needs.approve.result }}",
            SDLC_RELEASE: "${{ needs.write.outputs.release }}", SDLC_QUAY_USERNAME: "${{ secrets.SDLC_QUAY_USERNAME }}", SDLC_QUAY_PASSWORD: "${{ secrets.SDLC_QUAY_PASSWORD }}" }
     steps: [*fetch, { id: s, run: scripts/self.sh }]
   approve:  # no secret; sdlc-approval's reviewers (Josui Prime, Scott; prevent_self_review) are the approval
-    if: github.event_name == 'workflow_dispatch' && inputs.digest != '' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.event_name == 'workflow_dispatch' && (inputs.digest != '' || inputs.bootstrap) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     environment: sdlc-approval
     permissions: {}
     steps: [{ run: "true" }]
   sign:  # the only job with the sdlc key: cosign and validation on the host; release images are data
     needs: [image, approve]
-    if: always() && !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (needs.image.result == 'success' || needs.approve.result == 'success')
+    if: always() && !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (needs.image.result == 'success' || needs.approve.result == 'success' && !inputs.bootstrap)
     concurrency: { group: sdlc-sign, queue: max }
     runs-on: ubuntu-latest
     environment: sdlc-signing
     permissions: { contents: read }
-    env: { MODE: "${{ github.event_name == 'workflow_dispatch' && 'rollback' || github.event_name == 'schedule' && 'weekly' || 'release' }}", EVENT: "${{ github.event_name }}",
+    env: { MODE: "${{ inputs.bootstrap && 'bootstrap' || github.event_name == 'workflow_dispatch' && 'rollback' || github.event_name == 'schedule' && 'weekly' || 'release' }}", EVENT: "${{ github.event_name }}",
            BUILT: "${{ needs.image.outputs.result }}", APPROVED: "${{ needs.approve.result }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}",
            SDLC_KEY: "${{ secrets.SDLC_COSIGN_KEY }}", SDLC_KEY_PASSWORD: "${{ secrets.SDLC_COSIGN_PASSWORD }}",
            SDLC_QUAY_USERNAME: "${{ secrets.SDLC_QUAY_USERNAME }}", SDLC_QUAY_PASSWORD: "${{ secrets.SDLC_QUAY_PASSWORD }}" }

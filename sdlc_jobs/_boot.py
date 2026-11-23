@@ -286,7 +286,7 @@ def initialize() -> dict:
         "params": {
             "protocolVersion": MCP_PROTOCOL,
             "capabilities": {},
-            "clientInfo": {"name": "sdlc-boot-gate", "version": "1"},
+            "clientInfo": {"name": "sdlc-bootstrap-gate", "version": "1"},
         },
     }
 
@@ -332,7 +332,7 @@ def boot_mcp(job: Job, spec: Boot, image: str) -> str:
 
 
 def boot_name(job: Job) -> str:
-    return f"sdlc-boot-{job.volume}"
+    return f"sdlc-bootstrap-{job.volume}"
 
 
 def remove(job: Job, *names: str) -> None:

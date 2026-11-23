@@ -34,7 +34,7 @@ US = "\x1f"
 HOST = "/host/ws"
 INSPECT_ME = 2  # `inspect <container id>`, not a state query
 TAG = "localhost/demo:sdlc"  # what the plan's container-build tags, and the boot gate runs
-BOOT = "sdlc-boot-sdlc-cache-7-1"  # the boot container: sdlc-boot-<the job's volume>
+BOOT = "sdlc-bootstrap-sdlc-cache-7-1"  # the boot container: sdlc-bootstrap-<the job's volume>
 _boot.sleep = lambda _seconds: None  # the boot gate polls; the tests do not wait
 INIT_OK = {"result": {"serverInfo": {"name": "demo", "version": "1"}}}
 TOOLS_OK = {"result": {"tools": [{"name": "t"}]}}
@@ -115,7 +115,7 @@ class FakeTools(Tools):
         self.server_rc: int | None = None  # the stdio server's own exit; None, killed
         self.timeouts: list[float | None] = []  # each run's timeout, in argvs' order
         self.conversed: list[tuple[list[str], list[dict], dict]] = []
-        self.boot_rc = 0  # what `podman run -d --name sdlc-boot-...` exits
+        self.boot_rc = 0  # what `podman run -d --name sdlc-bootstrap-...` exits
         self.healthcheck = '{"Test": ["CMD", "true"]}'  # the image's .Config.Healthcheck
         self.health_rc = 0  # what `podman healthcheck run` exits
         self.systemd = "running"  # what `systemctl is-system-running` prints
@@ -171,7 +171,7 @@ class FakeTools(Tools):
             case "build":
                 self.built_file = (Path(cwd) / sub[sub.index("-f") + 1]).read_text()
                 rc = self.build_rc
-            case "inspect" if sub[-1].startswith("sdlc-boot-"):
+            case "inspect" if sub[-1].startswith("sdlc-bootstrap-"):
                 return self.podman_boot(sub)
             case "inspect":
                 state_query = "ExitCode" in sub[-2]
@@ -213,7 +213,7 @@ class FakeTools(Tools):
         """A gate's `run`, or the boot gate's server and its mcp-http client."""
         if "python3" in sub:  # the mcp-http client, in the server's namespace
             return cp(self.http_rc, self.http_out)
-        if "--name" in sub and sub[sub.index("--name") + 1].startswith("sdlc-boot-"):
+        if "--name" in sub and sub[sub.index("--name") + 1].startswith("sdlc-bootstrap-"):
             return cp(self.boot_rc)
         return cp(self.scan_rc if "-d" not in sub else 0)
 

@@ -1,4 +1,4 @@
-# sdlc-boot: the trust root. bin/sdlc-bootstrap grown into an image.
+# sdlc-bootstrap: the trust root. bin/sdlc-bootstrap grown into an image.
 #
 # It holds cosign, sdlc's public key, the major version it follows and a
 # minimum version, all baked in, and runs the verified sdlc image as a sibling
@@ -42,24 +42,24 @@ RUN dnf install -y jq && dnf clean all && rm -rf /var/cache/dnf /var/cache/libdn
 COPY --from=ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca /ko-app/cosign /usr/local/bin/cosign
 COPY --from=docker /usr/local/bin/docker /usr/local/bin/docker
 
-COPY boot/keys/ /etc/sdlc-boot/keys/
+COPY boot/keys/ /etc/sdlc-bootstrap/keys/
 # The trust policy, as files and not ENV: the major to follow and the oldest
 # release it may run. A job's env: can override ENV; it cannot rewrite these.
-RUN printf '%s\n' "${SDLC_MAJOR}" > /etc/sdlc-boot/major \
- && printf '%s\n' "${SDLC_MIN_VERSION}" > /etc/sdlc-boot/minimum
+RUN printf '%s\n' "${SDLC_MAJOR}" > /etc/sdlc-bootstrap/major \
+ && printf '%s\n' "${SDLC_MIN_VERSION}" > /etc/sdlc-bootstrap/minimum
 COPY boot/sdlc /usr/local/bin/sdlc
 RUN chmod 0755 /usr/local/bin/sdlc
 
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/sdlc" \
-      org.opencontainers.image.description="sdlc-boot: verifies the signed sdlc image and runs it as a sibling container" \
+      org.opencontainers.image.description="sdlc-bootstrap: verifies the signed sdlc image and runs it as a sibling container" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.created="${CREATED}" \
       version="${VERSION}" \
-      com.crunchtools.sdlc-boot.major="${SDLC_MAJOR}" \
-      com.crunchtools.sdlc-boot.minimum="${SDLC_MIN_VERSION}" \
-      com.crunchtools.sdlc-boot.cosign="${COSIGN_VERSION}" \
-      com.crunchtools.sdlc-boot.docker-cli="${DOCKER_CLI_VERSION}"
+      com.crunchtools.sdlc-bootstrap.major="${SDLC_MAJOR}" \
+      com.crunchtools.sdlc-bootstrap.minimum="${SDLC_MIN_VERSION}" \
+      com.crunchtools.sdlc-bootstrap.cosign="${COSIGN_VERSION}" \
+      com.crunchtools.sdlc-bootstrap.docker-cli="${DOCKER_CLI_VERSION}"
 
 # Stays root: GitHub runs job containers as root and overrides this entrypoint
 # anyway, and the socket is reachable only as root.

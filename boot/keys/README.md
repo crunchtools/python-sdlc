@@ -1,4 +1,4 @@
-# sdlc-boot trust keys
+# sdlc-bootstrap trust keys
 
 sdlc's own cosign public key goes here as `*.pub`; two during a rotation. It
 is baked into the image, and it is the only thing boot trusts.

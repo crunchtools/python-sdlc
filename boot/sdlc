@@ -1,5 +1,5 @@
 #!/bin/sh
-# sdlc-boot: resolve the signed sdlc image, verify it, run it.
+# sdlc-bootstrap: resolve the signed sdlc image, verify it, run it.
 #
 # The fleet file names this image by digest, so this is the trust root of every
 # job. In order:
@@ -19,7 +19,7 @@
 # Accepted risk: whoever can write quay.io/crunchtools/sdlc can point :<major>
 # at an older signed release of the same major at or above the minimum, and it
 # will run. They cannot make it run what sdlc's key did not sign. Recovery is
-# raising the minimum, which is a new sdlc-boot digest in the fleet file.
+# raising the minimum, which is a new sdlc-bootstrap digest in the fleet file.
 #
 # Every refusal is a 2, "GATE CANNOT RUN", so the inner command's own 1 (a
 # check failed) stays distinguishable from boot's (no check ran).
@@ -30,9 +30,9 @@ REPO=quay.io/crunchtools/sdlc
 # The trust policy is files baked into the image, never the environment: a
 # job's env: or an earlier step writing $GITHUB_ENV cannot loosen it. The test
 # runs a copy with this one line rewritten.
-ROOT=/etc/sdlc-boot
+ROOT=/etc/sdlc-bootstrap
 
-cannot() { printf 'sdlc-boot: GATE CANNOT RUN: %s\n' "$*" >&2; exit 2; }
+cannot() { printf 'sdlc-bootstrap: GATE CANNOT RUN: %s\n' "$*" >&2; exit 2; }
 
 # X.Y.Z, digits only, no leading zeros, no prerelease or build: a version that
 # can be compared field by field with nothing left to interpret.
@@ -101,7 +101,7 @@ for k in $keys; do
     break
   fi
   signed=
-  sed 's/^/sdlc-boot:   /' "$err" >> "$err.all"
+  sed 's/^/sdlc-bootstrap:   /' "$err" >> "$err.all"
 done
 if [ -z "$signed" ]; then
   cat "$err.all" >&2
