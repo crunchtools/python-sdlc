@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Renovate for the sdlc image's renovate job, installed by `npm ci --ignore-scripts` from the lockfile beside this file.",
+  "dependencies": {
+    "renovate": "44.221.0"
+  }
+}

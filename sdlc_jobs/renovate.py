@@ -11,19 +11,29 @@ where its config lives, and walks every crunchtools/* repo:
 Renovate has its own App, renovate.crunchtools.com, with ordinary permissions
 and no workflows permission. Its key reaches this job from the `renovate`
 environment, which admits the default branch only. The job holds no
-GITHUB_TOKEN: the token minted here is the only credential it has, org-wide by
-design, read-only on a dry run, and revoked when Renovate exits. That is why it
-runs on the uncached runners, whose storage starts empty every job, or on
-GitHub's machines, and never on the cached ones.
+GITHUB_TOKEN. The key is read once, dropped from the job's environment, and
+used only to mint the installation token: org-wide by design, read-only on a
+dry run, revoked when Renovate exits, and good for an hour, which is why the
+job's timeout is 55 minutes. It runs on the uncached runners, whose storage
+starts empty every job, or on GitHub's machines, and never on the cached ones.
+
+Renovate itself runs in a nested container from this job's own image, by
+digest, because its package managers run dependency code (a Python lock update
+builds an sdist, which runs that package's setup.py). That container gets no
+socket, no --volumes-from and nothing of this job's but the RENOVATE_*
+variables, the minted token among them: never the App key. It drops every
+capability, cannot gain privileges, has a read-only root, and works in an
+anonymous volume on disk, gone with the container.
 
 The global config is renovate/self-hosted.json, read from this run's own commit
-of the constitution, so a config change takes effect when it merges. Renovate
-is the image's, at RENOVATE_VERSION.
+of the constitution, so a config change takes effect when it merges, and handed
+to Renovate as RENOVATE_CONFIG. Renovate is the image's, at RENOVATE_VERSION.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -35,6 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sdlc_jobs import _core as core
 from sdlc_jobs import _tools as tools
 from sdlc_jobs._app_token import app_jwt, org_token
 from sdlc_jobs._github import OK, CannotRunError, GitHub, contract, default_branch, repo_of
@@ -56,6 +67,16 @@ WRITE = {
     "checks": "read",
     "vulnerability_alerts": "read",
 }
+# Renovate's working tree in the nested container: an anonymous volume, on disk.
+WORK = "/work"
+# Passed to the nested container by name only, so no value is on a command line.
+BY_NAME = (
+    "RENOVATE_TOKEN",
+    "RENOVATE_GIT_AUTHOR",
+    "RENOVATE_CONFIG",
+    "RENOVATE_DRY_RUN",
+    "RENOVATE_FORCE",
+)
 SAMPLE_LINES = 400
 SAMPLE = re.compile(
     r"DRY-RUN: Would (create PR|commit files to branch)|Repository result:"
@@ -75,11 +96,14 @@ Stream = Callable[[Sequence[str], Mapping[str, str], Path], int]
 @contract
 def main(event_name: str, event: dict[str, Any], env: Mapping[str, str]) -> int:
     """`sdlc event`'s entry for the `renovate` job: 0 when Renovate ran clean, else 2."""
+    # First of all, whatever follows: the key is held by the mint below and
+    # nowhere else from here on.
+    key = env.get("RENOVATE_APP_KEY", "")
+    os.environ.pop("RENOVATE_APP_KEY", None)
     real = is_real(event_name, event, env)
     repo = repo_of(event, env)
     if repo != HOME_REPO:
         raise CannotRunError(f"renovate runs in {HOME_REPO} only, not {repo}")
-    key = env.get("RENOVATE_APP_KEY", "")
     if not key:
         raise CannotRunError(
             "RENOVATE_APP_KEY must reach `renovate` "
@@ -91,7 +115,7 @@ def main(event_name: str, event: dict[str, Any], env: Mapping[str, str]) -> int:
         def mint(perms: Mapping[str, str]) -> AbstractContextManager[tuple[str, str]]:
             return org_token(GitHub(app_jwt(CLIENT_ID, key, time.time())), ORG, perms)
 
-        return Job(site, mint).run(real)
+        return Job(site, mint, core.Tools()).run(real)
 
 
 def is_real(event_name: str, event: Mapping[str, Any], env: Mapping[str, str]) -> bool:
@@ -101,6 +125,8 @@ def is_real(event_name: str, event: Mapping[str, Any], env: Mapping[str, str]) -
             raise CannotRunError(f"renovate runs on the weekly cron {WEEKLY!r} only")
         return True
     if event_name == "workflow_dispatch":
+        if (event.get("inputs") or {}).get("version"):
+            raise CannotRunError("a dispatch with a version is a release, not a renovate dry run")
         if env.get("GITHUB_REF") != f"refs/heads/{default_branch(event)}":
             raise CannotRunError("a renovate dry run starts from the default branch only")
         return False
@@ -130,20 +156,22 @@ def stream(argv: Sequence[str], env: Mapping[str, str], log: Path) -> int:
 
 @dataclass
 class Job:
-    """One run: the site, how a token is minted, how Renovate is run. Tests fake the last two."""
+    """One run: the site, how a token is minted, the socket's tools (to find this
+    job's image) and how the nested container is run. Tests fake all but the site."""
 
     site: Site
     mint: Mint
+    tools: core.Tools
     runner: Stream = field(default=stream)
 
     def run(self, real: bool) -> int:
         """Renovate over the org with this commit's config; OK, or CannotRunError."""
-        config = self.config()
+        config, image = self.config(), self.image()
         log = self.site.work / "renovate.log"
         print(f"renovate: {'a real run' if real else 'a dry run'} of {ORG}/*, config {CONFIG}")
         with self.mint(WRITE if real else READ) as (token, slug):
             env = self.child(token, self.author(token, slug), config, real)
-            rc = self.runner(["renovate"], env, log)
+            rc = self.runner(self.nested(image), env, log)
         self.summarise(log)
         if rc != 0:
             raise CannotRunError(f"renovate exited {rc}; its log above says which repo")
@@ -159,19 +187,59 @@ class Job:
             raise CannotRunError(f"{HOME_REPO}@{sha[:12]} has no {CONFIG}")
         return config
 
+    def image(self) -> str:
+        """This job's own image, by digest, found through the socket."""
+        image = core.image_of(core.inspect_self(self.tools, self.site.env))
+        if "@sha256:" not in image:
+            raise CannotRunError(f"this job's image is not pinned by digest: {image!r}")
+        return image
+
     def author(self, token: str, slug: str) -> str:
         """The App's bot identity, read from the slug the token was minted for."""
         login = f"{slug}[bot]"
         user = self.site.api_for(token).request("GET", f"/users/{urllib.parse.quote(login)}")
         return f"{login} <{user['id']}+{login}@users.noreply.github.com>"
 
+    def nested(self, image: str) -> list[str]:
+        """podman's argv for Renovate's container: nothing of this job's but BY_NAME."""
+        named = [arg for name in BY_NAME for arg in ("-e", name)]
+        return [
+            *core.podman(self.site.env),
+            "run",
+            "--rm",
+            "--pull=never",
+            "--log-driver=none",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,exec,size=1g,mode=1777",  # noqa: S108 -- inside the nested container
+            "-v",
+            WORK,
+            "-w",
+            WORK,
+            "-e",
+            "HOME=/tmp",
+            "-e",
+            f"RENOVATE_BASE_DIR={WORK}",
+            "-e",
+            "LOG_LEVEL=info",
+            *named,
+            "--entrypoint",
+            "renovate",
+            image,
+        ]
+
     def child(self, token: str, author: str, config: Path, real: bool) -> dict[str, str]:
+        """podman's own environment: the allowlist, and the values BY_NAME hands on."""
+        try:
+            global_config = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as err:
+            raise CannotRunError(f"{CONFIG} does not load: {err}") from err
         extra = {
             "RENOVATE_TOKEN": token,
             "RENOVATE_GIT_AUTHOR": author,
-            "RENOVATE_CONFIG_FILE": str(config),
-            "RENOVATE_BASE_DIR": str(self.site.work / "base"),
-            "LOG_LEVEL": "info",
+            "RENOVATE_CONFIG": json.dumps(global_config),
         }
         if not real:
             # A dry run ignores the preset's weekly window (schedule:weekly), so

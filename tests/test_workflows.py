@@ -60,6 +60,8 @@ FAILED: list[str] = []
 SKIPPED: list[str] = []
 
 CHECK_OK = "needs.check.result == 'success'"
+# A GitHub App installation token lives an hour; `renovate` must end inside it.
+TOKEN_MINUTES = 55
 # A status function in an `if:` replaces GitHub's implicit success(), which
 # is what otherwise skips a job whose needs did not all succeed.
 # The event literally, not pull_request_target or pull_request_review_comment.
@@ -321,6 +323,10 @@ check(
     str(renovate.get("env")),
 )
 check("fleet: renovate's token is granted nothing", renovate.get("permissions") == {})
+check(
+    "fleet: renovate ends inside its token's hour",
+    0 < int(renovate.get("timeout-minutes") or 0) <= TOKEN_MINUTES,
+)
 check(
     "fleet: renovate's key is in the renovate environment",
     renovate.get("environment") == "renovate",

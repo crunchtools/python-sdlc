@@ -23,7 +23,10 @@ from __future__ import annotations
 import atexit
 import contextlib
 import io
+import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -78,6 +81,17 @@ check(
     refusal(renovate.is_real, "workflow_dispatch", DEFAULT, {"GITHUB_REF": "refs/heads/x"})
     is not None,
 )
+check(
+    "a dispatch with a version is refused, whatever the YAML's if: says",
+    refusal(
+        renovate.is_real, "workflow_dispatch", {**DEFAULT, "inputs": {"version": "1.2.3"}}, on_main
+    )
+    is not None,
+)
+check(
+    "a dispatch with an empty version is a dry run",
+    renovate.is_real("workflow_dispatch", {**DEFAULT, "inputs": {"version": ""}}, on_main) is False,
+)
 for name in ("push", "pull_request", "pull_request_target", "issues"):
     check(f"{name} is refused", refusal(renovate.is_real, name, DEFAULT, on_main) is not None)
 
@@ -94,6 +108,9 @@ check(
     == 2,
 )
 check("no App key is a 2", quiet(renovate.main, "schedule", weekly, base_env) == 2)
+os.environ["RENOVATE_APP_KEY"] = "PEM-KEY"
+quiet(renovate.main, "schedule", weekly, {**base_env, "GITHUB_REPOSITORY": "crunchtools/x"})
+check("main drops the App key from the job's environment", "RENOVATE_APP_KEY" not in os.environ)
 
 
 # ------------------------------------------------------------------ a run
@@ -139,11 +156,22 @@ class FakeRenovate:
         return self.rc
 
 
+IMAGE = "quay.io/crunchtools/sdlc@sha256:" + "e" * 64
+
+
+class FakeSocket:
+    """The socket's tools: answers `podman inspect` of this container with its image."""
+
+    def run(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        doc = [{"ImageName": IMAGE, "Image": "f" * 64}] if "inspect" in argv else []
+        return subprocess.CompletedProcess(argv, 0, json.dumps(doc), "")
+
+
 def scenario(*, real: bool, rc: int = 0, config: bool = True) -> dict[str, Any]:
     work = Path(tempfile.mkdtemp(dir=TMP))
     if config:
         (work / "repo" / "renovate").mkdir(parents=True)
-        (work / "repo" / renovate.CONFIG).write_text("{}")
+        (work / "repo" / renovate.CONFIG).write_text('{"platform": "github"}')
     summary = work / "summary.md"
     env = {
         **base_env,
@@ -152,12 +180,13 @@ def scenario(*, real: bool, rc: int = 0, config: bool = True) -> dict[str, Any]:
         "GITHUB_STEP_SUMMARY": str(summary),
         "PATH": "/p",
         "HOME": "/h",
+        "HOSTNAME": "self-id",
     }
     api = FakeGitHub({("GET", "/users/renovate-crunchtools%5Bbot%5D"): {"id": 4242}})
     git = FakeRunner()
     site = Site(HOME, env, git, work, api_for=lambda _tok: api)
     mint, run = Minter(), FakeRenovate(rc)
-    job = renovate.Job(site, mint, run)
+    job = renovate.Job(site, mint, FakeSocket(), run)
     try:
         out: object = quiet(job.run, real)
     except CannotRunError as err:
@@ -182,7 +211,34 @@ check(
     and not any("GIT_CONFIG_VALUE_0" in e for _a, e, _c, _s in dry["git"].calls),
 )
 ((argv, child),) = dry["run"].calls
-check("renovate is the image's", argv == ["renovate"])
+check(
+    "Renovate runs in a nested container from this job's image, by digest",
+    argv[argv.index("--entrypoint") + 1 :] == ["renovate", IMAGE] and "run" in argv,
+    str(argv),
+)
+check(
+    "the nested container gets no socket and none of this job's mounts",
+    "--volumes-from" not in argv
+    and not any("docker.sock" in a or "podman.sock" in a for a in argv[argv.index("run") :])
+    and [argv[i + 1] for i, a in enumerate(argv) if a == "-v"] == [renovate.WORK],
+    str(argv),
+)
+check(
+    "the nested container is locked down",
+    {"--cap-drop=all", "--security-opt=no-new-privileges", "--read-only", "--pull=never"}
+    <= set(argv),
+)
+env_args = [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
+check(
+    "the nested container's environment is RENOVATE_* by name and three literals",
+    set(env_args)
+    == {*renovate.BY_NAME, "HOME=/tmp", f"RENOVATE_BASE_DIR={renovate.WORK}", "LOG_LEVEL=info"},
+    str(env_args),
+)
+check(
+    "no key and no token on the nested command line",
+    not any("PEM-KEY" in a or "minted-tok" in a or "APP_KEY" in a for a in argv),
+)
 check("Renovate gets the minted token", child.get("RENOVATE_TOKEN") == "minted-tok")
 check(
     "nothing else the job holds reaches Renovate",
@@ -197,8 +253,9 @@ check(
     == "renovate-crunchtools[bot] <4242+renovate-crunchtools[bot]@users.noreply.github.com>",
 )
 check(
-    "the global config is self-hosted.json at that sha",
-    child.get("RENOVATE_CONFIG_FILE") == str(dry["work"] / "repo" / renovate.CONFIG),
+    "the global config is self-hosted.json at that sha, as RENOVATE_CONFIG",
+    json.loads(child.get("RENOVATE_CONFIG", "null")) == {"platform": "github"}
+    and "RENOVATE_CONFIG_FILE" not in child,
 )
 check(
     "a dry run is full and ignores the window",

@@ -118,7 +118,7 @@ jobs:
       && (github.event.schedule == '17 6 * * 1'
           || github.event_name == 'workflow_dispatch' && !inputs.version && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     concurrency: { group: renovate, queue: max }
-    timeout-minutes: 150
+    timeout-minutes: 55  # the minted token lives an hour
     runs-on: ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}  # an org-wide token: storage that starts empty, never the cached runner
     environment: renovate
     container: *boot
@@ -539,15 +539,19 @@ storage would let one same-repo PR's build poison a later check, so PR checks
 leave it. A fork's PR always gets `ubuntu-latest`. This design does not use
 `CACHED_RUNNER_LABEL` at all.
 
-`renovate` is the exception, on purpose (a1099). Its run walks every repo in
-the org for up to two hours a week. It builds nothing, its package managers
-run with install scripts off (Renovate's `allowScripts` is false), and the only
-credential it holds is the App token it mints, revoked when Renovate exits. The uncached
-class's per-job storage starts empty and is wiped after, so nothing a job
-leaves reaches it, and it never sees the cached runners. The class can also
-mount the read-only warm image store (`GHA_SHARED_IMAGES`, gha-runner's
-deploy/exedore), which holds `sdlc:latest`, so the job starts without pulling
-the image once that is switched on for the uncached units.
+`renovate` is the exception, on purpose (a1099). It walks every repo in the
+org once a week, within 55 minutes, because the token it mints lives an hour.
+Its key is read once, used only to mint that token, and dropped. Renovate's
+package managers do run dependency code (a Python lock update builds an sdist,
+which runs its `setup.py`), so Renovate runs in a nested container from the
+job's own image: no socket, no `--volumes-from`, every capability dropped, a
+read-only root and an anonymous work volume, holding the minted token and
+nothing else of the job's. The uncached class's per-job storage starts empty
+and is wiped after, so nothing a job leaves reaches it, and it never sees the
+cached runners. The class can also mount the read-only warm image store
+(`GHA_SHARED_IMAGES`, gha-runner's deploy/exedore), which holds `sdlc:latest`,
+so the job starts without pulling the image once that is switched on for the
+uncached units.
 
 **Private repos and the org's plan.** The plan could not be verified from this
 seat: the org's `plan` field needs an admin token. Two facts point to GitHub

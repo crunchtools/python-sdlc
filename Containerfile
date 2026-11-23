@@ -77,7 +77,8 @@ ARG SYFT_VERSION=1.57.0
 ARG ZIZMOR_VERSION=1.32.0
 ARG CLAUDE_CODE_VERSION=2.1.323
 # The fleet's self-hosted Renovate (the `renovate` job, a1099). Kept equal by
-# hand to the renovate@ the constitution's ci.yml validates its config with.
+# hand to the renovate@ the constitution's ci.yml validates its config with,
+# and to npm/renovate's lockfile, which the build checks.
 ARG RENOVATE_VERSION=44.221.0
 ARG CRYPTOGRAPHY_VERSION=50.0.2
 ARG PYJWT_VERSION=2.15.1
@@ -294,15 +295,22 @@ RUN npm install -g --prefix /opt/claude-code --omit=dev --no-audit --no-fund \
  && rm -rf /root/.npm \
  && claude --version
 
-# Renovate, the same way: an exact version in a prefix of its own, run only by
-# the `renovate` job (sdlc_jobs/renovate.py). renovate-config-validator comes
-# with it. npm runs none of its packages' install scripts, so re2's native
-# build is skipped and Renovate falls back to RegExp. 347 MB, the image's
-# largest npm prefix.
-RUN npm install -g --prefix /opt/renovate --omit=dev --no-audit --no-fund \
-        "renovate@${RENOVATE_VERSION}" \
- && ln -s /opt/renovate/bin/renovate /usr/local/bin/renovate \
- && ln -s /opt/renovate/bin/renovate-config-validator /usr/local/bin/renovate-config-validator \
+# Renovate, in a prefix of its own, run only by the `renovate` job
+# (sdlc_jobs/renovate.py), which starts it in a nested container. Unlike the
+# tools above it installs from a committed lockfile, npm/renovate/, so every
+# one of its ~600 packages is the one reviewed, by integrity hash; the build
+# fails if the lockfile's renovate is not RENOVATE_VERSION. --ignore-scripts:
+# no package runs code at install. That leaves re2's native module unbuilt, on
+# purpose. Renovate then uses JavaScript's RegExp, and re2 only guards against
+# a catastrophic regex in a config, and every config this job reads is the
+# fleet's own. renovate-config-validator comes with it. 347 MB.
+COPY npm/renovate/package.json npm/renovate/package-lock.json /opt/renovate/
+RUN npm ci --prefix /opt/renovate --omit=dev --ignore-scripts --no-audit --no-fund \
+ && got=$(node -p 'require("/opt/renovate/node_modules/renovate/package.json").version') \
+ && { [ "$got" = "${RENOVATE_VERSION}" ] || { \
+      echo "npm/renovate's lockfile has renovate $got, not RENOVATE_VERSION ${RENOVATE_VERSION}" >&2; exit 1; }; } \
+ && ln -s /opt/renovate/node_modules/.bin/renovate /usr/local/bin/renovate \
+ && ln -s /opt/renovate/node_modules/.bin/renovate-config-validator /usr/local/bin/renovate-config-validator \
  && rm -rf /root/.npm \
  && renovate --version
 
