@@ -230,6 +230,69 @@ else
   bad "an unknown target exits $rc, should be 2"
 fi
 
+# ---------------------------- Renovate's token is out of its children's reach
+#
+# sdlc#121. Dependency code that Renovate's package managers run (an sdist's
+# setup.py) is a child of Renovate, as the same uid. The `renovate` job starts
+# Renovate with renovate-node, node at mode 0111, so the kernel marks it not
+# dumpable and that child cannot read its /proc/<pid>/environ or mem, or ptrace
+# it. Proved here with the job's own lockdown flags (sdlc_jobs/renovate.py
+# Job.nested): a stand-in token in the parent's environment, a Python child
+# that tries all three, and plain node as the control that shows the probe
+# would see a leak.
+RPROBE=$(mktemp -d)
+cat > "$RPROBE/child.py" <<'PY'
+import ctypes, os
+parent = os.getppid()
+for name in ("environ", "mem"):
+    try:
+        with open(f"/proc/{parent}/{name}", "rb") as fh:
+            print(name, "LEAK" if name == "mem" or b"probe-renovate-token" in fh.read() else "clean")
+    except OSError:
+        print(name, "denied")
+libc = ctypes.CDLL(None, use_errno=True)
+print("ptrace", "denied" if libc.ptrace(0x4206, parent, 0, 0) != 0 else "LEAK")
+PY
+cat > "$RPROBE/parent.js" <<'JS'
+const { spawnSync } = require("child_process");
+const out = spawnSync("python3", ["/probe/child.py"], { env: { PATH: process.env.PATH } });
+process.stdout.write(out.stdout.toString() + out.stderr.toString());
+JS
+chmod -R a+rX "$RPROBE"
+renovate_child() {
+  podman run --rm --cap-drop=all --security-opt=no-new-privileges --read-only \
+    --tmpfs /tmp:rw,exec,size=64m,mode=1777 -e HOME=/tmp \
+    -e RENOVATE_TOKEN=probe-renovate-token -v "$RPROBE:/probe:ro,z" \
+    --entrypoint "$1" "$IMAGE" /probe/parent.js 2>&1
+}
+_mode=$(inside stat -c '%a %u' /usr/local/libexec/renovate-node 2>&1)
+if [ "$_mode" = "111 0" ]; then
+  ok "renovate-node is execute-only and root's"
+else
+  bad "renovate-node is '$_mode', not mode 111 owned by root"
+fi
+_got=$(renovate_child /usr/local/libexec/renovate-node)
+if [ "$_got" = "$(printf 'environ denied\nmem denied\nptrace denied')" ]; then
+  ok "a child of Renovate's node cannot read its environ or mem, or ptrace it"
+else
+  bad "a child of Renovate's node reached it:"
+  printf '%s\n' "$_got" | sed 's/^/       /'
+fi
+if renovate_child node | grep -q '^environ LEAK$'; then
+  ok "the control: under plain node the same child reads the token"
+else
+  bad "the control did not leak under plain node, so the probe proves nothing"
+fi
+_ver=$(podman run --rm --cap-drop=all --security-opt=no-new-privileges --read-only \
+  --tmpfs /tmp -e HOME=/tmp --entrypoint /usr/local/libexec/renovate-node "$IMAGE" \
+  /opt/renovate/node_modules/renovate/dist/renovate.js --version 2>&1)
+if [ "$_ver" = "$(inside sh -c 'printf %s "$SDLC_RENOVATE_VERSION"')" ]; then
+  ok "Renovate runs under renovate-node, as the job starts it ($_ver)"
+else
+  bad "Renovate under renovate-node says '$_ver'"
+fi
+rm -rf "$RPROBE"
+
 # -------------------------------------------- nothing that must not ship is here
 
 # A root-owned /tmp entry reappears at run time through podman's tmpfs copy-up.

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 
 import jwt
@@ -61,14 +61,23 @@ def app_token(
 
 @contextmanager
 def org_token(
-    app: Api, org: str, permissions: Mapping[str, str], *, api_for: Callable[[str], Api] = GitHub
+    app: Api,
+    org: str,
+    permissions: Mapping[str, str],
+    *,
+    repositories: Sequence[str] = (),
+    api_for: Callable[[str], Api] = GitHub,
 ) -> Iterator[tuple[str, str]]:
-    """(token, the App's slug): every repo of `org`'s installation, holding
-    `permissions` alone, revoked on exit. `app` is the API as the App itself
-    (`api_for(app_jwt(...))`), for an App whose job is the whole org."""
+    """(token, the App's slug): the `repositories` of `org`'s installation named,
+    or every one when none are, holding `permissions` alone, revoked on exit.
+    `app` is the API as the App itself (`api_for(app_jwt(...))`), for an App
+    whose job is the whole org."""
     slug = app.request("GET", "/app")["slug"]
     installation = app.request("GET", f"/orgs/{org}/installation")["id"]
-    with minted(app, installation, {"permissions": dict(permissions)}, api_for) as token:
+    body: dict[str, object] = {"permissions": dict(permissions)}
+    if repositories:
+        body["repositories"] = list(repositories)
+    with minted(app, installation, body, api_for) as token:
         yield token, slug
 
 

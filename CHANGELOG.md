@@ -55,6 +55,23 @@ All notable changes to this project are documented here, following
   accepted and printed as not enforced. They are repo shell or the host's disk,
   and they need a job of their own that holds no secret (#118).
 
+### Security
+
+- Dependency code that Renovate's package managers run can no longer reach a
+  token for the whole org (sdlc#121, a1142). Renovate hands its token to that
+  code on purpose, as `GIT_CONFIG_VALUE_n` for uv, poetry, pdm and gomod and in
+  each clone's origin URL, and no option turns it off; and the code could read
+  `/proc/<renovate>/environ` as the same uid. So `renovate` now lists the
+  installation's repos itself, with a metadata-only token that never enters a
+  container, matching `autodiscoverFilter`'s plain owner/globs as Renovate
+  would (anything else is refused), and runs each repo in a container of its
+  own with a token minted for that repo alone and revoked when it is removed.
+  A repo that fails no longer hides the rest: each is run and the failures are
+  named. Renovate is started by `/usr/local/libexec/renovate-node`, node at
+  mode 0111, so the kernel marks it not dumpable: its children cannot read its
+  environ or mem, or ptrace it. The contract test proves that against the
+  built image, with plain node as the control.
+
 ### Fixed
 
 - `scripts/cutover.py` raises no CodeQL `py/clear-text-logging-sensitive-data` (a1140).
