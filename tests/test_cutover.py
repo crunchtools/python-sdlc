@@ -1073,9 +1073,7 @@ class FakeConnection:
 class PagedApi(cut.Api):
     """Answers a commit's runs with one more page of check runs than was read."""
 
-    def call(self, method: str, path: str, _body: object = None) -> tuple[int, object]:
-        if (method, path) != ("POST", "/graphql"):
-            return 404, None
+    def call(self, _method: str, _path: str, _body: object = None) -> tuple[int, object]:
         status, answer = runs_as_graphql((200, {"check_runs": []}))
         answer["data"]["repository"]["object"]["checkSuites"]["nodes"] = [
             {
