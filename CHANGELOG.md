@@ -23,8 +23,10 @@ All notable changes to this project are documented here, following
   the constitution at the run's sha for `renovate/self-hosted.json`, and runs
   Renovate in a nested container from its own image by digest: no socket, no
   `--volumes-from`, every capability dropped, a read-only root, and only the
-  RENOVATE_* variables, never the key. It writes the step summary the old
-  workflow did. The constitution's `renovate.yml` is retired.
+  RENOVATE_* variables, never the key. The container has a unique name and
+  podman's own 50-minute limit; SIGTERM and SIGINT raise, so on every path,
+  a cancel included, it is removed and the token revoked. It writes the step
+  summary the old workflow did. The constitution's `renovate.yml` is retired.
 
 ### Fixed
 

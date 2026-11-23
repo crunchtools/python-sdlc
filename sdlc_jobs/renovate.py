@@ -35,12 +35,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import signal
 import subprocess
 import tempfile
 import time
 import urllib.parse
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -77,6 +79,9 @@ BY_NAME = (
     "RENOVATE_DRY_RUN",
     "RENOVATE_FORCE",
 )
+# podman stops Renovate's container after this many seconds: 50 minutes, inside
+# the job's 55 and the minted token's hour, leaving time to clean up.
+CONTAINER_SECONDS = 3000
 SAMPLE_LINES = 400
 SAMPLE = re.compile(
     r"DRY-RUN: Would (create PR|commit files to branch)|Repository result:"
@@ -135,6 +140,22 @@ def is_real(event_name: str, event: Mapping[str, Any], env: Mapping[str, str]) -
     raise CannotRunError(f"renovate runs on schedule and workflow_dispatch, not {event_name!r}")
 
 
+@contextmanager
+def interruptible() -> Iterator[None]:
+    """SIGTERM and SIGINT raise, so a cancelled or timed-out job still unwinds
+    through its `finally`s: the container is removed and the token revoked."""
+
+    def stop(signum: int, _frame: object) -> None:
+        raise CannotRunError(f"renovate was stopped by {signal.Signals(signum).name}")
+
+    before = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        yield
+    finally:
+        for sig, handler in before.items():
+            signal.signal(sig, handler)
+
+
 def stream(argv: Sequence[str], env: Mapping[str, str], log: Path) -> int:
     """Run argv with its output in the job log as it comes, and in `log` too."""
     with log.open("w", encoding="utf-8") as out:
@@ -148,12 +169,17 @@ def stream(argv: Sequence[str], env: Mapping[str, str], log: Path) -> int:
             )
         except OSError as err:
             raise CannotRunError(f"could not start {argv[0]}: {err}") from err
-        if proc.stdout is None:
-            raise CannotRunError(f"{argv[0]} started with no output pipe")
-        for line in proc.stdout:
-            print(line, end="", flush=True)
-            out.write(line)
-        return proc.wait()
+        try:
+            if proc.stdout is None:
+                raise CannotRunError(f"{argv[0]} started with no output pipe")
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                out.write(line)
+            return proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
 
 
 @dataclass
@@ -171,9 +197,15 @@ class Job:
         config, image = self.config(), self.image()
         log = self.site.work / "renovate.log"
         print(f"renovate: {'a real run' if real else 'a dry run'} of {ORG}/*, config {CONFIG}")
-        with self.mint(WRITE if real else READ) as (token, slug):
+        name = f"sdlc-renovate-{secrets.token_hex(8)}"
+        # Inner to outer on every path, a signal included: the container goes,
+        # then the token is revoked as the mint's context exits.
+        with interruptible(), self.mint(WRITE if real else READ) as (token, slug):
             env = self.child(token, self.author(token, slug), config, real)
-            rc = self.runner(self.nested(image), env, log)
+            try:
+                rc = self.runner(self.nested(image, name), env, log)
+            finally:
+                self.remove(name)
         self.summarise(log)
         if rc != 0:
             raise CannotRunError(f"renovate exited {rc}; its log above says which repo")
@@ -202,13 +234,23 @@ class Job:
         user = self.site.api_for(token).request("GET", f"/users/{urllib.parse.quote(login)}")
         return f"{login} <{user['id']}+{login}@users.noreply.github.com>"
 
-    def nested(self, image: str) -> list[str]:
+    def remove(self, name: str) -> None:
+        """`podman rm -f` of Renovate's container; gone already is fine, a failure is said."""
+        proc = self.tools.run([*core.podman(self.site.env), "rm", "-f", "--ignore", name])
+        if proc.returncode != 0:
+            print(f"::warning::could not remove {name}: {(proc.stderr or proc.stdout).strip()}")
+
+    def nested(self, image: str, name: str) -> list[str]:
         """podman's argv for Renovate's container: nothing of this job's but BY_NAME."""
-        named = [arg for name in BY_NAME for arg in ("-e", name)]
+        named = [arg for var in BY_NAME for arg in ("-e", var)]
         return [
             *core.podman(self.site.env),
             "run",
             "--rm",
+            "--name",
+            name,
+            "--timeout",
+            str(CONTAINER_SECONDS),
             "--pull=never",
             "--log-driver=none",
             "--cap-drop=all",

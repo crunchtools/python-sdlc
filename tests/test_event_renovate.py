@@ -26,6 +26,7 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -150,13 +151,15 @@ class FakeRenovate:
         "ERROR: Repository has unknown error (repository=crunchtools/b)\n"
     )
 
-    def __init__(self, rc: int = 0) -> None:
+    def __init__(self, rc: int | BaseException = 0) -> None:
         self.rc = rc
         self.calls: list[tuple[list[str], dict[str, str]]] = []
 
     def __call__(self, argv: Sequence[str], env: Mapping[str, str], log: Path) -> int:
         self.calls.append((list(argv), dict(env)))
         log.write_text(self.LOG)
+        if isinstance(self.rc, BaseException):
+            raise self.rc
         return self.rc
 
 
@@ -164,14 +167,19 @@ IMAGE = "quay.io/crunchtools/sdlc@sha256:" + "e" * 64
 
 
 class FakeSocket:
-    """The socket's tools: answers `podman inspect` of this container with its image."""
+    """The socket's tools: answers `podman inspect` of this container with its image,
+    and records every command."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
 
     def run(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(argv))
         doc = [{"ImageName": IMAGE, "Image": "f" * 64}] if "inspect" in argv else []
         return subprocess.CompletedProcess(argv, 0, json.dumps(doc), "")
 
 
-def scenario(*, real: bool, rc: int = 0, config: bool = True) -> dict[str, Any]:
+def scenario(*, real: bool, rc: int | BaseException = 0, config: bool = True) -> dict[str, Any]:
     work = Path(tempfile.mkdtemp(dir=TMP))
     if config:
         (work / "repo" / "renovate").mkdir(parents=True)
@@ -190,15 +198,17 @@ def scenario(*, real: bool, rc: int = 0, config: bool = True) -> dict[str, Any]:
     git = FakeRunner()
     site = Site(HOME, env, git, work, api_for=lambda _tok: api)
     mint, run = Minter(), FakeRenovate(rc)
-    job = renovate.Job(site, mint, FakeSocket(), run)
+    sock = FakeSocket()
+    job = renovate.Job(site, mint, sock, run)
     try:
         out: object = quiet(job.run, real)
-    except CannotRunError as err:
+    except Exception as err:  # a CannotRunError, or the crash a scenario raises
         out = err
     return {
         "out": out,
         "mint": mint,
         "run": run,
+        "sock": sock,
         "git": git,
         "summary": summary.read_text() if summary.exists() else "",
         "work": work,
@@ -226,6 +236,19 @@ check(
     and not any("docker.sock" in a or "podman.sock" in a for a in argv[argv.index("run") :])
     and [argv[i + 1] for i, a in enumerate(argv) if a == "-v"] == [renovate.WORK],
     str(argv),
+)
+name = argv[argv.index("--name") + 1]
+check(
+    "the nested container has a unique name and podman's own time limit",
+    name.startswith("sdlc-renovate-")
+    and argv[argv.index("--timeout") + 1] == str(renovate.CONTAINER_SECONDS)
+    and renovate.CONTAINER_SECONDS < 55 * 60,
+    str(argv),
+)
+check(
+    "the container is removed by name after a clean run",
+    any(c[-4:] == ["rm", "-f", "--ignore", name] for c in dry["sock"].calls),
+    str(dry["sock"].calls),
 )
 check(
     "the nested container is locked down",
@@ -296,6 +319,29 @@ check(
 )
 check("a failed Renovate still releases its token", failed["mint"].released == 1)
 check("a failed Renovate still writes its summary", "### Renovate" in failed["summary"])
+
+for label, err in (
+    ("a stop signal", CannotRunError("renovate was stopped by SIGTERM")),
+    ("a crash", RuntimeError("boom")),
+):
+    raised = scenario(real=True, rc=err)
+    ((r_argv, _env),) = raised["run"].calls
+    r_name = r_argv[r_argv.index("--name") + 1]
+    check(
+        f"{label} mid-run propagates, and still removes the container and revokes the token",
+        raised["out"] is err
+        and any(c[-4:] == ["rm", "-f", "--ignore", r_name] for c in raised["sock"].calls)
+        and raised["mint"].released == 1,
+        repr(raised["out"]),
+    )
+
+with renovate.interruptible():
+    stopped = refusal(os.kill, os.getpid(), signal.SIGTERM)
+check("SIGTERM inside the run raises, so the finallys run", "SIGTERM" in (stopped or ""))
+check(
+    "the handlers are put back afterwards",
+    signal.getsignal(signal.SIGTERM) is signal.SIG_DFL,
+)
 
 missing = scenario(real=False, config=False)
 check(
