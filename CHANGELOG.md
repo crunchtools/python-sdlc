@@ -8,7 +8,15 @@ All notable changes to this project are documented here, following
 
 ### Added
 
-- sdlc-boot now trusts sdlc's own cosign key (`boot/keys/sdlc.pub`); the private half lives only in the `sdlc-signing` environment.
+- sdlc-bootstrap now trusts sdlc's own cosign key (`boot/keys/sdlc.pub`); the private half lives only in the `sdlc-signing` environment.
+- sdlc-boot is renamed sdlc-bootstrap: the image is
+  `quay.io/crunchtools/sdlc-bootstrap`, and its signature annotation
+  `repo=crunchtools/sdlc-bootstrap`.
+- `scripts/self.sh` gains MODE=bootstrap: sdlc's first release, once, by an
+  approved dispatch with `version` and `bootstrap: true`, of the `vX.Y.Z` tag
+  at the dispatched commit, while no `:<major>` exists. It breaks the loop in
+  which the release path's `write` runs in sdlc-bootstrap, which needs a
+  release to verify.
 
 - The fleet's self-hosted Renovate runs from this image (a1099). `renovate` is
   installed by `npm ci --ignore-scripts` from a committed lockfile,

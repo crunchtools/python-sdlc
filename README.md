@@ -73,7 +73,7 @@ to the digest with the same key; `cosign verify-attestation
 `language: system` hooks, `.sdlc/bin/sdlc commit` and `.sdlc/bin/sdlc push`.
 CI is [`examples/ci.yml`](examples/ci.yml), the fleet file: copied into
 every repo byte for byte, no `uses:` of any kind, seven jobs that are seven
-trust levels, each running `sdlc event` in the digest-pinned `sdlc-boot`
+trust levels, each running `sdlc event` in the digest-pinned `sdlc-bootstrap`
 image (design: `docs/marketplace-free-ci.md`). Its two required checks are
 `sdlc / check (pull_request)` and `sdlc / gate (pull_request_target)`.
 `tests/test_workflows.py` pins its guards.
@@ -109,7 +109,7 @@ reads both new checks green, merges, moves the rulesets (recomputed from which
 repos carry the fleet file, counting the one just merged, so a re-run is
 safe; an active ruleset is never sent an empty list), drops the repo from each
 moved org secret, and brings bot pull requests up to date. Every mode exits 2
-while `examples/ci.yml` has no sdlc-boot digest.
+while `examples/ci.yml` has no sdlc-bootstrap digest.
 `cutover.py --move-rulesets` runs the move alone, and `cutover.py --check`
 fails while a converted repo can still read a moved secret, the rulesets are
 out of step, or no ruleset guards `ashigaru/release-*`.
@@ -556,7 +556,7 @@ finding still has to be answered on the pull request.
 ## `sdlc event`, in CI
 
 Each job of the fleet's one `ci.yml` (`examples/ci.yml`, designed in
-`docs/marketplace-free-ci.md`) runs `sdlc event` in the `sdlc-boot` container.
+`docs/marketplace-free-ci.md`) runs `sdlc event` in the `sdlc-bootstrap` container.
 It routes on `GITHUB_JOB` to `sdlc_jobs/<job>.py` -- `check`, `image`,
 `promote`, `pypi`, `write` -- and passes the job `GITHUB_EVENT_NAME`, the payload
 at `GITHUB_EVENT_PATH` and the environment. A job with no module is a 2 that

@@ -137,15 +137,16 @@ complexity to the required check for a saving of milliseconds.
 agent = "constitution"
 category = "constitution"
 file = "examples/ci.yml"
-evidence = "image: \"quay.io/crunchtools/sdlc-boot@sha256:<digest>\""
+evidence = "image: \"quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>\""
 status = "not-a-bug"
 reason = """
 The fleet file is docs/marketplace-free-ci.md's YAML byte for byte, and the \
-sdlc-boot digest does not exist until sdlc's trust root is built (cutover \
-prerequisite 4), which records it here in its own reviewed commit. Until then \
+sdlc-bootstrap digest does not exist until sdlc's trust root is built (cutover \
+prerequisite 4: the first release, cut by MODE=bootstrap), which records it \
+here in its own reviewed commit. Until then \
 no repo can receive the placeholder: fleet_wave.py --apply and every mode of \
 cutover.py (--merge, --move-rulesets, --check) exit 2 while the file names \
-sdlc-boot by anything but sha256:<64 hex>, before any API call \
+sdlc-bootstrap by anything but sha256:<64 hex>, before any API call \
 (tests/test_fleet_wave.py, tests/test_cutover.py).
 """
 

@@ -339,12 +339,12 @@ check(
 
 # ======================================================================= the API
 
-# The fleet file names sdlc-boot by a placeholder until prerequisite 4, and
+# The fleet file names sdlc-bootstrap by a placeholder until prerequisite 4, and
 # every mode refuses that (pinned below); the API tests run on a pinned copy.
 UNPINNED = cut.FLEET_FILE
 PINNED_DIR = Path(tempfile.mkdtemp())
 (PINNED_DIR / "ci.yml").write_text(
-    UNPINNED.read_text().replace("sdlc-boot@sha256:<digest>", "sdlc-boot@sha256:" + "a" * 64)
+    UNPINNED.read_text().replace("sdlc-bootstrap@sha256:<digest>", "sdlc-bootstrap@sha256:" + "a" * 64)
 )
 cut.FLEET_FILE = PINNED_DIR / "ci.yml"
 FLEET = cut.FLEET_FILE.read_bytes()
@@ -809,14 +809,14 @@ check(
     f"{code} {paths(api)} {err}",
 )
 
-# Every mode refuses while the fleet file has no sdlc-boot digest.
+# Every mode refuses while the fleet file has no sdlc-bootstrap digest.
 cut.FLEET_FILE = UNPINNED
 for argv in (["--check"], ["--move-rulesets"], ["--merge", "app", "--pr", "7"]):
     w = World()
     code, api, out, err = cli(w, *argv)
     check(
         f"unpinned: {argv[0]} exits 2 and touches nothing",
-        code == 2 and not api.calls and "no sdlc-boot digest" in err,
+        code == 2 and not api.calls and "no sdlc-bootstrap digest" in err,
         f"{code} {err}",
     )
 cut.FLEET_FILE = PINNED_DIR / "ci.yml"

@@ -869,15 +869,15 @@ check(
 )
 
 
-# ------------------------------------------------- the sdlc-boot placeholder
+# ------------------------------------------------- the sdlc-bootstrap placeholder
 
-PINNED_BOOT = "quay.io/crunchtools/sdlc-boot@sha256:" + "a" * 64
+PINNED_BOOT = "quay.io/crunchtools/sdlc-bootstrap@sha256:" + "a" * 64
 check(
     "boot: the placeholder digest is unpinned",
-    W.cutover.unpinned('image: "x/sdlc-boot@sha256:<digest>"'),
+    W.cutover.unpinned('image: "x/sdlc-bootstrap@sha256:<digest>"'),
 )
 check("boot: a real digest is pinned", not W.cutover.unpinned(f'image: "{PINNED_BOOT}"'))
-check("boot: a tag is unpinned", W.cutover.unpinned('image: "quay.io/crunchtools/sdlc-boot:1"'))
+check("boot: a tag is unpinned", W.cutover.unpinned('image: "quay.io/crunchtools/sdlc-bootstrap:1"'))
 if W.cutover.unpinned(W.cutover.FLEET_FILE.read_text()):
     proc = subprocess.run(
         [
@@ -897,8 +897,8 @@ if W.cutover.unpinned(W.cutover.FLEET_FILE.read_text()):
         env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GH_TOKEN": "x"},
     )
     check(
-        "boot: --apply refuses while the fleet file has no sdlc-boot digest",
-        proc.returncode == 2 and "no sdlc-boot digest" in proc.stderr,
+        "boot: --apply refuses while the fleet file has no sdlc-bootstrap digest",
+        proc.returncode == 2 and "no sdlc-bootstrap digest" in proc.stderr,
         proc.stderr,
     )
 

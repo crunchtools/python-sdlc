@@ -39,7 +39,7 @@ jobs:
       contains(fromJSON('["pull_request","schedule"]'), github.event_name)
       || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
-    container: &boot { image: "quay.io/crunchtools/sdlc-boot@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
+    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, security-events: write, actions: write }  # actions: the 60-day schedule keepalive
     outputs: { result: "${{ steps.e.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}" }
@@ -185,11 +185,11 @@ where a dispatch took minutes.
 - Private repos are a separate question, under "Private repos and the org's
   plan".
 
-## The trust root: sdlc-boot, `:<major>` and a minimum version
+## The trust root: sdlc-bootstrap, `:<major>` and a minimum version
 
-The fleet file names `quay.io/crunchtools/sdlc-boot@sha256:<digest>`. That is a
+The fleet file names `quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>`. That is a
 literal, so only a reviewed commit to `ci.yml` can change it; no variable can.
-`sdlc-boot` is `bin/sdlc-bootstrap` grown into an image. It holds cosign, the
+`sdlc-bootstrap` is `bin/sdlc-bootstrap` grown into an image. It holds cosign, the
 **sdlc public key**, the major version it follows and a **minimum version**,
 all baked in. In every job it does five things:
 1. It resolves `quay.io/crunchtools/sdlc:<major>` to a digest.
@@ -207,7 +207,7 @@ sdlc's `sign` moves `:<major>`, and the next job runs it.
 
 **sdlc's key is not the fleet key.** Its private half lives only in sdlc's
 `sdlc-signing` environment, so a fleet repo's signing key can never produce
-something `sdlc-boot` will run. The fleet key keeps signing the fleet's images.
+something `sdlc-bootstrap` will run. The fleet key keeps signing the fleet's images.
 
 **Accepted risk.** Write access to `quay.io/crunchtools/sdlc` is sdlc's own
 quay robot, held only in sdlc's `registry` and `sdlc-signing` environments,
@@ -216,7 +216,7 @@ Anyone with that access can
 point `:<major>` at any **older signed** sdlc of the same major that is at or
 above the boot minimum, and the fleet will run it. They cannot make it run
 anything sdlc's key did not sign. The recovery is to raise the minimum, which
-means a new `sdlc-boot` digest in `ci.yml`. That is a fleet edit only Josui
+means a new `sdlc-bootstrap` digest in `ci.yml`. That is a fleet edit only Josui
 Prime makes. A signed pointer with expiry and a deny list was designed to
 close this window, and it was dropped: two review rounds of blockers in that
 machinery cost more than the window it closed.
@@ -227,12 +227,12 @@ Break-glass is that same rollback; there is no other mode and no deny.
 
 **Key rotation.**
 1. **Planned.**
-   - Ship an `sdlc-boot` that trusts both public keys (fleet edit 1).
+   - Ship an `sdlc-bootstrap` that trusts both public keys (fleet edit 1).
    - Sign every later release with the new key only.
-   - Ship an `sdlc-boot` with the new key alone and a minimum at the first
+   - Ship an `sdlc-bootstrap` with the new key alone and a minimum at the first
      new-key release (fleet edit 2).
    - Destroy the old private key.
-2. **Compromise.** Ship an `sdlc-boot` with a new key and a minimum above
+2. **Compromise.** Ship an `sdlc-bootstrap` with a new key and a minimum above
    anything the old key signed. That is one emergency fleet edit, and until it
    merges the fleet is exposed.
 
@@ -241,8 +241,8 @@ the same key.
 
 ## sdlc's own workflow: 98 lines, the stated exception
 
-crunchtools/sdlc builds the image that `sdlc-boot` runs, so the jobs that
-build and sign it cannot run from `sdlc-boot`. It is the one repo whose
+crunchtools/sdlc builds the image that `sdlc-bootstrap` runs, so the jobs that
+build and sign it cannot run from `sdlc-bootstrap`. It is the one repo whose
 `ci.yml` differs from the fleet file:
 
 ```yaml
@@ -291,7 +291,7 @@ jobs:
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
     environment: ai
-    container: &boot { image: "quay.io/crunchtools/sdlc-boot@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
+    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", OPENROUTER_API_KEY: "${{ secrets.OPENROUTER_API_KEY }}" }
@@ -355,7 +355,7 @@ jobs:
 
 **It is longer than the 54-line draft because it is now converted like every
 other repo.** It has the fleet's `ai`, `write` and `gate`, byte for byte,
-running from `sdlc-boot`. So sdlc gets Gatehouse review, Ashigaru and the
+running from `sdlc-bootstrap`. So sdlc gets Gatehouse review, Ashigaru and the
 required `sdlc / gate (pull_request_target)`. Only `test`, `check`, `image`,
 `approve` and `sign` are its own.
 
@@ -376,7 +376,7 @@ a job that has nothing to take:
   any ref, so its `if:` checks `github.ref`; `approve` and `sign` carry the same
   test), so the code it builds and runs is reviewed, merged code. It holds the `security-events` and `actions` writes, uploads
   SARIF, keeps the schedule alive, and plans, as the fleet's `check` does.
-- **`ai`, `write` and `gate`** run `sdlc-boot`, which runs a **released**,
+- **`ai`, `write` and `gate`** run `sdlc-bootstrap`, which runs a **released**,
   signed sdlc, never the PR's tree.
 - **`image`** builds **only releases**, so its `if:` keys on the plan's
   `release`, not on the `image` key the fleet's `image` job reads: sdlc's plan
@@ -433,6 +433,14 @@ a job that has nothing to take:
     is built or signed. `write` does not run on that dispatch: its `if:`
     carries `!inputs.digest`, and `sdlc event` also exits doing nothing when
     `DIGEST` is set, so a rollback cannot open a release PR for `VERSION`.
+  - **`bootstrap`:** once, the first release. `write` runs in sdlc-bootstrap,
+    which verifies `:<major>`, so no release exists for it to verify until
+    one is made without it. A dispatch with `version` and `bootstrap: true`
+    needs `approve` to have succeeded, no `:<major>` at all, the tree at
+    `VERSION`, and tag `vVERSION` (pushed by the old release path) at the
+    dispatched commit. `image` then builds and pushes both candidates, and
+    `sign` signs and tags them as a release would. Once `:<major>` exists it
+    refuses forever.
 - **`approve`** runs in `sdlc-approval`. That environment holds no secret,
   admits the default branch only, and has required reviewers Josui Prime and
   Scott with `prevent_self_review` on. sdlc is public, so reviewers are
@@ -540,7 +548,7 @@ This table is the fleet file. In crunchtools/sdlc alone, the required
 emptied before and after every job, and the only thing it shares between jobs
 is the warm image store, mounted read-only: a job can run an image from it and
 cannot add, change or remove one. Only the warm timer writes it. The job
-still checks what it runs: `sdlc-boot` by its literal digest, sdlc against
+still checks what it runs: `sdlc-bootstrap` by its literal digest, sdlc against
 sdlc's key, and `image`'s parent against the fleet key or Red Hat's. So the
 store saves pulls and is trusted for nothing. A secret job
 therefore starts from the same state as a GitHub VM, on a machine we run.
@@ -567,7 +575,7 @@ therefore starts from the same state as a GitHub VM, on a machine we run.
   PR's build poison a later job (gha-runner `deploy/exedore/README.md`), so
   no job here uses `CACHED_RUNNER_LABEL`.
 - **sdlc's own** `image`, `approve` and `sign` stay on `ubuntu-latest`: they
-  run on the host, without `sdlc-boot`, and `sign` holds the trust root.
+  run on the host, without `sdlc-bootstrap`, and `sign` holds the trust root.
 
 `renovate` (a1099) shares that runner. It walks every repo in the org once a
 week, within 55 minutes, because the token it mints lives an hour. Its key is
@@ -647,7 +655,7 @@ to a person:
   - `sdlc.toml`, and the `[tool.sdlc]` tables in `pyproject.toml`.
 - **crunchtools/sdlc's trust-root files:**
   - `bin/sdlc-bootstrap`;
-  - the `sdlc-boot` Containerfile;
+  - the `sdlc-bootstrap` Containerfile;
   - `scripts/self.sh`;
   - the public keys;
   - `sdlc`, the in-image entrypoint;
@@ -776,7 +784,7 @@ Each must hold before the first canary converts, unless it says otherwise.
    - `sdlc-signing` holding the sdlc key;
    - `sdlc-approval`, with its reviewers and `prevent_self_review`;
    - the first release signed with the sdlc key, and `:<major>` on it;
-   - `sdlc-boot`, built with the key, the major and the minimum version, with
+   - `sdlc-bootstrap`, built with the key, the major and the minimum version, with
      its digest recorded;
    - sdlc's own ruleset entry, and sdlc off the org secret lists.
 5. **gha-runner rejects fork jobs** (separate gha-runner work). A job-started
@@ -1017,7 +1025,7 @@ in favour of Renovate `customManagers` on the `ARG` lines.
 - **claude**: the CLI from npm, at an exact version, under its own prefix as
   markdownlint-cli2 is.
 - **cryptography** (or PyJWT): in an isolated venv, for App tokens.
-- **The bootstrap** is a second, separate image (`sdlc-boot`), built from
+- **The bootstrap** is a second, separate image (`sdlc-bootstrap`), built from
   this repo. It holds cosign, sdlc's own public key (two during a rotation),
   the major it follows, the minimum version and the docker CLI, and
   nothing else. It changes rarely, and each

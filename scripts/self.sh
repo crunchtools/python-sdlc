@@ -12,6 +12,7 @@
 #   image  release: the verified release merge, version from write's output.
 #          weekly: the version :<major> carries, rebuilt from the commit its
 #          revision label names (never the mutable vX.Y.Z tag).
+#          bootstrap: sdlc's first release, once, by dispatch (see bootstrap_ok).
 #          Pushes candidates by digest; signs nothing and moves no tag.
 #   sign   the only step with sdlc's key. Never runs the image it signs: cosign
 #          runs from COSIGN_IMAGE, a digest the workflow pins, and the release
@@ -24,7 +25,7 @@
 set -eu
 
 QUAY=quay.io/crunchtools/sdlc
-BOOT=quay.io/crunchtools/sdlc-boot
+BOOT=quay.io/crunchtools/sdlc-bootstrap
 here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 die() { printf 'self.sh: %s\n' "$*" >&2; exit 1; }
@@ -56,7 +57,7 @@ digest_ok() {
   case $_hex in ''|*[!0-9a-f]*) return 1 ;; esac
   [ "${#_hex}" -eq 64 ]
 }
-# The major and minimum sdlc-boot bakes are the reviewed tree's, read from
+# The major and minimum sdlc-bootstrap bakes are the reviewed tree's, read from
 # boot/Containerfile, so this file and the bootstrap cannot disagree.
 boot_arg() {
   sed -n "s/^ARG $1=\\([0-9.]*\\)\$/\\1/p" "$here/boot/Containerfile" | head -1
@@ -79,7 +80,7 @@ IMAGE_SUITES='tests/test_plan.py tests/test_codeql_globs.py tests/test_pycache_p
   tests/test_cutover.py tests/test_fleet_wave.py tests/test_pip_audit_resilience.py
   tests/test_mypy_traceback.py tests/test_update_tools.py tests/test_workflows.py'
 
-# Builds the tree in $1 as sdlc and sdlc-boot, tagged $2 and $3. A run no
+# Builds the tree in $1 as sdlc and sdlc-bootstrap, tagged $2 and $3. A run no
 # commit triggered must not reuse a cached `dnf install`, or it ships no errata.
 build() {
   _src=$1 _rev=$(git -C "$1" rev-parse HEAD) _ver=$(tree_version "$1") _args=
@@ -102,8 +103,8 @@ build() {
     -t "$3" "$_src"
 }
 
-# Everything container.yml's build job runs today, plus sdlc-boot's own tests
-# and `sdlc ci` from the image just built. $1 is the sdlc image, $2 sdlc-boot.
+# Everything container.yml's build job runs today, plus sdlc-bootstrap's own tests
+# and `sdlc ci` from the image just built. $1 is the sdlc image, $2 sdlc-bootstrap.
 test_all() {
   cd "$here"
   # shellcheck disable=SC2086
@@ -121,7 +122,7 @@ test_all() {
   for s in container node bootc docs; do
     "tests/test_${s}_stack.sh" "$1"
   done
-  # sdlc-boot runs nothing without a signed release, so its smoke test is
+  # sdlc-bootstrap runs nothing without a signed release, so its smoke test is
   # that every tool it needs is there and that it refuses on its own.
   podman run --rm --entrypoint sh "$2" -c 'cosign version && docker --version && jq --version'
   SDLC_IMAGE=$1 bin/sdlc ci
@@ -160,6 +161,25 @@ keepalive() {
   say "kept the schedule alive"
 }
 
+# MODE=bootstrap: the release path's write runs in sdlc-bootstrap, which
+# verifies :<major>, so the first release cannot run it. Once, by dispatch, a
+# version whose vX.Y.Z tag the old release path already pushed at this commit
+# is built and released as if write had; never once :<major> exists.
+bootstrap_ok() {
+  [ "${APPROVED:-}" = success ] || die "bootstrap needs the sdlc-approval job to have succeeded (${APPROVED:-none})"
+  semver "${VERSION:-}" || die "VERSION '${VERSION:-}' is not X.Y.Z"
+  [ "$(tree_version "$here")" = "$VERSION" ] || die "the tree is $(tree_version "$here"), not $VERSION"
+  _ref=refs/tags/v$VERSION
+  _tags=$(git ls-remote --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$_ref" "$_ref^{}") \
+    || die "cannot list the tags of $GITHUB_REPOSITORY"
+  # An annotated tag's commit is its peeled line.
+  _at=$(printf '%s\n' "$_tags" | awk -v r="$_ref" '$2 == r "^{}" { p = $1 } $2 == r { t = $1 } END { print p ? p : t }')
+  _head=$(git -C "$here" rev-parse HEAD)
+  [ "$_at" = "$_head" ] || die "v$VERSION is at '${_at:-no tag}', this run is at $_head"
+  _none=$(current)
+  [ -z "$_none" ] || die "$QUAY:$MAJOR exists (${_none#* }); bootstrap runs once, before the first release"
+}
+
 output() {
   if [ -n "${GITHUB_OUTPUT:-}" ]; then printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; fi
   say "$1=$2"
@@ -180,7 +200,7 @@ login() {
     | podman login --authfile "$AUTH" -u "$SDLC_QUAY_USERNAME" --password-stdin quay.io > /dev/null
 }
 
-# sdlc's public keys, the ones sdlc-boot trusts (two during a rotation).
+# sdlc's public keys, the ones sdlc-bootstrap trusts (two during a rotation).
 load_keys() {
   for _k in "$here"/boot/keys/*.pub; do
     [ -e "$_k" ] && cp "$_k" "$work/keys/"
@@ -289,8 +309,8 @@ mode_test() {
   [ "${GITHUB_EVENT_NAME:-}" = pull_request ] || die "test runs on pull_request only"
   name_origin
   _sha=$(git -C "$here" rev-parse HEAD)
-  build "$here" "localhost/sdlc:$_sha" "localhost/sdlc-boot:$_sha"
-  test_all "localhost/sdlc:$_sha" "localhost/sdlc-boot:$_sha"
+  build "$here" "localhost/sdlc:$_sha" "localhost/sdlc-bootstrap:$_sha"
+  test_all "localhost/sdlc:$_sha" "localhost/sdlc-bootstrap:$_sha"
 }
 
 mode_check() {
@@ -298,8 +318,8 @@ mode_check() {
     *) die "check never runs on ${GITHUB_EVENT_NAME:-no event}: a PR's code runs only in test" ;; esac
   name_origin
   _sha=$(git -C "$here" rev-parse HEAD)
-  build "$here" "localhost/sdlc:$_sha" "localhost/sdlc-boot:$_sha"
-  test_all "localhost/sdlc:$_sha" "localhost/sdlc-boot:$_sha"
+  build "$here" "localhost/sdlc:$_sha" "localhost/sdlc-bootstrap:$_sha"
+  test_all "localhost/sdlc:$_sha" "localhost/sdlc-bootstrap:$_sha"
   [ "$GITHUB_EVENT_NAME" != schedule ] || keepalive
   # Not `output result "$(plan)"`: a plan that died would write an empty
   # result, which every consumer reads as "no release".
@@ -308,7 +328,7 @@ mode_check() {
 }
 
 mode_image() {
-  case $MODE:${GITHUB_EVENT_NAME:-} in release:push|weekly:schedule) ;;
+  case $MODE:${GITHUB_EVENT_NAME:-} in release:push|weekly:schedule|bootstrap:workflow_dispatch) ;;
     *) die "image MODE=$MODE does not go with event ${GITHUB_EVENT_NAME:-none}" ;; esac
   login
   if [ "$MODE" = release ]; then
@@ -321,6 +341,12 @@ mode_image() {
       || _v=${SDLC_RELEASE:-}
     semver "$_v" || die "write's release version '$_v' is not X.Y.Z"
     [ "$(tree_version "$here")" = "$_v" ] || die "the tree is $(tree_version "$here"), write released $_v"
+    _src=$here
+  elif [ "$MODE" = bootstrap ]; then
+    load_keys
+    cosign_image
+    bootstrap_ok
+    _v=$VERSION
     _src=$here
   else
     load_keys
@@ -340,21 +366,21 @@ mode_image() {
   fi
   [ "$(major "$_v")" = "$MAJOR" ] || die "$_v is not of major $MAJOR, which boot/Containerfile follows"
   _rev=$(git -C "$_src" rev-parse HEAD)
-  build "$_src" "localhost/sdlc:$_rev" "localhost/sdlc-boot:$_rev"
+  build "$_src" "localhost/sdlc:$_rev" "localhost/sdlc-bootstrap:$_rev"
   # The contract test of the tree being built, against what was built.
   "$_src/tests/contract.sh" "localhost/sdlc:$_rev"
   podman push -q --authfile "$AUTH" --digestfile "$work/sdlc.digest" \
     "localhost/sdlc:$_rev" "docker://$QUAY:gated-$_rev"
   _d=$(cat "$work/sdlc.digest")
   digest_ok "$_d" || die "the push reported no digest"
-  # sdlc-boot only on a release: the fleet runs it by a digest a fleet edit
+  # sdlc-bootstrap only on a release: the fleet runs it by a digest a fleet edit
   # names, so rebuilding it weekly would publish digests nobody runs.
   _b=
-  if [ "$MODE" = release ]; then
+  if [ "$MODE" != weekly ]; then
     podman push -q --authfile "$AUTH" --digestfile "$work/boot.digest" \
-      "localhost/sdlc-boot:$_rev" "docker://$BOOT:gated-$_rev"
+      "localhost/sdlc-bootstrap:$_rev" "docker://$BOOT:gated-$_rev"
     _b=$(cat "$work/boot.digest")
-    digest_ok "$_b" || die "the sdlc-boot push reported no digest"
+    digest_ok "$_b" || die "the sdlc-bootstrap push reported no digest"
   fi
   output result "$(jq -cn --arg d "$_d" --arg v "$_v" --arg b "$_b" '{digest: $d, version: $v, boot: $b}')"
 }
@@ -374,13 +400,13 @@ sign_one() {
 }
 
 mode_sign() {
-  case $MODE:${EVENT:-} in release:push|weekly:schedule|rollback:workflow_dispatch) ;;
+  case $MODE:${EVENT:-} in release:push|weekly:schedule|rollback:workflow_dispatch|bootstrap:workflow_dispatch) ;;
     *) die "sign MODE=$MODE does not go with event ${EVENT:-none}" ;; esac
   [ -n "${SDLC_KEY:-}" ] || die "no SDLC_KEY: it lives in the sdlc-signing environment only"
   cosign_image
   load_keys
   login
-  # The private key must be the other half of a key sdlc-boot trusts.
+  # The private key must be the other half of a key sdlc-bootstrap trusts.
   cosign_key public-key --key env://SDLC_KEY > "$work/secret.pub"
   _match=
   for _k in "$work/keys/"*.pub; do cmp -s "$work/secret.pub" "$_k" && _match=1; done
@@ -390,7 +416,7 @@ mode_sign() {
     [ "${APPROVED:-}" = success ] || die "rollback needs the sdlc-approval job to have succeeded (${APPROVED:-none})"
     semver "${VERSION:-}" || die "VERSION '${VERSION:-}' is not X.Y.Z"
     [ "$(major "$VERSION")" = "$MAJOR" ] || die "$VERSION is not of major $MAJOR"
-    [ "$(vcmp "$VERSION" "$MINIMUM")" -ge 0 ] || die "$VERSION is below sdlc-boot's minimum $MINIMUM"
+    [ "$(vcmp "$VERSION" "$MINIMUM")" -ge 0 ] || die "$VERSION is below sdlc-bootstrap's minimum $MINIMUM"
     digest_ok "${DIGEST:-}" || die "DIGEST '${DIGEST:-}' is not sha256:<64 hex>"
     _sv=$(signed_version "$QUAY@$DIGEST" crunchtools/sdlc) \
       || die "$QUAY@$DIGEST carries an ambiguous sdlc signature"
@@ -408,7 +434,11 @@ mode_sign() {
   semver "$_v" || die "$QUAY@$_d's version label '$_v' is not X.Y.Z"
   [ "$(major "$_v")" = "$MAJOR" ] || die "$_v is not of major $MAJOR"
   _cur=$(current)
-  if [ "$MODE" = release ]; then
+  if [ "$MODE" = bootstrap ]; then
+    bootstrap_ok
+    [ "$_v" = "$VERSION" ] || die "the image is $_v, the bootstrap is of $VERSION"
+  fi
+  if [ "$MODE" != weekly ]; then
     [ "$(tree_version "$here")" = "$_v" ] || die "the release merge is $(tree_version "$here"), the image is $_v"
     [ -z "$_cur" ] || [ "$(vcmp "$_v" "${_cur#* }")" -gt 0 ] \
       || die "$_v is not newer than ${_cur#* }, which $QUAY:$MAJOR carries"
@@ -421,18 +451,18 @@ mode_sign() {
     _now=$(revision_of "$QUAY@$_d")
     [ "$_now" = "$_was" ] || die "the rebuild is of $_now, $QUAY:$MAJOR was built from $_was; refusing"
   fi
-  # sdlc-boot is checked before anything is signed, so a refusal signs nothing.
+  # sdlc-bootstrap is checked before anything is signed, so a refusal signs nothing.
   _b=
-  [ "$MODE" != release ] || _b=$(printf '%s' "$BUILT" | jq -r '.boot // empty')
+  [ "$MODE" = weekly ] || _b=$(printf '%s' "$BUILT" | jq -r '.boot // empty')
   if [ -n "$_b" ]; then
-    digest_ok "$_b" || die "image's output names a malformed sdlc-boot digest: $_b"
+    digest_ok "$_b" || die "image's output names a malformed sdlc-bootstrap digest: $_b"
     [ "$(label_version "$BOOT@$_b")" = "$_v" ] || die "$BOOT@$_b is not labelled $_v"
-    _bs=$(signed_version "$BOOT@$_b" crunchtools/sdlc-boot) \
+    _bs=$(signed_version "$BOOT@$_b" crunchtools/sdlc-bootstrap) \
       || die "$BOOT@$_b carries an ambiguous sdlc signature"
     [ -z "$_bs" ] || [ "$_bs" = "$_v" ] || die "$BOOT@$_b is signed as '$_bs', not $_v"
   fi
   sign_one "$QUAY" "$_d" crunchtools/sdlc "$_v"
-  [ -z "$_b" ] || sign_one "$BOOT" "$_b" crunchtools/sdlc-boot "$_v"
+  [ -z "$_b" ] || sign_one "$BOOT" "$_b" crunchtools/sdlc-bootstrap "$_v"
 
   # Read again, inside the sdlc-sign concurrency group, immediately before the
   # move: a weekly run queued behind a release finds :<major> moved and stops.
@@ -442,7 +472,7 @@ mode_sign() {
   [ "$_again" = "$_cur" ] || die "$QUAY:$MAJOR moved while this run was signing; refusing"
   retag "$QUAY" "$_d" "$_v"
   retag "$QUAY" "$_d" "$MAJOR"
-  if [ "$MODE" = release ]; then
+  if [ "$MODE" != weekly ]; then
     retag "$QUAY" "$_d" latest
     [ -z "$_b" ] || retag "$BOOT" "$_b" "$_v"
   fi
@@ -457,7 +487,7 @@ semver "$MINIMUM" || cannot "boot/Containerfile names no ARG SDLC_MIN_VERSION=X.
 case ${GITHUB_JOB:-}:$MODE in
   test:test)   mode_test ;;
   check:check) mode_check ;;
-  image:release|image:weekly) mode_image ;;
-  sign:release|sign:weekly|sign:rollback) mode_sign ;;
+  image:release|image:weekly|image:bootstrap) mode_image ;;
+  sign:release|sign:weekly|sign:rollback|sign:bootstrap) mode_sign ;;
   *) cannot "no step for job '${GITHUB_JOB:-}' in MODE '$MODE'" ;;
 esac

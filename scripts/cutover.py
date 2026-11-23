@@ -393,12 +393,12 @@ def is_converted(repo: str, have: bytes | None) -> bool:
     ) == fleet_jobs["gate"]
 
 
-BOOT_PIN = re.compile(r"sdlc-boot@sha256:[0-9a-f]{64}\b")
+BOOT_PIN = re.compile(r"sdlc-bootstrap@sha256:[0-9a-f]{64}\b")
 
 
 def unpinned(text: str) -> bool:
-    """The fleet file names sdlc-boot by anything but a real digest."""
-    return "sdlc-boot" in text and not BOOT_PIN.search(text)
+    """The fleet file names sdlc-bootstrap by anything but a real digest."""
+    return "sdlc-bootstrap" in text and not BOOT_PIN.search(text)
 
 
 def live_names(api: Api) -> set[str]:
@@ -899,9 +899,9 @@ def run_mode(args: argparse.Namespace, api: Api, opts: Options) -> list[str]:
 def main(argv: list[str] | None = None, api: Api | None = None) -> int:
     args = parser().parse_args(argv)
     if unpinned(FLEET_FILE.read_text()):
-        # Until sdlc's trust root records the sdlc-boot digest (prerequisite 4),
+        # Until sdlc's trust root records the sdlc-bootstrap digest (prerequisite 4),
         # a merge would land a ci.yml no runner can pull, in any mode's wake.
-        print(f"cutover: {FLEET_FILE.name} has no sdlc-boot digest yet", file=sys.stderr)
+        print(f"cutover: {FLEET_FILE.name} has no sdlc-bootstrap digest yet", file=sys.stderr)
         return 2
     if args.merge and args.pr is None:
         print("cutover: --merge needs --pr", file=sys.stderr)

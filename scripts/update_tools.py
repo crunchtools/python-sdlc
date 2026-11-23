@@ -12,7 +12,7 @@ lychee is pinned twice over, by version and by image digest. The digest is
 looked up on Docker Hub for the new version and written with it; a version
 with no digest raises, so a bump with a stale digest is never written.
 
-The sdlc-boot image's base is pinned by digest (ARG BOOT_BASE_DIGEST in
+The sdlc-bootstrap image's base is pinned by digest (ARG BOOT_BASE_DIGEST in
 boot/Containerfile). When quay's digest for core-runtime:2-builder changes, it
 is written the same way and counts as a move, so it ships as a sdlc release too.
 
@@ -127,7 +127,7 @@ BOOT_BASE_TAG_URL = (
     "https://quay.io/api/v1/repository/hummingbird/core-runtime/tag/"
     "?specificTag=2-builder&onlyActiveTags=true"
 )
-BOOT_BASE_NAME = "sdlc-boot base core-runtime:2-builder"
+BOOT_BASE_NAME = "sdlc-bootstrap base core-runtime:2-builder"
 BOOT_ARG = re.compile(r"^(ARG BOOT_BASE_DIGEST=)(sha256:[0-9a-f]{64})$", re.M)
 
 

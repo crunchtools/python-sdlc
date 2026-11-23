@@ -1267,7 +1267,7 @@ rm -rf "$FLOAT"
 
 # A converted repo carries the bootstrap as .sdlc/bin/sdlc, and its hooks start
 # that file -- a script in the repo, which is what XII's host contract lets a
-# `system` hook run -- and nothing else. CI runs `sdlc event` in sdlc-boot.
+# `system` hook run -- and nothing else. CI runs `sdlc event` in sdlc-bootstrap.
 if grep -q '^        entry: \.sdlc/bin/sdlc commit$' examples/pre-commit-floating.yaml \
    && grep -q '^        entry: \.sdlc/bin/sdlc push$' examples/pre-commit-floating.yaml \
    && grep -q '^    steps: &event \[{ id: e, run: sdlc event }\]$' examples/ci.yml; then
