@@ -20,8 +20,10 @@ that trust level does for that event in this repo.
 # routes inside it. The only version here is the bootstrap's digest: it resolves
 # quay.io/crunchtools/sdlc:<major>, verifies it against sdlc's own key and a
 # minimum version, and runs it through the runner's container socket. Every
-# secret lives in an environment that admits the default branch only, and every
-# job that holds one runs on our uncached runners, or GitHub's for a fork.
+# secret is an org secret: a fork's PR gets none, pull_request_target runs the
+# default branch's copy of this file, and only Prime's credential may change a
+# workflow. Every job that holds one runs on our uncached runners, or GitHub's
+# for a fork.
 name: CI
 on:
   push:
@@ -47,7 +49,6 @@ jobs:
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
-    environment: ai
     container: *boot
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
@@ -57,7 +58,6 @@ jobs:
     needs: check
     if: needs.check.result == 'success' && fromJSON(needs.check.outputs.result || '{}').image && github.event_name != 'pull_request'
     runs-on: *secret
-    environment: registry
     container: *boot
     permissions: { contents: read }
     outputs: { result: "${{ steps.e.outputs.result }}" }
@@ -73,7 +73,6 @@ jobs:
           || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
     runs-on: *secret
-    environment: ashigaru
     container: *boot
     permissions: {}
     outputs: { release: "${{ steps.e.outputs.release }}" }
@@ -85,7 +84,6 @@ jobs:
     if: always() && !cancelled() && needs.image.result == 'success'
     concurrency: { group: "promote-${{ github.repository }}", queue: max }
     runs-on: *secret
-    environment: cosign-signing
     container: *boot
     permissions: { contents: read }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_CHECK: "${{ needs.check.outputs.result }}", SDLC_IMAGE_RESULT: "${{ needs.image.outputs.result }}", SDLC_WRITE: "${{ needs.write.result }}", SDLC_RELEASE: "${{ needs.write.outputs.release }}",
@@ -290,7 +288,6 @@ jobs:
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
-    environment: ai
     container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
@@ -304,7 +301,6 @@ jobs:
           || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
     runs-on: *secret
-    environment: ashigaru
     container: *boot
     permissions: {}
     outputs: { release: "${{ steps.e.outputs.release }}" }
@@ -327,7 +323,6 @@ jobs:
     needs: [check, write]
     if: always() && !cancelled() && needs.check.result == 'success' && (fromJSON(needs.check.outputs.result || '{}').release || github.event_name == 'schedule')
     runs-on: ubuntu-latest
-    environment: registry
     permissions: { contents: read }
     outputs: { result: "${{ steps.s.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", MODE: "${{ github.event_name == 'schedule' && 'weekly' || 'release' }}", SDLC_WRITE: "${{ needs.write.result }}",
@@ -458,16 +453,13 @@ a job that has nothing to take:
 | `update-tools.yml` | deleted; Renovate updates the `Containerfile` pins |
 | `dependabot-automerge.yml` | deleted with Dependabot |
 
-sdlc gets its own environments (`ai`, `ashigaru`, `registry`, `sdlc-signing`,
-`sdlc-approval`). It has no `cosign-signing` and no `pypi`, because it neither
-signs with the fleet key nor publishes to PyPI. Its `registry` and
-`sdlc-signing` hold **sdlc's own quay robot** (`SDLC_QUAY_USERNAME`,
-`SDLC_QUAY_PASSWORD`), the only credential that can write
-`quay.io/crunchtools/sdlc`. The fleet's `QUAY_*` robot cannot, so no fleet
-repo's `registry` or `cosign-signing` can push or retag the trust root. It
-moves to the new ruleset,
-and it comes off every org secret's selected-repository list, like any
-converted repo.
+sdlc is the one repo with environments: `registry`, `sdlc-signing` and
+`sdlc-approval`. Its `ai` and `write` read the org secrets like any repo's.
+Its `registry` and `sdlc-signing` hold **sdlc's own quay robot**
+(`SDLC_QUAY_USERNAME`, `SDLC_QUAY_PASSWORD`), the only credential that can
+write `quay.io/crunchtools/sdlc` and `sdlc-bootstrap`. The fleet's `QUAY_*`
+robot cannot, so no fleet repo can push or retag the trust root. It moves to
+the new ruleset like any converted repo.
 
 ## Releases run from the merge, and every job checks what it needs
 
@@ -520,19 +512,18 @@ The `always()` in those `if:`s exists to make that judgement **run**, never to
 let it pass.
 
 Nothing runs from a tag, and nothing triggers on `release` or a closed pull
-request, so every environment admits the default branch alone. The App-only
-tag ruleset stays as it is today.
+request. The App-only tag ruleset stays as it is today.
 
 ## Jobs are trust levels
 
-| Job | Check name | Environment and secrets | Runs on | Never holds |
+| Job | Check name | Secrets (org secrets) | Runs on | Never holds |
 |---|---|---|---|---|
 | `check` | `sdlc / check (pull_request)` (required) | none; read token, `security-events`, the socket | pull_request (forks on `ubuntu-latest`), default-branch push, schedule, dispatch; our **uncached** runners otherwise | any secret |
-| `ai` | | `ai`: Claude and OpenRouter keys | issues, `pull_request_target`; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | an App key, a write token |
-| `image` | | `registry`: quay, RHSM, registry.redhat.io | when `check` plans an image; our **uncached** runners | the cosign key |
-| `write` | | `ashigaru`: Ashigaru App key; queued | `pull_request_target`, issues, a `version` dispatch; otherwise only when a successful `check` plans `write` (a release merge, the weekly audit); never a rollback dispatch; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | a model |
-| `promote` | | `cosign-signing`: cosign key, quay; queued | after `image`, and after `write` on a release; our **uncached** runners | an App key, a build |
-| `pypi` | | `pypi`: OIDC only | a release merge that publishes to PyPI; our **uncached** runners | anything else |
+| `ai` | | Claude and OpenRouter keys | issues, `pull_request_target`; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | an App key, a write token |
+| `image` | | quay, RHSM, registry.redhat.io | when `check` plans an image; our **uncached** runners | the cosign key |
+| `write` | | Ashigaru App key; queued | `pull_request_target`, issues, a `version` dispatch; otherwise only when a successful `check` plans `write` (a release merge, the weekly audit); never a rollback dispatch; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | a model |
+| `promote` | | cosign key, quay; queued | after `image`, and after `write` on a release; our **uncached** runners | an App key, a build |
+| `pypi` | | none: OIDC, environment `pypi` for the publisher | a release merge that publishes to PyPI; our **uncached** runners | anything else |
 | `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; `ubuntu-latest` | any secret |
 | `renovate` | | `renovate`: Renovate App key; no `GITHUB_TOKEN`; queued | crunchtools/constitution only: the weekly schedule, a bare dispatch from the default branch; our **uncached** runners | a token of this repo's, a build |
 
@@ -617,18 +608,27 @@ list needs an admin listing (`type=private`). The proposals, in order:
 3. Where a private repo needs no privacy, making it public moves it into the
    wave.
 
-**Every environment admits the default branch only, and every secret is in
-one.** That includes quay, RHSM and registry.redhat.io. A job that runs from
-any other ref gets empty secrets, whatever its `if:` says. That matters
-because an `if:` comes from whichever copy of `ci.yml` runs: a branch
-dispatch, a pushed branch, or a review-comment run all bring their own.
+**Every secret is an org secret, keyed once, and no fleet repo has an
+environment to set up** (Scott, 2026-11-23: nothing per repo, because every
+container build will be signed). What keeps a secret on the right code:
+- a fork's `pull_request` gets no secret at all, org secrets included;
+- `pull_request_target`, `issues`, `schedule` and default-branch `push` run
+  the default branch's copy of `ci.yml`;
+- every other run (a pushed branch, a branch dispatch, a same-repo PR's
+  review-comment run) runs a copy a writer could have changed, and changing a
+  workflow needs the workflows permission. Only Prime's credential holds it:
+  the Ashigaru App and the seats' tokens do not, so no writer but Prime can
+  stage a branch workflow that reads a secret.
+
+sdlc alone keeps environments (`registry`, `sdlc-signing`, `sdlc-approval`):
+its robot and key must stay out of the fleet's reach, and it is one repo.
 
 **The splits are forced.**
 - **`ai` / `write`:** "the credential that can write never shares a machine
   with the LLM" (crunchtools/ashigaru `.github/workflows/code.yml`).
 - **`image` / `promote`:** the signing key never shares a job with a
   Containerfile build.
-- **`write` / `promote`:** no App key in `cosign-signing`. With downstream
+- **`write` / `promote`:** no App key in the signing job. With downstream
   dispatch gone, nothing needs one there.
 - **`gate`:** it must come from the base definition and hold no secret, so it
   can be required.
@@ -757,33 +757,14 @@ Each must hold before the first canary converts, unless it says otherwise.
    the organization's Actions event policy allows it. It must allow it for
    `.github/workflows/ci.yml` in every repo. Without that, `ai`, `write` and
    the required `gate` never run.
-2. **Environments, provisioned and asserted.**
-   - The provisioner creates `ai`, `ashigaru`, `registry`, `cosign-signing` and
-     `pypi` in every repo, and `sdlc-signing` and `sdlc-approval` in sdlc. Each
-     has a deployment branch policy naming the default branch alone.
-   - It **asserts** that each exists with exactly that policy, and fails
-     otherwise. For `sdlc-approval` it also asserts the required-reviewer
-     list (Josui Prime, Scott) and `prevent_self_review: true`.
-   - It copies the secrets in: CLAUDE_CODE_OAUTH_TOKEN and OPENROUTER_API_KEY
-     to `ai`, ASHIGARU_APP_KEY to `ashigaru`, QUAY_*, RHSM_* and
-     REGISTRY_REDHAT_IO_* to `registry`, and COSIGN_* plus a copy of QUAY_* to
-     `cosign-signing`. ASHIGARU_CLIENT_ID stays a variable.
-   - In sdlc alone, `registry` and `sdlc-signing` get **sdlc's own quay
-     robot** (SDLC_QUAY_*) instead of QUAY_*. It is a separate robot with
-     write on `quay.io/crunchtools/sdlc` only, and the fleet robot loses
-     write there. The provisioner asserts both: no fleet environment holds
-     SDLC_QUAY_*, and the fleet robot's quay permissions omit that repo.
-3. **Org secrets scoped to selected repositories.**
-   - Each org secret that moves is switched from "all repositories" to
-     **selected repositories**, listing the unconverted repos.
-   - `cutover.py` removes each repo from every such list in its merge run
-     (`DELETE /orgs/{org}/actions/secrets/{name}/repositories/{id}`).
-   - `cutover.py --check` is modelled on `provision-cosign-env.py`'s `stale()`
-     and `org_stale()` (constitution `scripts/`, lines 306–326). It fails while
-     a converted repo can still read any moved name at repo or org level, and
-     a refused read is an error.
-   - The org copies, by then visible to nobody, are deleted only **after the
-     whole wave**, once `--check` is clean.
+2. **No environments, no per-repo secrets.** Every fleet secret stays an org
+   secret: CLAUDE_CODE_OAUTH_TOKEN, OPENROUTER_API_KEY, ASHIGARU_APP_KEY,
+   QUAY_*, RHSM_*, REGISTRY_REDHAT_IO_* and COSIGN_*; ASHIGARU_CLIENT_ID stays
+   a variable. The control is the workflows permission, held by Prime's
+   credential alone. In sdlc alone, `registry` and `sdlc-signing` hold **sdlc's
+   own quay robot** (SDLC_QUAY_*), with write on `quay.io/crunchtools/sdlc`
+   and `sdlc-bootstrap` only; the fleet robot has none there.
+3. *(Withdrawn: org secrets stay visible to the converted repos.)*
 4. **sdlc's trust root, converted first.** In this order:
    - sdlc's own `ci.yml` and `scripts/self.sh`;
    - `sdlc-signing` holding the sdlc key;
@@ -791,7 +772,7 @@ Each must hold before the first canary converts, unless it says otherwise.
    - the first release signed with the sdlc key, and `:<major>` on it;
    - `sdlc-bootstrap`, built with the key, the major and the minimum version, with
      its digest recorded;
-   - sdlc's own ruleset entry, and sdlc off the org secret lists.
+   - sdlc's own ruleset entry.
 5. **gha-runner rejects fork jobs** (separate gha-runner work). A job-started
    hook (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) exits non-zero when the payload's
    `pull_request.head.repo.full_name` differs from `repository.full_name`.
@@ -828,8 +809,8 @@ Each must hold before the first canary converts, unless it says otherwise.
 This is a human step, for Scott. Each publisher must change from
 `publish.yml` with no environment to `ci.yml` with environment `pypi`.
 
-1. **Before the wave.** The provisioner creates `pypi` in each of the 22 repos.
-   `cutover.py` lists the projects with their PyPI URLs.
+1. **Before the wave.** Nothing to create: GitHub creates `pypi` the first
+   time a job names it. `cutover.py` lists the projects with their PyPI URLs.
 2. **Before each repo's merge**, at
    pypi.org/manage/project/<name>/settings/publishing:
    - add the new publisher (owner `crunchtools`, the repo, workflow `ci.yml`,
@@ -915,7 +896,6 @@ check the ruleset reads, as a re-run of the same job did in gatehouse#50.
   (`GITHUB_REF` is `refs/tags/<tag>`). That is why this file subscribes to
   no `release` event and runs no job on a tag push: release work runs from
   the push that merges the release PR (see "Releases run from the merge").
-  That leaves every environment admitting the default branch alone.
 - `pull_request` and `pull_request_review_comment` run the merge commit's copy.
   So a fork can edit the jobs in its own run, as it can today. `gate` refuses
   the change, `check` holds nothing, and `gate`'s review-comment path holds no
@@ -924,11 +904,8 @@ check the ruleset reads, as a re-run of the same job did in gatehouse#50.
 - **An `if:` cannot keep a secret on the right ref.** A writer can dispatch the
   workflow against their own branch, or push a branch whose copy of `ci.yml`
   adds triggers, and either way the `if:` that runs is the one they wrote. So
-  the environments' deployment rules are the control. Today the App key, the
-  Claude, OpenRouter and quay secrets are org or repo secrets, which any
-  branch's workflow can read. Moving them closes that gap for the current
-  workflows too. The cost is cosmetic: the environment shows as a deployment
-  in each PR's timeline.
+  the control is who may change a workflow at all: the workflows permission,
+  held by Prime's credential alone (see "Every secret is an org secret").
 
 Nothing changes here. Moving into one file does not move the boundary.
 
@@ -1263,8 +1240,7 @@ exist in the repo:
    reusable workflow is released or changed first: the unconverted repos keep
    calling them, unchanged, until the wave is done.
 2. The cutover prerequisites above are met, in their order: the org event
-   policy; the environments, asserted, with the secrets copied in; the org
-   secrets scoped to selected repositories; sdlc's trust root; the gha-runner
+   policy; sdlc's trust root; the gha-runner
    hook; the Ashigaru and Gatehouse items; the plan decision for private
    repos; the spike. The PyPI publishers change per repo, just before each
    merge.

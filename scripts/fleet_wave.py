@@ -740,6 +740,11 @@ def main() -> int:
         help="the environment variable holding the GitHub API token (default %(default)s; "
         "required with --apply). The token itself is never an argument",
     )
+    ap.add_argument(
+        "--api-url",
+        default="https://api.github.com",
+        help="the REST API's base, e.g. a gateway route that adds its own credential",
+    )
     args = ap.parse_args()
     ledger = args.ledger or Path("fleet-wave.tsv" if args.apply else "fleet-wave-plan.tsv")
     token = os.environ.get(args.token_env, "")
@@ -766,7 +771,7 @@ def main() -> int:
         return 2
     if args.out:
         args.out.mkdir(parents=True, exist_ok=True)
-    api = Api(token)
+    api = Api(token, base=args.api_url)
     try:
         available = org_repos(api)
         names = wanted(args.repos) if args.repos else sorted(available)

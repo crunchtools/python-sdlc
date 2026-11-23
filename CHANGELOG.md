@@ -6,6 +6,18 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- Every fleet secret stays an org secret: the fleet file names no `ai`,
+  `ashigaru`, `registry` or `cosign-signing` environment, so no repo needs
+  any setup to build, sign or review. The control against a branch workflow
+  reading a secret is the workflows permission, held by Prime's credential
+  alone. `cutover.py` no longer takes repos off the org secrets' lists, and
+  `--check` no longer looks for moved secrets. sdlc alone keeps its
+  `registry`, `sdlc-signing` and `sdlc-approval`.
+- `cutover.py` and `fleet_wave.py` take `--api-url`, so their GitHub calls can
+  go through a gateway route that adds its own credential.
+
 ## [0.12.1] - 2026-11-23
 
 ### Fixed

@@ -2,8 +2,10 @@
 # routes inside it. The only version here is the bootstrap's digest: it resolves
 # quay.io/crunchtools/sdlc:<major>, verifies it against sdlc's own key and a
 # minimum version, and runs it through the runner's container socket. Every
-# secret lives in an environment that admits the default branch only, and every
-# job that holds one runs on our uncached runners, or GitHub's for a fork.
+# secret is an org secret: a fork's PR gets none, pull_request_target runs the
+# default branch's copy of this file, and only Prime's credential may change a
+# workflow. Every job that holds one runs on our uncached runners, or GitHub's
+# for a fork.
 name: CI
 on:
   push:
@@ -29,7 +31,6 @@ jobs:
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
-    environment: ai
     container: *boot
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
@@ -39,7 +40,6 @@ jobs:
     needs: check
     if: needs.check.result == 'success' && fromJSON(needs.check.outputs.result || '{}').image && github.event_name != 'pull_request'
     runs-on: *secret
-    environment: registry
     container: *boot
     permissions: { contents: read }
     outputs: { result: "${{ steps.e.outputs.result }}" }
@@ -55,7 +55,6 @@ jobs:
           || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
     runs-on: *secret
-    environment: ashigaru
     container: *boot
     permissions: {}
     outputs: { release: "${{ steps.e.outputs.release }}" }
@@ -67,7 +66,6 @@ jobs:
     if: always() && !cancelled() && needs.image.result == 'success'
     concurrency: { group: "promote-${{ github.repository }}", queue: max }
     runs-on: *secret
-    environment: cosign-signing
     container: *boot
     permissions: { contents: read }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_CHECK: "${{ needs.check.outputs.result }}", SDLC_IMAGE_RESULT: "${{ needs.image.outputs.result }}", SDLC_WRITE: "${{ needs.write.result }}", SDLC_RELEASE: "${{ needs.write.outputs.release }}",
