@@ -37,6 +37,7 @@ from typing import Any
 import sdlc_root
 from fake_github import FakeGitHub, FakeRunner, check, finish
 
+from sdlc_jobs import _core as core
 from sdlc_jobs import renovate
 from sdlc_jobs._app_token import org_token
 from sdlc_jobs._github import CannotRunError
@@ -411,6 +412,31 @@ check(
     "an image not pinned by digest is a 2",
     "not pinned by digest" in (refusal(tagged.image) or ""),
 )
+
+# ------------------------------------------------------------- inspect_self
+
+
+class AnswerSocket:
+    def __init__(self, stdout: str, rc: int = 0) -> None:
+        self.stdout, self.rc = stdout, rc
+
+    def run(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, self.rc, self.stdout, "")
+
+
+for label, sock, env in (
+    ("no HOSTNAME", AnswerSocket("[{}]"), {}),
+    ("inspect exits non-zero", AnswerSocket("", 125), {"HOSTNAME": "x"}),
+    ("inspect is not JSON", AnswerSocket("not json"), {"HOSTNAME": "x"}),
+    ("inspect is an empty list", AnswerSocket("[]"), {"HOSTNAME": "x"}),
+    ("inspect's first item is not an object", AnswerSocket('["x"]'), {"HOSTNAME": "x"}),
+):
+    try:
+        core.inspect_self(sock, env)
+        raised = False
+    except core.CannotRunError:
+        raised = True
+    check(f"inspect_self: {label} is a 2", raised)
 
 check("the suite tests this checkout's job", Path(renovate.__file__).resolve() == JOB_FILE)
 

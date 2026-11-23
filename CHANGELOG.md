@@ -16,8 +16,8 @@ All notable changes to this project are documented here, following
   crunchtools/constitution only, the weekly cron is the real run and a bare
   dispatch from the default branch a dry run. It holds the Renovate App key from
   the `renovate` environment and nothing else, no `GITHUB_TOKEN` included, and
-  runs on the uncached runners, the one secret-holding job allowed there, for
-  at most 55 minutes, inside the minted token's hour.
+  runs on the secret jobs' guarded runner (`*secret`, a1100), for at most 55
+  minutes, inside the minted token's hour.
   `sdlc_jobs/renovate.py` reads the key and drops it from its environment,
   mints the App's org-wide token in-process (`_app_token.org_token`), clones
   the constitution at the run's sha for `renovate/self-hosted.json`, and runs
@@ -44,6 +44,15 @@ All notable changes to this project are documented here, following
 
 ### Changed
 
+- The fleet file's secret jobs (`ai`, `image`, `write`, `promote`, `pypi`) run on
+  Exedore's uncached class, `crunchtools-uncached`, instead of `ubuntu-latest`
+  (a1100): scratch storage emptied every job, the warm image store read-only.
+  One shared `runs-on` takes that label only when `vars.UNCACHED_RUNNER_LABEL`
+  is exactly it, so the variable is a kill switch that can never name the
+  cached class. A fork's `pull_request_target` (or a deleted fork's) and an
+  issue from anyone but an owner, member or collaborator stay on
+  `ubuntu-latest`. The
+  design doc's runner rule says so, and `tests/test_workflows.py` pins the routes.
 - `examples/ci.yml` is the fleet file of `docs/marketplace-free-ci.md` (a1051):
   one workflow, no `uses:`, seven trust-level jobs each running `sdlc event` in
   `sdlc-boot`. `tests/test_workflows.py` pins its guards (`!inputs.digest` on

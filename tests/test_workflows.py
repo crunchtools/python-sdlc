@@ -25,10 +25,11 @@ to review:
     file defines them in a different first job. Parsed, they are equal too
   - and of the fleet file: no `uses:` at all, top-level `permissions: {}`,
     every job that holds a secret has an environment and runs on
-    ubuntu-latest, and `check` and `gate` hold none
-  - `renovate`, the one secret-holding job on our runners, runs only in
-    crunchtools/constitution, on the weekly cron or a bare default-branch
-    dispatch, on the uncached runner (never the cached one), and holds the
+    crunchtools-uncached only while the variable names exactly that (never the
+    cached class), a fork's pull_request_target on ubuntu-latest, and `check`
+    and `gate` hold none
+  - `renovate` runs only in crunchtools/constitution, on the weekly cron or a
+    bare default-branch dispatch, within its token's hour, and holds the
     Renovate App key alone: no GITHUB_TOKEN, `permissions: {}`
 
 sdlc's own ci.yml and `sdlc event` land in their own pull requests; until
@@ -68,6 +69,17 @@ TOKEN_MINUTES = 55
 PULL_REQUEST = re.compile(r"""['"]pull_request['"]""")
 SECRET = re.compile(r"\$\{\{\s*secrets\.")
 SHARED = ("ai", "write", "gate")
+# Every job that holds a secret: Exedore's uncached class while the org variable
+# names exactly it, GitHub's otherwise and for a fork's pull_request_target.
+GUARDED_RUNNER = (
+    "${{ (github.event_name == 'issues'"
+    ' && contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'),'
+    " github.event.issue.author_association)"
+    " || github.event_name != 'issues' && (github.event_name != 'pull_request_target'"
+    " || github.event.pull_request.head.repo.full_name == github.repository))"
+    " && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached'"
+    " && 'crunchtools-uncached' || 'ubuntu-latest' }}"
+)
 DOC = ROOT / "docs" / "marketplace-free-ci.md"
 # The doc's first ```yaml block, which "The fleet file" opens with.
 FLEET_BLOCK = re.compile(r"^```yaml\n(?P<body>.*?)^```$", re.M | re.S)
@@ -238,13 +250,49 @@ for name in ("REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"):
 check("fleet: no `uses:` anywhere", not re.search(r"^\s*-?\s*uses:", fleet_text, re.M))
 check("fleet: top-level permissions are {}", parsed.get("permissions") == {})
 for job_id, job in fleet.items():
-    holds = bool(SECRET.search(yaml.safe_dump(job)))
-    if holds:
+    if SECRET.search(yaml.safe_dump(job)):
         check(f"fleet: {job_id} holds secrets only in an environment", bool(job.get("environment")))
-        if job_id == "renovate":
-            continue  # the one exception, pinned below
-        on_hosted = job.get("runs-on") == "ubuntu-latest"
-        check(f"fleet: {job_id} holds secrets on ubuntu-latest", on_hosted)
+    # By environment, not by secrets: pypi holds only OIDC.
+    if job.get("environment"):
+        check(
+            f"fleet: {job_id} shares the secret jobs' runner", job.get("runs-on") == GUARDED_RUNNER
+        )
+fork = {"github.event.pull_request.head.repo.full_name": "stranger/app"}
+same_repo = {"github.event.pull_request.head.repo.full_name": "crunchtools/app"}
+uncached = {"vars.UNCACHED_RUNNER_LABEL": "crunchtools-uncached"}
+author = "github.event.issue.author_association"
+guarded_routes = (
+    *(
+        (f"an issue by {who}", event("issues", **uncached, **{author: who}), "crunchtools-uncached")
+        for who in ("OWNER", "MEMBER", "COLLABORATOR")
+    ),
+    *(
+        (f"an issue by {who}", event("issues", **uncached, **{author: who}), "ubuntu-latest")
+        for who in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE", "")
+    ),
+    ("a push", event("push", **uncached), "crunchtools-uncached"),
+    (
+        "a same-repo PR's target run",
+        event("pull_request_target", **uncached, **same_repo),
+        "crunchtools-uncached",
+    ),
+    ("a fork's target run", event("pull_request_target", **uncached, **fork), "ubuntu-latest"),
+    ("a deleted fork's target run", event("pull_request_target", **uncached), "ubuntu-latest"),
+    (
+        "a push with no runner variable",
+        event("push", **{"vars.UNCACHED_RUNNER_LABEL": ""}),
+        "ubuntu-latest",
+    ),
+    (
+        "a push with the variable on the cached class",
+        event("push", **{"vars.UNCACHED_RUNNER_LABEL": "crunchtools-cached"}),
+        "ubuntu-latest",
+    ),
+    ("a push with any other label", event("push"), "ubuntu-latest"),
+)
+for label, ctx, want in guarded_routes:
+    got = evaluate(GUARDED_RUNNER, ctx)
+    check(f"fleet: guarded jobs run {label} on {want}", got == want, str(got))
 for job_id in ("check", "gate"):
     check(f"fleet: {job_id} holds no secret", not SECRET.search(yaml.safe_dump(fleet[job_id])))
 # check: the one job a fork's PR runs, and the only one on our runners.
@@ -266,8 +314,6 @@ for label, ctx in admitted.items():
     check(f"fleet: check runs on {label}", bool(evaluate(check_if, ctx)))
 for label, ctx in refused.items():
     check(f"fleet: check does not run on {label}", not evaluate(check_if, ctx))
-same_repo = {"github.event.pull_request.head.repo.full_name": "crunchtools/app"}
-fork = {"github.event.pull_request.head.repo.full_name": "stranger/app"}
 routes = (
     ("a same-repo PR", event("pull_request", **same_repo), "gha-uncached"),
     ("a fork's PR", event("pull_request", **fork), "ubuntu-latest"),
@@ -304,18 +350,16 @@ for label, ctx in {
     "pull_request_target": event("pull_request_target", **home),
 }.items():
     check(f"fleet: renovate does not run on {label}", not evaluate(renovate_if, ctx))
-renovate_runner = str(renovate["runs-on"])
 check(
-    "fleet: renovate runs on the uncached runner",
-    evaluate(renovate_runner, event("schedule")) == "gha-uncached",
-    renovate_runner,
-)
-check(
-    "fleet: renovate falls back to ubuntu-latest, never the cached runner",
-    evaluate(renovate_runner, event("schedule", **{"vars.UNCACHED_RUNNER_LABEL": ""}))
-    == "ubuntu-latest"
-    and "CACHED_RUNNER_LABEL" not in renovate_runner.replace("UNCACHED_RUNNER_LABEL", ""),
-    renovate_runner,
+    "fleet: renovate's weekly run goes to the uncached class only while the variable names it",
+    evaluate(
+        GUARDED_RUNNER, event("schedule", **{"vars.UNCACHED_RUNNER_LABEL": "crunchtools-uncached"})
+    )
+    == "crunchtools-uncached"
+    and evaluate(
+        GUARDED_RUNNER, event("schedule", **{"vars.UNCACHED_RUNNER_LABEL": "crunchtools-cached"})
+    )
+    == "ubuntu-latest",
 )
 check(
     "fleet: renovate holds the Renovate App key and nothing else",
