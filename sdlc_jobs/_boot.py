@@ -295,13 +295,21 @@ def judge_tools(init: object, listed: object) -> str:
     """'' when initialize succeeded and tools/list named at least one tool; else why not."""
     if not isinstance(init, dict) or not isinstance(init.get("result"), dict):
         return f"initialize failed: {json.dumps(init)[:500]}"
-    result = listed.get("result") if isinstance(listed, dict) else None
-    tools = result.get("tools") if isinstance(result, dict) else None
-    if not isinstance(tools, list) or not tools:
+    tools = listed_tools(listed)
+    if not tools:
         return f"tools/list returned no tools: {json.dumps(listed)[:500]}"
     server = init["result"].get("serverInfo") or {}
+    if not isinstance(server, dict):
+        return f"initialize answered a serverInfo that is not an object: {json.dumps(server)[:500]}"
     print(f"  {server.get('name', '?')} {server.get('version', '?')}: {len(tools)} tools")
     return ""
+
+
+def listed_tools(listed: object) -> list:
+    """The `result.tools` list of a tools/list reply, [] for any other shape."""
+    result = listed.get("result") if isinstance(listed, dict) else None
+    tools = result.get("tools") if isinstance(result, dict) else None
+    return tools if isinstance(tools, list) else []
 
 
 def boot_mcp(job: Job, spec: Boot, image: str) -> str:
@@ -336,27 +344,43 @@ def remove(job: Job, *names: str) -> None:
             print(f"boot: could not remove {name} (exit {proc.returncode}): {said}", flush=True)
 
 
-def engine(job: Job, proc: subprocess.CompletedProcess[str], name: str) -> str:
-    """'' unless a check's podman call failed in podman itself (125) or hung (TIMED_OUT).
-
-    Either way the engine is asked whether the container still runs: an engine
-    that cannot answer is a 2, and a gone container the finding "the container
-    exited". After a 125 a live container is a 2 too; a hung call into a live
-    one is the image's to answer for, so the check goes on judging it.
-    126 and 127 come from inside the container (#116): verdicts, not here.
-    """
-    if proc.returncode not in (PODMAN_CANNOT_CREATE, TIMED_OUT):
-        return ""
+def exited(job: Job, name: str) -> str:
+    """The finding "the container exited" when it has; '' while it runs; a 2 when the
+    engine cannot say. Asked before each call into it, so a 125 is never the image's."""
     state = job.run([*job.podman, "inspect", "--format", "{{.State.Running}}", name])
     if state.returncode != 0:
         show(state)
         cannot(f"boot: podman cannot inspect {name} (exit {state.returncode}); nothing was judged")
-    if state.stdout.strip() != "true":
-        return "the container exited before it was judged"
+    return "" if state.stdout.strip() == "true" else "the container exited before it was judged"
+
+
+def call_into(job: Job, name: str, words: list[str]) -> subprocess.CompletedProcess[str]:
+    """`podman <words>` into the running container `name`, bounded by EXEC_TIMEOUT.
+
+    Raises ContainerExitedError, a finding, when the container is gone, before
+    or because of the call; podman's own failure on a live one is a 2.
+    """
+    if gone := exited(job, name):
+        raise ContainerExitedError(gone)
+    proc = job.run([*job.podman, *words], timeout=EXEC_TIMEOUT)
+    if gone := engine(job, proc, name):
+        raise ContainerExitedError(gone)
+    return proc
+
+
+def engine(job: Job, proc: subprocess.CompletedProcess[str], name: str) -> str:
+    """'' unless a check's call into the running container failed in podman or hung.
+
+    125 is podman's own failure, always a 2: `exited` was asked just before, so a
+    container that had stopped never got this far. A hung call (TIMED_OUT) asks
+    again: gone is the finding, and a hung call into a live one is the image's to
+    answer for, so the check goes on judging it. 126 and 127 come from inside
+    the container (#116): verdicts, not here.
+    """
     if proc.returncode == PODMAN_CANNOT_CREATE:
         show(proc)
-        cannot(f"boot: podman failed on the running {name} (exit 125); nothing was judged")
-    return ""
+        cannot(f"boot: podman failed on {name} (exit 125); nothing was judged")
+    return exited(job, name) if proc.returncode == TIMED_OUT else ""
 
 
 # Run inside the sdlc image, in the server container's network namespace: the
@@ -460,11 +484,7 @@ def boot_systemd(job: Job, spec: Boot, image: str) -> str:
     """systemd as PID 1 reaches `running`, and every boot-unit is active."""
 
     def systemctl(name: str, *args: str) -> str:
-        argv = [*job.podman, "exec", name, "systemctl", *args]
-        proc = job.run(argv, timeout=EXEC_TIMEOUT)
-        if exited := engine(job, proc, name):
-            raise ContainerExitedError(exited)
-        return proc.stdout
+        return call_into(job, name, ["exec", name, "systemctl", *args]).stdout
 
     def check(name: str) -> str:
         try:
@@ -510,9 +530,10 @@ def boot_healthcheck(job: Job, spec: Boot, image: str) -> str:
 
     def check(name: str) -> str:
         for _ in range(max(1, spec.timeout // POLL_SECONDS)):
-            ran = job.run([*job.podman, "healthcheck", "run", name], timeout=EXEC_TIMEOUT)
-            if exited := engine(job, ran, name):
-                return exited
+            try:
+                ran = call_into(job, name, ["healthcheck", "run", name])
+            except ContainerExitedError as exc:
+                return str(exc)
             if ran.returncode == 0:
                 print("  healthy")
                 return ""

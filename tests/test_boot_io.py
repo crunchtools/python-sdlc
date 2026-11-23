@@ -313,6 +313,12 @@ def test_judge_tools_findings() -> None:
     assert "initialize failed" in _boot.judge_tools(None, TOOLS_OK)
 
 
+def test_judge_tools_malformed_server_info_is_a_finding() -> None:
+    init = {"result": {"serverInfo": "demo"}}
+    finding = _boot.judge_tools(init, {"result": {"tools": [{"name": "t"}]}})
+    assert "serverInfo" in finding, finding
+
+
 def main() -> int:
     tests: list[Callable[[], None]] = [v for k, v in globals().items() if k.startswith("test_")]
     failed = 0
