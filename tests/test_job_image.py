@@ -87,6 +87,7 @@ class FakeTools(Tools):
         self.argvs: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
         self.verify_rc = 0
+        self.signed_tag = PARENT  # what a hi/<name>:<tag> resolves to
         self.scan_rc = 0
         self.smoke_up = "true"
         self.build_rc = 0
@@ -153,7 +154,7 @@ class FakeTools(Tools):
                 self.policy = json.loads(Path(argv[2]).read_text())
                 rc = self.verify_rc
             case "inspect":
-                out = PARENT
+                out = self.signed_tag if "registry.access.redhat.com/hi/" in argv[-1] else PARENT
         return cp(rc, out)
 
     def pushed(self) -> bool:
@@ -261,6 +262,55 @@ def test_red_hat_parent_verified() -> None:
     assert pull[-2] == f"docker://registry.redhat.io/ubi10/ubi-minimal@{PARENT}"
 
 
+def test_hummingbird_mirror_verified_at_red_hat() -> None:
+    """quay.io/hummingbird is unsigned; the same digest under hi/ carries Red Hat's key."""
+    t = FakeTools()
+    cf = (
+        f"FROM quay.io/hummingbird/python:3.14-builder@{PARENT} AS b\nRUN true\n"
+        "FROM quay.io/hummingbird/python:3.14\nCOPY --from=b /a /a\n"
+    )
+    rc, result = go(t, cf)
+    assert rc == 0 and result is not None and t.policy is not None
+    entry = t.policy["transports"]["docker"]["registry.access.redhat.com"][0]
+    assert entry["type"] == "sigstoreSigned" and entry["keyPath"] == image.RH_KEY
+    assert "quay.io" not in t.policy["transports"]["docker"]
+    pulled = [a[-2] for a in t.argvs if a[1:2] == ["--policy"]]
+    assert pulled == [f"docker://registry.access.redhat.com/hi/python@{PARENT}"] * 2
+    assert not any(a[0] == "cosign" for a in t.argvs)
+    lines = t.built_file.splitlines()
+    assert lines[0] == f"FROM quay.io/hummingbird/python@{PARENT} AS b"
+    assert lines[2] == f"FROM quay.io/hummingbird/python@{PARENT}"
+    assert result["parent"] == f"quay.io/hummingbird/python@{PARENT}"
+    inspected = [a[-1] for a in t.argvs if a[:2] == ["skopeo", "inspect"]]
+    assert f"docker://quay.io/hummingbird/python@{PARENT}" in inspected  # no tag: skopeo refuses
+    # the tag-only FROM is resolved at hi/ as well; the digest-pinned one is not
+    assert "docker://registry.access.redhat.com/hi/python:3.14" in inspected
+    assert not any(
+        i.startswith("docker://registry.access.redhat.com/hi/python:3.14-") for i in inspected
+    )
+    assert t.policy["default"] == [{"type": "reject"}]
+
+
+def test_hummingbird_mirror_tag_must_match_hi() -> None:
+    """A mirror tag that names a different digest than hi/ does is a rollback: refused."""
+    t = FakeTools()
+    t.signed_tag = "sha256:" + "c" * 64
+    msg = refused(t, "FROM quay.io/hummingbird/python:3.14-builder\nRUN true\n")
+    assert "registry.access.redhat.com/hi/python:3.14-builder" in msg, msg
+    assert not any(a[1:2] == ["--policy"] for a in t.argvs)
+    t = FakeTools()
+    t.signed_tag = "sha256:" + "c" * 64
+    refused(t, "FROM quay.io/hummingbird/core-runtime\nRUN true\n")
+    assert "docker://registry.access.redhat.com/hi/core-runtime:latest" in [a[-1] for a in t.argvs]
+
+
+def test_hummingbird_unverified_pushes_nothing() -> None:
+    t = FakeTools()
+    t.verify_rc = 1
+    refused(t, "FROM quay.io/hummingbird/python:3.14-builder\nRUN true\n")
+    assert not t.built()
+
+
 def test_unknown_registry_refused() -> None:
     for parent in ("FROM docker.io/library/alpine:3\n", "FROM ghcr.io/x/y:1\n"):
         t = FakeTools()
@@ -325,9 +375,14 @@ def test_builder_stage_on_an_untrusted_registry_refused() -> None:
     cf = "FROM docker.io/library/golang:1 AS b\nRUN true\nFROM scratch\nCOPY --from=b /a /a\n"
     assert "docker.io" in refused(t, cf)
     assert not t.built()
-    t = FakeTools()
-    assert "quay.io" in refused(t, "FROM quay.io/hummingbird/go:1 AS b\nFROM scratch\n")
-    assert not t.built()
+    for cf in (
+        "FROM quay.io/hummingbird-community/minio:1 AS b\nFROM scratch\n",
+        "FROM quay.io/hummingbird/x/go:1 AS b\nFROM scratch\n",
+        "FROM quay.io/other/go:1 AS b\nFROM scratch\n",
+    ):
+        t = FakeTools()
+        assert "quay.io" in refused(t, cf), cf
+        assert not t.built()
 
 
 def test_stage_alias_followed_to_registry_parent() -> None:

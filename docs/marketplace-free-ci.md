@@ -147,6 +147,9 @@ where a dispatch took minutes.
     `-a repo=<parent repo>`.
   - A `registry.redhat.io` or `registry.access.redhat.com` parent is checked
     with Red Hat's release key, as gha-runner's `policy.json` already does.
+  - A `quay.io/hummingbird/<name>` parent is unsigned, being a mirror, so
+    its digest is checked at `registry.access.redhat.com/hi/<name>` with the
+    same key.
   - The build then runs `FROM` that verified `@sha256:` digest, whatever tag
     the Containerfile names.
 - **Quiet repos stay scheduled.** GitHub disables a public repo's schedule
