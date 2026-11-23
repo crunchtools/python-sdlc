@@ -37,7 +37,7 @@ jobs:
     steps: *event
   image:  # verifies the parent itself, builds FROM @digest through the socket, gates, pushes gated-<sha>
     needs: check
-    if: fromJSON(needs.check.outputs.result || '{}').image && github.event_name != 'pull_request'
+    if: needs.check.result == 'success' && fromJSON(needs.check.outputs.result || '{}').image && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: registry
     container: *boot

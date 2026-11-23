@@ -10,14 +10,16 @@ to review:
   - `write`'s `if:` carries `!inputs.digest`: a rollback dispatch never runs
     `write`; and `sdlc event`, given DIGEST in `write`'s env, exits 0 having
     done nothing (the second guard, run when the image has `sdlc event`)
+  - examples/ci.yml is the fleet block of docs/marketplace-free-ci.md, byte
+    for byte, so the design and the file cannot drift apart
   - `write` outside the triage events, `image` and `pypi` act on `check`'s
-    plan only when `check` succeeded: `needs.check.result == 'success'` in the
-    `if:`, or an `if:` with no status function, where GitHub's implicit
-    success() requires it
+    plan only when `check` succeeded: each `if:` says
+    `needs.check.result == 'success'` itself
   - `image`'s env maps REGISTRY_REDHAT_IO_USER and REGISTRY_REDHAT_IO_PASSWORD
   - in sdlc's own file, `test` is the only job whose `if:` admits
     pull_request, with `permissions: { contents: read }`, no `environment` and
-    no `container`; and sdlc's `check` does not admit pull_request
+    no `container`; and sdlc's `check` does not admit pull_request and is
+    named `sdlc / plan`, never the required `sdlc / check`
   - `ai`, `write` and `gate` are byte for byte the same in both files, an
     anchor's definition (`&boot {...}`) read as its alias (`*boot`): sdlc's
     file defines them in a different first job. Parsed, they are equal too
@@ -56,11 +58,13 @@ SKIPPED: list[str] = []
 CHECK_OK = "needs.check.result == 'success'"
 # A status function in an `if:` replaces GitHub's implicit success(), which
 # is what otherwise skips a job whose needs did not all succeed.
-STATUS = re.compile(r"\b(?:always|cancelled|failure|success)\(\)")
 # The event literally, not pull_request_target or pull_request_review_comment.
 PULL_REQUEST = re.compile(r"""['"]pull_request['"]""")
 SECRET = re.compile(r"\$\{\{\s*secrets\.")
 SHARED = ("ai", "write", "gate")
+DOC = ROOT / "docs" / "marketplace-free-ci.md"
+# The doc's first ```yaml block, which "The fleet file" opens with.
+FLEET_BLOCK = re.compile(r"^```yaml\n(?P<body>.*?)^```$", re.M | re.S)
 # `key: &name <value>` to the end of the line: the anchor's definition.
 ANCHOR = re.compile(r"&(\w+) .*$", re.M)
 
@@ -101,10 +105,6 @@ def admits_pull_request(job: dict) -> bool:
     """A job runs on a `pull_request` event: no `if:` at all, or one naming it."""
     cond = job.get("if")
     return cond is None or bool(PULL_REQUEST.search(str(cond)))
-
-
-def acts_only_on_success(cond: str) -> bool:
-    return CHECK_OK in cond or not STATUS.search(cond)
 
 
 # GitHub's expression syntax, as far as these files use it, parsed as Python:
@@ -191,6 +191,12 @@ def event(name: str, **rest: object) -> dict[str, object]:
 # ---------------------------------------------------------- the fleet file
 
 fleet_text = FLEET.read_text()
+block = FLEET_BLOCK.search(DOC.read_text())
+check(
+    "fleet: examples/ci.yml is the doc's fleet block, byte for byte",
+    block is not None and block["body"] == fleet_text,
+    're-copy it from docs/marketplace-free-ci.md\'s "The fleet file"',
+)
 fleet = jobs_of(fleet_text)
 parsed = yaml.safe_load(fleet_text)
 
@@ -211,17 +217,13 @@ check(
 for job_id in ("image", "pypi"):
     cond = str(fleet[job_id]["if"])
     check(
-        f"fleet: {job_id} acts on check's plan only when check succeeded",
-        acts_only_on_success(cond),
+        f"fleet: {job_id}'s if: names needs.check.result == 'success' itself",
+        CHECK_OK in cond,
         cond,
     )
     needs = fleet[job_id]["needs"]
     needs = needs if isinstance(needs, list) else [needs]
     check(f"fleet: {job_id} needs check", "check" in needs)
-check(
-    "fleet: pypi's if: names needs.check.result == 'success' itself (it runs under always())",
-    CHECK_OK in str(fleet["pypi"]["if"]),
-)
 
 image_env = fleet["image"]["env"]
 for name in ("REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"):
@@ -312,6 +314,12 @@ else:
         check("own: test has no container", "container" not in test)
         check("own: test holds no secret", not SECRET.search(yaml.safe_dump(test)))
         check("own: check does not admit pull_request", not admits_pull_request(own["check"]))
+        check(
+            "own: check is named sdlc / plan, never the required name",
+            str(own["check"].get("name", "")).startswith("sdlc / plan ")
+            and own["check"].get("name") != fleet["check"]["name"],
+            str(own["check"].get("name")),
+        )
         own_write_if = str(own["write"]["if"])
         check("own: write's if: has !inputs.digest", "!inputs.digest" in own_write_if)
         for job_id in SHARED:
