@@ -22,6 +22,15 @@ All notable changes to this project are documented here, following
 
 ### Changed
 
+- The fleet file's secret jobs (`ai`, `image`, `write`, `promote`, `pypi`) run on
+  Exedore's uncached class, `crunchtools-uncached`, instead of `ubuntu-latest`
+  (a1100): scratch storage emptied every job, the warm image store read-only.
+  One shared `runs-on` takes that label only when `vars.UNCACHED_RUNNER_LABEL`
+  is exactly it, so the variable is a kill switch that can never name the
+  cached class. A fork's `pull_request_target` (or a deleted fork's) and an
+  issue from anyone but an owner, member or collaborator stay on
+  `ubuntu-latest`. The
+  design doc's runner rule says so, and `tests/test_workflows.py` pins the routes.
 - `examples/ci.yml` is the fleet file of `docs/marketplace-free-ci.md` (a1051):
   one workflow, no `uses:`, seven trust-level jobs each running `sdlc event` in
   `sdlc-boot`. `tests/test_workflows.py` pins its guards (`!inputs.digest` on
