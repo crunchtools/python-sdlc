@@ -18,10 +18,9 @@ Online, an in-memory GitHub (routes to (status, body), every write recorded):
   - the ruleset move: happy path, a re-run that PUTs nothing, and a refusal for a
     reverted repo, a non-explicit include list and a new ruleset without the
     required checks; private repos stay on the old list without --include-private
-  - --merge, in order: merge, rulesets, secret DELETEs, update-branch; each
-    refusal among its steps 1 to 7 writes nothing; a re-run on a merged PR resumes
-  - --check: a repo-level and an org-level moved secret, a refused read, rulesets
-    out of step and the missing release-branch ruleset
+  - --merge, in order: merge, rulesets, update-branch; each
+    refusal among its steps 1 to 6 writes nothing; a re-run on a merged PR resumes
+  - --check: rulesets out of step and the missing release-branch ruleset
   - a private repo without --include-private is refused and named (prerequisite 9)
 
 Run: python3 tests/test_cutover.py
@@ -37,6 +36,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -344,7 +344,9 @@ check(
 UNPINNED = cut.FLEET_FILE
 PINNED_DIR = Path(tempfile.mkdtemp())
 (PINNED_DIR / "ci.yml").write_text(
-    UNPINNED.read_text().replace("sdlc-bootstrap@sha256:<digest>", "sdlc-bootstrap@sha256:" + "a" * 64)
+    UNPINNED.read_text().replace(
+        "sdlc-bootstrap@sha256:<digest>", "sdlc-bootstrap@sha256:" + "a" * 64
+    )
 )
 cut.FLEET_FILE = PINNED_DIR / "ci.yml"
 FLEET = cut.FLEET_FILE.read_bytes()
@@ -453,10 +455,6 @@ class World:
                 "head": {"ref": "renovate/x", "sha": "b" * 40},
             },
         ]
-        self.secrets: dict[str, str] = {
-            "CLAUDE_CODE_OAUTH_TOKEN": "selected",
-            "QUAY_USERNAME": "selected",
-        }
         self.runs = [
             {"id": 1, "name": c, "conclusion": "success", **GA} for c in cut.REQUIRED_CHECKS
         ]
@@ -479,14 +477,6 @@ class World:
         }
         for rid in self.rs:
             self.register(rid)
-        for name in cut.MOVED_TO_ENVIRONMENTS:
-            self.routes[("GET", f"/orgs/crunchtools/actions/secrets/{name}")] = (
-                lambda _b=None, name=name: (
-                    (200, {"name": name, "visibility": self.secrets[name]})
-                    if name in self.secrets
-                    else (404, {"message": "Not Found"})
-                )
-            )
         for name in self.repos:
             self.routes[("GET", f"{O}/{name}/contents/.github/workflows/ci.yml")] = (
                 lambda _b=None, name=name: (
@@ -518,11 +508,6 @@ class World:
 
 
 HEAD_CI = ("GET", f"{O}/app/contents/.github/workflows/ci.yml?ref={SHA}")
-ORGS = "/orgs/crunchtools/actions/secrets"
-
-
-def named(*names: str) -> dict:
-    return {"secrets": [{"name": n} for n in names]}
 
 
 def refusing(_body: object = None) -> tuple[int, object]:
@@ -748,14 +733,12 @@ w = World()
 code, api, out, err = merge_cli(w)
 check("merge: happy path exits 0", code == 0, f"{code} {out} {err}")
 check(
-    "merge: in order: merge, new ruleset, old ruleset, secret DELETEs, update-branch",
+    "merge: in order: merge, new ruleset, old ruleset, update-branch; no org secret touched",
     paths(api)
     == [
         f"PUT {O}/app/pulls/7/merge",
         "PUT /orgs/crunchtools/rulesets/1",
         "PUT /orgs/crunchtools/rulesets/2",
-        "DELETE /orgs/crunchtools/actions/secrets/CLAUDE_CODE_OAUTH_TOKEN/repositories/42",
-        "DELETE /orgs/crunchtools/actions/secrets/QUAY_USERNAME/repositories/42",
         f"PUT {O}/app/pulls/9/update-branch",
     ],
     str(paths(api)),
@@ -772,12 +755,12 @@ check(
 )
 check(
     "merge: one line per step",
-    all(f"\n{n} " in "\n" + out for n in range(1, 12)),
+    all(f"\n{n} " in "\n" + out for n in range(1, 10)),
     out,
 )
 check("merge: the token is never printed", TOKEN not in out + err)
 
-# A re-run on the merged PR resumes at 8: no merge, the rest still happens.
+# A re-run on the merged PR resumes at 7: no merge, the rest still happens.
 code2, api2, out2, err2 = merge_cli(w)
 check(
     "merge: a re-run on a merged PR does not merge again and moves nothing twice",
@@ -898,16 +881,6 @@ code, api, out, err = merge_cli(w)
 check("merge: a project that does not publish to PyPI needs no ledger", code == 0, err)
 
 refused(
-    "an org secret visible to all",
-    lambda w: w.secrets.update(QUAY_USERNAME="all"),
-    needs="prerequisite 3",
-)
-refused(
-    "an org secret that cannot be read",
-    lambda w: w.routes.update({("GET", f"{ORGS}/QUAY_PASSWORD"): (422, {})}),
-    needs="QUAY_PASSWORD",
-)
-refused(
     "a ruleset move that would refuse (a reverted repo)",
     lambda w: w.rs[1]["conditions"]["repository_name"]["include"].append("old1"),
     needs="old1",
@@ -940,28 +913,15 @@ check(
 )
 
 w = World()
-w.routes[("DELETE", "/orgs/crunchtools/actions/secrets/QUAY_USERNAME/repositories/42")] = (409, {})
 w.routes[("PUT", f"{O}/app/pulls/9/update-branch")] = (422, {})
 code, api, out, err = merge_cli(w)
 check(
-    "merge: a failed secret DELETE and update-branch are named, exit 1, the rest done",
+    "merge: a failed update-branch is named, exit 1, the rest done",
     code == 1
-    and "QUAY_USERNAME" in out
     and "PR #9" in out
     and w.include(1) == ["app", "done1", "done2"]
-    and len(paths(api)) == 6,
+    and len(paths(api)) == 4,
     f"{code} {out}",
-)
-
-w = World()
-w.secrets["QUAY_USERNAME"] = "all"
-w.pr.update(state="closed", merged=True)
-w.converted.add("app")
-code, api, out, err = merge_cli(w)
-check(
-    "merge: after the merge a secret that is not scoped is a problem, never deleted from",
-    code == 1 and not any(p.startswith("DELETE") and "QUAY" in p for p in paths(api)),
-    f"{code} {paths(api)}",
 )
 
 # ------------------------------------------------------ private repos (prereq 9)
@@ -991,40 +951,13 @@ check(
 
 
 def consistent() -> World:
-    w = World(merged=True)
-    for name in w.repos:
-        w.routes[("GET", f"{O}/{name}/actions/secrets")] = (200, {"secrets": []})
-        w.routes[("GET", f"{O}/{name}/actions/organization-secrets")] = (200, {"secrets": []})
-    return w
+    return World(merged=True)
 
 
 w = consistent()
 code, api, out, err = cli(w, "--check")
 check("check: a clean fleet exits 0", code == 0 and "clean" in out, f"{out} {err}")
 
-w = consistent()
-w.routes[("GET", f"{O}/done1/actions/secrets")] = (200, named("QUAY_PASSWORD", "KEEP_ME"))
-w.routes[("GET", f"{O}/done2/actions/organization-secrets")] = (200, named("COSIGN_PASSWORD"))
-code, api, out, err = cli(w, "--check")
-check(
-    "check: a moved repo secret and a moved org secret are named by repo, scope and name",
-    code == 1
-    and "done1: moved repo secret QUAY_PASSWORD" in out
-    and "done2: moved org secret COSIGN_PASSWORD" in out
-    and "KEEP_ME" not in out,
-    out,
-)
-w = consistent()
-w.routes[("GET", f"{O}/done1/actions/secrets")] = (404, {"message": "Not Found"})
-w.routes[("GET", f"{O}/done2/actions/organization-secrets")] = refusing
-code, api, out, err = cli(w, "--check")
-check(
-    "check: a refused read is a problem, never none found",
-    code == 1
-    and "done1: could not read repo secrets" in out
-    and "done2: could not read org secrets" in out,
-    out,
-)
 w = consistent()
 w.rs[2]["conditions"]["repository_name"]["include"].append("done1")
 code, api, out, err = cli(w, "--check")
@@ -1097,6 +1030,54 @@ check("Api: a 403 raises, redacted", "HTTP 403" in error and TOKEN not in error,
 check(
     "Api: authenticated follows the token",
     cut.Api(TOKEN).authenticated and not cut.Api(None).authenticated,
+)
+
+
+conn = FakeConnection()
+with contextlib.suppress(cut.ApiError):
+    cut.Api(TOKEN, connect=lambda: conn).call("GET", "/orgs/crunchtools/repos")
+check("Api: by default a path goes as it is", conn.sent[0][1] == "/orgs/crunchtools/repos")
+conn = FakeConnection()
+with contextlib.suppress(cut.ApiError):
+    cut.Api(TOKEN, connect=lambda: conn, base="http://gw:8019/proxy/http/github-api/").call(
+        "GET", "/orgs/crunchtools/repos"
+    )
+check(
+    "Api: a base URL's path prefixes every request",
+    conn.sent[0][1] == "/proxy/http/github-api/orgs/crunchtools/repos",
+    str(conn.sent),
+)
+
+opened: list[tuple[str, str]] = []
+
+
+def opener(kind: str) -> Callable[..., FakeConnection]:
+    def open_(host: str, **_kw: object) -> FakeConnection:
+        opened.append((kind, host))
+        return FakeConnection()
+
+    return open_
+
+
+real = (cut.http.client.HTTPConnection, cut.http.client.HTTPSConnection)
+KINDS = ("HTTPConnection", "HTTPSConnection")
+for name, kind in zip(KINDS, ("http", "https"), strict=True):
+    setattr(cut.http.client, name, opener(kind))
+try:
+    for base in ("", "http://gw:8019/proxy/http/github-api"):
+        with contextlib.suppress(cut.ApiError):
+            cut.Api(TOKEN, base=base).call("GET", "/x")
+    os.environ["CUTOVER_TEST_TOKEN"] = TOKEN
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        cut.main(["--check", "--token-env", "CUTOVER_TEST_TOKEN", "--api-url", "http://gw:1/p"])
+finally:
+    for name, cls in zip(KINDS, real, strict=True):
+        setattr(cut.http.client, name, cls)
+    os.environ.pop("CUTOVER_TEST_TOKEN", None)
+check(
+    "Api: https to api.github.com by default, http to a gateway named by --api-url",
+    opened[:2] == [("https", cut.API_HOST), ("http", "gw:8019")] and ("http", "gw:1") in opened,
+    str(opened),
 )
 
 

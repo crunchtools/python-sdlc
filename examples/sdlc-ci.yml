@@ -51,7 +51,6 @@ jobs:
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
-    environment: ai
     container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
@@ -65,7 +64,6 @@ jobs:
           || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
     runs-on: *secret
-    environment: ashigaru
     container: *boot
     permissions: {}
     outputs: { release: "${{ steps.e.outputs.release }}" }

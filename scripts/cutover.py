@@ -20,9 +20,9 @@ every change at once:
 The online half is the CLI, run by Josui Prime with an admin token:
 
   cutover.py --merge REPO --pr N     merge the conversion PR, then move the repo to
-                                     the new ruleset and off the moved org secrets
+                                     the new ruleset
   cutover.py --move-rulesets         the idempotent ruleset move, alone
-  cutover.py --check                 prerequisites 3 and 12, over the converted fleet
+  cutover.py --check                 prerequisite 12 and the rulesets, over the converted fleet
 
 A repo is converted when its default branch carries .github/workflows/ci.yml
 byte for byte equal to examples/ci.yml. The ruleset move computes both rulesets'
@@ -77,22 +77,6 @@ ACTIONS_APP = 15368  # GitHub Actions, as a ruleset's integration_id
 RELEASE_REF = "refs/heads/ashigaru/release-*"
 RELEASE_PREFIX = "ashigaru/release-"
 REQUIRED_CHECKS = ("sdlc / check (pull_request)", "sdlc / gate (pull_request_target)")
-# The org secrets that moved into environments (prerequisite 2). Not named
-# *_SECRETS: CodeQL reads that name as sensitive data and flags every message
-# that carries one of these names (py/clear-text-logging-sensitive-data).
-MOVED_TO_ENVIRONMENTS = (
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "OPENROUTER_API_KEY",
-    "ASHIGARU_APP_KEY",
-    "QUAY_USERNAME",
-    "QUAY_PASSWORD",
-    "RHSM_ACTIVATION_KEY",
-    "RHSM_ORG_ID",
-    "REGISTRY_REDHAT_IO_USER",
-    "REGISTRY_REDHAT_IO_PASSWORD",
-    "COSIGN_PRIVATE_KEY",
-    "COSIGN_PASSWORD",
-)
 
 API_HOST = "api.github.com"
 API_TIMEOUT = 30  # seconds, per call
@@ -278,11 +262,12 @@ class ApiError(Exception):
 class Api:
     """GitHub's REST and GraphQL APIs. The token lives in a header, nowhere else."""
 
-    def __init__(self, token: str | None, connect: Any = None) -> None:
+    def __init__(self, token: str | None, connect: Any = None, base: str = "") -> None:
         self._token = token
-        self._connect = connect or (
-            lambda: http.client.HTTPSConnection(API_HOST, timeout=API_TIMEOUT)
-        )
+        url = urllib.parse.urlsplit(base or f"https://{API_HOST}")
+        kind = http.client.HTTPConnection if url.scheme == "http" else http.client.HTTPSConnection
+        self._prefix = url.path.rstrip("/")
+        self._connect = connect or (lambda: kind(url.netloc, timeout=API_TIMEOUT))
 
     @property
     def authenticated(self) -> bool:
@@ -301,7 +286,9 @@ class Api:
         }
         conn = self._connect()
         try:
-            conn.request(method, path, None if body is None else json.dumps(body), headers)
+            conn.request(
+                method, self._prefix + path, None if body is None else json.dumps(body), headers
+            )
             response = conn.getresponse()
             status, raw = response.status, response.read()
         except (OSError, http.client.HTTPException) as exc:
@@ -644,9 +631,9 @@ def verify_pr(run: Run) -> bool:
 
 
 def merge_pr(run: Run, already: bool) -> None:
-    """Step 8: squash-merge at the sha the checks ran on, unless it is already merged."""
+    """Step 7: squash-merge at the sha the checks ran on, unless it is already merged."""
     if already:
-        run.say("8 merge: skipped, already merged")
+        run.say("7 merge: skipped, already merged")
         return
     status, body = run.api.call(
         "PUT", f"{run.base}/pulls/{run.number}/merge", {"merge_method": "squash", "sha": run.sha}
@@ -654,11 +641,11 @@ def merge_pr(run: Run, already: bool) -> None:
     if status != HTTPStatus.OK:
         note = body.get("message", "") if isinstance(body, dict) else ""
         raise RefusedError(f"merge of PR #{run.number}: HTTP {status} {note}".rstrip())
-    run.say(f"8 merge: PR #{run.number} squashed at {run.sha[:7]}")
+    run.say(f"7 merge: PR #{run.number} squashed at {run.sha[:7]}")
 
 
 def move_rulesets(run: Run) -> None:
-    """Step 9: the idempotent ruleset move.
+    """Step 8: the idempotent ruleset move.
 
     The contents API lags a squash merge, so a fresh read can miss the repo
     just merged, find both lists in step, and strand it on the old ruleset
@@ -668,34 +655,13 @@ def move_rulesets(run: Run) -> None:
     opts = run.opts
     done = converted_repos(run.api, opts.include_private) | {run.repo}
     puts = plan_move(org_rulesets(run.api), done, opts.old, opts.new, live_names(run.api))
-    apply_move(run.api, puts, lambda line: run.say(f"9 {line}"))
+    apply_move(run.api, puts, lambda line: run.say(f"8 {line}"))
     if not puts:
-        run.say("9 rulesets: already in step")
-
-
-def remove_secret_access(run: Run, problems: list[str]) -> None:
-    """Step 10: take the repo off each moved org secret's list; failures join `problems`."""
-    for name in MOVED_TO_ENVIRONMENTS:
-        status, entry = run.api.call("GET", f"/orgs/{ORG}/actions/secrets/{name}")
-        if status == HTTPStatus.NOT_FOUND:
-            continue
-        if status != HTTPStatus.OK or not isinstance(entry, dict):
-            problems.append(f"org secret {name}: reading it gave HTTP {status}; re-run")
-            continue
-        if entry.get("visibility") != "selected":
-            problems.append(f"org secret {name} is visible to {entry.get('visibility')}")
-            continue
-        status, _ = run.api.call(
-            "DELETE", f"/orgs/{ORG}/actions/secrets/{name}/repositories/{run.record['id']}"
-        )
-        if status == HTTPStatus.NO_CONTENT:
-            run.say(f"10 org secret {name}: {run.repo} removed from its list")
-        else:
-            problems.append(f"org secret {name}: removing {run.repo} gave HTTP {status}; re-run")
+        run.say("8 rulesets: already in step")
 
 
 def update_bot_branches(run: Run, problems: list[str]) -> None:
-    """Step 11: bring each open bot PR up to the default branch; failures join `problems`."""
+    """Step 9: bring each open bot PR up to the default branch; failures join `problems`."""
     for other in open_prs(run.api, run.repo):
         if (other.get("user") or {}).get("type") != "Bot" or other["number"] == run.number:
             continue
@@ -706,7 +672,7 @@ def update_bot_branches(run: Run, problems: list[str]) -> None:
             {"expected_head_sha": sha_other},
         )
         if status == HTTPStatus.ACCEPTED:
-            run.say(f"11 PR #{other['number']}: brought up to {run.default}")
+            run.say(f"9 PR #{other['number']}: brought up to {run.default}")
         else:
             problems.append(f"PR #{other['number']}: update-branch gave HTTP {status}")
 
@@ -724,7 +690,6 @@ def merge(
     merge_pr(run, already)
     problems: list[str] = []
     move_rulesets(run)
-    remove_secret_access(run, problems)
     update_bot_branches(run, problems)
     for problem in problems:
         say(f"problem: {problem}")
@@ -768,45 +733,28 @@ def check_pypi(run: Run) -> None:
     run.say(f"4 PyPI {project}: ledger records both steps")
 
 
-def check_secret_scope(run: Run) -> None:
-    """Step 5: each moved org secret is scoped to selected repositories."""
-    for name in MOVED_TO_ENVIRONMENTS:
-        status, secret = run.api.call("GET", f"/orgs/{ORG}/actions/secrets/{name}")
-        if status == HTTPStatus.NOT_FOUND:
-            continue
-        if status != HTTPStatus.OK or not isinstance(secret, dict):
-            raise RefusedError(f"org secret {name}: HTTP {status}")
-        if secret.get("visibility") != "selected":
-            raise RefusedError(
-                f"org secret {name} is visible to {secret.get('visibility')} repositories; "
-                f"prerequisite 3: scope it to selected repositories"
-            )
-    run.say("5 org secrets: each is scoped to selected repositories")
-
-
 def check_move_plans(run: Run) -> None:
-    """Step 6: the ruleset move would go through, planned and not applied."""
+    """Step 5: the ruleset move would go through, planned and not applied."""
     done = converted_repos(run.api, run.opts.include_private) | {run.repo}
     plan_move(org_rulesets(run.api), done, run.opts.old, run.opts.new, live_names(run.api))
-    run.say("6 rulesets: the move would go through")
+    run.say("5 rulesets: the move would go through")
 
 
 def check_runs(run: Run) -> None:
-    """Step 7: the head commit has a passing Actions run of each required check."""
+    """Step 6: the head commit has a passing Actions run of each required check."""
     runs = paged(run.api, f"{run.base}/commits/{run.sha}/check-runs", "check_runs")
     missing = [c for c in REQUIRED_CHECKS if not passing(runs, c)]
     if missing:
         raise RefusedError(
             f"{run.sha[:7]} has no passing GitHub Actions run of: {', '.join(missing)}"
         )
-    run.say("7 check runs: both required checks passed")
+    run.say("6 check runs: both required checks passed")
 
 
 def preconditions(run: Run) -> None:
-    """Steps 3 to 7: each raises RefusedError, and none writes."""
+    """Steps 3 to 6: each raises RefusedError, and none writes."""
     check_busy(run)
     check_pypi(run)
-    check_secret_scope(run)
     check_move_plans(run)
     check_runs(run)
 
@@ -814,30 +762,10 @@ def preconditions(run: Run) -> None:
 # ------------------------------------------------------------------- --check
 
 
-def secret_names(api: Api, path: str) -> list[str]:
-    key = "secrets"
-    return [s["name"] for s in paged(api, path, key)]
-
-
 def check_fleet(api: Api, opts: Options) -> list[str]:
-    """Prerequisites 3 and 12, as problems; a refused read is a problem, not "none"."""
+    """Prerequisite 12 and the rulesets, as problems; a refused read is a problem."""
     problems: list[str] = []
     done = converted_repos(api, opts.include_private)
-    for repo in sorted(done):
-        for scope, path in (
-            ("repo", "actions/secrets"),
-            ("org", "actions/organization-secrets"),
-        ):
-            try:
-                names = secret_names(api, f"/repos/{ORG}/{repo}/{path}")
-            except ApiError as exc:
-                problems.append(f"{repo}: could not read {scope} secrets: {exc}")
-                continue
-            problems += [
-                f"{repo}: moved {scope} secret {n} is still readable"
-                for n in sorted(names)
-                if n in MOVED_TO_ENVIRONMENTS
-            ]
     rulesets = org_rulesets(api)
     try:
         if plan_move(rulesets, done, opts.old, opts.new, live_names(api)):
@@ -867,13 +795,18 @@ def parser() -> argparse.ArgumentParser:
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--merge", metavar="REPO", help="merge REPO's conversion PR and move it")
     mode.add_argument("--move-rulesets", action="store_true", help="the idempotent ruleset move")
-    mode.add_argument("--check", action="store_true", help="prerequisites 3 and 12")
+    mode.add_argument("--check", action="store_true", help="prerequisite 12 and the rulesets")
     p.add_argument("--pr", type=int, help="the conversion PR's number (with --merge)")
     p.add_argument("--include-private", action="store_true", help="also move private repos")
     p.add_argument("--pypi-ledger", metavar="TSV", help="repo, project, added_by, removed_by")
     p.add_argument("--old-ruleset", action="append", help=f"default {OLD_RULESET!r}; repeatable")
     p.add_argument("--new-ruleset", default=NEW_RULESET, help=f"default {NEW_RULESET!r}")
     p.add_argument("--token-env", default="GH_TOKEN", help="the variable holding the token")
+    p.add_argument(
+        "--api-url",
+        default=f"https://{API_HOST}",
+        help="the REST API's base, e.g. a gateway route that adds its own credential",
+    )
     return p
 
 
@@ -911,7 +844,7 @@ def main(argv: list[str] | None = None, api: Api | None = None) -> int:
         if not token:
             print(f"cutover: ${args.token_env} is empty", file=sys.stderr)
             return 2
-        api = Api(token)
+        api = Api(token, base=args.api_url)
     opts = Options(
         include_private=args.include_private,
         ledger=args.pypi_ledger,

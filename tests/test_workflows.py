@@ -24,7 +24,8 @@ to review:
     anchor's definition (`&boot {...}`) read as its alias (`*boot`): sdlc's
     file defines them in a different first job. Parsed, they are equal too
   - and of the fleet file: no `uses:` at all, top-level `permissions: {}`,
-    every job that holds a secret has an environment and runs on
+    no environment but pypi's and renovate's (every secret is an org
+    secret), and every job that holds a secret runs on
     crunchtools-uncached only while the variable names exactly that (never the
     cached class), a fork's pull_request_target on ubuntu-latest, and `check`
     and `gate` hold none
@@ -249,11 +250,18 @@ for name in ("REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"):
 
 check("fleet: no `uses:` anywhere", not re.search(r"^\s*-?\s*uses:", fleet_text, re.M))
 check("fleet: top-level permissions are {}", parsed.get("permissions") == {})
+# Every secret is an org secret: no environment to provision in any repo.
+# pypi's names PyPI's trusted publisher and holds no secret; renovate's runs in
+# one repo. Neither needs setting up anywhere else.
+NAMED_ENVIRONMENTS = {"pypi", "renovate"}
 for job_id, job in fleet.items():
-    if SECRET.search(yaml.safe_dump(job)):
-        check(f"fleet: {job_id} holds secrets only in an environment", bool(job.get("environment")))
-    # By environment, not by secrets: pypi holds only OIDC.
-    if job.get("environment"):
+    check(
+        f"fleet: {job_id} names no environment but pypi or renovate",
+        job.get("environment") in {None} | NAMED_ENVIRONMENTS,
+        str(job.get("environment")),
+    )
+    holds = SECRET.search(yaml.safe_dump(job)) or job.get("environment") == "pypi"
+    if holds:
         check(
             f"fleet: {job_id} shares the secret jobs' runner", job.get("runs-on") == GUARDED_RUNNER
         )
