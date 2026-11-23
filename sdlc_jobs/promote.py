@@ -132,6 +132,14 @@ def release_version(env: Mapping[str, str], planned: object) -> str | None:
 
 
 def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
+    """Sign, attest and tag the digest `image` pushed; 0 when it is promoted.
+
+    Everything comes from `env`: GITHUB_REPOSITORY, SDLC_IMAGE_RESULT (image's
+    output), SDLC_CHECK, SDLC_WRITE and SDLC_RELEASE, and the signing key.
+    `tools` runs skopeo and cosign (a fake in the suites). Raises
+    CannotRunError, exit 2, when an input is malformed or would move a version
+    backwards, or a signing or tagging step fails.
+    """
     del event_name, event  # the job contract passes them; promote reads only the environment
     repo = env.get("GITHUB_REPOSITORY", "")
     if repo.count("/") != 1:

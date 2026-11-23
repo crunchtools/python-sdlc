@@ -104,7 +104,9 @@ class FakeTools(Tools):
         input: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        stream: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        del stream  # captured or streamed, the fake answers the same
         self.argvs.append(argv)
         self.stdin.append(input)
         self.envs.append(dict(env or {}))
@@ -423,8 +425,9 @@ class SmokeTools(Tools):
         input: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        stream: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del input, env, cwd
+        del input, env, cwd, stream
         self.argvs.append(argv)
         match argv[1]:
             case "image":

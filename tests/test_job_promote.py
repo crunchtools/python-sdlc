@@ -63,6 +63,7 @@ class FakeTools(Tools):
         self.signed: list[tuple[str, set[str]]] = []
         self.attested: set[tuple[str, str]] = set()
         self.release_tags: dict[str, str] = {}  # "1.2.3" -> commit
+        self.annotated: dict[str, str] = {}  # "1.2.3" -> the commit its tag object points at
         self.key = FLEET_PUBLIC_KEY
         self.image_missing = False  # the registry has no manifest at the digest
         self.stdin: list[str | None] = []
@@ -123,11 +124,20 @@ class FakeTools(Tools):
 
     def http(self, method: str, url: str, _headers: object, _data: bytes | None = None) -> Response:
         path = url.removeprefix("https://api.github.com")
+        tag_object = f"/repos/{REPO}/git/tags/"
+        if path.startswith(tag_object):  # the hop an annotated tag takes to its commit
+            sha = path.removeprefix(tag_object)
+            commit = self.annotated.get(sha.removeprefix("tag-"))
+            body = {"object": {"type": "commit", "sha": commit}}
+            return Response(404 if commit is None else 200, json.dumps(body).encode())
         prefix = f"/repos/{REPO}/git/ref/tags/v"
         assert method == "GET" and path.startswith(prefix), path
         commit = self.release_tags.get(path.removeprefix(prefix))
-        if commit is None:
+        if commit is None and path.removeprefix(prefix) not in self.annotated:
             return Response(404, b"{}")
+        if path.removeprefix(prefix) in self.annotated:
+            tag = {"type": "tag", "sha": f"tag-{path.removeprefix(prefix)}"}
+            return Response(200, json.dumps({"object": tag}).encode())
         return Response(200, json.dumps({"object": {"type": "commit", "sha": commit}}).encode())
 
     def copies(self) -> list[str]:
@@ -318,6 +328,15 @@ def test_rebuild_of_the_release_moves_the_version_tag() -> None:
     t.release_tags["1.2.3"] = SHA
     t.tags["1.2.3"] = OLD
     assert go(t) == 0 and t.tags["1.2.3"] == NEW
+
+
+def test_rebuild_of_an_annotated_release_tag_moves_it() -> None:
+    t = FakeTools()
+    t.annotated["1.2.3"] = SHA  # v1.2.3 is a tag object, one hop from this run's commit
+    assert go(t) == 0 and t.tags["1.2.3"] == NEW
+    t = FakeTools()  # the same, with the tag object pointing at another commit
+    t.annotated["1.2.3"] = OTHER_SHA
+    assert go(t) == 0 and "1.2.3" not in t.tags
 
 
 def test_stale_rebuild_does_not_move_latest_back() -> None:

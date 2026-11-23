@@ -2721,6 +2721,15 @@ def t_pip_audit(s: dict) -> int:
     """
     need_project()
     report = pip_audit_report_path()
+    try:
+        return pip_audit_gate(report)
+    finally:
+        if report is not None:
+            shutil.rmtree(report.parent, ignore_errors=True)
+
+
+def pip_audit_gate(report: Path | None) -> int:
+    """t_pip_audit's run: sync, audit with retries, and print the report if asked."""
     env = project_env()
     sync_project(env)
     pypi, registry = locked_registry(project_dir() / "uv.lock")
@@ -3435,7 +3444,9 @@ def event_payload() -> tuple[str, dict]:
 
 def job_module(job: str) -> types.ModuleType:
     """sdlc_jobs.<job>, or a 2 naming the handler this sdlc does not have."""
-    for where in JOBS_PATHS:
+    # Reversed, so the first of JOBS_PATHS -- this script's own directory -- ends
+    # up first on sys.path and a checkout runs its own sdlc_jobs.
+    for where in reversed(JOBS_PATHS):
         if (where / "sdlc_jobs").is_dir() and str(where) not in sys.path:
             sys.path.insert(0, str(where))
     try:

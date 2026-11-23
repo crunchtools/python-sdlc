@@ -98,8 +98,12 @@ class Job:
     child_env: dict[str, str] = field(default_factory=dict)
     settings: dict = field(default_factory=dict)  # [tool.sdlc.image], checked
 
-    def run(self, argv: list[str], *, input: str | None = None) -> subprocess.CompletedProcess[str]:
-        return self.tools.run(argv, input=input, env=self.child_env, cwd=str(self.root))
+    def run(
+        self, argv: list[str], *, input: str | None = None, stream: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        return self.tools.run(
+            argv, input=input, env=self.child_env, cwd=str(self.root), stream=stream
+        )
 
     def must(self, argv: list[str], *, input: str | None = None) -> str:
         return must(self.tools, argv, input=input, env=self.child_env, cwd=str(self.root))
@@ -410,7 +414,7 @@ def build(job: Job, plan: dict[str, tuple[str, str]], text: str, parent: Parent 
     copy = pinned_file(job)
     try:
         argv += pin_args(job, text, parent, words[2:])
-        proc = job.run(argv)
+        proc = job.run(argv, stream=True)  # a build's log goes to the job log, unbuffered
     finally:
         copy.unlink(missing_ok=True)
     show(proc)

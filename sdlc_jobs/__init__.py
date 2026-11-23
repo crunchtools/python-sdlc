@@ -2,9 +2,10 @@
 
 Each `sdlc_jobs/<job>.py` exposes
 
-    def main(event_name: str, event: dict, env: Mapping[str, str]) -> int
+    def run(event_name: str, event: dict, env: Mapping[str, str],
+            tools: Tools) -> int
 
-and returns the exit contract of `sdlc`: 0 clean, 1 found, 2 could not run,
-3 could not run and CI judges the same commit. A module whose name starts with
-an underscore is a helper, never a job.
+and returns 0 clean, 1 found or 2 could not run. `sdlc`'s 3 (deferred to CI)
+is not a job's to return: a job is CI, so `_core.run_job` makes it a 2. A module
+whose name starts with an underscore is a helper, never a job.
 """

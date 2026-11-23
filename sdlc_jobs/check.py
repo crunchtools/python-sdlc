@@ -66,6 +66,15 @@ SARIF_FILES = {"/language:python": "codeql-results.sarif", "zizmor": "zizmor.sar
 
 
 def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
+    """Gate this commit and write the plan; the gates' verdict is the exit code.
+
+    `event_name` and `event` are the workflow's: a push to the default branch
+    (named in `event`) may plan an image and a release, a schedule's cron the
+    weekly audit or the parent poll. `env` is the job's environment
+    (GITHUB_*, GITHUB_OUTPUT for the plan). `tools` runs podman, skopeo and the
+    GitHub API (a fake in the suites). 0 clean, 1 a gate found something, and
+    CannotRunError, exit 2, when a gate or the plan could not be made.
+    """
     root = workspace(env)
     repo = env.get("GITHUB_REPOSITORY", "")
     default_push = event_name == "push" and env.get("GITHUB_REF") == (

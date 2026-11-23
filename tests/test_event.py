@@ -16,6 +16,7 @@ Run: python3 tests/test_event.py
 from __future__ import annotations
 
 import contextlib
+import email.message
 import importlib.machinery
 import importlib.util
 import io
@@ -24,7 +25,9 @@ import os
 import sys
 import tempfile
 import types
+import urllib.error
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -152,6 +155,66 @@ def test_job_failures_are_a_2() -> None:
     check("a job that returns nothing is a 2", isinstance(rc, str), str(rc))
 
 
+class FakeReply(io.BytesIO):
+    """What urlopen yields: a context manager with a status and a body."""
+
+    status = 200
+
+
+def http(url: str, urlopen: object) -> object:
+    """Tools().http(GET, url) with urlopen replaced; the Response or the CannotRun message."""
+    with mock.patch.object(core.urllib.request, "urlopen", urlopen):
+        try:
+            return core.Tools().http("GET", url, {"Accept": "x"})
+        except core.CannotRunError as exc:
+            return str(exc)
+
+
+def test_http_returns_a_https_response() -> None:
+    seen: list[tuple[str, str, float]] = []
+
+    def urlopen(req: urllib.request.Request, timeout: float) -> FakeReply:
+        seen.append((req.full_url, req.get_method(), timeout))
+        return FakeReply(b'{"ok": true}')
+
+    got = http("https://api.example/x", urlopen)
+    check("a 200 is a Response with its body", got == core.Response(200, b'{"ok": true}'), str(got))
+    check("sent as the method, with a timeout", seen == [("https://api.example/x", "GET", 60)])
+
+
+def test_http_error_status_is_a_response() -> None:
+    def urlopen(*_: object, **__: object) -> FakeReply:
+        raise urllib.error.HTTPError(
+            "https://api.example/x", 404, "nf", email.message.Message(), io.BytesIO(b"{}")
+        )
+
+    got = http("https://api.example/x", urlopen)
+    check("an HTTPError is the Response of its status", got == core.Response(404, b"{}"), str(got))
+
+
+def test_http_network_failure_is_a_2() -> None:
+    for exc in (urllib.error.URLError("no route"), TimeoutError("slow"), OSError("reset")):
+
+        def urlopen(*_: object, exc: Exception = exc, **__: object) -> FakeReply:
+            raise exc
+
+        got = http("https://api.example/x", urlopen)
+        check(
+            f"{type(exc).__name__} is a 2 naming the request",
+            isinstance(got, str) and "GET https://api.example/x" in got,
+            str(got),
+        )
+
+
+def test_http_refuses_a_non_https_url() -> None:
+    def urlopen(*_: object, **__: object) -> FakeReply:
+        raise AssertionError("opened a non-https URL")
+
+    for url in ("http://api.example/x", "file:///etc/passwd", "ftp://api.example/x"):
+        got = http(url, urlopen)
+        check(f"{url} is refused", isinstance(got, str) and "non-https" in got, str(got))
+
+
 def main() -> int:
     for test in (
         test_refuses_without_a_job,
@@ -160,6 +223,10 @@ def main() -> int:
         test_routes_on_github_job,
         test_write_with_digest_does_nothing,
         test_job_failures_are_a_2,
+        test_http_returns_a_https_response,
+        test_http_error_status_is_a_response,
+        test_http_network_failure_is_a_2,
+        test_http_refuses_a_non_https_url,
     ):
         test()
     print()

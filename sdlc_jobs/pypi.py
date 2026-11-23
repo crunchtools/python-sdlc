@@ -95,6 +95,14 @@ def dist_files(root: Path, out: Path, version: str) -> list[Path]:
 
 
 def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
+    """Re-verify the release `write` made and publish it to PyPI by OIDC; 0 published.
+
+    `event_name` must be `push`. `env` carries SDLC_RELEASE ({version, sha} from
+    `write`), GITHUB_REPOSITORY and the OIDC request variables. `tools` runs
+    the GitHub API, the build and the upload (a fake in the suites). Raises
+    CannotRunError, exit 2, when the release does not verify from the API or
+    a step fails.
+    """
     del event  # the job contract passes it; a push needs nothing from it
     if event_name != "push":
         cannot(f"pypi runs on a push, not {event_name!r}")

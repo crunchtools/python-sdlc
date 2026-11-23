@@ -553,6 +553,16 @@ server really is.
 `SDLC_SKIP=gatehouse git push` skips one check, once, for a false positive. The
 finding still has to be answered on the pull request.
 
+## `sdlc event`, in CI
+
+Each job of the fleet's one `ci.yml` (`examples/ci.yml`, designed in
+`docs/marketplace-free-ci.md`) runs `sdlc event` in the `sdlc-boot` container.
+It routes on `GITHUB_JOB` to `sdlc_jobs/<job>.py` -- `check`, `image`,
+`promote`, `pypi`, `write` -- and passes the job `GITHUB_EVENT_NAME`, the payload
+at `GITHUB_EVENT_PATH` and the environment. A job with no module is a 2 that
+names it, and `write` with `DIGEST` set (sdlc's own rollback dispatch) exits 0
+having done nothing. It is not for a laptop: outside a workflow it is a 2.
+
 ## Exit codes
 
 ```
