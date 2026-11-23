@@ -14,6 +14,21 @@ All notable changes to this project are documented here, following
 
 ### Changed
 
+- sdlc's own CI fetch adds an `origin` remote before fetching. Without one
+  the constitution validator names the repo after its mount point, `/repo`,
+  so sdlc's own exemptions (`sdlc_exempt`, `container_release_custom`) never
+  applied and `sdlc ci` failed the constitution check.
+- `convert_repo.py` takes the fleet's two Gatehouse variants as the template:
+  the guard on `ubuntu-latest`, and triage handed `review_result`. A publish
+  job may set up Python with `uv python install`.
+- The fleet file, the doc and sdlc's own file pin
+  `quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b796…de060`, sdlc-bootstrap
+  0.12.1, signed with sdlc's key by the bootstrap run. `cutover.py` and
+  `fleet_wave.py --apply` no longer refuse.
+- sdlc's own `.github/workflows/ci.yml` is installed, beside the old workflows
+  until the rulesets move. `test` runs on the cached runner for a same-repo PR
+  and on GitHub's for a fork. The bootstrap wiring is pinned in
+  `tests/test_workflows.py` (#128).
 - Every fleet secret stays an org secret: the fleet file names no `ai`,
   `ashigaru`, `registry` or `cosign-signing` environment, so no repo needs
   any setup to build, sign or review. The control against a branch workflow
@@ -21,6 +36,12 @@ All notable changes to this project are documented here, following
   alone. `cutover.py` no longer takes repos off the org secrets' lists, and
   `--check` no longer looks for moved secrets. sdlc alone keeps its
   `registry`, `sdlc-signing` and `sdlc-approval`.
+- `cutover.py` and `fleet_wave.py` list the org's repos with a GraphQL query for
+  name, privacy, archived and default branch alone. The REST listing carries
+  each repo's description, free text a gateway route may withhold. The same
+  goes for the merge's check of the required runs: GraphQL, for id, name,
+  conclusion and app only, which also needs no Checks permission (fine-grained
+  tokens cannot hold it).
 - `cutover.py` and `fleet_wave.py` take `--api-url`, so their GitHub calls can
   go through a gateway route that adds its own credential.
 

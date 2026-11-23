@@ -529,6 +529,7 @@ UV_BUILD = re.compile(r"^uv build(?: --(?:sdist|wheel|no-sources))*(?: --out-dir
 PY_BUILD = re.compile(r"^python3? -m build(?: --(?:sdist|wheel))*$")
 UV_PUBLISH = re.compile(r"^uv publish(?: --trusted-publishing (?:always|automatic))?(?: dist/\*)?$")
 PIP_BUILD = re.compile(r"^(?:python3? -m )?pip install(?: --upgrade| -U)*(?: pip)? build$")
+UV_PYTHON = re.compile(r"^uv python install(?: \d+(?:\.\d+){0,2})?$")
 SET_E = re.compile(r"^set -[eu]+(?: -o pipefail)?$")
 
 
@@ -542,7 +543,7 @@ def pypi_run(step: dict) -> str | None:
             kinds.add("publish")
         elif UV_BUILD.match(line) or PY_BUILD.match(line):
             kinds.add("build")
-        elif not (PIP_BUILD.match(line) or SET_E.match(line)):
+        elif not (PIP_BUILD.match(line) or UV_PYTHON.match(line) or SET_E.match(line)):
             return None
     return "publish" if "publish" in kinds else "build" if kinds else ""
 
@@ -685,14 +686,46 @@ def prior_guard(run: str) -> str:
     return run
 
 
+# Two fields the fleet's copies differ in, both Gatehouse's own: the guard on
+# ubuntu-latest (before the private-repo runner), and triage handed review's
+# result. Either value of each is the template; nothing else is.
+TRIAGE_REVIEW_RESULT = "${{ needs.review.result }}"
+
+
+def known_variants(doc: dict, canonical: dict) -> dict:
+    """`doc` with the guard's runner and triage's review_result as the template has them."""
+    jobs = doc.get("jobs")
+    want = canonical.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        return doc
+    jobs = dict(jobs)
+    guard, guard_want = jobs.get("guard"), want.get("guard") or {}
+    if isinstance(guard, dict) and guard.get("runs-on") == "ubuntu-latest":
+        jobs["guard"] = {**guard, "runs-on": guard_want.get("runs-on")}
+    triage = jobs.get("triage")
+    passed = triage.get("with") if isinstance(triage, dict) else None
+    if (
+        isinstance(triage, dict)
+        and isinstance(passed, dict)
+        and passed.get("review_result") == TRIAGE_REVIEW_RESULT
+    ):
+        rest = {k: v for k, v in passed.items() if k != "review_result"}
+        jobs["triage"] = {k: v for k, v in triage.items() if k != "with"} | (
+            {"with": rest} if rest else {}
+        )
+    return {**doc, "jobs": jobs}
+
+
 def same_gatehouse(current: dict, canonical: dict) -> bool:
-    """`current` is examples/gatehouse.yml in all but comments, or its guard is the one before.
+    """`current` is examples/gatehouse.yml in all but comments and the known variants,
+    or its guard is the one before.
 
     gatehouse#150 changed the guard's script (it now refuses a fork's change to
     .sdlc/ too). A copy whose guard script is exactly the one before that is
     brought up to date; any other difference in any step, the guard's
     included, keeps the file as it is.
     """
+    current = known_variants(current, canonical)
     if current == canonical:
         return True
     jobs = current.get("jobs")

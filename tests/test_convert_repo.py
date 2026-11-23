@@ -696,6 +696,19 @@ check(
 
 # Already there: nothing to write, and the old file still goes.
 repo, done = converted(
+    {
+        WF + "publish.yml": PUBLISH.replace(
+            "      - run: uv build\n",
+            "      - run: uv python install 3.12\n      - run: uv build\n",
+        )
+    }
+)
+check(
+    "a publish job that installs its Python with uv is still a publish job",
+    done.returncode == 0 and sdlc_cfg(repo) == {"publish": "pypi"},
+    done.stderr,
+)
+repo, done = converted(
     {WF + "publish.yml": PUBLISH, "sdlc.toml": '[tool.sdlc]\npublish = "pypi"\n'}
 )
 check(
@@ -1125,6 +1138,36 @@ for label, jobs in (("a list", [canonical["jobs"]["guard"]]), ("a string", "guar
     except AttributeError as exc:
         same = exc
     check(f"same_gatehouse: jobs as {label} is not the stub, and does not raise", same is False)
+
+
+def fleet_variant(runs_on: str, review_result: str | None) -> dict:
+    """The template with the guard's runner and triage's review_result as given."""
+    jobs = dict(canonical["jobs"])
+    jobs["guard"] = {**jobs["guard"], "runs-on": runs_on}
+    if review_result is not None:
+        jobs["triage"] = {**jobs["triage"], "with": {"review_result": review_result}}
+    return {**canonical, "jobs": jobs}
+
+
+for label, doc, same in (
+    ("the guard on ubuntu-latest", fleet_variant("ubuntu-latest", None), True),
+    (
+        "triage handed review's result",
+        fleet_variant(canonical["jobs"]["guard"]["runs-on"], "${{ needs.review.result }}"),
+        True,
+    ),
+    (
+        "both, as the fleet carries them",
+        fleet_variant("ubuntu-latest", "${{ needs.review.result }}"),
+        True,
+    ),
+    ("the guard on another runner", fleet_variant("self-hosted", None), False),
+    ("triage handed something else", fleet_variant("ubuntu-latest", "${{ github.sha }}"), False),
+):
+    check(
+        f"same_gatehouse: {label} is {'' if same else 'not '}the template",
+        C.same_gatehouse(doc, canonical) is same,
+    )
 
 
 # ------------------------------- config: a converted repo never exits 2 at once

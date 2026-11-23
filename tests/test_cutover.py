@@ -33,6 +33,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -339,14 +340,16 @@ check(
 
 # ======================================================================= the API
 
-# The fleet file names sdlc-bootstrap by a placeholder until prerequisite 4, and
-# every mode refuses that (pinned below); the API tests run on a pinned copy.
-UNPINNED = cut.FLEET_FILE
+# Two fixtures from the real fleet file, whatever digest it pins: one carrying
+# the `<digest>` marker it had before sdlc-bootstrap's first release, which every
+# mode must refuse, and one pinned to a stand-in digest for the API tests.
+PLACEHOLDER = "sdlc-bootstrap@sha256:<digest>"
+FLEET_TEXT = re.sub(r"sdlc-bootstrap@sha256:[0-9a-f]{64}", PLACEHOLDER, cut.FLEET_FILE.read_text())
 PINNED_DIR = Path(tempfile.mkdtemp())
+UNPINNED = PINNED_DIR / "unpinned.yml"
+UNPINNED.write_text(FLEET_TEXT)
 (PINNED_DIR / "ci.yml").write_text(
-    UNPINNED.read_text().replace(
-        "sdlc-bootstrap@sha256:<digest>", "sdlc-bootstrap@sha256:" + "a" * 64
-    )
+    FLEET_TEXT.replace(PLACEHOLDER, "sdlc-bootstrap@sha256:" + "a" * 64)
 )
 cut.FLEET_FILE = PINNED_DIR / "ci.yml"
 FLEET = cut.FLEET_FILE.read_bytes()
@@ -357,6 +360,42 @@ GA = {"app": {"slug": "github-actions"}}
 
 def b64(data: bytes) -> dict:
     return {"content": base64.b64encode(data).decode()}
+
+
+def as_graphql(answer: tuple[int, object]) -> tuple[int, object]:
+    """A REST repo listing fixture as the GraphQL page fleet() asks for."""
+    status, body = answer
+    if status != 200 or not isinstance(body, list):
+        return status, body
+    nodes = [
+        {
+            "name": r["name"],
+            "isPrivate": bool(r.get("private")),
+            "isArchived": bool(r.get("archived")),
+            "defaultBranchRef": {"name": r.get("default_branch", "main")},
+        }
+        for r in body
+    ]
+    repos = {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}
+    return 200, {"data": {"organization": {"repositories": repos}}}
+
+
+def runs_as_graphql(answer: tuple[int, object]) -> tuple[int, object]:
+    """A REST check-runs fixture as the GraphQL commit commit_runs() asks for."""
+    status, body = answer
+    if status != 200 or not isinstance(body, dict):
+        return status, body
+    suites: dict[str, list[dict]] = {}
+    for r in body.get("check_runs", []):
+        node = {
+            "databaseId": r["id"],
+            "name": r["name"],
+            "conclusion": (r.get("conclusion") or "").upper() or None,
+        }
+        suites.setdefault((r.get("app") or {}).get("slug"), []).append(node)
+    nodes = [{"app": {"slug": app}, "checkRuns": {"nodes": runs}} for app, runs in suites.items()]
+    commit = {"checkSuites": {"nodes": nodes}}
+    return 200, {"data": {"repository": {"object": commit}}}
 
 
 class FakeApi(cut.Api):
@@ -374,6 +413,8 @@ class FakeApi(cut.Api):
 
     def call(self, method: str, path: str, body: object = None) -> tuple[int, object]:
         self.calls += 1
+        if (method, path) == ("POST", "/graphql"):  # a read: the repo listing or a commit's runs
+            return self.graphql(body)
         if method != "GET":
             self.writes.append((method, path, body))
         for key in (path, path.split("?", maxsplit=1)[0]):
@@ -385,6 +426,19 @@ class FakeApi(cut.Api):
         if method == "PUT":
             return (202 if path.endswith("/update-branch") else 200), {}
         return 404, {"message": "Not Found"}
+
+    def graphql(self, body: object) -> tuple[int, object]:
+        """The two queries the cutover sends, answered from their REST fixtures."""
+        query = body.get("query", "") if isinstance(body, dict) else ""
+        if "checkSuites" not in query:
+            listing = self.routes[("GET", f"/orgs/{cut.ORG}/repos")]
+            return as_graphql(listing() if callable(listing) else listing)
+        variables = body["variables"]
+        runs = self.routes.get(
+            ("GET", f"{O}/{variables['name']}/commits/{variables['oid']}/check-runs"),
+            (404, {"message": "Not Found"}),
+        )
+        return runs_as_graphql(runs() if callable(runs) else runs)
 
 
 def ruleset(rid: int, name: str, include: list[str], checks: bool = True) -> dict:
@@ -1015,6 +1069,43 @@ class FakeConnection:
     def close(self) -> None:
         pass
 
+
+PAGED_ASKED: list[tuple[str, str]] = []
+
+
+class PagedApi(cut.Api):
+    """Answers a commit's runs with one more page of check runs than was read.
+
+    It records what it was asked, and the test checks that was one POST /graphql.
+    """
+
+    def call(self, method: str, path: str, _body: object = None) -> tuple[int, object]:
+        PAGED_ASKED.append((method, path))
+        status, answer = runs_as_graphql((200, {"check_runs": []}))
+        answer["data"]["repository"]["object"]["checkSuites"]["nodes"] = [
+            {
+                "app": {"slug": "github-actions"},
+                "checkRuns": {"pageInfo": {"hasNextPage": True}, "nodes": []},
+            }
+        ]
+        return status, answer
+
+
+try:
+    cut.commit_runs(PagedApi(TOKEN), "app", SHA)
+    paged = ""
+except cut.ApiError as exc:
+    paged = str(exc)
+check(
+    "commit_runs: asks for a commit's runs by one POST /graphql",
+    PAGED_ASKED == [("POST", "/graphql")],
+    str(PAGED_ASKED),
+)
+check(
+    "commit_runs: a run past the first page is an error, not a refusal",
+    "more than 100" in paged,
+    paged,
+)
 
 conn = FakeConnection()
 try:

@@ -418,6 +418,20 @@ else:
         only_test = admitting == ["test"]
         check("own: test is the only job that admits pull_request", only_test, str(admitting))
         test = own["test"]
+        same_repo_pr = event(
+            "pull_request", **{"github.event.pull_request.head.repo.full_name": "crunchtools/app"}
+        )
+        fork_pr = event(
+            "pull_request", **{"github.event.pull_request.head.repo.full_name": "stranger/app"}
+        )
+        cached = {"vars.CACHED_RUNNER_LABEL": "crunchtools-cached"}
+        for label, ctx, want in (
+            ("a same-repo PR, cached label set", {**same_repo_pr, **cached}, "crunchtools-cached"),
+            ("a same-repo PR, no cached label", same_repo_pr, "ubuntu-latest"),
+            ("a fork's PR, cached label set", {**fork_pr, **cached}, "ubuntu-latest"),
+        ):
+            got = evaluate(str(test["runs-on"]), ctx)
+            check(f"own: test runs {label} on {want}", got == want, str(got))
         read_only = test.get("permissions") == {"contents": "read"}
         check("own: test has permissions { contents: read }", read_only)
         check("own: test has no environment", "environment" not in test)
@@ -432,6 +446,46 @@ else:
         )
         own_write_if = str(own["write"]["if"])
         check("own: write's if: has !inputs.digest", "!inputs.digest" in own_write_if)
+        # The bootstrap dispatch (MODE=bootstrap): approved, then built and
+        # signed; release, weekly and rollback keep their own paths.
+        approve_if = str(own["approve"]["if"])
+        check(
+            "own: approve runs on a rollback or bootstrap dispatch from the default branch",
+            "(inputs.digest != '' || inputs.bootstrap)" in approve_if
+            and "github.event_name == 'workflow_dispatch'" in approve_if
+            and "github.event.repository.default_branch" in approve_if,
+        )
+        image = own["image"]
+        check("own: image needs approve", "approve" in image.get("needs", []))
+        check(
+            "own: image runs a bootstrap only once approve succeeded",
+            "inputs.bootstrap && needs.approve.result == 'success'" in str(image["if"]),
+        )
+        image_mode = str(image["env"]["MODE"])
+        check(
+            "own: image's MODE is bootstrap, weekly or release",
+            image_mode.startswith("${{ inputs.bootstrap && 'bootstrap' ||")
+            and "'weekly'" in image_mode
+            and "'release'" in image_mode,
+        )
+        check(
+            "own: image hands self.sh the version and approve's result",
+            image["env"].get("VERSION") == "${{ inputs.version }}"
+            and image["env"].get("APPROVED") == "${{ needs.approve.result }}",
+        )
+        sign = own["sign"]
+        sign_mode = str(sign["env"]["MODE"])
+        check(
+            "own: sign's MODE is bootstrap first, then rollback, weekly or release",
+            sign_mode.startswith("${{ inputs.bootstrap && 'bootstrap' ||")
+            and "'rollback'" in sign_mode
+            and "'weekly'" in sign_mode
+            and "'release'" in sign_mode,
+        )
+        check(
+            "own: sign never runs a bootstrap on approve alone",
+            "needs.approve.result == 'success' && !inputs.bootstrap" in str(sign["if"]),
+        )
         for job_id in SHARED:
             same = job_id in own and as_aliases(job_text(own_text, job_id)) == as_aliases(
                 job_text(fleet_text, job_id)
