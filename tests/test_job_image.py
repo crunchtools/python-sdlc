@@ -19,11 +19,12 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Unpack
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sdlc_jobs import image
-from sdlc_jobs._core import CannotRunError, Tools
+from sdlc_jobs import _boot, image
+from sdlc_jobs._core import CannotRunError, RunOptions, Tools
 
 REPO = "crunchtools/demo"
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -32,6 +33,17 @@ PUSHED = "sha256:" + "b" * 64
 US = "\x1f"
 HOST = "/host/ws"
 INSPECT_ME = 2  # `inspect <container id>`, not a state query
+TAG = "localhost/demo:sdlc"  # what the plan's container-build tags, and the boot gate runs
+BOOT = "sdlc-boot-sdlc-cache-7-1"  # the boot container: sdlc-boot-<the job's volume>
+_boot.sleep = lambda _seconds: None  # the boot gate polls; the tests do not wait
+INIT_OK = {"result": {"serverInfo": {"name": "demo", "version": "1"}}}
+TOOLS_OK = {"result": {"tools": [{"name": "t"}]}}
+
+
+class Link(str):
+    """A `files` value that go() commits as a symlink to it, not as a file's text."""
+
+    __slots__ = ()
 
 
 def cp(rc: int = 0, out: str = "", err: str = "") -> subprocess.CompletedProcess[str]:
@@ -98,20 +110,33 @@ class FakeTools(Tools):
         self.plan = ""  # the plan `sdlc plan ci` prints; empty is the stock one
         self.stdin: list[str | None] = []
         self.digest: str | None = PUSHED  # what `podman push --digestfile` writes; None, none
+        self.replies: dict[int, dict] = {1: INIT_OK, 2: TOOLS_OK}  # what the MCP server says
+        self.why = ""  # what `converse` says went wrong; empty, nothing
+        self.server_rc: int | None = None  # the stdio server's own exit; None, killed
+        self.timeouts: list[float | None] = []  # each run's timeout, in argvs' order
+        self.conversed: list[tuple[list[str], list[dict], dict]] = []
+        self.boot_rc = 0  # what `podman run -d --name sdlc-boot-...` exits
+        self.healthcheck = '{"Test": ["CMD", "true"]}'  # the image's .Config.Healthcheck
+        self.health_rc = 0  # what `podman healthcheck run` exits
+        self.systemd = "running"  # what `systemctl is-system-running` prints
+        self.systemd_first: list[str] = []  # printed before `systemd`, one per call
+        self.inactive: set[str] = set()  # units `systemctl is-active` says are not
+        self.http_rc = 0  # what the mcp-http client container exits
+        self.http_out = json.dumps({"init": INIT_OK, "tools": TOOLS_OK})
+        self.exec_rc = 0  # what `podman exec` itself exits; 125, podman failed
+        self.boot_running = "true"  # `inspect {{.State.Running}}` of the boot container
+        self.boot_inspect_rc = 0  # what that inspect exits; non-zero, the engine is gone
+        self.rm_rc: dict[str, int] = {}  # container name -> what `podman rm -f -v` exits
+        self.image_inspect_rc = 0  # what `podman image inspect` exits
+        self.log = ""  # what the job printed, kept by go()
 
-    def run(
-        self,
-        argv: list[str],
-        *,
-        input: str | None = None,
-        env: Mapping[str, str] | None = None,
-        cwd: str | None = None,
-        stream: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        del stream  # captured or streamed, the fake answers the same
+    def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
+        # captured or streamed, the fake answers the same
         self.argvs.append(argv)
-        self.stdin.append(input)
-        self.envs.append(dict(env or {}))
+        self.timeouts.append(kw.get("timeout"))
+        self.stdin.append(kw.get("input"))
+        self.envs.append(dict(kw.get("env") or {}))
+        cwd = kw.get("cwd")
         if argv[0] == "skopeo":
             return self.skopeo(argv)
         if argv[0] == "cosign":
@@ -123,6 +148,19 @@ class FakeTools(Tools):
         assert argv[:3] == ["podman", "--remote", "--url"], argv
         return self.podman(argv[4:], cwd or ".")
 
+    def converse(
+        self,
+        argv: list[str],
+        messages: list[dict],
+        *,
+        timeout: int,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[dict[int, dict], str, int | None]:
+        self.argvs.append(argv)
+        self.timeouts.append(None)
+        self.conversed.append((argv, messages, {"timeout": timeout, "env": dict(env or {})}))
+        return self.replies, self.why, self.server_rc
+
     def podman(self, sub: list[str], cwd: str) -> subprocess.CompletedProcess[str]:
         rc, out = 0, ""
         up = self.smoke_up == "true"
@@ -133,8 +171,8 @@ class FakeTools(Tools):
             case "build":
                 self.built_file = (Path(cwd) / sub[sub.index("-f") + 1]).read_text()
                 rc = self.build_rc
-            case "image":
-                out = "{}"
+            case "inspect" if sub[-1].startswith("sdlc-boot-"):
+                return self.podman_boot(sub)
             case "inspect":
                 state_query = "ExitCode" in sub[-2]
                 out = (
@@ -143,9 +181,41 @@ class FakeTools(Tools):
             case "push":
                 if self.digest is not None:
                     Path(sub[sub.index("--digestfile") + 1]).write_text(self.digest + "\n")
-            case "run" if "-d" not in sub:
-                rc = self.scan_rc
+            case "run" | "exec" | "healthcheck" | "image" | "rm":
+                return self.podman_boot(sub)
         return cp(rc, out)
+
+    def podman_boot(self, sub: list[str]) -> subprocess.CompletedProcess[str]:
+        """`run` (a gate, or the boot gate's server and client), `exec`, `healthcheck`,
+        `image inspect`, `rm` and the boot container's `inspect`."""
+        rc, out = 0, ""
+        match sub[0]:
+            case "image":
+                rc = self.image_inspect_rc
+                out = self.healthcheck if "{{json .Config.Healthcheck}}" in sub else "{}"
+            case "inspect":
+                rc, out = self.boot_inspect_rc, self.boot_running
+            case "rm" if self.rm_rc.get(sub[-1]):
+                return cp(self.rm_rc[sub[-1]], "", f"Error: {sub[-1]} has dependent containers")
+            case "run":
+                return self.podman_run(sub)
+            case "exec" if self.exec_rc:
+                rc = self.exec_rc
+            case "exec" if sub[3:] == ["is-system-running"]:
+                out = (self.systemd_first.pop(0) if self.systemd_first else self.systemd) + "\n"
+            case "exec" if sub[3:4] == ["is-active"]:
+                out = "inactive\n" if sub[4] in self.inactive else "active\n"
+            case "healthcheck":
+                rc = self.health_rc
+        return cp(rc, out)
+
+    def podman_run(self, sub: list[str]) -> subprocess.CompletedProcess[str]:
+        """A gate's `run`, or the boot gate's server and its mcp-http client."""
+        if "python3" in sub:  # the mcp-http client, in the server's namespace
+            return cp(self.http_rc, self.http_out)
+        if "--name" in sub and sub[sub.index("--name") + 1].startswith("sdlc-boot-"):
+            return cp(self.boot_rc)
+        return cp(self.scan_rc if "-d" not in sub else 0)
 
     def skopeo(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         rc, out = 0, ""
@@ -162,6 +232,14 @@ class FakeTools(Tools):
 
     def built(self) -> bool:
         return any(a[4:5] == ["build"] for a in self.argvs)
+
+    def boot_calls(self) -> list[list[str]]:
+        """The podman words (after --remote --url <url>) of what named the boot container."""
+        return [a[4:] for a in self.argvs if BOOT in a or any(BOOT in w for w in a)]
+
+    def boot_start(self) -> list[str]:
+        """The `podman run -d` that started the boot container (not the smoke one)."""
+        return next(a for a in self.argvs if a[4:5] == ["run"] and BOOT in a)
 
     def build_argv(self) -> list[str]:
         return next(a for a in self.argvs if a[4:5] == ["build"])
@@ -180,7 +258,11 @@ def go(
         ws.mkdir()
         (ws / "Containerfile").write_text(containerfile)
         for name, text in (files or {}).items():
-            (ws / name).write_text(text)
+            (ws / name).parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(text, Link):  # a symlink committed to the repo
+                (ws / name).symlink_to(text)
+            else:
+                (ws / name).write_text(text)
         out = Path(tmp) / "out"
         env = {
             "GITHUB_WORKSPACE": str(ws),
@@ -196,8 +278,12 @@ def go(
             "QUAY_PASSWORD": "pw",
             **(extra or {}),
         }
-        with contextlib.redirect_stdout(io.StringIO()):
-            rc = image.run(event, {}, env, tools=tools)
+        log = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(log):
+                rc = image.run(event, {}, env, tools=tools)
+        finally:
+            tools.log = log.getvalue()
         text = out.read_text() if out.exists() else ""
         result = json.loads(text.split("\n")[1]) if text else None
         return rc, result
@@ -565,16 +651,8 @@ class SmokeTools(Tools):
         self.argvs: list[list[str]] = []
         self.config, self.start_rc, self.state = config, start_rc, state
 
-    def run(
-        self,
-        argv: list[str],
-        *,
-        input: str | None = None,
-        env: Mapping[str, str] | None = None,
-        cwd: str | None = None,
-        stream: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        del input, env, cwd, stream
+    def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
+        del kw  # the smoke fake answers by argv alone
         self.argvs.append(argv)
         match argv[1]:
             case "image":
@@ -713,8 +791,547 @@ def test_settings_refuses_what_it_cannot_honour() -> None:
 
 def test_settings_boot_inputs_are_accepted() -> None:
     body = 'boot = "mcp"\nboot-env = "K=v\\n"\nboot-timeout = 240\n'
-    rc, _ = go(FakeTools(), QUAY_PARENT, files=settings(body))
-    assert rc == 0
+    t = FakeTools()
+    rc, _ = go(t, QUAY_PARENT, files=settings(body))
+    assert rc == 0 and t.conversed[0][2]["timeout"] == int("240")
+
+
+def test_settings_contract_test_and_free_disk_are_accepted() -> None:
+    t = FakeTools()
+    body = 'contract-test = "pytest tests/contract"\nfree-disk = true\n'
+    rc, _ = go(t, QUAY_PARENT, files=settings(body))
+    assert rc == 0 and t.pushed()
+
+
+# ------------------------------------------------------------------ the boot gate
+
+
+def boot(profile: str, **keys: object) -> dict[str, str]:
+    """pyproject.toml with `boot = profile` and the boot-* keys (`boot_env` is `boot-env`)."""
+    body = f"boot = {json.dumps(profile)}\n"
+    body += "".join(f"{k.replace('_', '-')} = {json.dumps(v)}\n" for k, v in keys.items())
+    return settings(body)
+
+
+def run_boot(
+    t: FakeTools,
+    profile: str,
+    *,
+    tree: dict[str, str] | None = None,
+    **keys: object,
+) -> int:
+    files = {**boot(profile, **keys), **(tree or {})}
+    return go(t, QUAY_PARENT, files=files)[0]
+
+
+CONFINED = ["--cap-drop=all", "--security-opt=no-new-privileges", "--network=none"]
+
+
+def boot_refused(profile: str, **keys: object) -> str:
+    t = FakeTools()
+    msg = refused(t, QUAY_PARENT, files=boot(profile, **keys))
+    assert not t.argvs, "something ran before the settings were refused"
+    return msg
+
+
+def test_boot_absent_is_no_gate() -> None:
+    t = FakeTools()
+    assert go(t, QUAY_PARENT)[0] == 0
+    assert not t.conversed and not t.boot_calls() and t.pushed()
+
+
+def test_boot_mcp_passes_and_pushes() -> None:
+    t = FakeTools()
+    assert run_boot(t, "mcp") == 0 and t.pushed()
+    argv, msgs, _ = t.conversed[0]
+    assert [m.get("method") for m in msgs] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+    ]
+    assert t.argvs.index(argv) < t.argvs.index(next(a for a in t.argvs if a[4:5] == ["push"]))
+
+
+def test_boot_mcp_argv_carries_env_run_args_and_cmd() -> None:
+    t = FakeTools()
+    keys = {
+        "boot_env": "A=1\n\nB=two words\n",
+        "boot_run_args": "--read-only -e C=3 --tmpfs /run",
+        "boot_cmd": "serve --stdio",
+        "boot_timeout": 30,
+    }
+    assert run_boot(t, "mcp", **keys) == 0
+    argv, _, seen = t.conversed[0]
+    i = argv.index(TAG)
+    assert argv[4:10] == ["run", "--rm", "-i", "--name", BOOT, "--pull=never"]
+    assert argv[10:13] == CONFINED
+    assert argv[13:i] == [
+        *["--env", "A=1", "--env", "B=two words"],
+        *["--read-only", "-e", "C=3", "--tmpfs", "/run"],
+    ]
+    assert argv[i + 1 :] == ["serve", "--stdio"]
+    assert seen["timeout"] == keys["boot_timeout"]
+    assert "QUAY_PASSWORD" not in seen["env"], "the boot client was handed a secret"
+
+
+def test_boot_mcp_findings_push_nothing() -> None:
+    for replies, why in (
+        ({}, ""),
+        ({1: {"error": {"code": -32600}}, 2: TOOLS_OK}, ""),
+        ({1: INIT_OK, 2: {"result": {"tools": []}}}, ""),
+        ({1: INIT_OK}, ""),
+        ({1: INIT_OK, 2: TOOLS_OK}, "no reply to tools/list within 180s"),
+    ):
+        t = FakeTools()
+        t.replies, t.why = replies, why
+        rc, result = go(t, QUAY_PARENT, files=boot("mcp"))
+        assert rc == 1 and result is None and not t.pushed(), (replies, why)
+
+
+def test_boot_mcp_http_sidecar_joins_the_servers_namespace() -> None:
+    t = FakeTools()
+    keys = {"boot_port": 9000, "boot_path": "/rpc", "boot_timeout": 60, "boot_cmd": "serve"}
+    assert run_boot(t, "mcp-http", **keys) == 0 and t.pushed()
+    start = t.boot_start()
+    assert start[4:] == ["run", "-d", "--name", BOOT, "--pull=never", *CONFINED, TAG, "serve"]
+    client = next(a for a in t.argvs if "python3" in a)
+    assert client[client.index("--network") + 1] == f"container:{BOOT}"
+    assert client[client.index("--entrypoint") + 1] == "python3"
+    assert client[client.index("python3") + 1] == "imgid", "the client is not the job's image"
+    assert TAG not in client
+    assert client[-4:-1] == ["9000", "/rpc", "60"]
+    assert json.loads(client[-1])["method"] == "initialize"
+    assert "--cap-drop=all" in client and "--security-opt=no-new-privileges" in client
+    assert t.argvs[-1][4:] == ["volume", "rm", "-f", "sdlc-cache-7-1"]
+    assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_mcp_http_defaults_to_8080_mcp() -> None:
+    t = FakeTools()
+    assert run_boot(t, "mcp-http") == 0
+    client = next(a for a in t.argvs if "python3" in a)
+    assert client[-4:-1] == ["8080", "/mcp", str(_boot.TIMEOUT)]
+
+
+def test_boot_mcp_http_findings_push_nothing() -> None:
+    for out in (
+        json.dumps({"error": "127.0.0.1:8080/mcp never answered initialize"}),
+        json.dumps({"init": INIT_OK, "tools": {"result": {"tools": []}}}),
+        json.dumps({"init": None, "tools": None}),
+    ):
+        t = FakeTools()
+        t.http_out = out
+        assert run_boot(t, "mcp-http") == 1 and not t.pushed(), out
+        assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+        assert ["logs", BOOT] in t.boot_calls(), "a failed boot showed no log"
+
+
+def test_boot_mcp_http_client_that_cannot_run_is_refused() -> None:
+    for rc, out in ((1, ""), (0, "not json"), (0, "[1]")):
+        t = FakeTools()
+        t.http_rc, t.http_out = rc, out
+        assert "could not run" in refused(t, QUAY_PARENT, files=boot("mcp-http")), (rc, out)
+        assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_systemd_passes_with_every_unit_active() -> None:
+    t = FakeTools()
+    assert run_boot(t, "systemd", boot_units="a.service\nb@x.service") == 0 and t.pushed()
+    start = t.boot_start()
+    assert start[4:] == ["run", "-d", "--name", BOOT, "--pull=never", *_boot.SYSTEMD_CONFINED, TAG]
+    active = [a[-1] for a in t.argvs if a[4:5] == ["exec"] and "is-active" in a]
+    assert active == ["a.service", "b@x.service"]
+
+
+def test_boot_systemd_inactive_unit_is_a_finding() -> None:
+    t = FakeTools()
+    t.inactive = {"b.service"}
+    rc, result = go(t, QUAY_PARENT, files=boot("systemd", boot_units="a.service b.service"))
+    assert rc == 1 and result is None and not t.pushed()
+    assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_systemd_not_running_is_a_finding() -> None:
+    for state in ("degraded", "starting", "", "maintenance"):
+        t = FakeTools()
+        t.systemd = state
+        assert run_boot(t, "systemd", boot_timeout=4) == 1 and not t.pushed(), state
+        assert any("--failed" in a for a in t.argvs), "the failed units were not asked for"
+
+
+def test_boot_systemd_polls_until_settled() -> None:
+    t = FakeTools()
+    t.systemd_first = ["starting", "starting"]
+    assert run_boot(t, "systemd") == 0 and t.pushed()
+    assert not t.systemd_first, "it stopped polling before systemd settled"
+
+
+def test_boot_healthcheck_passes() -> None:
+    t = FakeTools()
+    assert run_boot(t, "healthcheck") == 0 and t.pushed()
+    assert ["healthcheck", "run", BOOT] in t.boot_calls()
+
+
+def test_boot_healthcheck_undeclared_is_a_finding() -> None:
+    for declared in ("", "null", "<nil>", "{}"):
+        t = FakeTools()
+        t.healthcheck = declared
+        assert run_boot(t, "healthcheck") == 1 and not t.pushed(), declared
+        assert not t.boot_calls(), "a container was started for an image with no HEALTHCHECK"
+
+
+def test_boot_healthcheck_unhealthy_is_a_finding() -> None:
+    t = FakeTools()
+    t.health_rc = 1
+    assert run_boot(t, "healthcheck", boot_timeout=6) == 1 and not t.pushed()
+    assert sum(a[4:5] == ["healthcheck"] for a in t.argvs) == len(range(0, 6, 2))
+    assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_container_podman_cannot_create_is_refused() -> None:
+    """125 is podman's own failure: nothing in the image ran, so it is no verdict."""
+    for profile in ("systemd", "healthcheck", "mcp-http"):
+        t = FakeTools()
+        t.boot_rc = 125
+        assert "exit 125" in refused(t, QUAY_PARENT, files=boot(profile)), profile
+        assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+    t = FakeTools()
+    t.why, t.server_rc = "the server exited before answering initialize", 125
+    assert "exit 125" in refused(t, QUAY_PARENT, files=boot("mcp"))
+    assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def test_boot_container_that_cannot_start_is_a_finding() -> None:
+    """126/127 come from inside the container: the image's entrypoint is the finding."""
+    for profile in ("systemd", "healthcheck"):
+        for rc in (1, 126, 127):
+            t = FakeTools()
+            t.boot_rc = rc
+            assert run_boot(t, profile) == 1 and not t.pushed(), (profile, rc)
+            assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+    t = FakeTools()
+    t.why, t.server_rc = "the server exited before answering initialize", 127
+    assert run_boot(t, "mcp") == 1 and not t.pushed()
+
+
+def test_boot_mcp_container_is_removed_on_every_path() -> None:
+    """`run --rm -i` leaks its container when the client is killed; it is named and removed."""
+    for why in ("", "no reply to initialize within 1s"):
+        t = FakeTools()
+        t.why = why
+        run_boot(t, "mcp")
+        assert t.boot_calls()[-1] == ["rm", "-f", "-v", BOOT], why
+
+
+def test_boot_containers_are_confined() -> None:
+    for profile in ("healthcheck", "mcp-http"):
+        t = FakeTools()
+        assert run_boot(t, profile) == 0
+        start = t.boot_start()
+        assert start[start.index("--pull=never") + 1 :][:3] == CONFINED, profile
+    t = FakeTools()
+    assert run_boot(t, "systemd", boot_units="httpd.service") == 0
+    words = t.boot_start()[t.boot_start().index("--pull=never") + 1 : t.boot_start().index(TAG)]
+    assert words[0] == "--cap-drop=all" and "--network=none" in words
+    assert "--systemd=always" in words
+    added = {w.removeprefix("--cap-add=") for w in words if w.startswith("--cap-add=")}
+    assert added == set(_boot.SYSTEMD_CAPS) and "SYS_ADMIN" not in added
+    assert not any(w.startswith("--security-opt") or w == "--privileged" for w in words)
+
+
+def test_boot_execs_and_the_http_client_are_bounded() -> None:
+    t = FakeTools()
+    assert run_boot(t, "systemd", boot_units="a.service") == 0
+    execs = [n for a, n in zip(t.argvs, t.timeouts, strict=True) if a[4:5] == ["exec"]]
+    assert execs and all(n == _boot.EXEC_TIMEOUT for n in execs)
+    t = FakeTools()
+    assert run_boot(t, "mcp-http", boot_timeout=40) == 0
+    client = [n for a, n in zip(t.argvs, t.timeouts, strict=True) if "python3" in a]
+    assert client == [40 + _boot.GRACE]
+    t = FakeTools()
+    t.http_rc = 124  # what Tools.run reports for a client it stopped
+    assert "exit 124" in refused(t, QUAY_PARENT, files=boot("mcp-http"))
+
+
+def test_boot_mcp_http_client_is_named_and_removed_before_the_server() -> None:
+    """The client holds the server's namespace: removed first, even when it timed out."""
+    for http_rc in (0, 124):
+        t = FakeTools()
+        t.http_rc = http_rc
+        go_or_refused = refused if http_rc else go
+        go_or_refused(t, QUAY_PARENT, files=boot("mcp-http"))
+        client = next(a for a in t.argvs if "python3" in a)
+        assert client[client.index("--name") + 1] == f"{BOOT}-client"
+        removed = [a[-1] for a in t.boot_calls() if a[:3] == ["rm", "-f", "-v"]]
+        assert removed == [f"{BOOT}-client", BOOT], (http_rc, removed)
+
+
+def test_boot_failed_rm_is_logged_not_hidden() -> None:
+    t = FakeTools()
+    t.rm_rc = {BOOT: 125}
+    assert run_boot(t, "healthcheck") == 0
+    assert f"could not remove {BOOT} (exit 125)" in t.log
+    assert "dependent containers" in t.log
+
+
+def test_boot_engine_failure_inside_a_check_is_refused() -> None:
+    """125 from exec or healthcheck under a live container is podman's failure: a 2."""
+    for profile in ("systemd", "healthcheck"):
+        t = FakeTools()
+        t.exec_rc = t.health_rc = 125
+        assert "exit 125" in refused(t, QUAY_PARENT, files=boot(profile)), profile
+        assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+        t = FakeTools()  # the engine is unreachable: even inspect fails
+        t.exec_rc = t.health_rc = 125
+        t.boot_inspect_rc = 125
+        assert "cannot inspect" in refused(t, QUAY_PARENT, files=boot(profile)), profile
+    t = FakeTools()  # the image's HEALTHCHECK cannot even be read
+    t.image_inspect_rc = 125
+    assert "cannot inspect" in refused(t, QUAY_PARENT, files=boot("healthcheck"))
+    assert not t.boot_calls(), "a container was started on an image podman could not read"
+
+
+def test_boot_hung_check_asks_the_engine() -> None:
+    """A check that timed out: a 2 when the engine cannot answer, else still judged."""
+    for profile in ("systemd", "healthcheck"):
+        t = FakeTools()
+        t.exec_rc = t.health_rc = 124
+        t.boot_inspect_rc = 125
+        assert "cannot inspect" in refused(t, QUAY_PARENT, files=boot(profile)), profile
+        t = FakeTools()
+        t.exec_rc = t.health_rc = 124
+        assert run_boot(t, profile) == 1 and not t.pushed(), profile
+        t = FakeTools()  # it hung because the container died: that is the finding
+        t.exec_rc = t.health_rc = 124
+        t.boot_running = "false"
+        assert run_boot(t, profile) == 1 and "the container exited" in t.log, profile
+
+
+def test_boot_container_that_exits_during_a_check_is_a_finding() -> None:
+    """125 because the container is gone: the image died under test, a verdict."""
+    for profile in ("systemd", "healthcheck"):
+        t = FakeTools()
+        t.exec_rc = t.health_rc = 125
+        t.boot_running = "false"
+        assert run_boot(t, profile) == 1 and not t.pushed(), profile
+
+
+def test_boot_none_needs_its_reason() -> None:
+    assert "boot-none-reason" in boot_refused("none")
+    assert "boot-none-reason" in boot_refused("none", boot_none_reason="  ")
+    t = FakeTools()
+    assert run_boot(t, "none", boot_none_reason="a library, nothing to run") == 0
+    assert t.pushed() and not t.conversed and not t.boot_calls()
+
+
+def test_boot_command_needs_boot_command_and_is_not_run() -> None:
+    assert "boot-command" in boot_refused("command")
+    assert "boot-command" in boot_refused("command", boot_command=" ")
+    t = FakeTools()
+    assert run_boot(t, "command", boot_command="./test.sh") == 0
+    assert t.pushed() and not t.conversed and not t.boot_calls()
+    assert not any("./test.sh" in w for a in t.argvs for w in a), "the command was run"
+
+
+def test_boot_command_prints_not_enforced() -> None:
+    t = FakeTools()
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "ws"
+        ws.mkdir()
+        (ws / "Containerfile").write_text(QUAY_PARENT)
+        (ws / "pyproject.toml").write_text(boot("command", boot_command="x")["pyproject.toml"])
+        env = {
+            "GITHUB_WORKSPACE": str(ws),
+            "GITHUB_OUTPUT": str(Path(tmp) / "out"),
+            "GITHUB_REPOSITORY": REPO,
+            "GITHUB_SHA": SHA,
+            "GITHUB_RUN_ID": "7",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_REF": f"{REPO}/.github/workflows/ci.yml@refs/heads/main",
+            "HOSTNAME": "cid",
+            "RUNNER_TEMP": tmp,
+            "QUAY_USERNAME": "robot",
+            "QUAY_PASSWORD": "pw",
+        }
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = image.run("push", {}, env, tools=t)
+    assert rc == 0 and "NOT ENFORCED" in out.getvalue(), out.getvalue()
+
+
+def test_boot_unknown_profile_refused() -> None:
+    assert "boot must be one of" in boot_refused("shell")
+    assert "boot must be one of" in boot_refused("MCP")
+
+
+def test_boot_keys_without_boot_refused() -> None:
+    for body in ('boot-env = "A=1"\n', "boot-port = 80\n", 'boot-none-reason = "x"\n'):
+        t = FakeTools()
+        msg = refused(t, QUAY_PARENT, files=settings(body))
+        assert "no boot profile" in msg and body.split()[0] in msg, msg
+        assert not t.argvs
+
+
+def test_boot_bad_values_refused() -> None:
+    for keys, said in (
+        ({"boot_env": "NOEQUALS"}, "boot-env"),
+        ({"boot_env": "1A=b"}, "boot-env"),
+        ({"boot_env": "A-B=c"}, "boot-env"),
+        ({"boot_env": 5}, "boot-env must be a string"),
+        ({"boot_timeout": 0}, "boot-timeout"),
+        ({"boot_timeout": -5}, "boot-timeout"),
+        ({"boot_timeout": _boot.TIMEOUT_MAX + 1}, "boot-timeout"),
+        ({"boot_timeout": True}, "boot-timeout"),
+        ({"boot_timeout": "30"}, "boot-timeout"),
+        ({"boot_timeout": 1.5}, "boot-timeout"),
+        ({"boot_port": 0}, "boot-port"),
+        ({"boot_port": 65536}, "boot-port"),
+        ({"boot_port": True}, "boot-port"),
+        ({"boot_path": "mcp"}, "boot-path"),
+        ({"boot_path": "/a b"}, "boot-path"),
+        ({"boot_units": "-x.service"}, "boot-units"),
+        ({"boot_units": "a;b"}, "boot-units"),
+        ({"boot_cmd": "'unclosed"}, "does not split"),
+    ):
+        assert said in boot_refused("mcp", **keys), keys
+
+
+def test_boot_limits_are_accepted() -> None:
+    keys = {"boot_timeout": _boot.TIMEOUT_MAX, "boot_port": 65535, "boot_path": "/"}
+    assert run_boot(FakeTools(), "mcp-http", **keys) == 0
+    assert run_boot(FakeTools(), "mcp-http", boot_timeout=1, boot_port=1) == 0
+
+
+def test_boot_run_args_allowed_are_accepted() -> None:
+    for args in (
+        "--read-only",
+        "--tmpfs /run",
+        "--tmpfs=/run",
+        "-e A=b --env C=d --env=E=f",
+        "-u 1000:1000 --user app -w /app --workdir=/srv --shm-size 64m",
+        "--entrypoint /bin/sh",
+        "-v ./tests/image/home:/app/.openclaw:O",
+        "--volume ./x:/y:ro",
+    ):
+        t = FakeTools()
+        tree = {"tests/image/home/config.json": "{}", "x": ""}
+        assert run_boot(t, "mcp", boot_run_args=args, tree=tree) == 0, args
+
+
+def test_boot_run_args_tmpfs_with_options_is_accepted() -> None:
+    for args in (
+        "--tmpfs /tmp:rw,nosuid,size=256m",
+        "--tmpfs=/tmp:rw,nosuid,size=256m",
+        "--tmpfs /data:mode=1777",
+    ):
+        assert run_boot(FakeTools(), "mcp", boot_run_args=args) == 0, args
+
+
+def test_boot_run_args_repo_volumes_are_rewritten_to_the_host_path() -> None:
+    t = FakeTools()
+    args = "-v ./tests/image/home:/app/.openclaw:O --volume=./x:/y:ro --read-only"
+    tree = {"tests/image/home/config.json": "{}", "x/f": ""}
+    assert run_boot(t, "healthcheck", boot_run_args=args, tree=tree) == 0
+    start = t.boot_start()
+    assert start[start.index("--pull=never") + 4 : start.index(TAG)] == [
+        "-v",
+        f"{HOST}/tests/image/home:/app/.openclaw:O",
+        f"--volume={HOST}/x:/y:ro",
+        "--read-only",
+    ]
+    t = FakeTools()
+    assert run_boot(t, "mcp", boot_run_args="-v ./x:/y:ro", tree={"x": ""}) == 0
+    argv = t.conversed[0][0]
+    assert argv[argv.index("-v") + 1] == f"{HOST}/x:/y:ro"
+    t = FakeTools()  # only a volume's source is the checkout's: other words stay
+    args = "--entrypoint ./x -e P=./x -v ./x:/y:ro"
+    assert run_boot(t, "mcp", boot_run_args=args, tree={"x": ""}) == 0
+    argv = t.conversed[0][0]
+    assert argv[argv.index("--entrypoint") + 1] == "./x"
+    assert argv[argv.index("-e") + 1] == "P=./x"
+
+
+def test_boot_volume_through_a_committed_symlink_is_refused() -> None:
+    """`link -> /` passes every string check; the walk on disk is what refuses it."""
+    for links, args in (
+        ({"link": Link("/")}, "-v ./link:/h:ro"),
+        ({"link": Link("/")}, "-v ./link/etc:/h:ro"),
+        ({"fixtures/link": Link("/etc")}, "--volume=./fixtures/link:/h:O"),
+        ({"inner": Link("x")}, "-v ./inner:/h:ro"),  # even one that stays inside
+        ({"d/up": Link("..")}, "-v ./d/up/x:/h:ro"),
+    ):
+        t = FakeTools()
+        files = {**boot("healthcheck", boot_run_args=args), "x": "", **links}
+        msg = refused(t, QUAY_PARENT, files=files)
+        assert "symlink" in msg, (args, msg)
+        assert not t.boot_calls(), f"{args} started a container"
+    t = FakeTools()
+    msg = refused(t, QUAY_PARENT, files=boot("healthcheck", boot_run_args="-v ./absent:/h:ro"))
+    assert "does not exist" in msg
+
+
+def test_boot_run_args_that_reach_the_host_are_refused() -> None:
+    for args in (
+        "--privileged",
+        "--network host",
+        "--network=host",
+        "--net host",
+        "--device /dev/fuse",
+        "--pid=host",
+        "--cap-add=all",
+        "--security-opt seccomp=unconfined",
+        "-v /:/host:ro",
+        "-v /etc:/etc:ro",
+        "-v ./../x:/y:ro",
+        "-v ./x/../../y:/y:ro",
+        "-v ./x:/y",
+        "-v ./x:/y:rw",
+        "-v ./x:/y:ro,z",
+        "-v ./x:/y:O,Z",
+        "-v ./x:/y:z",
+        "--volume=./x:/y",
+        "-v named:/y:ro",
+        "--mount type=bind,source=/,destination=/h",
+        "--tmpfs relative",
+        "-w relative",
+        "-e",
+        "-e NOEQUALS",
+        "-e 1A=b",
+        "--read-only=false",
+        "--user",
+        "stray",
+        "--rm",
+    ):
+        t = FakeTools()
+        msg = refused(t, QUAY_PARENT, files=boot("mcp", boot_run_args=args))
+        assert "boot-run-args" in msg, (args, msg)
+        assert not t.argvs, f"{args!r} ran something before it was refused"
+        assert not t.conversed
+
+
+def test_boot_run_args_refused_for_every_profile() -> None:
+    for profile in _boot.PROFILES:
+        keys = {"boot_run_args": "--privileged"}
+        if profile == "none":
+            keys["boot_none_reason"] = "x"
+        if profile == "command":
+            keys["boot_command"] = "x"
+        assert "boot-run-args" in boot_refused(profile, **keys), profile
+
+
+def test_build_args_become_build_arg_words() -> None:
+    t = FakeTools()
+    go(t, QUAY_PARENT, files=settings('build-args = "A=1\\n\\n  B=two words  \\n"\n'))
+    argv = t.build_argv()
+    pairs = [argv[i + 1] for i, w in enumerate(argv) if w == "--build-arg"]
+    assert pairs == ["A=1", "B=two words"]
+
+
+def test_build_args_bad_line_refused() -> None:
+    for body in ('build-args = "NOEQUALS"\n', 'build-args = "A=1\\n1B=2"\n', "build-args = 5\n"):
+        t = FakeTools()
+        msg = refused(t, QUAY_PARENT, files=settings(body))
+        assert "build-args" in msg and not t.argvs, (body, msg)
 
 
 def main() -> int:

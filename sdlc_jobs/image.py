@@ -21,6 +21,8 @@ otherwise, because podman's `--from` only replaces the FIRST stage's FROM.
 The gates are the ones `sdlc ci` plans for this repo. `sdlc plan ci` is asked for the
 build argv (so `[tool.sdlc.ci.container-build]` settings still hold) and for smoke, scan
 and bootc-lint, and they are run here through the socket as the launcher runs them.
+Then the boot gate, `[tool.sdlc.image] boot`, as container-release ran it
+(sdlc_jobs/_boot.py).
 Container-release pushed before it gated; this job gates the local image and pushes only
 what passed, so no ungated digest exists in the registry.
 
@@ -40,6 +42,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sdlc_jobs._boot import Boot, boot_gate, boot_settings
 from sdlc_jobs._core import (
     CLEAN,
     DIGEST,
@@ -47,6 +50,8 @@ from sdlc_jobs._core import (
     FOUND,
     FROM_AS_WORDS,
     IMAGE_NOT_ENFORCED,
+    PODMAN_CANNOT_CREATE,
+    RunOptions,
     Tools,
     cannot,
     expand_build_vars,
@@ -70,6 +75,7 @@ RH_KEY = "/etc/pki/sigstore/SIGSTORE-redhat-release3"
 RH_REKOR = "/etc/pki/sigstore/REKOR-signing-key"
 US = "\x1f"  # the plan's argv separator
 SHA = re.compile(r"[0-9a-f]{40}")
+BUILD_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=[^\x00-\x1f]*")
 GATES = ("container-smoke", "container-scan", "bootc-lint")
 SECRETS = (
     "QUAY_USERNAME",
@@ -98,7 +104,6 @@ RUN_VALUED = (
 EVENTS = ("push", "schedule", "workflow_dispatch")  # what the workflow's `if:` lets in
 PLAN_FIELDS = 4  # name, stage, mode, argv
 STATE_FIELDS = 3  # running, exit code, OOM-killed
-PODMAN_CANNOT_CREATE = 125
 HADOLINT_UNPARSED = 4  # containerfile-lint: hadolint could not parse the file
 SYSTEMD = ("/sbin/init", "/usr/sbin/init", "/lib/systemd/systemd", "/usr/lib/systemd/systemd")
 
@@ -118,13 +123,21 @@ class Job:
     image_id: str = ""
     child_env: dict[str, str] = field(default_factory=dict)
     settings: dict = field(default_factory=dict)  # [tool.sdlc.image], checked
+    boot: Boot | None = None  # its boot gate, checked; None is none asked for
 
     def run(
-        self, argv: list[str], *, input: str | None = None, stream: bool = False
+        self,
+        argv: list[str],
+        *,
+        input: str | None = None,
+        stream: bool = False,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return self.tools.run(
-            argv, input=input, env=self.child_env, cwd=str(self.root), stream=stream
-        )
+        kw: RunOptions = {"input": input, "env": self.child_env, "cwd": str(self.root)}
+        kw["stream"] = stream
+        if timeout is not None:  # only the boot gate's calls bound it
+            kw["timeout"] = timeout
+        return self.tools.run(argv, **kw)
 
     def must(self, argv: list[str], *, input: str | None = None) -> str:
         return must(self.tools, argv, input=input, env=self.child_env, cwd=str(self.root))
@@ -164,8 +177,10 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         f"sdlc-cache-{env.get('GITHUB_RUN_ID', '0')}-{env.get('GITHUB_RUN_ATTEMPT', '0')}",
     )
     job.settings = image_settings(root, repo)
+    job.boot = boot_settings(job.settings)
+    build_args(job.settings)
     for key in sorted(IMAGE_NOT_ENFORCED & set(job.settings)):
-        print(f"image: [tool.sdlc.image] {key} is not enforced yet (crunchtools/sdlc#110)")
+        print(f"image: [tool.sdlc.image] {key} is not enforced here (crunchtools/sdlc#118)")
     job.child_env = {k: v for k, v in env.items() if k not in SECRETS}
     job.child_env["REGISTRY_AUTH_FILE"] = str(job.auth)
     try:
@@ -197,6 +212,8 @@ def build_and_push(job: Job) -> int:
     for name in GATES:
         if name in plan and not run_gate(job, name, *plan[name]):
             found = True
+    if job.boot is not None and not boot_gate(job, job.boot, tag):
+        found = True
     if found:
         print("\nimage: a gate found something; nothing is pushed", flush=True)
         return FOUND
@@ -470,6 +487,8 @@ def build(
         job.settings.get("format") or ("oci" if "bootc-lint" in plan else "docker"),
     ]
     argv += ["--authfile", str(job.auth)]
+    for kv in build_args(job.settings):
+        argv += ["--build-arg", kv]
     for key, value in labels(job, parent).items():
         if value:
             argv += ["--label", f"{key}={value}"]
@@ -501,6 +520,18 @@ def build(
         print("image: the build failed", flush=True)
         cannot(f"podman build exited {proc.returncode}")
     return tag
+
+
+def build_args(settings: dict) -> list[str]:
+    """`[tool.sdlc.image] build-args`, container-release's KEY=VALUE lines; or a 2."""
+    given = settings.get("build-args", "")
+    if not isinstance(given, str):
+        cannot("[tool.sdlc.image] build-args must be a string of KEY=VALUE lines")
+    out = [kv.strip() for kv in given.splitlines() if kv.strip()]
+    for kv in out:
+        if not BUILD_ARG.fullmatch(kv):
+            cannot(f"[tool.sdlc.image] build-args line {kv.split('=')[0]!r} is not KEY=VALUE")
+    return out
 
 
 def run_gate(job: Job, name: str, mode: str, payload: str) -> bool:
