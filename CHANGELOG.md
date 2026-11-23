@@ -6,8 +6,36 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- `examples/ci.yml` is the fleet file of `docs/marketplace-free-ci.md` (a1051):
+  one workflow, no `uses:`, seven trust-level jobs each running `sdlc event` in
+  `sdlc-boot`. `tests/test_workflows.py` pins its guards (`!inputs.digest` on
+  `write`, `check`'s success before acting on its plan, the registry.redhat.io
+  secrets on `image`, sdlc's own `test` and shared jobs).
+- `scripts/convert_repo.py` writes that file and deletes every other workflow
+  whose every job `sdlc event` runs; any other workflow refuses the repo (exit 2),
+  named, for `[tool.sdlc.commands]` by hand. A PyPI publish becomes
+  `publish = "pypi"`, a `container-release.yml` call's inputs `[tool.sdlc.image]`.
+  Runner lifting, step floating and mixed workflows are gone.
+- `scripts/cutover.py` sheds signing, the weekly schedule, the release flow and
+  the Ashigaru caller; it moves `Inherits:` and the hook `rev:`, drops Dependabot,
+  removes `.gemini/` on request, and reports any `uses:` left.
+- `scripts/fleet_wave.py` refuses private repos without `--include-private`, opens
+  the pull request without auto-merge, and drops `--constitution-ref` and `--weekly`.
+- Inherits constitution v1.60.0. The pre-commit Gourmand and Gatehouse hooks float
+  (`:main`, `:latest`) with `--pull=newer`, and the Dependabot config and its
+  automerge workflow are gone (Renovate, XV). With `self.sh` naming the fetch's
+  origin, `sdlc ci` on sdlc itself passes the constitution check (#105).
+
 ### Added
 
+- `cutover.py --merge REPO --pr N`: refuses a busy repo (a person's open PR, an old
+  `ashigaru/release-*`), an unrecorded PyPI publisher swap (`--pypi-ledger`), a
+  private repo, org secrets not scoped to selected repositories, or red new checks;
+  then merges by admin bypass, moves the rulesets idempotently, drops the repo from
+  each moved org secret and updates bot PRs. `--move-rulesets` and `--check`
+  (moved secrets still readable, rulesets out of step, no `ashigaru/release-*` guard).
 - The image half of the marketplace-free CI (a1088, docs/marketplace-free-ci.md).
   The image gains podman-remote, skopeo, the docker CLI, cosign 2.6.5, syft 1.57.0,
   zizmor 1.32.0, the claude CLI 2.1.323 (auto-updater off), gh 2.104.0, and PyJWT
@@ -23,12 +51,6 @@ All notable changes to this project are documented here, following
   ci.yml, which waits in `examples/sdlc-ci.yml` until the cutover. sign runs cosign
   from a digest-pinned image and never runs the image it signs.
 
-### Changed
-
-- Inherits constitution v1.60.0. The pre-commit Gourmand and Gatehouse hooks float
-  (`:main`, `:latest`) with `--pull=newer`, and the Dependabot config and its
-  automerge workflow are gone (Renovate, XV). With `self.sh` naming the fetch's
-  origin, `sdlc ci` on sdlc itself passes the constitution check (#105).
 
 ## [0.11.1] - 2026-11-23
 

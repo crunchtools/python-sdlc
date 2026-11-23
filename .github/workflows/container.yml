@@ -161,11 +161,16 @@ jobs:
                    tests/test_pycache_prefix.py tests/test_gourmand_sidecar.py \
                    tests/test_codeql_resilience.py tests/test_convert_repo.py \
                    tests/test_cutover.py tests/test_fleet_wave.py tests/test_pip_audit_resilience.py \
-                   tests/test_mypy_traceback.py tests/test_update_tools.py; do
+                   tests/test_mypy_traceback.py tests/test_update_tools.py tests/test_workflows.py; do
             podman run --rm -v "$PWD:/src:ro,z" -w /src \
               --entrypoint /opt/constitution-venv/bin/python3 \
               "localhost/sdlc:$GITHUB_SHA" "$t"
           done
+          # sdlc's own next ci.yml, parked in examples/ until the cutover,
+          # held to the same guards the live file will be.
+          podman run --rm -v "$PWD:/src:ro,z" -w /src \
+            --entrypoint /opt/constitution-venv/bin/python3 \
+            "localhost/sdlc:$GITHUB_SHA" tests/test_workflows.py examples/sdlc-ci.yml
 
       # The container stack through the real launcher and a real podman: the
       # image mount grype scans is something only podman can prove.

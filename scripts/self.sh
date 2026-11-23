@@ -76,7 +76,7 @@ SHELLCHECK=docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6f
 IMAGE_SUITES='tests/test_plan.py tests/test_codeql_globs.py tests/test_pycache_prefix.py
   tests/test_gourmand_sidecar.py tests/test_codeql_resilience.py tests/test_convert_repo.py
   tests/test_cutover.py tests/test_fleet_wave.py tests/test_pip_audit_resilience.py
-  tests/test_mypy_traceback.py tests/test_update_tools.py'
+  tests/test_mypy_traceback.py tests/test_update_tools.py tests/test_workflows.py'
 
 # Builds the tree in $1 as sdlc and sdlc-boot, tagged $2 and $3. A run no
 # commit triggered must not reuse a cached `dnf install`, or it ships no errata.
