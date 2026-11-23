@@ -41,7 +41,7 @@ jobs:
       contains(fromJSON('["pull_request","schedule"]'), github.event_name)
       || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
-    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
+    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b7968ff9f14e0fa363ea3c25e0df4f6159abf43549653fff74eb674de060", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, security-events: write, actions: write }  # actions: the 60-day schedule keepalive
     outputs: { result: "${{ steps.e.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}" }
@@ -185,7 +185,7 @@ where a dispatch took minutes.
 
 ## The trust root: sdlc-bootstrap, `:<major>` and a minimum version
 
-The fleet file names `quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>`. That is a
+The fleet file names `quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b7968ff9f14e0fa363ea3c25e0df4f6159abf43549653fff74eb674de060`. That is a
 literal, so only a reviewed commit to `ci.yml` can change it; no variable can.
 `sdlc-bootstrap` is `bin/sdlc-bootstrap` grown into an image. It holds cosign, the
 **sdlc public key**, the major version it follows and a **minimum version**,
@@ -288,7 +288,7 @@ jobs:
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
-    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
+    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b7968ff9f14e0fa363ea3c25e0df4f6159abf43549653fff74eb674de060", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", OPENROUTER_API_KEY: "${{ secrets.OPENROUTER_API_KEY }}" }

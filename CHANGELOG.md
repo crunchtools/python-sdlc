@@ -8,6 +8,14 @@ All notable changes to this project are documented here, following
 
 ### Changed
 
+- The fleet file, the doc and sdlc's own file pin
+  `quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b796…de060`, sdlc-bootstrap
+  0.12.1, signed with sdlc's key by the bootstrap run. `cutover.py` and
+  `fleet_wave.py --apply` no longer refuse.
+- sdlc's own `.github/workflows/ci.yml` is installed, beside the old workflows
+  until the rulesets move. `test` runs on the cached runner for a same-repo PR
+  and on GitHub's for a fork. The bootstrap wiring is pinned in
+  `tests/test_workflows.py` (#128).
 - Every fleet secret stays an org secret: the fleet file names no `ai`,
   `ashigaru`, `registry` or `cosign-signing` environment, so no repo needs
   any setup to build, sign or review. The control against a branch workflow

@@ -1,10 +1,6 @@
-# NOT LIVE YET. This is crunchtools/sdlc's own .github/workflows/ci.yml as
-# docs/marketplace-free-ci.md specifies it, kept here until the cutover moves
-# it into place and deletes the workflows it replaces. Running it beside them
-# now would double every Gatehouse review and Ashigaru run, and its ai, write
-# and gate jobs name an sdlc-bootstrap digest that only exists after the first
-# release this file publishes. scripts/self.sh is the code its test, check,
-# image and sign jobs run, and it is tested today (tests/test_self.sh).
+# crunchtools/sdlc's .github/workflows/ci.yml is this file from the next
+# comment on, byte for byte (tests/test_workflows.py reads both). Until the
+# old workflows go, it runs beside them.
 #
 # crunchtools/sdlc's own ci.yml: the trust root, and the one exception to
 # "every repo, byte for byte". A pull request's sdlc code runs only in `test`,
@@ -32,7 +28,7 @@ jobs:
   test:  # the PR's own sdlc code, and nothing to steal: read-only contents, no secret, GitHub's machine
     name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && vars.CACHED_RUNNER_LABEL || 'ubuntu-latest' }}  # a fork's PR on GitHub's machine
     permissions: { contents: read }
     env: { MODE: test }
     steps:  # sdlc is public: the fetch needs no token and persists none
@@ -51,7 +47,7 @@ jobs:
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
-    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
+    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b7968ff9f14e0fa363ea3c25e0df4f6159abf43549653fff74eb674de060", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", OPENROUTER_API_KEY: "${{ secrets.OPENROUTER_API_KEY }}" }

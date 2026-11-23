@@ -33,6 +33,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -341,12 +342,15 @@ check(
 
 # The fleet file names sdlc-bootstrap by a placeholder until prerequisite 4, and
 # every mode refuses that (pinned below); the API tests run on a pinned copy.
-UNPINNED = cut.FLEET_FILE
+# The fleet file as it was before sdlc-bootstrap's first release, and pinned to
+# a stand-in digest, whatever the real file pins today.
+PLACEHOLDER = "sdlc-bootstrap@sha256:<digest>"
+FLEET_TEXT = re.sub(r"sdlc-bootstrap@sha256:[0-9a-f]{64}", PLACEHOLDER, cut.FLEET_FILE.read_text())
 PINNED_DIR = Path(tempfile.mkdtemp())
+UNPINNED = PINNED_DIR / "unpinned.yml"
+UNPINNED.write_text(FLEET_TEXT)
 (PINNED_DIR / "ci.yml").write_text(
-    UNPINNED.read_text().replace(
-        "sdlc-bootstrap@sha256:<digest>", "sdlc-bootstrap@sha256:" + "a" * 64
-    )
+    FLEET_TEXT.replace(PLACEHOLDER, "sdlc-bootstrap@sha256:" + "a" * 64)
 )
 cut.FLEET_FILE = PINNED_DIR / "ci.yml"
 FLEET = cut.FLEET_FILE.read_bytes()
