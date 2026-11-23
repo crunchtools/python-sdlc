@@ -307,3 +307,15 @@ justification = """
   mount point inside a fresh container with its own private tmpfs, and \
   HOME=/tmp points at it. The host's /tmp is never touched.
 """
+
+[[exceptions]]
+check = "CQ013-hardcoded_years"
+path = "sdlc_jobs/_boot.py"
+classification = "by_design"
+justification = """
+  MCP_PROTOCOL = "2025-06-18" is the Model Context Protocol revision the boot \
+  gate asks for in `initialize`, an identifier the spec spells as a date, not \
+  a year that goes stale. It is the revision container-release's gate sent, \
+  so a converted repo is judged by the same handshake; moving it is a protocol \
+  change to make on purpose, never a date to bump.
+"""

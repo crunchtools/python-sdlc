@@ -19,11 +19,12 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Unpack
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sdlc_jobs import _boot, image
-from sdlc_jobs._core import CannotRunError, Tools
+from sdlc_jobs._core import CannotRunError, RunOptions, Tools
 
 REPO = "crunchtools/demo"
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -37,6 +38,12 @@ BOOT = "sdlc-boot-sdlc-cache-7-1"  # the boot container: sdlc-boot-<the job's vo
 _boot.sleep = lambda _seconds: None  # the boot gate polls; the tests do not wait
 INIT_OK = {"result": {"serverInfo": {"name": "demo", "version": "1"}}}
 TOOLS_OK = {"result": {"tools": [{"name": "t"}]}}
+
+
+class Link(str):
+    """A `files` value that go() commits as a symlink to it, not as a file's text."""
+
+    __slots__ = ()
 
 
 def cp(rc: int = 0, out: str = "", err: str = "") -> subprocess.CompletedProcess[str]:
@@ -112,6 +119,7 @@ class FakeTools(Tools):
         self.healthcheck = '{"Test": ["CMD", "true"]}'  # the image's .Config.Healthcheck
         self.health_rc = 0  # what `podman healthcheck run` exits
         self.systemd = "running"  # what `systemctl is-system-running` prints
+        self.systemd_first: list[str] = []  # printed before `systemd`, one per call
         self.inactive: set[str] = set()  # units `systemctl is-active` says are not
         self.http_rc = 0  # what the mcp-http client container exits
         self.http_out = json.dumps({"init": INIT_OK, "tools": TOOLS_OK})
@@ -122,21 +130,13 @@ class FakeTools(Tools):
         self.image_inspect_rc = 0  # what `podman image inspect` exits
         self.log = ""  # what the job printed, kept by go()
 
-    def run(  # noqa: PLR0913 -- keyword-only, as the code under test
-        self,
-        argv: list[str],
-        *,
-        input: str | None = None,
-        env: Mapping[str, str] | None = None,
-        cwd: str | None = None,
-        stream: bool = False,
-        timeout: float | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        del stream  # captured or streamed, the fake answers the same
+    def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
+        # captured or streamed, the fake answers the same
         self.argvs.append(argv)
-        self.timeouts.append(timeout)
-        self.stdin.append(input)
-        self.envs.append(dict(env or {}))
+        self.timeouts.append(kw.get("timeout"))
+        self.stdin.append(kw.get("input"))
+        self.envs.append(dict(kw.get("env") or {}))
+        cwd = kw.get("cwd")
         if argv[0] == "skopeo":
             return self.skopeo(argv)
         if argv[0] == "cosign":
@@ -202,7 +202,7 @@ class FakeTools(Tools):
             case "exec" if self.exec_rc:
                 rc = self.exec_rc
             case "exec" if sub[3:] == ["is-system-running"]:
-                out = self.systemd + "\n"
+                out = (self.systemd_first.pop(0) if self.systemd_first else self.systemd) + "\n"
             case "exec" if sub[3:4] == ["is-active"]:
                 out = "inactive\n" if sub[4] in self.inactive else "active\n"
             case "healthcheck":
@@ -245,14 +245,13 @@ class FakeTools(Tools):
         return next(a for a in self.argvs if a[4:5] == ["build"])
 
 
-def go(  # noqa: PLR0913 -- keyword-only, as the code under test
+def go(
     tools: FakeTools,
     containerfile: str,
     *,
     event: str = "push",
     extra: dict[str, str] | None = None,
     files: dict[str, str] | None = None,
-    links: dict[str, str] | None = None,
 ) -> tuple[int, dict | None]:
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
@@ -260,10 +259,10 @@ def go(  # noqa: PLR0913 -- keyword-only, as the code under test
         (ws / "Containerfile").write_text(containerfile)
         for name, text in (files or {}).items():
             (ws / name).parent.mkdir(parents=True, exist_ok=True)
-            (ws / name).write_text(text)
-        for name, target in (links or {}).items():  # a symlink committed to the repo
-            (ws / name).parent.mkdir(parents=True, exist_ok=True)
-            (ws / name).symlink_to(target)
+            if isinstance(text, Link):  # a symlink committed to the repo
+                (ws / name).symlink_to(text)
+            else:
+                (ws / name).write_text(text)
         out = Path(tmp) / "out"
         env = {
             "GITHUB_WORKSPACE": str(ws),
@@ -294,18 +293,17 @@ QUAY_PARENT = "FROM quay.io/crunchtools/ubi10-core:latest\nRUN true\n"
 RH_PARENT = "FROM registry.redhat.io/ubi10/ubi-minimal:10.1\nRUN true\n"
 
 
-def refused(  # noqa: PLR0913 -- keyword-only, as the code under test
+def refused(
     tools: FakeTools,
     containerfile: str,
     *,
     event: str = "push",
     files: dict[str, str] | None = None,
     extra: dict[str, str] | None = None,
-    links: dict[str, str] | None = None,
 ) -> str:
     """The message of the refusal (exit 2) `image.run` raises, or a failed assertion."""
     try:
-        go(tools, containerfile, event=event, files=files, extra=extra, links=links)
+        go(tools, containerfile, event=event, files=files, extra=extra)
     except CannotRunError as exc:
         assert not tools.pushed(), "something was pushed after a refusal"
         return str(exc)
@@ -653,17 +651,8 @@ class SmokeTools(Tools):
         self.argvs: list[list[str]] = []
         self.config, self.start_rc, self.state = config, start_rc, state
 
-    def run(  # noqa: PLR0913 -- keyword-only, as the code under test
-        self,
-        argv: list[str],
-        *,
-        input: str | None = None,
-        env: Mapping[str, str] | None = None,
-        cwd: str | None = None,
-        stream: bool = False,
-        timeout: float | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        del input, env, cwd, stream, timeout
+    def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
+        del kw  # the smoke fake answers by argv alone
         self.argvs.append(argv)
         match argv[1]:
             case "image":
@@ -829,11 +818,10 @@ def run_boot(
     profile: str,
     *,
     tree: dict[str, str] | None = None,
-    links: dict[str, str] | None = None,
     **keys: object,
 ) -> int:
     files = {**boot(profile, **keys), **(tree or {})}
-    return go(t, QUAY_PARENT, files=files, links=links)[0]
+    return go(t, QUAY_PARENT, files=files)[0]
 
 
 CONFINED = ["--cap-drop=all", "--security-opt=no-new-privileges", "--network=none"]
@@ -973,16 +961,9 @@ def test_boot_systemd_not_running_is_a_finding() -> None:
 
 def test_boot_systemd_polls_until_settled() -> None:
     t = FakeTools()
-    states = iter(["starting", "starting", "running"])
-    original = t.podman
-
-    def podman(sub: list[str], cwd: str) -> subprocess.CompletedProcess[str]:
-        if sub[:1] == ["exec"] and sub[3:] == ["is-system-running"]:
-            return cp(0, next(states))
-        return original(sub, cwd)
-
-    t.podman = podman  # type: ignore[method-assign]
+    t.systemd_first = ["starting", "starting"]
     assert run_boot(t, "systemd") == 0 and t.pushed()
+    assert not t.systemd_first, "it stopped polling before systemd settled"
 
 
 def test_boot_healthcheck_passes() -> None:
@@ -1257,16 +1238,15 @@ def test_boot_run_args_repo_volumes_are_rewritten_to_the_host_path() -> None:
 def test_boot_volume_through_a_committed_symlink_is_refused() -> None:
     """`link -> /` passes every string check; the walk on disk is what refuses it."""
     for links, args in (
-        ({"link": "/"}, "-v ./link:/h:ro"),
-        ({"link": "/"}, "-v ./link/etc:/h:ro"),
-        ({"fixtures/link": "/etc"}, "--volume=./fixtures/link:/h:O"),
-        ({"inner": "x"}, "-v ./inner:/h:ro"),  # even one that stays inside
-        ({"d/up": ".."}, "-v ./d/up/x:/h:ro"),
+        ({"link": Link("/")}, "-v ./link:/h:ro"),
+        ({"link": Link("/")}, "-v ./link/etc:/h:ro"),
+        ({"fixtures/link": Link("/etc")}, "--volume=./fixtures/link:/h:O"),
+        ({"inner": Link("x")}, "-v ./inner:/h:ro"),  # even one that stays inside
+        ({"d/up": Link("..")}, "-v ./d/up/x:/h:ro"),
     ):
         t = FakeTools()
-        msg = refused(
-            t, QUAY_PARENT, files={**boot("healthcheck", boot_run_args=args), "x": ""}, links=links
-        )
+        files = {**boot("healthcheck", boot_run_args=args), "x": "", **links}
+        msg = refused(t, QUAY_PARENT, files=files)
         assert "symlink" in msg, (args, msg)
         assert not t.boot_calls(), f"{args} started a container"
     t = FakeTools()

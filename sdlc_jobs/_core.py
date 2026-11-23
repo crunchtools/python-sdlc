@@ -90,26 +90,18 @@ class Response:
 class Tools:
     """The real processes and network. Suites pass a fake with the same methods."""
 
-    def run(  # noqa: PLR0913 -- RunOptions, keyword-only
-        self,
-        argv: list[str],
-        *,
-        input: str | None = None,
-        env: Mapping[str, str] | None = None,
-        cwd: str | None = None,
-        stream: bool = False,
-        timeout: float | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+    def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
         """argv's verdict. `stream` sends its output straight to the job log instead of
         holding it, for the long runs (gates) whose output nothing parses. A process
         still running at `timeout` seconds is killed and reported as exit TIMED_OUT."""
+        env, timeout = kw.get("env"), kw.get("timeout")
         try:
             return subprocess.run(
                 argv,
-                input=input,
+                input=kw.get("input"),
                 env=None if env is None else dict(env),
-                cwd=cwd,
-                capture_output=not stream,
+                cwd=kw.get("cwd"),
+                capture_output=not kw.get("stream", False),
                 text=True,
                 check=False,
                 timeout=timeout,

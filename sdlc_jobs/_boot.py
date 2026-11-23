@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sdlc_jobs._core import PODMAN_CANNOT_CREATE, cannot, show, step
+from sdlc_jobs._core import PODMAN_CANNOT_CREATE, cannot, json_line, show, step
 
 if TYPE_CHECKING:
     from sdlc_jobs.image import Job
@@ -407,10 +407,8 @@ def boot_mcp_http(job: Job, spec: Boot, image: str) -> str:
             proc = client_run(name, client)
         finally:
             remove(job, client)
-        try:
-            got = json.loads(proc.stdout.strip().splitlines()[-1])
-        except ValueError, IndexError:
-            got = None
+        last = proc.stdout.strip().splitlines()[-1:]
+        got = json_line(last[0]) if last else None
         if proc.returncode != 0 or not isinstance(got, dict):
             show(proc)
             cannot(f"boot: the MCP HTTP client could not run (exit {proc.returncode})")
@@ -455,13 +453,13 @@ def boot_systemd(job: Job, spec: Boot, image: str) -> str:
         argv = [*job.podman, "exec", name, "systemctl", *args]
         proc = job.run(argv, timeout=EXEC_TIMEOUT)
         if exited := engine(job, proc, name):
-            raise Exited(exited)
+            raise ContainerExitedError(exited)
         return proc.stdout
 
     def check(name: str) -> str:
         try:
             return judged(name)
-        except Exited as exc:
+        except ContainerExitedError as exc:
             return str(exc)
 
     def judged(name: str) -> str:
@@ -548,8 +546,8 @@ def detached(job: Job, spec: Boot, image: str, check: Callable[[str], str], *con
         remove(job, name)
 
 
-class Exited(Exception):  # noqa: N818 -- a finding raised out of a check, not an error
-    """The container under test exited while a check was asking it something."""
+class ContainerExitedError(Exception):
+    """The container under test exited while a check was asking it something: a finding."""
 
 
 PROFILE_RUN: dict[str, Callable[[Job, Boot, str], str]] = {
