@@ -67,8 +67,11 @@ SHARED = ("ai", "write", "gate")
 # Every job that holds a secret: Exedore's uncached class while the org variable
 # names exactly it, GitHub's otherwise and for a fork's pull_request_target.
 GUARDED_RUNNER = (
-    "${{ (github.event_name != 'pull_request_target'"
-    " || github.event.pull_request.head.repo.full_name == github.repository)"
+    "${{ (github.event_name == 'issues'"
+    ' && contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'),'
+    " github.event.issue.author_association)"
+    " || github.event_name != 'issues' && (github.event_name != 'pull_request_target'"
+    " || github.event.pull_request.head.repo.full_name == github.repository))"
     " && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached'"
     " && 'crunchtools-uncached' || 'ubuntu-latest' }}"
 )
@@ -242,17 +245,26 @@ for name in ("REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"):
 check("fleet: no `uses:` anywhere", not re.search(r"^\s*-?\s*uses:", fleet_text, re.M))
 check("fleet: top-level permissions are {}", parsed.get("permissions") == {})
 for job_id, job in fleet.items():
-    holds = bool(SECRET.search(yaml.safe_dump(job)))
-    if holds:
+    if SECRET.search(yaml.safe_dump(job)):
         check(f"fleet: {job_id} holds secrets only in an environment", bool(job.get("environment")))
+    # By environment, not by secrets: pypi holds only OIDC.
+    if job.get("environment"):
         check(
             f"fleet: {job_id} shares the secret jobs' runner", job.get("runs-on") == GUARDED_RUNNER
         )
 fork = {"github.event.pull_request.head.repo.full_name": "stranger/app"}
 same_repo = {"github.event.pull_request.head.repo.full_name": "crunchtools/app"}
 uncached = {"vars.UNCACHED_RUNNER_LABEL": "crunchtools-uncached"}
+author = "github.event.issue.author_association"
 guarded_routes = (
-    ("issues", event("issues", **uncached), "crunchtools-uncached"),
+    *(
+        (f"an issue by {who}", event("issues", **uncached, **{author: who}), "crunchtools-uncached")
+        for who in ("OWNER", "MEMBER", "COLLABORATOR")
+    ),
+    *(
+        (f"an issue by {who}", event("issues", **uncached, **{author: who}), "ubuntu-latest")
+        for who in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE", "")
+    ),
     ("a push", event("push", **uncached), "crunchtools-uncached"),
     (
         "a same-repo PR's target run",
@@ -260,6 +272,7 @@ guarded_routes = (
         "crunchtools-uncached",
     ),
     ("a fork's target run", event("pull_request_target", **uncached, **fork), "ubuntu-latest"),
+    ("a deleted fork's target run", event("pull_request_target", **uncached), "ubuntu-latest"),
     (
         "a push with no runner variable",
         event("push", **{"vars.UNCACHED_RUNNER_LABEL": ""}),

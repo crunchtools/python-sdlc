@@ -46,7 +46,7 @@ jobs:
     steps: &event [{ id: e, run: sdlc event }]
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
-    runs-on: &secret "${{ (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}"
+    runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
     environment: ai
     container: *boot
     permissions: { contents: read, issues: read, pull-requests: read }
@@ -276,7 +276,7 @@ jobs:
     steps: [*fetch, { id: s, run: scripts/self.sh }]
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
-    runs-on: &secret "${{ (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}"
+    runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
     environment: ai
     container: &boot { image: "quay.io/crunchtools/sdlc-boot@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
@@ -507,9 +507,9 @@ tag ruleset stays as it is today.
 | Job | Check name | Environment and secrets | Runs on | Never holds |
 |---|---|---|---|---|
 | `check` | `sdlc / check (pull_request)` (required) | none; read token, `security-events`, the socket | pull_request (forks on `ubuntu-latest`), default-branch push, schedule, dispatch; our **uncached** runners otherwise | any secret |
-| `ai` | | `ai`: Claude and OpenRouter keys | issues, `pull_request_target`; our **uncached** runners (a fork's `pull_request_target` on `ubuntu-latest`) | an App key, a write token |
+| `ai` | | `ai`: Claude and OpenRouter keys | issues, `pull_request_target`; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | an App key, a write token |
 | `image` | | `registry`: quay, RHSM, registry.redhat.io | when `check` plans an image; our **uncached** runners | the cosign key |
-| `write` | | `ashigaru`: Ashigaru App key; queued | `pull_request_target`, issues, a `version` dispatch; otherwise only when a successful `check` plans `write` (a release merge, the weekly audit); never a rollback dispatch; our **uncached** runners (a fork's `pull_request_target` on `ubuntu-latest`) | a model |
+| `write` | | `ashigaru`: Ashigaru App key; queued | `pull_request_target`, issues, a `version` dispatch; otherwise only when a successful `check` plans `write` (a release merge, the weekly audit); never a rollback dispatch; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | a model |
 | `promote` | | `cosign-signing`: cosign key, quay; queued | after `image`, and after `write` on a release; our **uncached** runners | an App key, a build |
 | `pypi` | | `pypi`: OIDC only | a release merge that publishes to PyPI; our **uncached** runners | anything else |
 | `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; `ubuntu-latest` | any secret |
@@ -537,9 +537,16 @@ therefore starts from the same state as a GitHub VM, on a machine we run.
   commit. A repo variable can only do the same: it cannot name
   `crunchtools-cached`, or any other label, for a job that holds a secret.
 - **A fork's `pull_request_target` stays on `ubuntu-latest`.** `ai` reads the
-  fork's diff and `write` acts on it, and the gha-runner hook refuses any job
-  whose payload names a fork's head, so both route a fork to GitHub. `issues`,
-  a same-repo pull request and every default-branch event go to Exedore.
+  fork's diff and `write` acts on it, so both route a fork, or a deleted one
+  (no head repo), to GitHub. A same-repo pull request and every
+  default-branch event go to Exedore.
+- **A stranger's issue stays on `ubuntu-latest`** (Josui Prime, a1100). An
+  `issues` event goes to Exedore only when the issue's `author_association`
+  is `OWNER`, `MEMBER` or `COLLABORATOR`; anyone else's runs on GitHub.
+- **Today the barrier is the route, not a hook.** The gha-runner fork-reject
+  hook is prerequisite 5 and does not exist yet. Until it does, what keeps a
+  fork off Exedore is this `runs-on` and the org's "Require approval for all
+  external contributors" setting (prerequisite 11).
 - **`check`**, which holds nothing, keeps its own rule: our uncached runners,
   a fork's PR on `ubuntu-latest`. **`gate`** stays on `ubuntu-latest`.
 - **Never the cached class.** Its persistent layer storage lets one same-repo
@@ -745,8 +752,10 @@ Each must hold before the first canary converts, unless it says otherwise.
 5. **gha-runner rejects fork jobs** (separate gha-runner work). A job-started
    hook (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) exits non-zero when the payload's
    `pull_request.head.repo.full_name` differs from `repository.full_name`.
-   The secret jobs' `runs-on` already sends a fork's `pull_request_target` to
-   `ubuntu-latest`, so the hook is the backstop, not the route.
+   Future work: gha-runner has no such hook today. The secret jobs' `runs-on`
+   already sends a fork's `pull_request_target` to `ubuntu-latest`, and the
+   org's fork-approval setting holds fork runs, so the hook will be the
+   backstop, not the route.
 6. **Ashigaru: the wider patch filter** (ashigaru#254, which applies today),
    with the files listed under "What `write` will not push".
 7. **Gatehouse: triage ignores App-authored answers** (a separate gatehouse
