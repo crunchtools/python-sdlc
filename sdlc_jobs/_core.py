@@ -293,13 +293,7 @@ def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, s
     container, so the host path comes from inspecting this container (`HOSTNAME`
     is its id) and mapping the longest mount that holds `root`.
     """
-    me = env.get("HOSTNAME")
-    if not me:
-        cannot("HOSTNAME is not set: cannot find this container to map the workspace")
-    try:
-        doc = json.loads(must(tools, [*podman(env), "inspect", me], cwd=str(root)))[0]
-    except (ValueError, IndexError, TypeError) as exc:
-        cannot(f"podman inspect of this container did not parse: {exc}")
+    doc = inspect_self(tools, env, str(root))
     where = str(root)
     best: tuple[int, str] | None = None
     for mount in doc.get("Mounts") or []:
@@ -307,13 +301,32 @@ def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, s
         inside = bool(dest) and (where == dest or where.startswith(dest + "/"))
         if inside and (best is None or len(dest) > best[0]):
             best = (len(dest), str(mount["Source"]).rstrip("/") + where[len(dest) :])
-    # The name it was run by when that is pinned by digest (the bootstrap runs it so),
-    # which the launcher needs; else the image id, which `podman run` takes as well.
-    name = str(doc.get("ImageName") or "")
-    image = name if "@sha256:" in name else doc.get("Image")
+    image = image_of(doc)
     if best is None or not image:
         cannot(f"the workspace {root} is not a mount of this container, or its image is unknown")
-    return best[1], str(image)
+    return best[1], image
+
+
+def inspect_self(tools: Tools, env: Mapping[str, str], cwd: str | None = None) -> dict:
+    """`podman inspect` of this container, through the socket (`HOSTNAME` is its id)."""
+    me = env.get("HOSTNAME")
+    if not me:
+        cannot("HOSTNAME is not set: cannot find this container through the socket")
+    try:
+        doc = json.loads(must(tools, [*podman(env), "inspect", me], cwd=cwd))[0]
+    except (ValueError, IndexError, TypeError) as exc:
+        cannot(f"podman inspect of this container did not parse: {exc}")
+    if not isinstance(doc, dict):
+        cannot("podman inspect of this container is not an object")
+    return doc
+
+
+def image_of(doc: Mapping[str, object]) -> str:
+    """The image an inspected container runs: the name it was run by when that is
+    pinned by digest (the bootstrap runs it so), which the launcher needs; else
+    the image id, which `podman run` takes as well. "" when neither is known."""
+    name = str(doc.get("ImageName") or "")
+    return name if "@sha256:" in name else str(doc.get("Image") or "")
 
 
 def run_job(job: ModuleType, event_name: str, event: dict, env: Mapping[str, str]) -> int:

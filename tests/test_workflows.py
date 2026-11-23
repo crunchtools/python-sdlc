@@ -28,6 +28,9 @@ to review:
     crunchtools-uncached only while the variable names exactly that (never the
     cached class), a fork's pull_request_target on ubuntu-latest, and `check`
     and `gate` hold none
+  - `renovate` runs only in crunchtools/constitution, on the weekly cron or a
+    bare default-branch dispatch, within its token's hour, and holds the
+    Renovate App key alone: no GITHUB_TOKEN, `permissions: {}`
 
 sdlc's own ci.yml and `sdlc event` land in their own pull requests; until
 each exists, the checks that read it are reported as skipped, not passed.
@@ -58,6 +61,8 @@ FAILED: list[str] = []
 SKIPPED: list[str] = []
 
 CHECK_OK = "needs.check.result == 'success'"
+# A GitHub App installation token lives an hour; `renovate` must end inside it.
+TOKEN_MINUTES = 55
 # A status function in an `if:` replaces GitHub's implicit success(), which
 # is what otherwise skips a job whose needs did not all succeed.
 # The event literally, not pull_request_target or pull_request_review_comment.
@@ -322,6 +327,54 @@ routes = (
 for label, ctx, want in routes:
     got = evaluate(check_runner, ctx)
     check(f"fleet: check runs {label} on {want}", got == want, str(got))
+
+# renovate: the org's Renovate, from the constitution only, holding its App key alone.
+renovate = fleet["renovate"]
+renovate_if = str(renovate["if"])
+home = {"github.repository": "crunchtools/constitution"}
+weekly = {"github.event.schedule": "17 6 * * 1"}
+for label, ctx in {
+    "the weekly cron": event("schedule", **home, **weekly),
+    "a bare default-branch dispatch": event("workflow_dispatch", **home, **{"inputs.version": ""}),
+}.items():
+    check(f"fleet: renovate runs on {label}", bool(evaluate(renovate_if, ctx)))
+for label, ctx in {
+    "the weekly cron in another repo": event("schedule", **weekly),
+    "the 6-hourly poll": event("schedule", **home, **{"github.event.schedule": "47 */6 * * *"}),
+    "a version dispatch": event("workflow_dispatch", **home, **{"inputs.version": "1.2.3"}),
+    "a dispatch from a branch": event(
+        "workflow_dispatch", **home, **{"inputs.version": "", "github.ref": "refs/heads/topic"}
+    ),
+    "a push": event("push", **home),
+    "pull_request": event("pull_request", **home),
+    "pull_request_target": event("pull_request_target", **home),
+}.items():
+    check(f"fleet: renovate does not run on {label}", not evaluate(renovate_if, ctx))
+check(
+    "fleet: renovate's weekly run goes to the uncached class only while the variable names it",
+    evaluate(
+        GUARDED_RUNNER, event("schedule", **{"vars.UNCACHED_RUNNER_LABEL": "crunchtools-uncached"})
+    )
+    == "crunchtools-uncached"
+    and evaluate(
+        GUARDED_RUNNER, event("schedule", **{"vars.UNCACHED_RUNNER_LABEL": "crunchtools-cached"})
+    )
+    == "ubuntu-latest",
+)
+check(
+    "fleet: renovate holds the Renovate App key and nothing else",
+    renovate.get("env") == {"RENOVATE_APP_KEY": "${{ secrets.RENOVATE_APP_KEY }}"},
+    str(renovate.get("env")),
+)
+check("fleet: renovate's token is granted nothing", renovate.get("permissions") == {})
+check(
+    "fleet: renovate ends inside its token's hour",
+    0 < int(renovate.get("timeout-minutes") or 0) <= TOKEN_MINUTES,
+)
+check(
+    "fleet: renovate's key is in the renovate environment",
+    renovate.get("environment") == "renovate",
+)
 
 # gate: required, so it runs on pull_request_target and on a review comment
 # only from someone with write access, and on nothing else.

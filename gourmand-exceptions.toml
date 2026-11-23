@@ -282,3 +282,28 @@ justification = """
   identifier. They sign an image and convert a repository; there is no \
   helper to extract.
 """
+
+# A REST route, not a filesystem path.
+[[exceptions]]
+check = "CH001-absolute_paths"
+path = "sdlc_jobs/renovate.py"
+classification = "gourmand_bug"
+justification = """
+  The flagged literal is GitHub's REST route for a user by login, called through \
+  the Api object to read the Renovate App's bot id for its commit author, the \
+  same shape as every '/repos/...' route the other jobs call. The other \
+  absolute paths, /work and /tmp, are mount points inside Renovate's nested \
+  container (an anonymous volume and a private tmpfs), not paths on the \
+  runner or in this job's container.
+"""
+
+[[exceptions]]
+check = "EV001-lint_suppression"
+path = "sdlc_jobs/renovate.py"
+classification = "by_design"
+justification = """
+  `noqa: S108` on the `--tmpfs /tmp:rw,exec,size=1g,mode=1777` argument of \
+  Renovate's nested container, the same case as pypi.py's: the string is a \
+  mount point inside a fresh container with its own private tmpfs, and \
+  HOME=/tmp points at it. The host's /tmp is never touched.
+"""

@@ -4,11 +4,11 @@ Design for a1051. Nothing here is implemented: it is the target that
 `convert_repo.py` and `cutover.py` will be changed to write, and the list of
 `sdlc` internals that have to exist first.
 
-## The fleet file: 90 lines, seven jobs
+## The fleet file: 103 lines, eight jobs
 
 Every fleet repo carries exactly this `.github/workflows/ci.yml`, byte for
 byte, whatever kind of repo it is. The one exception is crunchtools/sdlc
-itself, below. The file is 90 lines without comments. It contains no `uses:`
+itself, below. The file is 103 lines without comments. It contains no `uses:`
 of any kind: no `actions/checkout`, no reusable-workflow call and no
 third-party action. Every job runs one image, the sdlc **bootstrap**, by a
 literal digest, and one command, `sdlc event`. That command reads
@@ -112,9 +112,22 @@ jobs:
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
     steps: *event
+  renovate:  # the Renovate App key alone, no GITHUB_TOKEN; the constitution only: the weekly run for real, a bare dispatch dry
+    if: >-
+      github.repository == 'crunchtools/constitution'
+      && (github.event.schedule == '17 6 * * 1'
+          || github.event_name == 'workflow_dispatch' && !inputs.version && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    concurrency: { group: renovate, queue: max }
+    timeout-minutes: 55  # the minted token lives an hour
+    runs-on: *secret
+    environment: renovate
+    container: *boot
+    permissions: {}
+    env: { RENOVATE_APP_KEY: "${{ secrets.RENOVATE_APP_KEY }}" }
+    steps: *event
 ```
 
-**Why 90 lines and not 20.** GitHub makes a separate job only where the
+**Why 103 lines and not 20.** GitHub makes a separate job only where the
 permissions, the secrets, the environment or the runner differ. Seven levels
 differ, and each job needs its `if`, `runs-on`, `environment`, `container`,
 `permissions`, `env` and `steps` lines. Merging any two would put a secret, a
@@ -513,6 +526,7 @@ tag ruleset stays as it is today.
 | `promote` | | `cosign-signing`: cosign key, quay; queued | after `image`, and after `write` on a release; our **uncached** runners | an App key, a build |
 | `pypi` | | `pypi`: OIDC only | a release merge that publishes to PyPI; our **uncached** runners | anything else |
 | `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; `ubuntu-latest` | any secret |
+| `renovate` | | `renovate`: Renovate App key; no `GITHUB_TOKEN`; queued | crunchtools/constitution only: the weekly schedule, a bare dispatch from the default branch; our **uncached** runners | a token of this repo's, a build |
 
 This table is the fleet file. In crunchtools/sdlc alone, the required
 `sdlc / check (pull_request)` is `test`: `pull_request` only,
@@ -521,7 +535,7 @@ This table is the fleet file. In crunchtools/sdlc alone, the required
 `pull_request` (under "sdlc's own workflow").
 
 **Runners.** Every job that holds a secret (`ai`, `image`, `write`,
-`promote`, `pypi`) runs on Exedore's **uncached** runner class,
+`promote`, `pypi`, `renovate`) runs on Exedore's **uncached** runner class,
 `crunchtools-uncached` (Scott, 2026-11-23). Its container storage is scratch,
 emptied before and after every job, and the only thing it shares between jobs
 is the warm image store, mounted read-only: a job can run an image from it and
@@ -530,7 +544,7 @@ still checks what it runs: `sdlc-boot` by its literal digest, sdlc against
 sdlc's key, and `image`'s parent against the fleet key or Red Hat's. So the
 store saves pulls and is trusted for nothing. A secret job
 therefore starts from the same state as a GitHub VM, on a machine we run.
-- **The label is a literal, and the variable is only a switch.** The five
+- **The label is a literal, and the variable is only a switch.** The six
   jobs share one `runs-on` (`&secret`) that yields `crunchtools-uncached` only
   when `vars.UNCACHED_RUNNER_LABEL` is exactly that, and `ubuntu-latest`
   otherwise. Clearing the org variable sends them back to GitHub with no
@@ -554,6 +568,17 @@ therefore starts from the same state as a GitHub VM, on a machine we run.
   no job here uses `CACHED_RUNNER_LABEL`.
 - **sdlc's own** `image`, `approve` and `sign` stay on `ubuntu-latest`: they
   run on the host, without `sdlc-boot`, and `sign` holds the trust root.
+
+`renovate` (a1099) shares that runner. It walks every repo in the org once a
+week, within 55 minutes, because the token it mints lives an hour. Its key is
+read once, used only to mint that token, and dropped. Renovate's package
+managers do run dependency code (a Python lock update builds an sdist, which
+runs its `setup.py`), so Renovate runs in a nested container from the job's
+own image: no socket, no `--volumes-from`, every capability dropped, a
+read-only root and an anonymous work volume, holding the minted token and
+nothing else of the job's. That container has a unique name and podman's own
+time limit, and it is removed, then the token revoked, on every path, a
+cancel included.
 
 **Private repos and the org's plan.** The plan could not be verified from this
 seat: the org's `plan` field needs an admin token. Two facts point to GitHub
@@ -670,6 +695,8 @@ CodeQL uploads as `/language:python`, and zizmor as `zizmor`.
 | pypi | release merge push | re-verifies, `uv build` nested, `uv publish` by OIDC | publish.yml |
 | gate | pull_request_target | fails unless `ai` and `write` succeeded; workflow guard; triage, which needs a review of the head SHA | gatehouse.yml guard, triage.yml |
 | gate | collaborator review comment | re-runs `gate` in the PR's `pull_request_target` run with `GITHUB_TOKEN` | gatehouse-retriage.yml |
+| renovate | schedule `17 6 * * 1`, constitution only | `sdlc_jobs/renovate.py`: mints the Renovate App's org-wide token and runs `renovate` in a nested container of this image (no socket, no key), with the constitution's `renovate/self-hosted.json` at this commit as `RENOVATE_CONFIG` | the constitution's renovate.yml |
+| renovate | workflow_dispatch without `version`, constitution only | the same as a dry run: a read-only token, the weekly window ignored; a dispatch with `version` is refused | renovate.yml's dispatch |
 
 ## Required checks: from five to two
 

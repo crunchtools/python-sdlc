@@ -94,3 +94,16 @@ jobs:
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
     steps: *event
+  renovate:  # the Renovate App key alone, no GITHUB_TOKEN; the constitution only: the weekly run for real, a bare dispatch dry
+    if: >-
+      github.repository == 'crunchtools/constitution'
+      && (github.event.schedule == '17 6 * * 1'
+          || github.event_name == 'workflow_dispatch' && !inputs.version && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    concurrency: { group: renovate, queue: max }
+    timeout-minutes: 55  # the minted token lives an hour
+    runs-on: *secret
+    environment: renovate
+    container: *boot
+    permissions: {}
+    env: { RENOVATE_APP_KEY: "${{ secrets.RENOVATE_APP_KEY }}" }
+    steps: *event

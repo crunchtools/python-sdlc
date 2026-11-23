@@ -80,6 +80,7 @@ BAKED = {
     "syft": os.environ.get("SDLC_SYFT_VERSION", "unknown"),
     "zizmor": os.environ.get("SDLC_ZIZMOR_VERSION", "unknown"),
     "claude-code": os.environ.get("SDLC_CLAUDE_CODE_VERSION", "unknown"),
+    "renovate": os.environ.get("SDLC_RENOVATE_VERSION", "unknown"),
     "cryptography": os.environ.get("SDLC_CRYPTOGRAPHY_VERSION", "unknown"),
     "pyjwt": os.environ.get("SDLC_PYJWT_VERSION", "unknown"),
     "gh": os.environ.get("SDLC_GH_VERSION", "unknown"),
@@ -105,6 +106,7 @@ VERSION_PROBE = {
     "syft": ["syft", "--version"],
     "zizmor": ["zizmor", "--version"],
     "claude-code": ["claude", "--version"],
+    "renovate": ["renovate", "--version"],
     "cryptography": [
         "/opt/constitution-venv/bin/python3",
         "-c",

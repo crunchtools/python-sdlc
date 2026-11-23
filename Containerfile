@@ -76,6 +76,10 @@ ARG COSIGN_VERSION=2.6.5
 ARG SYFT_VERSION=1.57.0
 ARG ZIZMOR_VERSION=1.32.0
 ARG CLAUDE_CODE_VERSION=2.1.323
+# The fleet's self-hosted Renovate (the `renovate` job, a1099). Kept equal by
+# hand to the renovate@ the constitution's ci.yml validates its config with,
+# and to npm/renovate's lockfile, which the build checks.
+ARG RENOVATE_VERSION=44.221.0
 ARG CRYPTOGRAPHY_VERSION=50.0.2
 ARG PYJWT_VERSION=2.15.1
 # gh, because every Ashigaru script talks to GitHub through it (its
@@ -96,7 +100,7 @@ ARG CONSTITUTION_COMMIT=726518b50e38f11c1ceb010b44b5eac8c7b90a13
 USER root
 
 LABEL maintainer="fatherlinux <scott.mccarty@crunchtools.com>"
-LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest, Gourmand, Gatehouse, Semgrep, CodeQL, pip-audit, hadolint, grype, node and npm, markdownlint, lychee and the constitution validator, plus the clients to drive a runner's socket (podman-remote, docker, skopeo, cosign, syft), zizmor and the claude CLI."
+LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest, Gourmand, Gatehouse, Semgrep, CodeQL, pip-audit, hadolint, grype, node and npm, markdownlint, lychee and the constitution validator, plus the clients to drive a runner's socket (podman-remote, docker, skopeo, cosign, syft), zizmor, the claude CLI and Renovate."
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/sdlc"
 LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python, container, node, bootc and docs repos, with the clients a runner job needs."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
@@ -121,6 +125,7 @@ LABEL com.crunchtools.sdlc.cosign="${COSIGN_VERSION}"
 LABEL com.crunchtools.sdlc.syft="${SYFT_VERSION}"
 LABEL com.crunchtools.sdlc.zizmor="${ZIZMOR_VERSION}"
 LABEL com.crunchtools.sdlc.claude-code="${CLAUDE_CODE_VERSION}"
+LABEL com.crunchtools.sdlc.renovate="${RENOVATE_VERSION}"
 LABEL com.crunchtools.sdlc.cryptography="${CRYPTOGRAPHY_VERSION}"
 LABEL com.crunchtools.sdlc.pyjwt="${PYJWT_VERSION}"
 LABEL com.crunchtools.sdlc.gh="${GH_VERSION}"
@@ -159,6 +164,7 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
     SDLC_SYFT_VERSION=${SYFT_VERSION} \
     SDLC_ZIZMOR_VERSION=${ZIZMOR_VERSION} \
     SDLC_CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
+    SDLC_RENOVATE_VERSION=${RENOVATE_VERSION} \
     SDLC_CRYPTOGRAPHY_VERSION=${CRYPTOGRAPHY_VERSION} \
     SDLC_PYJWT_VERSION=${PYJWT_VERSION} \
     SDLC_GH_VERSION=${GH_VERSION} \
@@ -288,6 +294,25 @@ RUN npm install -g --prefix /opt/claude-code --omit=dev --no-audit --no-fund \
  && ln -s /opt/claude-code/bin/claude /usr/local/bin/claude \
  && rm -rf /root/.npm \
  && claude --version
+
+# Renovate, in a prefix of its own, run only by the `renovate` job
+# (sdlc_jobs/renovate.py), which starts it in a nested container. Unlike the
+# tools above it installs from a committed lockfile, npm/renovate/, so every
+# one of its ~600 packages is the one reviewed, by integrity hash; the build
+# fails if the lockfile's renovate is not RENOVATE_VERSION. --ignore-scripts:
+# no package runs code at install. That leaves re2's native module unbuilt, on
+# purpose. Renovate then uses JavaScript's RegExp, and re2 only guards against
+# a catastrophic regex in a config, and every config this job reads is the
+# fleet's own. renovate-config-validator comes with it. 347 MB.
+COPY npm/renovate/package.json npm/renovate/package-lock.json /opt/renovate/
+RUN npm ci --prefix /opt/renovate --omit=dev --ignore-scripts --no-audit --no-fund \
+ && got=$(node -p 'require("/opt/renovate/node_modules/renovate/package.json").version') \
+ && { [ "$got" = "${RENOVATE_VERSION}" ] || { \
+      echo "npm/renovate's lockfile has renovate $got, not RENOVATE_VERSION ${RENOVATE_VERSION}" >&2; exit 1; }; } \
+ && ln -s /opt/renovate/node_modules/.bin/renovate /usr/local/bin/renovate \
+ && ln -s /opt/renovate/node_modules/.bin/renovate-config-validator /usr/local/bin/renovate-config-validator \
+ && rm -rf /root/.npm \
+ && renovate --version
 
 # Gatehouse is a Python app in a self-contained venv. Copying it works ONLY
 # because that image and this one are both Hummingbird with python3.14 at the

@@ -151,6 +151,8 @@ check_version zizmor    "$(inside sh -c 'printf %s "$SDLC_ZIZMOR_VERSION"')" \
                         "$(inside sh -c 'zizmor --version' 2>&1)"
 check_version claude    "$(inside sh -c 'printf %s "$SDLC_CLAUDE_CODE_VERSION"')" \
                         "$(inside sh -c 'claude --version' 2>&1)"
+check_version renovate  "$(inside sh -c 'printf %s "$SDLC_RENOVATE_VERSION"')" \
+                        "$(inside sh -c 'renovate --version' 2>&1)"
 check_version cryptography "$(inside sh -c 'printf %s "$SDLC_CRYPTOGRAPHY_VERSION"')" \
                         "$(inside sh -c '/opt/constitution-venv/bin/python3 -c "import cryptography; print(cryptography.__version__)"' 2>&1)"
 check_version pyjwt     "$(inside sh -c 'printf %s "$SDLC_PYJWT_VERSION"')" \
@@ -632,6 +634,7 @@ for row in \
   "syft:SDLC_SYFT_VERSION" \
   "zizmor:SDLC_ZIZMOR_VERSION" \
   "claude-code:SDLC_CLAUDE_CODE_VERSION" \
+  "renovate:SDLC_RENOVATE_VERSION" \
   "cryptography:SDLC_CRYPTOGRAPHY_VERSION" \
   "pyjwt:SDLC_PYJWT_VERSION" \
   "gh:SDLC_GH_VERSION" \

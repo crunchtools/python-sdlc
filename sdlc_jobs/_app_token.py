@@ -1,4 +1,4 @@
-"""Ashigaru App installation tokens, minted in-process.
+"""GitHub App installation tokens, minted in-process: Ashigaru's and Renovate's.
 
 What actions/create-github-app-token did, without it: an RS256 JWT from the
 App's key, the repository's installation, then a token scoped to this one
@@ -44,7 +44,7 @@ def app_token(
     api_for: Callable[[str], Api] = GitHub,
     signer: Callable[[str, str, float], str] = app_jwt,
 ) -> Iterator[str]:
-    """A token for `repo` alone, holding `permissions` alone, revoked on exit."""
+    """An Ashigaru token for `repo` alone, holding `permissions` alone, revoked on exit."""
     client_id = env.get("ASHIGARU_CLIENT_ID", "")
     key = env.get("ASHIGARU_APP_KEY", "")
     if not client_id or not key:
@@ -54,12 +54,32 @@ def app_token(
         )
     app = api_for(signer(client_id, key, time.time()))
     installation = app.request("GET", f"/repos/{repo}/installation")["id"]
-    minted = app.request(
-        "POST",
-        f"/app/installations/{installation}/access_tokens",
-        {"repositories": [repo.split("/", 1)[1]], "permissions": dict(permissions)},
-    )
-    token = minted["token"]
+    body = {"repositories": [repo.split("/", 1)[1]], "permissions": dict(permissions)}
+    with minted(app, installation, body, api_for) as token:
+        yield token
+
+
+@contextmanager
+def org_token(
+    app: Api, org: str, permissions: Mapping[str, str], *, api_for: Callable[[str], Api] = GitHub
+) -> Iterator[tuple[str, str]]:
+    """(token, the App's slug): every repo of `org`'s installation, holding
+    `permissions` alone, revoked on exit. `app` is the API as the App itself
+    (`api_for(app_jwt(...))`), for an App whose job is the whole org."""
+    slug = app.request("GET", "/app")["slug"]
+    installation = app.request("GET", f"/orgs/{org}/installation")["id"]
+    with minted(app, installation, {"permissions": dict(permissions)}, api_for) as token:
+        yield token, slug
+
+
+@contextmanager
+def minted(
+    app: Api, installation: int, body: Mapping[str, object], api_for: Callable[[str], Api]
+) -> Iterator[str]:
+    """An installation token made from `body`, masked at once and revoked on exit."""
+    token = app.request("POST", f"/app/installations/{installation}/access_tokens", dict(body))[
+        "token"
+    ]
     mask(token)
     try:
         yield token
