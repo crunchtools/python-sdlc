@@ -6,8 +6,13 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-23
+
 ### Added
 
+- `.github/workflows/bootstrap.yml`, the one-time dispatch that cuts this
+  release under sdlc's own key (MODE=bootstrap). The PR that installs sdlc's
+  own ci.yml deletes it.
 - sdlc-bootstrap now trusts sdlc's own cosign key (`boot/keys/sdlc.pub`); the private half lives only in the `sdlc-signing` environment.
 - sdlc-boot is renamed sdlc-bootstrap: the image is
   `quay.io/crunchtools/sdlc-bootstrap`, and its signature annotation
