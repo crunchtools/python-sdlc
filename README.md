@@ -71,52 +71,46 @@ to the digest with the same key; `cosign verify-attestation
 `.pre-commit-config.yaml` is
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
 `language: system` hooks, `.sdlc/bin/sdlc commit` and `.sdlc/bin/sdlc push`.
-CI is [`examples/ci.yml`](examples/ci.yml), whose job is still named `sdlc ci`,
-so the required check does not change:
+CI is [`examples/ci.yml`](examples/ci.yml), the fleet file: copied into
+every repo byte for byte, no `uses:` of any kind, seven jobs that are seven
+trust levels, each running `sdlc event` in the digest-pinned `sdlc-boot`
+image (design: `docs/marketplace-free-ci.md`). Its two required checks are
+`sdlc / check (pull_request)` and `sdlc / gate (pull_request_target)`.
+`tests/test_workflows.py` pins its guards.
 
-```yaml
-      - name: sdlc ci
-        env:
-          SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}
-        run: .sdlc/bin/sdlc ci
-```
+`scripts/convert_repo.py <checkout>` converts a repo and prints the diff;
+`--apply` writes it. It floats the hooks onto `.sdlc/bin/sdlc`, writes the
+fleet file as `.github/workflows/ci.yml`, and deletes every other workflow --
+but only when every job in every one of them is a row of what `sdlc event`
+runs (the `sdlc ci` job, the constitution, Gourmand, Gatehouse, Ashigaru and
+release callers, `container-release.yml`, CodeQL, a PyPI publish, Dependabot
+automerge). Anything else refuses the whole repo with exit 2, naming the file
+and its jobs, to be moved to `[tool.sdlc.commands]` by hand. What the old
+files said per repo moves into `[tool.sdlc]`: `publish = "pypi"`, and a
+`container-release.yml` call's inputs as `[tool.sdlc.image]`. It also writes
+`skip-stacks` and `[tool.sdlc.ci] skip` where the image cannot check a stack
+yet or the Containerfile needs build secrets, as before.
 
-`scripts/convert_repo.py <checkout>` converts a repo wired the old way -- the
-rev-pinned hooks below, or the standalone Gourmand and Gatehouse hooks -- and
-prints the diff; `--apply` writes it. It replaces a workflow only when the CI
-stub covers every job in it (`sdlc ci`, Gourmand), refreshes `gatehouse.yml`
-from [`examples/gatehouse.yml`](examples/gatehouse.yml) when it differs only in
-comments or in the guard's script (an older guard that does not cover
-`.sdlc/`), keeps everything else (publish, release, container builds), and
-refuses with exit 2 a shape it would have to guess at. So that a converted repo
-never meets GATE CANNOT RUN on its first run, it also writes `skip-stacks` for
-a stack this image cannot check yet (node, bootc, docs, or the list
-`--unbuilt-stacks` names; an entry for a stack that now exists is dropped), and `[tool.sdlc.ci]
-skip` for the three container checks when the Containerfile needs build
-secrets (`--mount=type=secret`, `subscription-manager`, RHSM) that `sdlc ci`
-is not given; the publish workflow keeps building those with its secrets. A
-Python repo that names no stacks is left alone, and an existing key that does
-not already say this is refused rather than rewritten.
-`scripts/fleet_wave.py` is the fleet cutover (sdlc#88): one pull request per
-consumer repo that floats its gates with `convert_repo.py` and then, with
-`scripts/cutover.py`, moves its constitution pins and `Inherits:`, drops
-Dependabot, renames what still says python-sdlc, signs every
-`container-release.yml` call, adds a weekly rebuild where #88 lists one
-missing, adds the Ashigaru release flow
-([`examples/release.yml`](examples/release.yml)), and replaces a pre-router
-`.github/workflows/ashigaru.yml` with crunchtools/ashigaru's
-`examples/ashigaru.yml`, read at the `v5` tag, whose `router.yml` call brings
-the release-tag job with it. A router repo's `release.yml` is then
-[`examples/release-open.yml`](examples/release-open.yml), which only opens the
-release pull request, so each repo has exactly one tag path. The versions are arguments:
-`--constitution-dir` (a constitution checkout at the target release, whose
-`fleet-bump.py` and validator it uses), `--constitution`, `--sdlc`,
-`--unbuilt-stacks`. A plan by default -- `--out DIR` writes each repo's diff and
-a `report.md` of what it changed and what needs a hand -- and one auto-merging
-pull request per repo with `--apply`; a repo the target validator fails is not
-pushed. A TSV ledger either way. It reads `GH_TOKEN` from the environment for
-the GitHub API (required with `--apply`), and pushes with the credentials git
-already has.
+`scripts/fleet_wave.py` runs the wave: one pull request per consumer repo,
+converted by `convert_repo.py` and cut over by `scripts/cutover.py` (the
+constitution's `Inherits:` and hook `rev:`, Dependabot dropped, python-sdlc
+renamed, `.gemini/` removed with `--drop-gemini`), judged by the target
+constitution's validator. A private repo is refused unless `--include-private`.
+A plan by default (`--out DIR` for diffs and a report); `--apply` pushes
+`chore/fleet-cutover` and opens the pull request, and a TSV ledger records
+each repo. It reads `GH_TOKEN` for the API and pushes with git's credentials.
+
+The conversion PR deletes the workflows that report the old required checks,
+so it merges only by `scripts/cutover.py --merge REPO --pr N`, with an admin
+token: it refuses while the repo has a person's open pull request or an old
+`ashigaru/release-*` one, a PyPI repo whose publisher swap the `--pypi-ledger`
+does not record, or org secrets not yet scoped to selected repositories; it
+reads both new checks green, merges, moves the rulesets (recomputed from which
+repos carry the fleet file, so a re-run is safe), drops the repo from each
+moved org secret, and brings bot pull requests up to date.
+`cutover.py --move-rulesets` runs the move alone, and `cutover.py --check`
+fails while a converted repo can still read a moved secret, the rulesets are
+out of step, or no ruleset guards `ashigaru/release-*`.
 
 **What floating trusts.** Whoever can move `quay.io/crunchtools/sdlc:latest`
 now decides the host-side code every seat and runner runs, and that code is no

@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """The fleet cutover (sdlc#88): one pull request per consumer repo, everything at once.
 
-Every non-archived repo in the org the token can see (or the ones a --repos
-file names) is cloned at its default branch, floated by convert_repo.py, cut
-over by cutover.py -- the constitution pins, Dependabot's removal, the old
-name, `sign: true`, the weekly rebuild, the Ashigaru release flow, the
-Ashigaru router caller -- and
-judged by the target constitution's own validator. Without --apply that is
-all: the plan goes to the ledger, and with --out each repo's diff and a report
-go to a directory, and nothing leaves this machine. With --apply each repo
-gets one commit on chore/fleet-cutover, pushed, a pull request, and auto-merge
-(squash) -- and its own CI decides whether it lands.
+Every non-archived, public repo in the org the token can see (or the ones a
+--repos file names) is cloned at its default branch, converted by
+convert_repo.py to the one fleet workflow, .github/workflows/ci.yml, which is
+examples/ci.yml byte for byte, with the old workflows deleted and their
+per-repo settings moved into [tool.sdlc]; cut over by cutover.py -- the
+constitution's Inherits and hook rev, Dependabot's removal, `.gemini/` when a
+human says the Gemini Code Assist app is gone -- and judged by the target
+constitution's own validator. Without --apply that is all: the plan goes to
+the ledger, and with --out each repo's diff and a report go to a directory, and
+nothing leaves this machine. With --apply each repo gets one commit on
+chore/fleet-cutover, pushed, and a pull request. Nothing is queued to merge
+itself: the PR deletes the workflows that produce the old required checks, so
+it merges only by `cutover.py --merge REPO --pr N`, Josui Prime's admin bypass.
 
 The versions are arguments, never constants: --constitution-dir is a checkout
 of crunchtools/constitution at the release the fleet moves to, whose
@@ -21,15 +24,18 @@ fails a pinned sdlc image, so the version rides the variable).
 
 Per repo, in order, and a repo that fails a step is skipped with the reason:
 
-  preflight   SDLC_IMAGE, the org's and the repo's, is unset or a value the
-              bootstrap takes (main, latest, X.Y.Z, @sha256:<64 hex>); no pull
-              request is open from an earlier wave's branch, whose `rev:` line
-              this rewrites out from under it
+  preflight   a repo whose API record says private: true is refused, and so is
+              one the listing does not show (its privacy is unknown), unless
+              --include-private; SDLC_IMAGE, the org's and the repo's, is
+              unset or a value the bootstrap takes (main, latest, X.Y.Z,
+              @sha256:<64 hex>); no pull request is open from an earlier
+              wave's branch, whose `rev:` line this rewrites out from under it
   convert     a shallow clone of the default branch, read from the API, never
               assumed; convert_repo.py's exit 2 is a refusal, an empty diff a
               no-op
   cutover     cutover.py over the converted checkout; what it will not guess
-              at is reported as hand work, and the rest still ships
+              at (a `uses:` left in a workflow) is reported as hand work, and
+              the rest still ships
   verify      a second run of both must find nothing to do, the bootstrap
               must be committed executable, nothing outside the files the two
               own may have changed, and the target validator must pass it --
@@ -37,12 +43,6 @@ Per repo, in order, and a repo that fails a step is skipped with the reason:
 
 The branch is one per repo and reused: a re-run force-pushes it and updates
 the pull request already open on it rather than opening a second.
-
-Before the first repo it reads crunchtools/ashigaru's examples/ashigaru.yml at
-the tag cutover.ASHIGARU_TAG names, never main, and the commit that tag points
-at goes in the report; and it lists the open Dependabot pull requests that bump
-one Ashigaru workflow pin, which the router caller makes moot, for whoever
-applies the wave to close.
 
 THE LEDGER is a TSV (repo, action, pr_url, reason), appended one row per repo
 as it finishes, so a run that dies leaves what it did. A re-run reads it and
@@ -58,23 +58,19 @@ an argument. Without it a dry run reads what anonymous API calls can and says
 which checks it could not make. git pushes with whatever credentials git
 already has (on a seat, the gateway's git route).
 
-Exit 0 when every repo reached an outcome, 1 when one failed or was left
-without auto-merge (rerun to retry them), 2 when the wave could not run.
+Exit 0 when every repo reached an outcome, 1 when one failed or was held back
+as invalid (rerun to retry them), 2 when the wave could not run.
 
 Usage: scripts/fleet_wave.py --constitution-dir DIR --constitution X.Y.Z --sdlc X.Y.Z
-                             [--constitution-ref REF] [--unbuilt-stacks LIST]
-                             [--weekly LIST] [--repos FILE] [--out DIR] [--apply]
+                             [--unbuilt-stacks LIST] [--drop-gemini]
+                             [--include-private] [--repos FILE] [--out DIR] [--apply]
                              [--ledger TSV] [--sleep S] [--token-env NAME]
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
-import dataclasses
-import http.client
 import importlib.util
-import json
 import os
 import re
 import subprocess
@@ -101,29 +97,25 @@ cutover = importlib.util.module_from_spec(_CUTOVER)
 sys.modules["cutover"] = cutover  # dataclasses look their module up there
 _CUTOVER.loader.exec_module(cutover)
 
-ORG = "crunchtools"
+ORG = cutover.ORG
 # The converter's own repo under either name, and the constitution: upstream of
 # the cutover, each released by hand before it runs, not consumers of it.
 SELF = {"sdlc", "python-sdlc", "constitution"}
-BRANCH = "chore/fleet-cutover"
+BRANCH = cutover.BRANCH
 # Branches of earlier waves whose open pull requests edit what this one does
 # (the `rev:` line, dependabot.yml): one merging after the cutover would
 # conflict, and a conflicting PR runs no checks, so it would sit looking green
 # forever.
 EARLIER_WAVES = ("chore/python-sdlc", "chore/sdlc-floating", "chore/renovate")
-# sdlc#88: the image repos with neither a weekly rebuild nor a parent that
-# dispatches them one.
-WEEKLY = ("gatehouse", "google-workspace-mcp", "openclaw", "ubi10-httpd-php")
 CONVERTER = Path(__file__).resolve().parent / "convert_repo.py"
-API_HOST = "api.github.com"
-API_TIMEOUT = 30  # seconds, per call
 CLONE_BASE = "https://github.com"
 # What convert_repo.py and cutover.py may write. Anything else changed in the
 # checkout is a converter that has grown a new reach, which a fleet wave is not
 # the place to find out about.
 CONVERTER_OWNS = re.compile(
     r"^(\.sdlc/bin/sdlc|\.pre-commit-config\.yaml|\.github/workflows/[^/]+\.ya?ml"
-    r"|\.github/dependabot\.yml|\.specify/memory/constitution\.md|pyproject\.toml|sdlc\.toml)$"
+    r"|\.github/dependabot\.yml|\.gemini/.+|\.specify/memory/constitution\.md"
+    r"|pyproject\.toml|sdlc\.toml)$"
 )
 # bin/sdlc-bootstrap's own rule, which refuses anything else with exit 2.
 FLEET_IMAGE = "quay.io/crunchtools/sdlc"
@@ -135,26 +127,25 @@ UNANSWERED = {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN, HTTPStatus.TOO_MANY
 
 DONE = {"opened", "updated", "noop", "would-open", "would-update"}
 INVALID = "invalid"  # the target validator fails the result: not pushed
-ASHIGARU = "ashigaru"  # the repo examples/ashigaru.yml is read from
-# A Dependabot title bumping an Ashigaru reusable workflow pin.
-PIN_BUMP = re.compile(r"\bcrunchtools/ashigaru/\.github/workflows/[\w-]+\.ya?ml\b", re.I)
 LEDGER_HEADER = ("repo", "action", "pr_url", "reason")
 
 COMMIT_MESSAGE = """\
-chore: cut over to constitution {constitution} and the signed release path
+chore: cut over to the single-file fleet CI (constitution {constitution})
 
 The fleet cutover (crunchtools/sdlc#88), in one commit so this repo's CI
-runs once: constitution pins and Inherits at {constitution_ref}, the gates
-floating on quay.io/crunchtools/sdlc, python-sdlc renamed sdlc, Dependabot
-dropped for the org's Renovate, every published image signed, and v*.*.*
-tags made by the Ashigaru app. Written by crunchtools/sdlc's
-scripts/fleet_wave.py.
+runs once: one workflow, .github/workflows/ci.yml, identical to sdlc's
+examples/ci.yml and calling nothing with `uses:`; the old workflows deleted
+and their per-repo settings moved into [tool.sdlc] (publish = "pypi" where a
+PyPI publish existed); Dependabot dropped for the org's Renovate;
+Inherits and the constitution hook rev at {constitution}; .gemini/ removed
+where asked. Merged by cutover.py --merge, not by auto-merge. Written by
+crunchtools/sdlc's scripts/fleet_wave.py.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 """
 PR_BODY = """\
 The fleet cutover (crunchtools/sdlc#88): every change this repo needs to sit \
-on the one build, sign and release path, in one pull request so CI runs once.
+on the one workflow, in one pull request so CI runs once.
 
 ## What changed
 
@@ -162,47 +153,40 @@ on the one build, sign and release path, in one pull request so CI runs once.
 
 What each kind of change is:
 
-- **constitution**: every `crunchtools/constitution` reusable workflow pinned \
-at an exact release moves to `{constitution_ref}`, together with `Inherits:` \
-(v{constitution}) and the constitution hook `rev:`. A major-tag call already floats.
+- **one workflow**: `.github/workflows/ci.yml` is crunchtools/sdlc's \
+`examples/ci.yml`, byte for byte, and uses no `uses:`; what the repo is, its \
+default branch and its Ashigaru enrolment are read at run time by `sdlc event`. \
+Every other workflow it replaces is deleted.
+- **settings**: what the old workflows said per repo moves into `[tool.sdlc]` \
+in `pyproject.toml` or `sdlc.toml`, such as `publish = "pypi"`.
 - **Dependabot**: `.github/dependabot.yml` and its auto-merge caller go; \
 Renovate runs from the org config. From constitution v1.60.0 the validator \
-fails a repo that still has them. Removed by the constitution's own \
-`fleet-bump.py` code.
-- **floating sdlc** (`.sdlc/bin/sdlc`, `.pre-commit-config.yaml`, the `sdlc ci` \
-job): the gates run `quay.io/crunchtools/sdlc`, picked by the variable \
-`SDLC_IMAGE` (the organization holds the fleet at {sdlc}); nothing here pins a \
-release.
-- **renamed**: what still named `python-sdlc`, the repo's old name, names `sdlc`.
-- **signing**: each `container-release.yml` call passes `sign: true` and the \
-two cosign secrets by name. Promote signs the gated digest, and attests its \
-SBOM and provenance, before any tag moves.
-- **schedule**: a weekly rebuild, for base-image errata.
-- **release**: `.github/workflows/release.yml` (crunchtools/sdlc's \
-`examples/release.yml`): run it with a version to have the Ashigaru app open \
-the release pull request; when it merges, the app tags `vX.Y.Z`. That is now \
-the only way a release tag is made.
-- **ashigaru**: `.github/workflows/ashigaru.yml`, which called Ashigaru's \
-triage, code and fix one by one, is crunchtools/ashigaru's \
-`examples/ashigaru.yml`: one call to `router.yml` at the major tag, which \
-brings the release-tag job too. Dependabot's one-pin bumps of the old file \
-are moot. With the router tagging, `release.yml` is crunchtools/sdlc's \
-`examples/release-open.yml`: the same dispatch opens the release pull request, \
-and no second job tags it.
+fails a repo that still has them.
+- **constitution**: `Inherits:` (v{constitution}) and the constitution hook \
+`rev:` move to the target release.
+- **gemini**: `.gemini/` is removed, when listed above, because the Gemini \
+Code Assist app is no longer installed.
+- **floating sdlc** (`.sdlc/bin/sdlc`, `.pre-commit-config.yaml`): the hooks \
+run `quay.io/crunchtools/sdlc`, picked by the variable `SDLC_IMAGE` (the \
+organization holds the fleet at {sdlc}); nothing here pins a release.
+
+## How it merges
+
+Not by auto-merge. This pull request deletes the workflows that produce the \
+old required checks, so they never report on it; it merges by \
+`cutover.py --merge REPO --pr N`, run by Josui Prime with an admin token once \
+the two checks of the new `ci.yml` pass.
 
 ## How to roll back
 
 - Before it merges: close this pull request.
-- After: `git revert` its squash commit on the default branch.
+- After: `git revert` its squash commit on the default branch, then re-run \
+`cutover.py --move-rulesets`, which puts the repo back on the old ruleset, \
+since it is no longer converted.
 
-It merges itself (squash) when its required checks pass. Opened by \
-crunchtools/sdlc's `scripts/fleet_wave.py`; a re-run reuses the branch \
-`chore/fleet-cutover` and this pull request.
+Opened by crunchtools/sdlc's `scripts/fleet_wave.py`; a re-run reuses the \
+branch `chore/fleet-cutover` and this pull request.
 """
-
-
-class ApiError(Exception):
-    """The API could not answer: network, auth, rate limit, or a 5xx."""
 
 
 class LeftAloneError(Exception):
@@ -216,54 +200,20 @@ class LeftAloneError(Exception):
 
 # ------------------------------------------------------------------- the API
 
-
-class Api:
-    """GitHub's REST and GraphQL APIs. The token lives in a header, nowhere else."""
-
-    def __init__(self, token: str | None, connect: Any = None) -> None:
-        self._token = token
-        self._connect = connect or (
-            lambda: http.client.HTTPSConnection(API_HOST, timeout=API_TIMEOUT)
-        )
-
-    @property
-    def authenticated(self) -> bool:
-        return bool(self._token)
-
-    def redact(self, text: str) -> str:
-        return text.replace(self._token, "***") if self._token else text
-
-    def call(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
-        """(status, decoded body). 4xx other than 401/403/429 is returned, not raised."""
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "crunchtools-fleet-wave",
-            **({"Authorization": f"Bearer {self._token}"} if self._token else {}),
-        }
-        conn = self._connect()
-        try:
-            conn.request(method, path, None if body is None else json.dumps(body), headers)
-            response = conn.getresponse()
-            status, raw = response.status, response.read()
-        except (OSError, http.client.HTTPException) as exc:
-            raise ApiError(self.redact(f"{method} {path}: {exc}")) from exc
-        finally:
-            conn.close()
-        decoded = json.loads(raw) if raw.strip() else None
-        if status in UNANSWERED or status >= HTTPStatus.INTERNAL_SERVER_ERROR:
-            message = decoded.get("message", "") if isinstance(decoded, dict) else ""
-            raise ApiError(self.redact(f"{method} {path}: HTTP {status} {message}".rstrip()))
-        return status, decoded
+Api = cutover.Api
+ApiError = cutover.ApiError
 
 
-def org_repos(api: Api) -> dict[str, str]:
-    """Every non-archived repo the token can see: name -> its default branch, as the API says.
+def org_repos(api: Api) -> dict[str, dict]:
+    """Every non-archived repo the token can see: name -> its API record, whole.
+
+    The record carries what the wave reads: default_branch, and private, which
+    preflight refuses on.
 
     Image repos are private too (openbao, rhel10-bootc-workstation); without a
     token the listing has only the public ones.
     """
-    repos: dict[str, str] = {}
+    repos: dict[str, dict] = {}
     for page in range(1, 50):
         status, page_repos = api.call(
             "GET", f"/orgs/{ORG}/repos?type=all&per_page={PAGE}&page={page}"
@@ -272,7 +222,7 @@ def org_repos(api: Api) -> dict[str, str]:
             raise ApiError(f"listing {ORG}'s repos: HTTP {status}")
         for repo in page_repos:
             if not repo["archived"]:
-                repos[repo["name"]] = repo["default_branch"]
+                repos[repo["name"]] = repo
         if len(page_repos) < PAGE:
             break
     return repos
@@ -292,42 +242,6 @@ def open_prs_from(api: Api, branch: str) -> dict[str, dict]:
         if len(hits["items"]) < PAGE:
             break
     return found
-
-
-def ashigaru_caller(api: Api) -> tuple[str, str]:
-    """(examples/ashigaru.yml, the commit it was read at), at cutover.ASHIGARU_TAG."""
-    repo, tag = f"/repos/{ORG}/{ASHIGARU}", cutover.ASHIGARU_TAG
-    status, ref = api.call("GET", f"{repo}/git/ref/tags/{tag}")
-    if status != HTTPStatus.OK or not isinstance(ref, dict):
-        raise ApiError(f"reading {ORG}/{ASHIGARU}'s tag {tag}: HTTP {status}")
-    obj = ref["object"]
-    if obj["type"] == "tag":  # annotated: the tag object names the commit
-        status, tagged = api.call("GET", f"{repo}/git/tags/{obj['sha']}")
-        if status != HTTPStatus.OK or not isinstance(tagged, dict):
-            raise ApiError(f"reading {ORG}/{ASHIGARU}'s tag {tag}: HTTP {status}")
-        obj = tagged["object"]
-    sha = str(obj["sha"])
-    status, content = api.call("GET", f"{repo}/contents/examples/ashigaru.yml?ref={sha}")
-    if status != HTTPStatus.OK or not isinstance(content, dict) or "content" not in content:
-        raise ApiError(f"reading examples/ashigaru.yml at {ORG}/{ASHIGARU}@{sha}: HTTP {status}")
-    text = base64.b64decode(content["content"]).decode()
-    if not any(u.endswith(f"@{tag}") for u in cutover.router_calls(cutover.yaml.safe_load(text))):
-        raise ApiError(f"examples/ashigaru.yml at {ORG}/{ASHIGARU}@{sha} calls no router.yml@{tag}")
-    return text, sha
-
-
-def pin_bumps(api: Api) -> list[str]:
-    """Open Dependabot pull requests bumping an Ashigaru workflow pin: their URLs, sorted."""
-    query = urllib.parse.quote(f'org:{ORG} is:pr is:open author:app/dependabot "{ORG}/{ASHIGARU}"')
-    found: list[str] = []
-    for page in range(1, 11):
-        status, hits = api.call("GET", f"/search/issues?q={query}&per_page={PAGE}&page={page}")
-        if status != HTTPStatus.OK or not isinstance(hits, dict):
-            raise ApiError(f"searching for Dependabot Ashigaru pin bumps: HTTP {status}")
-        found += [i["html_url"] for i in hits["items"] if PIN_BUMP.search(i.get("title", ""))]
-        if len(hits["items"]) < PAGE:
-            break
-    return sorted(found)
 
 
 def sdlc_image(api: Api, path: str) -> str | None:
@@ -361,6 +275,7 @@ class Wave:
     api: Api
     apply: bool
     clone_base: str = CLONE_BASE
+    include_private: bool = False  # --include-private: private repos are processed
     org_image: str | None = None
     earlier: dict[str, str] = field(default_factory=dict)  # repo -> open PR url
     ours: dict[str, dict] = field(default_factory=dict)  # repo -> open PR on BRANCH
@@ -371,7 +286,6 @@ class Wave:
     converter_args: tuple[str, ...] = ()  # e.g. --unbuilt-stacks
     out: Path | None = None  # where a dry run writes each repo's diff and the report
     reports: dict[str, Report] = field(default_factory=dict)
-    pin_bumps: list[str] = field(default_factory=list)  # Dependabot PRs the router makes moot
     outcomes: dict[str, tuple[str, str, str]] = field(default_factory=dict)  # this run's rows
 
 
@@ -382,9 +296,7 @@ class Report:
     changes: list[str] = field(default_factory=list)
     hand: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)  # the target validator's verdict
-    pins_left: list[str] = field(
-        default_factory=list
-    )  # constitution calls off the ref and major tags
+    pins_left: list[str] = field(default_factory=list)  # `uses:` lines left in a workflow
 
 
 def git(cwd: Path, *args: str, stdin: str | None = None) -> str:
@@ -415,9 +327,20 @@ def refusal(stderr: str) -> str:
     return stderr.strip().splitlines()[-1] if stderr.strip() else "refused, no reason given"
 
 
-def preflight(wave: Wave, repo: str) -> None:
+def preflight(wave: Wave, repo: str, record: dict | None = None) -> None:
+    """Leave the repo alone, with a reason, or return. `record` is its API listing, if shown."""
     if repo in SELF:
         raise LeftAloneError("skipped", "the converter's own repo, not a consumer")
+    if record is None:
+        # An anonymous listing lacks the private repos: this one may be one.
+        if not wave.include_private:
+            raise LeftAloneError(
+                "refused",
+                f"{ORG}/{repo} is not in the listing, so its privacy is unknown; "
+                "--include-private to process it anyway",
+            )
+    elif why := cutover.refuse_private(record, wave.include_private):
+        raise LeftAloneError("refused", why)
     if repo in wave.earlier:
         raise LeftAloneError(
             "skipped", f"open pull request from an earlier wave: {wave.earlier[repo]}"
@@ -444,7 +367,7 @@ def clone(wave: Wave, repo: str, default: str | None, checkout: Path) -> str:
     return default or git(checkout, "symbolic-ref", "--short", "HEAD").strip()
 
 
-def convert(wave: Wave, repo: str, default: str, checkout: Path) -> list[str]:
+def convert(wave: Wave, repo: str, checkout: Path) -> list[str]:
     """Float, cut over, verify. The paths changed, staged in the checkout.
 
     The repo's report row is in wave.reports[repo] whatever happens after it.
@@ -478,19 +401,17 @@ def convert(wave: Wave, repo: str, default: str, checkout: Path) -> list[str]:
         if code:
             raise RuntimeError(f"convert_repo.py --apply exited {code}: {err.strip()[-300:]}")
     if wave.target is not None:
-        result = cutover.cutover(checkout, repo, default, wave.target)
+        result = cutover.cutover(checkout, wave.target)
         report.changes += result.changed
         report.hand += result.hand
         report.pins_left = result.pins_left
-    changed = verify(wave, repo, default, checkout, floated=floated)
+    changed = verify(wave, repo, checkout, floated=floated)
     if not changed:
         raise LeftAloneError("noop", "already cut over" if wave.target else "already floating")
     return changed
 
 
-def verify(
-    wave: Wave, repo: str, default: str, checkout: Path, *, floated: bool = True
-) -> list[str]:
+def verify(wave: Wave, repo: str, checkout: Path, *, floated: bool = True) -> list[str]:
     """The paths the conversion changed, staged; or every way it is not fit to ship."""
     problems = []
     git(checkout, "add", "-A")  # the bootstrap's mode is read from the index
@@ -502,7 +423,7 @@ def verify(
         if mode != "100755":
             problems.append(f"would commit .sdlc/bin/sdlc as mode {mode or 'absent'}")
     if wave.target is not None:
-        again = cutover.cutover(checkout, repo, default, wave.target)
+        again = cutover.cutover(checkout, wave.target)
         if again.changed:
             problems.append(f"is not a fixed point: a second cutover.py run {again.changed[0]}")
     git(checkout, "add", "-A")
@@ -523,7 +444,7 @@ def bootstrap_mode(checkout: Path) -> str:
 
 
 def ship(wave: Wave, repo: str, default: str, checkout: Path) -> tuple[str, str, str]:
-    """Commit, push, open or update the pull request, queue auto-merge."""
+    """Commit, push, open or update the pull request. It is merged by cutover.py --merge."""
     git(checkout, "checkout", "-q", "-B", BRANCH)
     # No hooks: whatever the operator's git config installs is not this repo's
     # gate; the pull request's own CI is.
@@ -545,9 +466,6 @@ def ship(wave: Wave, repo: str, default: str, checkout: Path) -> tuple[str, str,
     # commit rebuilt from the default branch on every run.
     git(checkout, "push", "-q", "--force", "origin", f"HEAD:refs/heads/{BRANCH}")
     pr, action = open_or_update(wave.api, repo, default, pr_fields(wave, repo))
-    problem = auto_merge(wave.api, pr["node_id"])
-    if problem:
-        return "no-automerge", pr["html_url"], f"auto-merge not enabled: {problem}"
     return action, pr["html_url"], ""
 
 
@@ -562,7 +480,6 @@ def versions(wave: Wave) -> dict[str, str]:
     target = wave.target
     return {
         "constitution": target.constitution if target else "",
-        "constitution_ref": target.constitution_ref if target else "",
         "sdlc": wave.sdlc,
     }
 
@@ -598,38 +515,15 @@ def open_or_update(api: Api, repo: str, default: str, fields: dict[str, str]) ->
     raise RuntimeError(f"opening the pull request: HTTP {status} {message(pull)}".rstrip())
 
 
-AUTO_MERGE = """\
-mutation($id: ID!) {
-  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) {
-    pullRequest { autoMergeRequest { mergeMethod } }
-  }
-}"""
-
-
-def auto_merge(api: Api, node_id: str) -> str | None:
-    """Queue a squash merge; None when queued, else why not."""
-    try:
-        status, reply = api.call(
-            "POST", "/graphql", {"query": AUTO_MERGE, "variables": {"id": node_id}}
-        )
-    except ApiError as exc:
-        return str(exc)
-    if status != HTTPStatus.OK or not isinstance(reply, dict):
-        return f"HTTP {status} {message(reply)}".rstrip()
-    if reply.get("errors"):
-        return message(reply)
-    return None
-
-
-def process(wave: Wave, repo: str, default: str | None) -> tuple[str, str, str]:
+def process(wave: Wave, repo: str, record: dict | None) -> tuple[str, str, str]:
     """One repo, start to finish: (action, pr_url, reason). Never raises for the repo's sake."""
     ours = wave.ours.get(repo, {}).get("url", "")
     try:
-        preflight(wave, repo)
+        preflight(wave, repo, record)
         with tempfile.TemporaryDirectory(prefix="fleet-wave-") as workdir:
             checkout = Path(workdir) / repo
-            default = clone(wave, repo, default, checkout)
-            changed = convert(wave, repo, default, checkout)
+            default = clone(wave, repo, record["default_branch"] if record else None, checkout)
+            changed = convert(wave, repo, checkout)
             if wave.out is not None:
                 (wave.out / f"{repo}.diff").write_text(git(checkout, "diff", "--cached"))
             invalid = wave.reports.get(repo, Report()).invalid
@@ -690,23 +584,22 @@ def survey(api: Api, apply: bool) -> Wave:
         for repo, pr in open_prs_from(api, branch).items()
     }
     wave.ours = open_prs_from(api, BRANCH)
-    wave.pin_bumps = pin_bumps(api)
     if api.authenticated:
         wave.org_image = sdlc_image(api, f"/orgs/{ORG}")
     else:
         wave.notes.append("no API token: SDLC_IMAGE (organization and repository) not checked")
-        wave.notes.append("no API token: Dependabot pin bumps listed in public repos only")
     return wave
 
 
 def run(
-    wave: Wave, names: list[str], available: dict[str, str], ledger: Path, pause: float
+    wave: Wave, names: list[str], available: dict[str, dict], ledger: Path, pause: float
 ) -> dict[str, int]:
     """Process `names` in order, one at a time, `pause` seconds apart.
 
-    `available` is the org listing (name -> default branch); a name not in it is
+    `available` is the org listing (name -> API record); a name not in it is
     skipped when the listing was read with a token, and cloned at its HEAD
-    when not (a private repo an anonymous listing does not show). Each repo's
+    when not (a repo an anonymous listing does not show, which preflight
+    refuses unless --include-private). Each repo's
     outcome is appended to `ledger` as it finishes, and a repo whose last ledger
     action is in DONE is not processed again. Returns
     how many repos ended in each action, plus "already done" for those passed
@@ -736,9 +629,10 @@ def run(
 REPORT_HEAD = """\
 # Fleet cutover {mode}
 
-Target: constitution `{constitution_ref}` (Inherits v{constitution}), sdlc {sdlc} \
-through the organization variable `SDLC_IMAGE`, unbuilt stacks `{unbuilt}`.
-{caller}
+Target: constitution v{constitution} (Inherits and the hook rev), sdlc {sdlc} \
+through the organization variable `SDLC_IMAGE`, unbuilt stacks `{unbuilt}`, \
+`.gemini/` {gemini}, private repos {private}.
+Each pull request merges by `cutover.py --merge REPO --pr N`, not by auto-merge.
 {summary}
 
 """
@@ -749,34 +643,22 @@ def write_report(wave: Wave, path: Path, unbuilt: str) -> None:
     clean = [
         r for r, (action, _, _) in wave.outcomes.items() if action in DONE and not hand(wave, r)
     ]
-    recopied = [
-        r
-        for r in wave.outcomes
-        if any(c.startswith("ashigaru:") for c in wave.reports.get(r, Report()).changes)
-    ]
     off_ref = [r for r in wave.outcomes if wave.reports.get(r, Report()).pins_left]
     rows = [
         f"- **Clean** ({len(clean)}): {', '.join(clean) or 'none'}",
         f"- **Hand work** ({len(wave.outcomes) - len(clean)}): "
         + (", ".join(r for r in wave.outcomes if r not in clean) or "none"),
-        f"- **Ashigaru router caller re-copied** ({len(recopied)}): "
-        + (", ".join(recopied) or "none"),
-        "- **Constitution calls at neither the target ref nor a major tag** "
+        "- **Workflows with a `uses:` left** "
         f"({sum(len(wave.reports.get(r, Report()).pins_left) for r in wave.outcomes)}): "
         + (", ".join(off_ref) or "none"),
     ]
-    source = wave.target.ashigaru_source if wave.target else ""
-    caller = (
-        f"Ashigaru caller: `examples/ashigaru.yml` at `{cutover.ASHIGARU_TAG}`, {source}.\n"
-        if source
-        else ""
-    )
     out = [
         REPORT_HEAD.format(
             mode="(applied)" if wave.apply else "(dry run)",
             unbuilt=unbuilt or "none",
             summary="\n".join(rows),
-            caller=caller,
+            gemini="removed" if wave.target and wave.target.drop_gemini else "left alone",
+            private="included" if wave.include_private else "refused",
             **versions(wave),
         )
     ]
@@ -789,10 +671,6 @@ def write_report(wave: Wave, path: Path, unbuilt: str) -> None:
         out += [f"- HAND {h}" for h in report.hand]
         out += [f"- INVALID {v}" for v in report.invalid]
         out.append("")
-    out.append(f"## Dependabot Ashigaru pin bumps to close ({len(wave.pin_bumps)})\n")
-    out.append("Moot once the router caller lands: close them at cutover.\n")
-    out += [f"- {url}" for url in wave.pin_bumps] or ["- none"]
-    out.append("")
     path.write_text("\n".join(out))
 
 
@@ -805,10 +683,9 @@ def target_of(args: argparse.Namespace) -> cutover.Target:
     bump, validator = cutover.constitution_modules(args.constitution_dir.resolve())
     return cutover.Target(
         constitution=args.constitution,
-        constitution_ref=args.constitution_ref,
         bump=bump,
         validator=validator,
-        weekly=frozenset(filter(None, args.weekly.split(","))),
+        drop_gemini=args.drop_gemini,
     )
 
 
@@ -819,9 +696,9 @@ def release(value: str) -> str:
 
 
 def exit_status(counts: dict[str, int]) -> int:
-    """1 when any repo failed, could not queue auto-merge, or was held back by
-    the target validator (`invalid`): each one is a repo a human has to look at."""
-    return 1 if counts.get("failed") or counts.get("no-automerge") or counts.get(INVALID) else 0
+    """1 when any repo failed or was held back by the target validator (`invalid`):
+    each one is a repo a human has to look at."""
+    return 1 if counts.get("failed") or counts.get(INVALID) else 0
 
 
 def main() -> int:
@@ -842,13 +719,6 @@ def main() -> int:
         help="the constitution release the fleet inherits",
     )
     ap.add_argument(
-        "--constitution-ref",
-        metavar="REF",
-        default="v1",
-        help="what exact constitution workflow pins become (default %(default)s, the major "
-        "tag each release moves, as fleet-bump.py writes; vX.Y.Z holds a repo back)",
-    )
-    ap.add_argument(
         "--sdlc",
         type=release,
         required=True,
@@ -863,10 +733,15 @@ def main() -> int:
         "(default: none, every stack is checked since sdlc#92)",
     )
     ap.add_argument(
-        "--weekly",
-        default=",".join(WEEKLY),
-        metavar="LIST",
-        help="repos that get a weekly rebuild (default: sdlc#88's %(default)s)",
+        "--drop-gemini",
+        action="store_true",
+        help="remove .gemini/: a human has checked the Gemini Code Assist app is uninstalled",
+    )
+    ap.add_argument(
+        "--include-private",
+        action="store_true",
+        help="also process private repos, and repos the listing does not show (default: "
+        "refused; the org's plan must allow what a private repo's CI needs)",
     )
     ap.add_argument("--repos", type=Path, help="a file of repo names, one per line; default all")
     ap.add_argument(
@@ -905,10 +780,6 @@ def main() -> int:
         args.out.mkdir(parents=True, exist_ok=True)
     api = Api(token)
     try:
-        caller, sha = ashigaru_caller(api)
-        target = dataclasses.replace(
-            target, ashigaru_caller=caller, ashigaru_source=f"{ORG}/{ASHIGARU}@{sha}"
-        )
         available = org_repos(api)
         names = wanted(args.repos) if args.repos else sorted(available)
         wave = survey(api, args.apply)
@@ -916,6 +787,7 @@ def main() -> int:
         print(f"fleet_wave: CANNOT RUN: {api.redact(str(exc))}", file=sys.stderr)
         return 2
     wave.target, wave.sdlc, wave.out = target, args.sdlc, args.out
+    wave.include_private = args.include_private
     wave.converter_args = ("--unbuilt-stacks", args.unbuilt_stacks)
     for note in wave.notes:
         print(f"fleet_wave: note: {note}", file=sys.stderr)
