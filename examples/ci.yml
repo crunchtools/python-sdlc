@@ -18,8 +18,8 @@ jobs:
   check:  # no secret, read token: the one level a fork's PR runs, and the only one on our runners (uncached)
     name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
     if: >-
-      contains(fromJSON('["pull_request","schedule","workflow_dispatch"]'), github.event_name)
-      || github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      contains(fromJSON('["pull_request","schedule"]'), github.event_name)
+      || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
     container: &boot { image: "quay.io/crunchtools/sdlc-boot@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, security-events: write, actions: write }  # actions: the 60-day schedule keepalive

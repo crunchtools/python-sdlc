@@ -36,8 +36,8 @@ jobs:
   check:  # no secret, read token: the one level a fork's PR runs, and the only one on our runners (uncached)
     name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
     if: >-
-      contains(fromJSON('["pull_request","schedule","workflow_dispatch"]'), github.event_name)
-      || github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      contains(fromJSON('["pull_request","schedule"]'), github.event_name)
+      || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
     container: &boot { image: "quay.io/crunchtools/sdlc-boot@sha256:<digest>", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, security-events: write, actions: write }  # actions: the 60-day schedule keepalive
@@ -264,8 +264,8 @@ jobs:
   check:  # default-branch code only: builds it, runs `sdlc ci` from it, plans, uploads SARIF, keeps the schedule alive
     name: sdlc / plan (${{ github.event_name }})  # never the required name: test reports that
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      github.event_name == 'schedule'
+      || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
     permissions: { contents: read, security-events: write, actions: write }
     outputs: { result: "${{ steps.s.outputs.result }}" }
@@ -318,14 +318,14 @@ jobs:
            SDLC_RELEASE: "${{ needs.write.outputs.release }}", SDLC_QUAY_USERNAME: "${{ secrets.SDLC_QUAY_USERNAME }}", SDLC_QUAY_PASSWORD: "${{ secrets.SDLC_QUAY_PASSWORD }}" }
     steps: [*fetch, { id: s, run: scripts/self.sh }]
   approve:  # no secret; sdlc-approval's reviewers (Josui Prime, Scott; prevent_self_review) are the approval
-    if: github.event_name == 'workflow_dispatch' && inputs.digest != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.digest != '' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     environment: sdlc-approval
     permissions: {}
     steps: [{ run: "true" }]
   sign:  # the only job with the sdlc key: cosign and validation on the host; release images are data
     needs: [image, approve]
-    if: always() && !cancelled() && (needs.image.result == 'success' || needs.approve.result == 'success')
+    if: always() && !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (needs.image.result == 'success' || needs.approve.result == 'success')
     concurrency: { group: sdlc-sign, queue: max }
     runs-on: ubuntu-latest
     environment: sdlc-signing
@@ -356,18 +356,25 @@ a job that has nothing to take:
   the contract test from it by digest. Whatever the PR's code does, it does
   it on a throwaway VM with a read-only token.
 - **`check`** never runs on `pull_request`. It runs on a default-branch push,
-  the schedule and a dispatch, so the code it builds and runs is reviewed,
-  merged code. It holds the `security-events` and `actions` writes, uploads
+  the schedule and a dispatch **from the default branch** (a dispatch can name
+  any ref, so its `if:` checks `github.ref`; `approve` and `sign` carry the same
+  test), so the code it builds and runs is reviewed, merged code. It holds the `security-events` and `actions` writes, uploads
   SARIF, keeps the schedule alive, and plans, as the fleet's `check` does.
 - **`ai`, `write` and `gate`** run `sdlc-boot`, which runs a **released**,
   signed sdlc, never the PR's tree.
-- **`image`** builds **only releases**. On a push, that means the merge of a
+- **`image`** builds **only releases**, so its `if:` keys on the plan's
+  `release`, not on the `image` key the fleet's `image` job reads: sdlc's plan
+  never reports `image`, because nothing but a release is ever built to quay.
+  On a push, that means the merge of a
   release PR that `write` has verified with the full test (under "Releases run
   from the merge"). The version comes from `write`'s output, which is read
   from the tree. On the weekly schedule it means **the version `:<major>`
   carries now**, read from that image's `version` annotation and label (which
-  must agree), and rebuilt from its `vX.Y.Z` tag, never from the default
-  branch and never from the newest tag. After a rollback, the weekly run
+  must agree), and rebuilt from the commit that image's
+  `org.opencontainers.image.revision` label names: never from the default
+  branch, never from the newest tag, and never from the `vX.Y.Z` tag itself,
+  which anyone with `contents: write` could move. `sign` refuses a rebuild
+  whose revision is not the one `:<major>` carries. After a rollback, the weekly run
   rebuilds the rolled-back version. It pushes a candidate by digest. A
   non-release push builds nothing to quay, so no intermediate digest ever
   exists to be signed.
@@ -399,7 +406,7 @@ a job that has nothing to take:
     built digest with `-a repo=crunchtools/sdlc -a version=X.Y.Z` and moves
     `X.Y.Z`, `<major>` and `latest`.
   - **`weekly`:** a rebuild of the version `:<major>` carries. The built
-    version must equal it. It re-signs and moves `X.Y.Z` and `:<major>` to the
+    version must equal it, and so must the built revision label. It re-signs and moves `X.Y.Z` and `:<major>` to the
     rebuilt digest, the version unchanged. It refuses any other version,
     older or newer, so it can neither undo a rollback nor stand in for a
     release.

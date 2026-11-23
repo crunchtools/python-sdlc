@@ -12,6 +12,10 @@ lychee is pinned twice over, by version and by image digest. The digest is
 looked up on Docker Hub for the new version and written with it; a version
 with no digest raises, so a bump with a stale digest is never written.
 
+The sdlc-boot image's base is pinned by digest (ARG BOOT_BASE_DIGEST in
+boot/Containerfile). When quay's digest for core-runtime:2-builder changes, it
+is written the same way and counts as a move, so it ships as a sdlc release too.
+
 Run by .github/workflows/update-tools.yml. Writes `changed=true|false` and a
 one-line `summary` to $GITHUB_OUTPUT when that is set.
 
@@ -119,6 +123,40 @@ def lychee_digest(version: str) -> str:
     return digest
 
 
+BOOT_BASE_TAG_URL = (
+    "https://quay.io/api/v1/repository/hummingbird/core-runtime/tag/"
+    "?specificTag=2-builder&onlyActiveTags=true"
+)
+BOOT_BASE_NAME = "sdlc-boot base core-runtime:2-builder"
+BOOT_ARG = re.compile(r"^(ARG BOOT_BASE_DIGEST=)(sha256:[0-9a-f]{64})$", re.M)
+
+
+def boot_base_digest() -> str:
+    """The manifest digest quay holds for core-runtime:2-builder."""
+    tags = http_json(BOOT_BASE_TAG_URL).get("tags")
+    if not isinstance(tags, list) or len(tags) != 1 or not isinstance(tags[0], dict):
+        raise ValueError(f"core-runtime:2-builder: expected one active tag on quay, got {tags!r}")
+    digest = tags[0].get("manifest_digest")
+    if not isinstance(digest, str) or not DIGEST.match(digest):
+        raise ValueError(f"core-runtime:2-builder has no usable digest on quay: {digest!r}")
+    return digest
+
+
+def boot_pinned(text: str) -> str:
+    found = BOOT_ARG.findall(text)
+    if len(found) != 1:
+        raise ValueError(f"boot/Containerfile: expected one BOOT_BASE_DIGEST, found {len(found)}")
+    return found[0][1]
+
+
+def apply_boot_digest(containerfile: Path, digest: str) -> None:
+    if not DIGEST.match(digest):
+        raise ValueError(f"refusing to write a malformed digest: {digest!r}")
+    text = containerfile.read_text(encoding="utf-8")
+    boot_pinned(text)
+    containerfile.write_text(BOOT_ARG.sub(rf"\g<1>{digest}", text), encoding="utf-8")
+
+
 @dataclass(frozen=True)
 class Tool:
     """One pinned tool: its ARG, and how to find its latest version (and digest)."""
@@ -203,10 +241,17 @@ def main() -> int:
 
     containerfile = ROOT / "Containerfile"
     text = containerfile.read_text(encoding="utf-8")
+    boot_file = ROOT / "boot" / "Containerfile"
+    if not boot_file.is_file():
+        raise ValueError(f"{boot_file} is missing")
+    boot_current = boot_pinned(boot_file.read_text(encoding="utf-8"))
+    # Every lookup happens here, before anything is written.
     moves = plan_moves(text)
+    boot_latest = boot_base_digest()
+    boot_moved = boot_latest != boot_current
 
     output = os.environ.get("GITHUB_OUTPUT")
-    if not moves:
+    if not moves and not boot_moved:
         print("every baked tool is at its latest release")
         if output:
             with Path(output).open("a", encoding="utf-8") as fh:
@@ -216,7 +261,10 @@ def main() -> int:
     image_tag = ROOT / "IMAGE_TAG"
     current = image_tag.read_text(encoding="utf-8").strip()
     version = bump_patch(current)
-    summary = ", ".join(f"{t.name} {old} -> {new}" for t, old, new, _ in moves)
+    changes = [(t.name, old, new) for t, old, new, _ in moves]
+    if boot_moved:
+        changes.append((BOOT_BASE_NAME, boot_current[:19], boot_latest[:19]))
+    summary = ", ".join(f"{name} {old} -> {new}" for name, old, new in changes)
     print(f"sdlc {current} -> {version}: {summary}")
     if args.dry_run:
         return 0
@@ -229,10 +277,12 @@ def main() -> int:
         )
         if digest:
             apply_digest(containerfile, digest)
+    if boot_moved:
+        apply_boot_digest(boot_file, boot_latest)
     rewrite(containerfile, f'LABEL version="{current}"', f'LABEL version="{version}"', count=1)
     rewrite(ROOT / "pyproject.toml", f'version = "{current}"', f'version = "{version}"', count=1)
     image_tag.write_text(version + "\n", encoding="utf-8")
-    entry = changelog_entry(version, [(t.name, o, n) for t, o, n, _ in moves])
+    entry = changelog_entry(version, changes)
     rewrite(ROOT / "CHANGELOG.md", "## [Unreleased]\n\n", "## [Unreleased]\n\n" + entry, count=1)
 
     if output:
