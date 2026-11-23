@@ -479,7 +479,7 @@ class World:
         }
         for rid in self.rs:
             self.register(rid)
-        for name in cut.MOVED_SECRETS:
+        for name in cut.MOVED_TO_ENVIRONMENTS:
             self.routes[("GET", f"/orgs/crunchtools/actions/secrets/{name}")] = (
                 lambda _b=None, name=name: (
                     (200, {"name": name, "visibility": self.secrets[name]})

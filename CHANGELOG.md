@@ -8,6 +8,10 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `scripts/cutover.py` raises no CodeQL `py/clear-text-logging-sensitive-data` (a1140).
+  `MOVED_SECRETS` is now `MOVED_TO_ENVIRONMENTS`: the query's name heuristic read
+  `*_SECRETS` as secret values, so every problem line naming a moved secret was
+  flagged. Only the names are printed, never a value.
 - The `image` job trusts a `quay.io/hummingbird/<name>` parent (a1128). That
   registry is Hummingbird's unsigned mirror, so the job verifies the same
   digest at `registry.access.redhat.com/hi/<name>` with Red Hat's release key
