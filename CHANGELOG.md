@@ -8,6 +8,9 @@ All notable changes to this project are documented here, following
 
 ### Changed
 
+- `convert_repo.py` takes the fleet's two Gatehouse variants as the template:
+  the guard on `ubuntu-latest`, and triage handed `review_result`. A publish
+  job may set up Python with `uv python install`.
 - The fleet file, the doc and sdlc's own file pin
   `quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b796…de060`, sdlc-bootstrap
   0.12.1, signed with sdlc's key by the bootstrap run. `cutover.py` and
