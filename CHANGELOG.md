@@ -70,6 +70,13 @@ All notable changes to this project are documented here, following
   by digest (moved by `scripts/update_tools.py`), its policy is baked as files that
   no job env can override, and Ashigaru and the constitution are fetched by commit.
 
+### Fixed
+
+- The CodeQL bundle is checksum-verified before it is extracted (sdlc#111,
+  a1112). The build fetched the full bundle's checksum for the Python bundle,
+  ignored a failed fetch and never compared it; the Python bundle's sha256 is
+  now pinned as `CODEQL_SHA256` beside `CODEQL_BUNDLE` and checked with
+  `sha256sum -c`.
 
 ## [0.11.1] - 2026-11-23
 

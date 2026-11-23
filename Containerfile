@@ -61,6 +61,11 @@ ARG SEMGREP_VERSION=1.177.0
 ARG PIP_AUDIT_VERSION=2.9.0
 ARG PYYAML_VERSION=6.0.3
 ARG CODEQL_BUNDLE=codeql-bundle-v2.27.4
+# The release publishes a checksum file for the full bundle only, none for the
+# Python bundle installed below, so its sha256 is pinned here. Bump it with
+# CODEQL_BUNDLE: the release API's asset `digest` for
+# codeql-bundle-python-linux64.tar.zst is the value.
+ARG CODEQL_SHA256=d862cb11aff035988f178703b69751be072f2aa7e76616f16bb725a207b50b7d
 # The node stack's runtime. Pinned to the MAJOR, the way the base pins Python
 # to 3.14: Hummingbird ships one nodejs24 at a time and drops the old build, so
 # an exact RPM version would fail the weekly rebuild that exists to take errata.
@@ -321,10 +326,10 @@ RUN ln -s /app/venv/bin/gatehouse /usr/local/bin/gatehouse
 RUN set -eu; \
     base="https://github.com/github/codeql-action/releases/download/${CODEQL_BUNDLE}"; \
     curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 20 -o /tmp/codeql.tar.zst "${base}/codeql-bundle-python-linux64.tar.zst"; \
-    curl -fsSL -o /tmp/codeql.sha "${base}/codeql-bundle-linux64.tar.zst.checksum.txt" || true; \
+    echo "${CODEQL_SHA256}  /tmp/codeql.tar.zst" | sha256sum -c -; \
     mkdir -p /opt; \
     tar --use-compress-program=unzstd -xf /tmp/codeql.tar.zst -C /opt; \
-    rm -f /tmp/codeql.tar.zst /tmp/codeql.sha; \
+    rm -f /tmp/codeql.tar.zst; \
     chown -R root:root /opt/codeql; \
     chmod -R a+rX /opt/codeql; \
     ln -s /opt/codeql/codeql /usr/local/bin/codeql; \
