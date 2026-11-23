@@ -1396,6 +1396,12 @@ check("image: a number is not a tag", msg is not None and "must be a tag" in msg
 msg = image_error("[tool.ruff]\n", "main")
 check("image: a launcher reading one that TOML lacks is refused", msg is not None, str(msg))
 check("image: none set anywhere is fine", image_error("[tool.ruff]\n", None) is None)
+check(
+    "image: the [tool.sdlc.image] table is the image job's, not a tag",
+    image_error('[tool.sdlc.image]\nimage = "quay.io/crunchtools/x"\nrhsm = true\n', None) is None,
+)
+msg = image_error("[tool.sdlc.image]\nrhsm = true\n", "main")
+check("image: a launcher tag beside the table is refused", msg is not None, str(msg))
 
 
 # ------------------------------------------------------------- the docs stack

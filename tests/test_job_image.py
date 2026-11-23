@@ -91,6 +91,7 @@ class FakeTools(Tools):
         self.smoke_up = "true"
         self.build_rc = 0
         self.bootc = False
+        self.lint_rc = 0  # what `sdlc containerfile-lint` exits
         self.policy: dict | None = None
         self.built_file = ""
         self.plan = ""  # the plan `sdlc plan ci` prints; empty is the stock one
@@ -114,7 +115,7 @@ class FakeTools(Tools):
         if argv[:2] == ["sdlc", "plan"]:
             return cp(0, self.plan or plan_text(bootc=self.bootc))
         if argv[0] == "sdlc":
-            return cp(0)
+            return cp(self.lint_rc if argv[1:] == ["containerfile-lint"] else 0)
         assert argv[:3] == ["podman", "--remote", "--url"], argv
         return self.podman(argv[4:], cwd or ".")
 
@@ -165,11 +166,14 @@ def go(
     *,
     event: str = "push",
     extra: dict[str, str] | None = None,
+    files: dict[str, str] | None = None,
 ) -> tuple[int, dict | None]:
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
         ws.mkdir()
         (ws / "Containerfile").write_text(containerfile)
+        for name, text in (files or {}).items():
+            (ws / name).write_text(text)
         out = Path(tmp) / "out"
         env = {
             "GITHUB_WORKSPACE": str(ws),
@@ -196,10 +200,17 @@ QUAY_PARENT = "FROM quay.io/crunchtools/ubi10-core:latest\nRUN true\n"
 RH_PARENT = "FROM registry.redhat.io/ubi10/ubi-minimal:10.1\nRUN true\n"
 
 
-def refused(tools: FakeTools, containerfile: str, *, event: str = "push") -> str:
+def refused(
+    tools: FakeTools,
+    containerfile: str,
+    *,
+    event: str = "push",
+    files: dict[str, str] | None = None,
+    extra: dict[str, str] | None = None,
+) -> str:
     """The message of the refusal (exit 2) `image.run` raises, or a failed assertion."""
     try:
-        go(tools, containerfile, event=event)
+        go(tools, containerfile, event=event, files=files, extra=extra)
     except CannotRunError as exc:
         assert not tools.pushed(), "something was pushed after a refusal"
         return str(exc)
@@ -352,6 +363,202 @@ def test_scratch_has_no_parent() -> None:
     assert rc == 0 and result is not None and result["parent"] == ""
     assert "--from" not in t.build_argv()
     assert not any(a[0] == "cosign" for a in t.argvs)
+
+
+def gate_refused(*words: str, drop: tuple[str, str] | None = None) -> str:
+    """A gate step with `words` after --rm (or `drop` swapped in) must be refused, unrun.
+
+    Returns the refusal, which names the option it refused."""
+    t = FakeTools()
+    text = plan_text()
+    text = text.replace(*drop) if drop else text.replace("--rm", US.join(["--rm", *words]), 1)
+    t.plan = text
+    msg = refused(t, QUAY_PARENT)
+    assert "refused podman option" in msg, msg
+    gates = [a for a in t.argvs if a[4:5] == ["run"] and "-d" not in a]
+    assert not gates, f"a gate ran after the refusal: {gates}"
+    return msg
+
+
+def test_gate_network_is_refused_unless_none() -> None:
+    gate_refused("--network", "host")
+    gate_refused("--net", "host")
+    gate_refused("--network=host")
+    gate_refused("--net=host")
+    t = FakeTools()
+    t.plan = plan_text().replace("--rm", US.join(["--rm", "--network", "none"]), 1)
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0
+
+
+def test_gate_volume_outside_the_allowed_sources_is_refused() -> None:
+    assert "'/etc:/etc:ro'" in gate_refused("-v", "/etc:/etc:ro")
+    assert "'/:/host'" in gate_refused("--volume", "/:/host")
+    assert "'/etc:/repo:ro,z'" in gate_refused(drop=(f"{HOST}:/repo:ro,z", "/etc:/repo:ro,z"))
+
+
+def test_gate_mount_that_is_not_an_image_is_refused() -> None:
+    assert "type=bind" in gate_refused("--mount", "type=bind,source=/,destination=/host")
+    assert "type=volume" in gate_refused(drop=("type=image,", "type=volume,"))
+
+
+def test_gate_allowed_mounts_pass() -> None:
+    t = FakeTools()
+    t.plan = plan_text().replace("--rm", US.join(["--rm", "-v", f"{HOST}:/x:ro,z"]), 1)
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0 and t.pushed()
+
+
+class SmokeTools(Tools):
+    """A container-smoke podman: the image's config, then how the container starts and ends."""
+
+    def __init__(self, config: str, start_rc: int = 0, state: str = "false 0 false") -> None:
+        self.argvs: list[list[str]] = []
+        self.config, self.start_rc, self.state = config, start_rc, state
+
+    def run(
+        self,
+        argv: list[str],
+        *,
+        input: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del input, env, cwd
+        self.argvs.append(argv)
+        match argv[1]:
+            case "image":
+                return cp(0, self.config)
+            case "run":
+                return cp(self.start_rc)
+            case "inspect" if "ExitCode" in argv[-2]:
+                return cp(0, self.state)
+            case "inspect":
+                return cp(0, "false")
+        return cp(0)
+
+    def subs(self) -> list[str]:
+        return [a[1] for a in self.argvs]
+
+
+def smoke(t: SmokeTools, words: list[str] | None = None) -> bool:
+    job = image.Job(
+        tools=t,
+        env={},
+        root=Path("."),
+        scratch=Path("."),
+        name="demo",
+        sha=SHA,
+        podman=["podman"],
+        auth=Path("auth"),
+        volume="vol",
+    )
+    with contextlib.redirect_stdout(io.StringIO()):
+        return image.stays_up(job, "container-smoke", [], words or ["--", "img"], 0)
+
+
+def test_smoke_skips_a_systemd_pid_1() -> None:
+    for config in ('{"Entrypoint": ["/sbin/init"]}', '{"Cmd": ["/usr/lib/systemd/systemd"]}'):
+        t = SmokeTools(config)
+        assert smoke(t) is True
+        assert t.subs() == ["image"], "a systemd image was started"
+
+
+def test_smoke_podman_cannot_create_is_refused() -> None:
+    t = SmokeTools("{}", start_rc=125)
+    try:
+        smoke(t)
+    except CannotRunError:
+        assert t.argvs[-1][1:5] == ["rm", "-f", "-v", "sdlc-smoke-vol"]
+        return
+    raise AssertionError("exit 125 was judged, not refused")
+
+
+def test_smoke_entrypoint_that_cannot_start_fails() -> None:
+    t = SmokeTools("{}", start_rc=127)
+    assert smoke(t) is False
+    assert t.argvs[-1][1:5] == ["rm", "-f", "-v", "sdlc-smoke-vol"]
+
+
+def test_smoke_exit_0_early_passes_and_is_cleaned_up() -> None:
+    t = SmokeTools("{}", state="false 0 false")
+    assert smoke(t) is True
+    assert "run" in t.subs() and t.argvs[-1][1:5] == ["rm", "-f", "-v", "sdlc-smoke-vol"]
+    assert smoke(SmokeTools("{}", state="false 1 false")) is False
+
+
+def test_lint_that_could_not_parse_is_refused_not_passed() -> None:
+    t = FakeTools()
+    t.lint_rc = 4
+    assert "nothing was judged" in refused(t, QUAY_PARENT)
+    t = FakeTools()
+    t.lint_rc = 1
+    assert go(t, QUAY_PARENT)[0] == 1 and not t.pushed()
+
+
+# ------------------------------------------------------------- [tool.sdlc.image]
+
+
+def settings(body: str, name: str = "pyproject.toml") -> dict[str, str]:
+    return {name: f"[tool.sdlc.image]\n{body}"}
+
+
+def test_settings_image_is_where_it_pushes() -> None:
+    t = FakeTools()
+    _, result = go(t, QUAY_PARENT, files=settings('image = "quay.io/crunchtools/other"\n'))
+    assert result is not None and result["ref"] == "quay.io/crunchtools/other"
+    assert any(a[-1] == f"docker://quay.io/crunchtools/other:gated-{SHA}" for a in t.argvs)
+
+
+def test_settings_in_sdlc_toml_are_read() -> None:
+    files = settings('image = "quay.io/crunchtools/other"\n', "sdlc.toml")
+    _, result = go(FakeTools(), QUAY_PARENT, files=files)
+    assert result is not None and result["ref"] == "quay.io/crunchtools/other"
+
+
+def test_settings_image_outside_crunchtools_refused() -> None:
+    msg = refused(FakeTools(), QUAY_PARENT, files=settings('image = "docker.io/evil/x"\n'))
+    assert "quay.io/crunchtools/" in msg
+
+
+def test_settings_rhsm_needs_its_secrets() -> None:
+    msg = refused(FakeTools(), QUAY_PARENT, files=settings("rhsm = true\n"))
+    assert "rhsm" in msg
+    go(
+        FakeTools(),
+        QUAY_PARENT,
+        files=settings("rhsm = true\n"),
+        extra={"RHSM_ACTIVATION_KEY": "k", "RHSM_ORG_ID": "o"},
+    )
+
+
+def test_settings_redhat_registry_needs_its_login() -> None:
+    msg = refused(FakeTools(), QUAY_PARENT, files=settings("redhat-registry = true\n"))
+    assert "REGISTRY_REDHAT_IO_USER" in msg
+
+
+def test_settings_format_overrides_the_default() -> None:
+    t = FakeTools()
+    go(t, QUAY_PARENT, files=settings('format = "oci"\n'))
+    assert t.build_argv()[t.build_argv().index("--format") + 1] == "oci"
+
+
+def test_settings_refuses_what_it_cannot_honour() -> None:
+    for body, said in (
+        ('imagee = "x"\n', "imagee"),
+        ('containerfile = "build/Containerfile"\n', "container-build"),
+        ('context = "sub"\n', "container-build"),
+        ('format = "tar"\n', "docker or oci"),
+        ('rhsm = "yes"\n', "rhsm must be true or false"),
+    ):
+        msg = refused(FakeTools(), QUAY_PARENT, files=settings(body))
+        assert said in msg, (body, msg)
+
+
+def test_settings_boot_inputs_are_accepted() -> None:
+    body = 'boot = "mcp"\nboot-env = "K=v\\n"\nboot-timeout = 240\n'
+    rc, _ = go(FakeTools(), QUAY_PARENT, files=settings(body))
+    assert rc == 0
 
 
 def main() -> int:

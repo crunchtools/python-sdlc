@@ -185,7 +185,8 @@ def workspace(env: Mapping[str, str]) -> Path:
 
 def tool_sdlc(root: Path) -> dict:
     """The repo's [tool.sdlc]: pyproject.toml, or sdlc.toml without one; {} for neither."""
-    for name, key in (("pyproject.toml", ("tool", "sdlc")), ("sdlc.toml", ())):
+    # sdlc.toml holds the same [tool.sdlc] tables as pyproject.toml, as `sdlc` reads it.
+    for name in ("pyproject.toml", "sdlc.toml"):
         path = root / name
         if not path.is_file():
             continue
@@ -193,12 +194,63 @@ def tool_sdlc(root: Path) -> dict:
             doc: object = tomllib.loads(path.read_text())
         except (OSError, tomllib.TOMLDecodeError) as exc:
             cannot(f"{name} does not parse: {exc}")
-        for k in key:
+        for k in ("tool", "sdlc"):
             doc = doc.get(k, {}) if isinstance(doc, dict) else {}
         if not isinstance(doc, dict):
             cannot(f"[tool.sdlc] in {name} is not a table")
         return doc
     return {}
+
+
+# A container-release call's inputs, which scripts/convert_repo.py moves into
+# [tool.sdlc.image]. The image job enforces the first group; the boot gate's
+# inputs are named so a converted repo is not refused for them, and printed as
+# not enforced: container-smoke is the boot gate here (crunchtools/sdlc#110).
+IMAGE_ENFORCED = {"image", "containerfile", "context", "rhsm", "redhat-registry", "format"}
+IMAGE_NOT_ENFORCED = {
+    "build-args",
+    "free-disk",
+    "boot",
+    "boot-env",
+    "boot-run-args",
+    "boot-cmd",
+    "boot-units",
+    "boot-port",
+    "boot-path",
+    "boot-timeout",
+    "boot-command",
+    "boot-none-reason",
+    "contract-test",
+}
+IMAGE_REF = re.compile(r"quay\.io/crunchtools/[a-z0-9][a-z0-9._-]{0,127}")
+
+
+def image_settings(root: Path, repo: str) -> dict:
+    """[tool.sdlc.image], checked, with `image` defaulted to quay.io/crunchtools/<repo>.
+
+    A string `image` is the seat's launcher tag (bin/sdlc), not these settings.
+    """
+    given = tool_sdlc(root).get("image", {})
+    s = dict(given) if isinstance(given, dict) else {}
+    stray = sorted(set(s) - IMAGE_ENFORCED - IMAGE_NOT_ENFORCED)
+    if stray:
+        cannot(f"[tool.sdlc.image] has {', '.join(stray)}, which is no setting of the image job")
+    s.setdefault("image", f"quay.io/crunchtools/{repo.rpartition('/')[2]}")
+    if not isinstance(s["image"], str) or not IMAGE_REF.fullmatch(s["image"]):
+        cannot(f"[tool.sdlc.image] image must be quay.io/crunchtools/<name>; got {s['image']!r}")
+    for key in ("rhsm", "redhat-registry"):
+        if not isinstance(s.get(key, False), bool):
+            cannot(f"[tool.sdlc.image] {key} must be true or false")
+    if s.get("format", "docker") not in ("docker", "oci"):
+        cannot("[tool.sdlc.image] format must be docker or oci")
+    # The build is container-build's plan, so the file and context are named there.
+    named = s.get("containerfile", "Containerfile")
+    if named not in ("Containerfile", "Dockerfile") or s.get("context", ".") != ".":
+        cannot(
+            "[tool.sdlc.image] containerfile and context are read from "
+            "[tool.sdlc.ci.container-build]; move them there"
+        )
+    return s
 
 
 def plan(env: Mapping[str, str]) -> dict:

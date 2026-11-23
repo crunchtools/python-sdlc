@@ -41,10 +41,12 @@ from sdlc_jobs._core import (
     DIGEST,
     FLEET_PUBLIC_KEY,
     FOUND,
+    IMAGE_NOT_ENFORCED,
     Tools,
     cannot,
     final_stage,
     host_mount,
+    image_settings,
     must,
     podman,
     set_output,
@@ -76,6 +78,7 @@ DENIED = ("--privileged", "--cap-add", "--device", "--userns", "--pid", "--ipc",
 PLAN_FIELDS = 4  # name, stage, mode, argv
 STATE_FIELDS = 3  # running, exit code, OOM-killed
 PODMAN_CANNOT_CREATE = 125
+HADOLINT_UNPARSED = 4  # containerfile-lint: hadolint could not parse the file
 SYSTEMD = ("/sbin/init", "/usr/sbin/init", "/lib/systemd/systemd", "/usr/lib/systemd/systemd")
 
 
@@ -93,6 +96,7 @@ class Job:
     host_root: str = ""
     image_id: str = ""
     child_env: dict[str, str] = field(default_factory=dict)
+    settings: dict = field(default_factory=dict)  # [tool.sdlc.image], checked
 
     def run(self, argv: list[str], *, input: str | None = None) -> subprocess.CompletedProcess[str]:
         return self.tools.run(argv, input=input, env=self.child_env, cwd=str(self.root))
@@ -133,6 +137,9 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         scratch / "auth.json",
         f"sdlc-cache-{env.get('GITHUB_RUN_ID', '0')}-{env.get('GITHUB_RUN_ATTEMPT', '0')}",
     )
+    job.settings = image_settings(root, repo)
+    for key in sorted(IMAGE_NOT_ENFORCED & set(job.settings)):
+        print(f"image: [tool.sdlc.image] {key} is not enforced yet (crunchtools/sdlc#110)")
     job.child_env = {k: v for k, v in env.items() if k not in SECRETS}
     job.child_env["REGISTRY_AUTH_FILE"] = str(job.auth)
     try:
@@ -178,6 +185,8 @@ def login(job: Job) -> None:
         if not job.env.get(user):
             if host == QUAY:
                 cannot("QUAY_USERNAME is not set: nothing could be pushed")
+            if job.settings.get("redhat-registry"):
+                cannot(f"[tool.sdlc.image] redhat-registry is true but {user} is not set")
             continue
         job.must(
             [
@@ -325,8 +334,10 @@ def lint(job: Job) -> bool:
     step("containerfile-lint")
     proc = job.run(["sdlc", "containerfile-lint"])
     show(proc)
-    if proc.returncode in (0, 4):  # 4: hadolint could not parse it, skipped, never a pass
+    if proc.returncode == 0:
         return False
+    if proc.returncode == HADOLINT_UNPARSED:
+        cannot("containerfile-lint could not parse the Containerfile; nothing was judged")
     if proc.returncode != 1:
         cannot(f"containerfile-lint could not run (exit {proc.returncode})")
     return True
@@ -373,13 +384,15 @@ def build(job: Job, plan: dict[str, tuple[str, str]], text: str, parent: Parent 
         "build",
         "--pull=always",
         "--format",
-        "oci" if "bootc-lint" in plan else "docker",
+        job.settings.get("format") or ("oci" if "bootc-lint" in plan else "docker"),
     ]
     argv += ["--authfile", str(job.auth)]
     for key, value in labels(job, parent).items():
         if value:
             argv += ["--label", f"{key}={value}"]
     key, org = job.env.get("RHSM_ACTIVATION_KEY", ""), job.env.get("RHSM_ORG_ID", "")
+    if job.settings.get("rhsm") and not (key and org):
+        cannot("[tool.sdlc.image] rhsm is true but RHSM_ACTIVATION_KEY or RHSM_ORG_ID is not set")
     if key:
         # Files, not env=: the runner's podman predates env-sourced secrets. Both
         # spellings are in the fleet's Containerfiles; an extra secret costs nothing.
@@ -439,6 +452,7 @@ def check_words(job: Job, name: str, words: list[str]) -> None:
         bad = (
             word.split("=")[0] in DENIED
             or (word in ("--network", "--net") and words[i + 1 : i + 2] != ["none"])
+            or (word.startswith(("--network=", "--net=")) and word.split("=", 1)[1] != "none")
             or (prev in ("-v", "--volume") and not word.startswith(allowed))
             or (prev == "--mount" and not word.startswith("type=image,"))
         )
@@ -502,7 +516,7 @@ def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: in
 
 
 def push(job: Job, tag: str, pinned: str) -> int:
-    ref = f"{QUAY}/{ORG}/{job.name}"
+    ref = job.settings.get("image") or f"{QUAY}/{ORG}/{job.name}"
     gated = f"gated-{job.sha}"
     step(f"push {ref}:{gated}")
     job.must([*job.podman, "push", "--authfile", str(job.auth), tag, f"docker://{ref}:{gated}"])

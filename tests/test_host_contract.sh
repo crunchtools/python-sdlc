@@ -1075,6 +1075,29 @@ else
   bad "SDLC_IMAGE=localhost/...: $(last_run)"
 fi
 
+# The mount source is where the repo is on the machine podman runs on:
+# SDLC_HOST_REPO when `sdlc event` set it (a nested container mounts host
+# paths), the repo's own path when it is not.
+log_mark
+SDLC_HOST_REPO=/host/ws PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- ' -v /host/ws:/repo:ro,z ' \
+   && last_run | grep -q -- ' -e SDLC_HOST_REPO=/host/ws '; then
+  ok "SDLC_HOST_REPO is the mount source and is handed on"
+else
+  bad "SDLC_HOST_REPO was not the mount source: $(last_run)"
+fi
+
+log_mark
+env -u SDLC_HOST_REPO PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || true
+log_since
+if last_run | grep -q -- " -v $PWD:/repo:ro,z " \
+   && last_run | grep -q -- " -e SDLC_HOST_REPO=$PWD "; then
+  ok "no SDLC_HOST_REPO: the repo's own path is the mount source"
+else
+  bad "no SDLC_HOST_REPO did not fall back to the repo: $(last_run)"
+fi
+
 rc=0
 SDLC_IMAGE='main;touch' PATH="$SHIM" sh bin/sdlc tiers > "$RUN/out" 2>&1 || rc=$?
 if [ "$rc" -eq 2 ]; then

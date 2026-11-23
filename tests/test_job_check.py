@@ -56,6 +56,7 @@ class FakeTools(Tools):
         self.gate_rc = gate_rc
         self.prs = prs if prs is not None else []
         self.audit_rc = 0
+        self.audit_out: str | None = None  # None: the report for audit_rc
         self.base: str | None = DIGEST_A  # None: skopeo cannot read the parent
         self.built_on: str | None = DIGEST_A  # None: the published image has no label
         self.image = SDLC_REF  # what this container says it was run from
@@ -69,7 +70,9 @@ class FakeTools(Tools):
         input: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        stream: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        del stream  # captured or streamed, the fake answers the same
         self.argvs.append(argv)
         self.stdin.append(input)
         self.cwds.append(cwd)
@@ -82,13 +85,23 @@ class FakeTools(Tools):
             return cp(0, "#!/bin/sh\n")
         if ran_launcher(argv):
             self.launched.append((argv[1], dict(env or {})))
-            return cp(self.gate_rc) if argv[1] == "ci" else cp(self.audit_rc, "CVE-1 in foo")
+            if argv[1] == "ci":
+                return cp(self.gate_rc)
+            assert argv[2:] == ["--", "--report"], argv
+            return cp(self.audit_rc, self.report() if self.audit_out is None else self.audit_out)
         if argv[:2] == ["skopeo", "inspect"] and "--format" in argv:
             return cp(0, self.base) if self.base else cp(1)
         if argv[:2] == ["skopeo", "inspect"]:
             labels = {check.BASE_LABEL: self.built_on} if self.built_on else {}
             return cp(0, json.dumps({"Labels": labels}))
         raise AssertionError(f"unexpected argv {argv}")
+
+    def report(self) -> str:
+        """What `sdlc pip-audit -- --report` prints: its log, then the report line."""
+        vulns = [{"id": "CVE-1", "fix_versions": ["2.0"]}] if self.audit_rc == 1 else []
+        deps = [{"name": "foo", "version": "1.0", "vulns": vulns}]
+        doc = json.dumps({"dependencies": deps})
+        return f"{check.AUDIT_REPORT}forged by the repo\nFound 1\n{check.AUDIT_REPORT}{doc}\n"
 
     def http(
         self, method: str, url: str, _headers: object, payload: bytes | None = None
@@ -175,7 +188,7 @@ def test_push_other_branch_is_not_default() -> None:
 
 def test_release_merge() -> None:
     rc, plan = go("push", FakeTools(prs=[pr()]), files=PYPI)
-    assert rc == 0 and plan["release"] == {"version": "1.2.3", "publish": "pypi", "pr": 7}
+    assert rc == 0 and plan["release"] == {"version": "1.2.3", "publish": "pypi"}
     assert plan["write"] is True and plan["image"] is False
 
 
@@ -203,7 +216,8 @@ def test_weekly() -> None:
     t = FakeTools()
     rc, plan = go("schedule", t, files={**IMAGE, **PYPI}, cron=check.WEEKLY)
     assert rc == 0 and plan["weekly"] is True and plan["image"] is True
-    assert plan["audit"]["found"] is False and plan["write"] is False
+    # A clean report still goes to `write`: it closes the alert issue.
+    assert plan["audit"]["dependencies"][0]["vulns"] == [] and plan["write"] is True
     assert ("PUT", f"/repos/{REPO}/actions/workflows/ci.yml/enable", None) in t.calls
     assert not gated(t)
 
@@ -212,8 +226,29 @@ def test_weekly_audit_found() -> None:
     t = FakeTools()
     t.audit_rc = 1
     plan = go("schedule", t, files=PYPI, cron=check.WEEKLY)[1]
-    assert plan["audit"]["found"] is True and "CVE-1" in plan["audit"]["summary"]
+    assert plan["audit"]["dependencies"][0]["vulns"][0]["id"] == "CVE-1"
     assert plan["write"] is True
+
+
+def test_weekly_no_python_project_audits_nothing() -> None:
+    t = FakeTools()
+    plan = go("schedule", t, files=IMAGE, cron=check.WEEKLY)[1]
+    assert plan["audit"] is None and plan["write"] is False and not gated(t, "pip-audit")
+
+
+def test_weekly_audit_without_a_report_cannot_run() -> None:
+    for out in (
+        "Found 1\n",
+        f"{check.AUDIT_REPORT}not json\n",
+        f'{check.AUDIT_REPORT}{{"x": 1}}\n',
+    ):
+        t = FakeTools()
+        t.audit_out = out
+        try:
+            go("schedule", t, files=PYPI, cron=check.WEEKLY)
+        except CannotRunError:
+            continue
+        raise AssertionError(f"an audit with no report must not pass: {out!r}")
 
 
 def test_weekly_audit_cannot_run() -> None:

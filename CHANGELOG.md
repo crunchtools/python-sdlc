@@ -34,6 +34,15 @@ All notable changes to this project are documented here, following
   `image` verifies the parent, builds FROM its digest, gates and pushes
   `gated-<sha>`; `promote` signs, attests and moves tags without ever moving a
   version backwards; `pypi` re-verifies the release and publishes by OIDC.
+- The `image` job reads `[tool.sdlc.image]` (#107's contract): `image` is where it
+  pushes (quay.io/crunchtools/ only), `rhsm` and `redhat-registry` make their
+  secrets required, `format` overrides docker/oci. `containerfile`/`context` other
+  than the root are refused for `[tool.sdlc.ci.container-build]`; the boot gate's
+  inputs are accepted and printed as not enforced yet (#110).
+- `sdlc pip-audit -- --report` prints pip-audit's JSON report on one
+  `SDLC-AUDIT-REPORT` line. The weekly `check` hands it on as `audit`, clean or
+  not, so `write`'s `audit_alert` can also close the issue; `release` is
+  `{version, publish}`.
 - `bin/sdlc` honours `SDLC_HOST_REPO`, the repo's path on the machine podman runs
   on, for a job container that drives the runner's socket.
 - `cutover.py --merge REPO --pr N`: refuses a busy repo (a person's open PR, an old
@@ -42,6 +51,14 @@ All notable changes to this project are documented here, following
   then merges by admin bypass, moves the rulesets idempotently, drops the repo from
   each moved org secret and updates bot PRs. `--move-rulesets` and `--check`
   (moved secrets still readable, rulesets out of step, no `ashigaru/release-*` guard).
+
+### Fixed
+
+- `[tool.sdlc] image` as a table no longer fails config: a string stays the
+  seat's launcher tag, now deprecated for `SDLC_IMAGE`.
+- The jobs read `sdlc.toml`'s `[tool.sdlc]` tables; they read its top level.
+- A gate's `--network=host` / `--net=host` is refused like the two-word form.
+- `containerfile-lint` exit 4 (hadolint could not parse) is a 2, not a pass.
 
 ## [0.11.1] - 2026-11-23
 

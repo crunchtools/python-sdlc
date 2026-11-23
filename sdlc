@@ -548,6 +548,14 @@ IMAGE_TAG_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
 
 
 def config_image(cfg: dict) -> None:
+    # A table is the image job's settings (`[tool.sdlc.image]`, which
+    # scripts/convert_repo.py writes), and sdlc_jobs/image.py reads it.
+    # bin/sdlc's awk reads only a line directly under [tool.sdlc], so it never
+    # takes the table for a tag.
+    if isinstance(cfg.get("image"), dict):
+        if os.environ.get("SDLC_CONFIG_IMAGE"):
+            cannot("bin/sdlc read a [tool.sdlc] image tag; TOML has a [tool.sdlc.image] table")
+        return
     if "image" not in cfg:
         seen = os.environ.get("SDLC_CONFIG_IMAGE")
         if "SDLC_HOST_REPO" in os.environ and seen:
@@ -556,6 +564,13 @@ def config_image(cfg: dict) -> None:
     tag = cfg["image"]
     if not isinstance(tag, str) or not IMAGE_TAG_RE.fullmatch(tag):
         cannot(f"[tool.sdlc] image must be a tag such as main or 0.8.0; got {tag!r}")
+    # Deprecated: the key is the image job's table now, and TOML holds one or the
+    # other. SDLC_IMAGE=<tag> chooses the same image on a seat and needs no file.
+    print(
+        f"sdlc: [tool.sdlc] image = {tag!r} is deprecated; export SDLC_IMAGE={tag} instead. "
+        f"The key is now the image job's [tool.sdlc.image] table.",
+        file=sys.stderr,
+    )
     if "SDLC_HOST_REPO" in os.environ and os.environ.get("SDLC_CONFIG_IMAGE") != tag:
         cannot(
             f"[tool.sdlc] image is {tag!r} but bin/sdlc could not read it, so it "
@@ -2371,8 +2386,8 @@ def passthrough() -> list[str]:
     way and ends up in an argv list, so there is no shell between the caller
     and the tool.
 
-    Only a check that is a tool invocation reads this, and only `pytest` does
-    today. A tier never sees it -- `bin/sdlc` clears the variable for
+    Only a check that is a tool invocation reads this: `pytest`, and `pip-audit`
+    for its one `--report`. A tier never sees it -- `bin/sdlc` clears the variable for
     commit/push/ci rather than refusing it, so an exported SDLC_ARGS cannot
     reach a tier's pytest -- and no `host` step argv is built from it.
     """
@@ -2617,12 +2632,16 @@ def installed(env: dict[str, str]) -> set[str]:
     }
 
 
-def pip_audit_once(env: dict[str, str]) -> tuple[int, str, list[str]]:
+def pip_audit_once(env: dict[str, str], report: Path | None = None) -> tuple[int, str, list[str]]:
     """One pip-audit run: (its status, its output, what it skipped as not found).
 
     It runs inside the project venv, so it comes from `--with` rather than the
     image's own tool install -- pinned to that install's version, because the
     network-failure patterns above are read from that version's code.
+
+    With `report`, pip-audit writes its JSON report there. Its summary line stays
+    on stderr, but the skip reasons move into the report, so they are read back
+    from it.
     """
     version = BAKED["pip-audit"]
     if version == "unknown":
@@ -2640,19 +2659,55 @@ def pip_audit_once(env: dict[str, str]) -> tuple[int, str, list[str]]:
             str(PIP_AUDIT_TIMEOUT),
             "--progress-spinner",
             "off",
+            *(["--format", "json", "--output", str(report)] if report else []),
         ],
         env=env,
         cwd=project_dir(),
         tee=True,
     )
+    lines = out.splitlines()
+    if report is not None:
+        lines += [str(d.get("skip_reason")) for d in pip_audit_report(report, missing={})]
     unaudited = sorted(
         {
             line.split("could not be audited:")[-1].strip()
-            for line in out.splitlines()
+            for line in lines
             if "could not be audited" in line
         }
     )
     return rc, out, unaudited
+
+
+# The line `pip-audit -- --report` prints its report on, for the weekly `check`
+# job (sdlc_jobs/check.py), which hands it to the constitution's audit_alert.
+AUDIT_REPORT = "SDLC-AUDIT-REPORT "
+
+
+def pip_audit_report(path: Path, *, missing: dict | None = None) -> list[dict]:
+    """The dependencies of pip-audit's JSON report; `missing` stands in for no file."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else missing
+    except (OSError, ValueError) as exc:
+        cannot(f"pip-audit's report did not read as JSON: {exc}")
+    if doc is None:
+        cannot("pip-audit wrote no report")
+    deps = doc.get("dependencies", []) if isinstance(doc, dict) else None
+    if not isinstance(deps, list) or not all(isinstance(d, dict) for d in deps):
+        cannot("pip-audit's report has no dependencies list")
+    return deps
+
+
+def pip_audit_report_path() -> Path | None:
+    """Where a `-- --report` run writes its JSON report; None without one."""
+    args = passthrough()
+    if args not in ([], ["--report"]):
+        cannot("pip-audit takes one argument, --report, after `--`")
+    return Path(tempfile.mkdtemp(prefix="sdlc-audit-")) / "audit.json" if args else None
+
+
+def print_pip_audit_report(report: Path) -> None:
+    deps = pip_audit_report(report)
+    print(AUDIT_REPORT + json.dumps({"dependencies": deps}, separators=(",", ":")), flush=True)
 
 
 def t_pip_audit(s: dict) -> int:
@@ -2665,6 +2720,7 @@ def t_pip_audit(s: dict) -> int:
     and never a 0 that reads as a pass.
     """
     need_project()
+    report = pip_audit_report_path()
     env = project_env()
     sync_project(env)
     pypi, registry = locked_registry(project_dir() / "uv.lock")
@@ -2684,7 +2740,9 @@ def t_pip_audit(s: dict) -> int:
     attempts = len(PIP_AUDIT_BACKOFF) + 1
     for attempt in range(1, attempts + 1):
         step(f"pip-audit (attempt {attempt} of {attempts})" if attempt > 1 else "pip-audit")
-        rc, out, unaudited = pip_audit_once(env)
+        if report is not None:
+            report.unlink(missing_ok=True)
+        rc, out, unaudited = pip_audit_once(env, report)
         # A verdict is a verdict: a finding next to a skipped package or uv's
         # own network noise is still a finding, and retrying it would turn a 1
         # into a 2 on every run.
@@ -2718,6 +2776,8 @@ def t_pip_audit(s: dict) -> int:
             + "\nA local path or vendored dependency is expected here. Anything "
             "else in this list is a real gap in the scan."
         )
+    if report is not None and rc in (CLEAN, FOUND):
+        print_pip_audit_report(report)
     return rc
 
 

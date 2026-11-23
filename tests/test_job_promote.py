@@ -361,6 +361,43 @@ def test_no_provenance_without_a_build_record() -> None:
     assert t.attested == {(NEW, "spdxjson")}
 
 
+def test_provenance_predicate_from_valid_labels() -> None:
+    p = promote.provenance(built_labels(), REPO)
+    assert p is not None
+    source = f"https://github.com/{REPO}"
+    assert p["buildDefinition"]["buildType"] == promote.BUILD_TYPE
+    assert p["buildDefinition"]["externalParameters"]["workflow"] == {
+        "ref": "refs/heads/main",
+        "repository": source,
+        "path": ".github/workflows/ci.yml",
+    }
+    assert p["buildDefinition"]["resolvedDependencies"] == [
+        {"uri": f"git+{source}", "digest": {"gitCommit": SHA}}
+    ]
+    assert p["runDetails"]["builder"]["id"] == f"https://github.com/{WORKFLOW}"
+    assert p["runDetails"]["metadata"]["invocationId"] == RUN
+
+
+def test_provenance_refuses_malformed_or_mismatched_labels() -> None:
+    other = "crunchtools/other"
+    bad: list[dict[str, str]] = [
+        {"com.crunchtools.build.run": f"https://github.com/{other}/actions/runs/7/attempts/1"},
+        {"com.crunchtools.build.run": f"{RUN}/extra"},
+        {"com.crunchtools.build.run": f"https://github.com/{REPO}/actions/runs/x/attempts/1"},
+        {"com.crunchtools.build.run": ""},
+        {"com.crunchtools.build.workflow": f"{REPO}/.github/workflows/other.yml@refs/heads/main"},
+        {"com.crunchtools.build.workflow": f"{other}/.github/workflows/ci.yml@refs/heads/main"},
+        {"com.crunchtools.build.builder": f"{REPO}/.github/workflows/ci.yml@refs/tags/v1"},
+        {"com.crunchtools.build.commit": OTHER_SHA},
+        {"com.crunchtools.build.commit": SHA[:7]},
+        {"com.crunchtools.build.commit": SHA.upper()},
+        {"org.opencontainers.image.revision": OTHER_SHA},
+    ]
+    for change in bad:
+        assert promote.provenance({**built_labels(), **change}, REPO) is None, change
+    assert promote.provenance({}, REPO) is None
+
+
 def main() -> int:
     tests: list[Callable[[], None]] = [v for k, v in globals().items() if k.startswith("test_")]
     failed = 0

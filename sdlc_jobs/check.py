@@ -43,6 +43,7 @@ from sdlc_jobs._core import (
     cannot,
     final_stage,
     host_mount,
+    image_settings,
     must,
     set_output,
     step,
@@ -55,6 +56,8 @@ ACCEPTED = 202
 WEEKLY = "17 6 * * 1"
 POLL = "47 */6 * * *"
 RELEASE_REF = "ashigaru/release-"
+# The line `sdlc pip-audit -- --report` prints its JSON report on; the same in `sdlc`.
+AUDIT_REPORT = "SDLC-AUDIT-REPORT "
 BASE_LABEL = "org.opencontainers.image.base.digest"  # what the image job stamps on a build
 # Where a gate leaves SARIF, as category -> file name. CodeQL writes
 # codeql-results.sarif to the temp dir inside its nested container, which is gone when it exits, and
@@ -102,7 +105,8 @@ def make_plan(
         api(tools, env, "PUT", f"/repos/{repo}/actions/workflows/ci.yml/enable")
     elif cron == POLL and has_image:
         out["image"] = parent_moved(tools, root, repo)
-    out["write"] = bool(out["release"] or (out["audit"] or {}).get("found"))
+    # A clean report goes to `write` too: it is what closes the alert issue.
+    out["write"] = bool(out["release"]) or out["audit"] is not None
     return out
 
 
@@ -112,7 +116,12 @@ def containerfile(root: Path) -> str | None:
 
 
 def launch(
-    tools: Tools, env: Mapping[str, str], root: Path, command: str, *, stream: bool = False
+    tools: Tools,
+    env: Mapping[str, str],
+    root: Path,
+    command: str,
+    *args: str,
+    stream: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """The launcher's `command` for this tree, judged by this very image.
 
@@ -131,7 +140,8 @@ def launch(
         "SDLC_HOST_REPO": host,
         "CONTAINER_HOST": env.get("CONTAINER_HOST") or SOCKET,
     }
-    return tools.run([str(script), command], cwd=str(root), env=child, stream=stream)
+    argv = [str(script), command, *(["--", *args] if args else [])]
+    return tools.run(argv, cwd=str(root), env=child, stream=stream)
 
 
 def gates(tools: Tools, env: Mapping[str, str], root: Path) -> int:
@@ -158,18 +168,31 @@ def release_plan(tools: Tools, env: Mapping[str, str], root: Path, repo: str) ->
     if not ok:
         return None
     publish = "pypi" if tool_sdlc(root).get("publish") == "pypi" else ""
-    return {"version": version, "publish": publish, "pr": pr["number"]}
+    return {"version": version, "publish": publish}
 
 
-def audit(tools: Tools, env: Mapping[str, str], root: Path) -> dict:
-    """The weekly dependency audit: the image's own `pip-audit` gate, 1 meaning findings."""
+def audit(tools: Tools, env: Mapping[str, str], root: Path) -> dict | None:
+    """The weekly dependency audit: pip-audit's JSON report, from the image's own gate.
+
+    `write` hands it to the constitution's `audit_alert`, which opens, rewrites or
+    closes the one alert issue, so a clean report is handed on as well. None when
+    there is no Python project to audit.
+    """
     if not (root / "pyproject.toml").is_file():
-        return {"found": False, "summary": "no Python project to audit"}
-    proc = launch(tools, env, root, "pip-audit")
+        return None
+    proc = launch(tools, env, root, "pip-audit", "--report")
     if proc.returncode not in (CLEAN, FOUND):
         cannot(f"pip-audit could not run (exit {proc.returncode})")
-    tail = (proc.stdout + proc.stderr).strip().splitlines()[-10:]
-    return {"found": proc.returncode == FOUND, "summary": "\n".join(tail)[:2000]}
+    lines = [line for line in proc.stdout.splitlines() if line.startswith(AUDIT_REPORT)]
+    if not lines:
+        cannot("pip-audit printed no report")
+    try:
+        report = json.loads(lines[-1].removeprefix(AUDIT_REPORT))
+    except ValueError as exc:
+        cannot(f"pip-audit's report is not JSON: {exc}")
+    if not isinstance(report, dict) or not isinstance(report.get("dependencies"), list):
+        cannot("pip-audit's report has no dependencies list")
+    return report
 
 
 def final_base(text: str) -> str | None:
@@ -193,7 +216,7 @@ def parent_moved(tools: Tools, root: Path, repo: str) -> bool:
         return False
     step(f"poll: {base}")
     now = must(tools, ["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{base}"]).strip()
-    published = f"quay.io/crunchtools/{repo.rpartition('/')[2]}:latest"
+    published = f"{image_settings(root, repo)['image']}:latest"
     raw = must(tools, ["skopeo", "inspect", f"docker://{published}"])
     try:
         built_on = json.loads(raw).get("Labels", {}).get(BASE_LABEL)
