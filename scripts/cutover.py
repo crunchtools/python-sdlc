@@ -775,9 +775,48 @@ def check_move_plans(run: Run) -> None:
     run.say("5 rulesets: the move would go through")
 
 
+# A commit's check runs, as passing() reads them. Not the REST list: it carries
+# each run's output, free text a gateway route may withhold.
+RUNS_QUERY = """query($owner: String!, $name: String!, $oid: GitObjectID!) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $oid) {
+      ... on Commit {
+        checkSuites(first: 100) {
+          nodes { app { slug } checkRuns(first: 100) { nodes { databaseId name conclusion } } }
+        }
+      }
+    }
+  }
+}"""
+
+
+def commit_runs(api: Api, repo: str, sha: str) -> list[dict]:
+    """Every check run on `sha`: id, name, conclusion and app slug, as REST names them."""
+    variables = {"owner": ORG, "name": repo, "oid": sha}
+    status, body = api.call("POST", "/graphql", {"query": RUNS_QUERY, "variables": variables})
+    answered = body.get("data") if isinstance(body, dict) else None
+    found = answered.get("repository") if isinstance(answered, dict) else None
+    commit = found.get("object") if isinstance(found, dict) else None
+    if status != HTTPStatus.OK or not isinstance(commit, dict):
+        errors = body.get("errors") if isinstance(body, dict) else None
+        raise ApiError(
+            f"POST /graphql (check runs of {sha[:7]}): HTTP {status} {errors or ''}".rstrip()
+        )
+    return [
+        {
+            "id": r["databaseId"],
+            "name": r["name"],
+            "conclusion": (r.get("conclusion") or "").lower() or None,
+            "app": {"slug": (suite.get("app") or {}).get("slug")},
+        }
+        for suite in commit["checkSuites"]["nodes"]
+        for r in suite["checkRuns"]["nodes"]
+    ]
+
+
 def check_runs(run: Run) -> None:
     """Step 6: the head commit has a passing Actions run of each required check."""
-    runs = paged(run.api, f"{run.base}/commits/{run.sha}/check-runs", "check_runs")
+    runs = commit_runs(run.api, run.repo, run.sha)
     missing = [c for c in REQUIRED_CHECKS if not passing(runs, c)]
     if missing:
         raise RefusedError(

@@ -25,7 +25,10 @@ All notable changes to this project are documented here, following
   `registry`, `sdlc-signing` and `sdlc-approval`.
 - `cutover.py` and `fleet_wave.py` list the org's repos with a GraphQL query for
   name, privacy, archived and default branch alone. The REST listing carries
-  each repo's description, free text a gateway route may withhold.
+  each repo's description, free text a gateway route may withhold. The same
+  goes for the merge's check of the required runs: GraphQL, for id, name,
+  conclusion and app only, which also needs no Checks permission (fine-grained
+  tokens cannot hold it).
 - `cutover.py` and `fleet_wave.py` take `--api-url`, so their GitHub calls can
   go through a gateway route that adds its own credential.
 

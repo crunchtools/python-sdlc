@@ -380,6 +380,24 @@ def as_graphql(answer: tuple[int, object]) -> tuple[int, object]:
     return 200, {"data": {"organization": {"repositories": repos}}}
 
 
+def runs_as_graphql(answer: tuple[int, object]) -> tuple[int, object]:
+    """A REST check-runs fixture as the GraphQL commit commit_runs() asks for."""
+    status, body = answer
+    if status != 200 or not isinstance(body, dict):
+        return status, body
+    suites: dict[str, list[dict]] = {}
+    for r in body.get("check_runs", []):
+        node = {
+            "databaseId": r["id"],
+            "name": r["name"],
+            "conclusion": (r.get("conclusion") or "").upper() or None,
+        }
+        suites.setdefault((r.get("app") or {}).get("slug"), []).append(node)
+    nodes = [{"app": {"slug": app}, "checkRuns": {"nodes": runs}} for app, runs in suites.items()]
+    commit = {"checkSuites": {"nodes": nodes}}
+    return 200, {"data": {"repository": {"object": commit}}}
+
+
 class FakeApi(cut.Api):
     """An in-memory GitHub: (method, path) -> (status, body) or a callable giving one.
 
@@ -395,9 +413,8 @@ class FakeApi(cut.Api):
 
     def call(self, method: str, path: str, body: object = None) -> tuple[int, object]:
         self.calls += 1
-        if (method, path) == ("POST", "/graphql"):  # the repo listing, a read
-            listing = self.routes[("GET", f"/orgs/{cut.ORG}/repos")]
-            return as_graphql(listing() if callable(listing) else listing)
+        if (method, path) == ("POST", "/graphql"):  # a read: the repo listing or a commit's runs
+            return self.graphql(body)
         if method != "GET":
             self.writes.append((method, path, body))
         for key in (path, path.split("?", maxsplit=1)[0]):
@@ -409,6 +426,19 @@ class FakeApi(cut.Api):
         if method == "PUT":
             return (202 if path.endswith("/update-branch") else 200), {}
         return 404, {"message": "Not Found"}
+
+    def graphql(self, body: object) -> tuple[int, object]:
+        """The two queries the cutover sends, answered from their REST fixtures."""
+        query = body.get("query", "") if isinstance(body, dict) else ""
+        if "checkSuites" not in query:
+            listing = self.routes[("GET", f"/orgs/{cut.ORG}/repos")]
+            return as_graphql(listing() if callable(listing) else listing)
+        variables = body["variables"]
+        runs = self.routes.get(
+            ("GET", f"{O}/{variables['name']}/commits/{variables['oid']}/check-runs"),
+            (404, {"message": "Not Found"}),
+        )
+        return runs_as_graphql(runs() if callable(runs) else runs)
 
 
 def ruleset(rid: int, name: str, include: list[str], checks: bool = True) -> dict:
