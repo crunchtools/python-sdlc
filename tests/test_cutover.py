@@ -362,6 +362,24 @@ def b64(data: bytes) -> dict:
     return {"content": base64.b64encode(data).decode()}
 
 
+def as_graphql(answer: tuple[int, object]) -> tuple[int, object]:
+    """A REST repo listing fixture as the GraphQL page fleet() asks for."""
+    status, body = answer
+    if status != 200 or not isinstance(body, list):
+        return status, body
+    nodes = [
+        {
+            "name": r["name"],
+            "isPrivate": bool(r.get("private")),
+            "isArchived": bool(r.get("archived")),
+            "defaultBranchRef": {"name": r.get("default_branch", "main")},
+        }
+        for r in body
+    ]
+    repos = {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}
+    return 200, {"data": {"organization": {"repositories": repos}}}
+
+
 class FakeApi(cut.Api):
     """An in-memory GitHub: (method, path) -> (status, body) or a callable giving one.
 
@@ -377,6 +395,9 @@ class FakeApi(cut.Api):
 
     def call(self, method: str, path: str, body: object = None) -> tuple[int, object]:
         self.calls += 1
+        if (method, path) == ("POST", "/graphql"):  # the repo listing, a read
+            listing = self.routes[("GET", f"/orgs/{cut.ORG}/repos")]
+            return as_graphql(listing() if callable(listing) else listing)
         if method != "GET":
             self.writes.append((method, path, body))
         for key in (path, path.split("?", maxsplit=1)[0]):

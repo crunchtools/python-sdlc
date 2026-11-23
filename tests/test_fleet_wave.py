@@ -118,6 +118,24 @@ def origin(base: Path, name: str, files: dict[str, str], branch: str = "main") -
     return bare
 
 
+def as_graphql(answer: tuple[int, object]) -> tuple[int, object]:
+    """A REST repo listing fixture as the GraphQL page fleet() asks for."""
+    status, body = answer
+    if status != 200 or not isinstance(body, list):
+        return status, body
+    nodes = [
+        {
+            "name": r["name"],
+            "isPrivate": bool(r.get("private")),
+            "isArchived": bool(r.get("archived")),
+            "defaultBranchRef": {"name": r.get("default_branch", "main")},
+        }
+        for r in body
+    ]
+    repos = {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}
+    return 200, {"data": {"organization": {"repositories": repos}}}
+
+
 class FakeApi(W.Api):
     """Answers from a table; records every call. Writes answer as GitHub does."""
 
@@ -128,6 +146,9 @@ class FakeApi(W.Api):
         self.pr_exists = pr_exists or set()
 
     def call(self, method: str, path: str, body: object = None) -> tuple[int, object]:
+        if (method, path) == ("POST", "/graphql"):  # the repo listing: a read, recorded as one
+            self.calls.append(("GET", path, body))
+            return as_graphql(self.read("/orgs/crunchtools/repos?type=all&per_page=100&page=1"))
         self.calls.append((method, path, body))
         if method == "GET":
             return self.read(path)
@@ -478,7 +499,7 @@ check(
     and {k: opened[0][k] for k in ("title", "body")} == W.pr_fields(wave, "pinned")
     and "How to roll back" in opened[0]["body"],
 )
-merges = [b for m, p, b in api.calls if p == "/graphql"]
+merges = [b for m, p, b in api.calls if p == "/graphql" and "enablePullRequestAutoMerge" in str(b)]
 check("apply: no auto-merge is queued", not merges and len(api.calls) > 0, str(merges))
 check(
     "apply: the PR body says it merges by cutover.py --merge",
@@ -877,7 +898,9 @@ check(
     W.cutover.unpinned('image: "x/sdlc-bootstrap@sha256:<digest>"'),
 )
 check("boot: a real digest is pinned", not W.cutover.unpinned(f'image: "{PINNED_BOOT}"'))
-check("boot: a tag is unpinned", W.cutover.unpinned('image: "quay.io/crunchtools/sdlc-bootstrap:1"'))
+check(
+    "boot: a tag is unpinned", W.cutover.unpinned('image: "quay.io/crunchtools/sdlc-bootstrap:1"')
+)
 if W.cutover.unpinned(W.cutover.FLEET_FILE.read_text()):
     proc = subprocess.run(
         [

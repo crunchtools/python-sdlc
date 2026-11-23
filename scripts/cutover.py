@@ -353,10 +353,45 @@ def read_file(api: Api, repo: str, path: str, ref: str) -> bytes | None:
     return base64.b64decode(body["content"])
 
 
+# Only the fields the cutover reads. Not the REST listing: it carries each repo's
+# description, free text a gateway route may withhold, and nothing here needs it.
+REPOS_QUERY = """query($org: String!, $after: String) {
+  organization(login: $org) {
+    repositories(first: 100, after: $after) {
+      nodes { name isPrivate isArchived defaultBranchRef { name } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}"""
+
+
 def fleet(api: Api) -> list[dict]:
-    """Every non-archived repo of the org the token can see."""
-    repos = paged(api, f"/orgs/{ORG}/repos?type=all")
-    return [r for r in repos if not r["archived"]]
+    """Every non-archived repo of the org the token can see, with a default branch:
+    name, private and default_branch, as the REST record names them."""
+    repos: list[dict] = []
+    after = None
+    for _ in range(MAX_PAGES):
+        variables = {"org": ORG, "after": after}
+        status, body = api.call("POST", "/graphql", {"query": REPOS_QUERY, "variables": variables})
+        data = body.get("data") if isinstance(body, dict) else None
+        org = data.get("organization") if isinstance(data, dict) else None
+        if status != HTTPStatus.OK or not isinstance(org, dict):
+            errors = body.get("errors") if isinstance(body, dict) else None
+            raise ApiError(f"POST /graphql (repositories): HTTP {status} {errors or ''}".rstrip())
+        listed = org["repositories"]
+        repos += [
+            {
+                "name": n["name"],
+                "private": n["isPrivate"],
+                "default_branch": n["defaultBranchRef"]["name"],
+            }
+            for n in listed["nodes"]
+            if not n["isArchived"] and n.get("defaultBranchRef")
+        ]
+        if not listed["pageInfo"]["hasNextPage"]:
+            return repos
+        after = listed["pageInfo"]["endCursor"]
+    raise ApiError(f"POST /graphql (repositories): more than {MAX_PAGES} pages")
 
 
 def is_converted(repo: str, have: bytes | None) -> bool:

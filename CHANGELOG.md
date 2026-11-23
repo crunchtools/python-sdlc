@@ -23,6 +23,9 @@ All notable changes to this project are documented here, following
   alone. `cutover.py` no longer takes repos off the org secrets' lists, and
   `--check` no longer looks for moved secrets. sdlc alone keeps its
   `registry`, `sdlc-signing` and `sdlc-approval`.
+- `cutover.py` and `fleet_wave.py` list the org's repos with a GraphQL query for
+  name, privacy, archived and default branch alone. The REST listing carries
+  each repo's description, free text a gateway route may withhold.
 - `cutover.py` and `fleet_wave.py` take `--api-url`, so their GitHub calls can
   go through a gateway route that adds its own credential.
 
