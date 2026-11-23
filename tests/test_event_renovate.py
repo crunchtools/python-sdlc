@@ -34,6 +34,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import unittest.mock
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -209,6 +210,7 @@ def scenario(
     rcs: Sequence[int | BaseException] = (),
     config: dict[str, Any] | None = GLOBAL,
     installed: list[dict[str, Any]] = INSTALLED,
+    run: FakeRenovate | None = None,
 ) -> dict[str, Any]:
     work = Path(tempfile.mkdtemp(dir=TMP))
     if config is not None:
@@ -238,7 +240,8 @@ def scenario(
         return api
 
     site = Site(HOME, env, git, work, api_for=api_for)
-    mint, run = Minter(), FakeRenovate(*rcs)
+    mint = Minter()
+    run = run or FakeRenovate(*rcs)
     sock = FakeSocket()
     job = renovate.Job(site, mint, sock, run)
     try:
@@ -427,6 +430,37 @@ check(
     and isinstance(late["out"], CannotRunError)
     and "crunchtools/A (out of time)" in str(late["out"]),
     repr(late["out"]),
+)
+
+
+class SlowRenovate(FakeRenovate):
+    """Uses up all but 30 seconds of the run's budget on each repository."""
+
+    def __init__(self, clock: list[float]) -> None:
+        super().__init__()
+        self.clock = clock
+
+    def __call__(self, argv: Sequence[str], env: Mapping[str, str], log: Path) -> int:
+        self.clock[0] += renovate.CONTAINER_SECONDS - 30
+        return super().__call__(argv, env, log)
+
+
+clock = [0.0]
+
+
+def now() -> float:
+    return clock[0]
+
+
+with unittest.mock.patch.object(renovate.time, "monotonic", now):
+    partway = scenario(real=True, run=SlowRenovate(clock))
+check(
+    "a run out of time partway reports the rest, without a token or container for them",
+    len(partway["run"].calls) == 1
+    and partway["mint"].asked[1:] == [(renovate.WRITE, "crunchtools/A")]
+    and isinstance(partway["out"], CannotRunError)
+    and "1 of 2 repositories: crunchtools/b (out of time)" in str(partway["out"]),
+    repr(partway["out"]),
 )
 
 for label, cfg in (
