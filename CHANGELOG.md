@@ -34,9 +34,9 @@ All notable changes to this project are documented here, following
   `image` verifies the parent, builds FROM its digest, gates and pushes
   `gated-<sha>`; `promote` signs, attests and moves tags without ever moving a
   version backwards; `pypi` re-verifies the release and publishes by OIDC.
-- The `image` job reads `[tool.sdlc.image]` (#107's contract): `image` is where it
-  pushes (quay.io/crunchtools/ only), `rhsm` and `redhat-registry` make their
-  secrets required, `format` overrides docker/oci. `containerfile`/`context` other
+- The `image` job reads `[tool.sdlc.image]` (#107's contract): `image` may only
+  restate the repo's own quay.io/crunchtools/<repo>, `rhsm` and
+  `redhat-registry` make their secrets required, `format` overrides docker/oci. `containerfile`/`context` other
   than the root are refused for `[tool.sdlc.ci.container-build]`; the boot gate's
   inputs are accepted and printed as not enforced yet (#110).
 - `sdlc pip-audit -- --report` prints pip-audit's JSON report on one

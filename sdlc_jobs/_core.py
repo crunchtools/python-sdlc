@@ -222,11 +222,13 @@ IMAGE_NOT_ENFORCED = {
     "boot-none-reason",
     "contract-test",
 }
-IMAGE_REF = re.compile(r"quay\.io/crunchtools/[a-z0-9][a-z0-9._-]{0,127}")
 
 
 def image_settings(root: Path, repo: str) -> dict:
-    """[tool.sdlc.image], checked, with `image` defaulted to quay.io/crunchtools/<repo>.
+    """[tool.sdlc.image], checked; `image` is quay.io/crunchtools/<repo>, nothing else.
+
+    The registry credentials are the org's, so a repo that could name any image
+    could push over another repo's. `image` may only restate its own.
 
     A string `image` is the seat's launcher tag (bin/sdlc), not these settings.
     """
@@ -235,9 +237,10 @@ def image_settings(root: Path, repo: str) -> dict:
     stray = sorted(set(s) - IMAGE_ENFORCED - IMAGE_NOT_ENFORCED)
     if stray:
         cannot(f"[tool.sdlc.image] has {', '.join(stray)}, which is no setting of the image job")
-    s.setdefault("image", f"quay.io/crunchtools/{repo.rpartition('/')[2]}")
-    if not isinstance(s["image"], str) or not IMAGE_REF.fullmatch(s["image"]):
-        cannot(f"[tool.sdlc.image] image must be quay.io/crunchtools/<name>; got {s['image']!r}")
+    own = f"quay.io/crunchtools/{repo.rpartition('/')[2]}"
+    s.setdefault("image", own)
+    if s["image"] != own:
+        cannot(f"[tool.sdlc.image] image must be this repo's own, {own}; got {s['image']!r}")
     for key in ("rhsm", "redhat-registry"):
         if not isinstance(s.get(key, False), bool):
             cannot(f"[tool.sdlc.image] {key} must be true or false")

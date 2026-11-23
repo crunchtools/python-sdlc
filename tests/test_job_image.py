@@ -508,20 +508,26 @@ def settings(body: str, name: str = "pyproject.toml") -> dict[str, str]:
 
 def test_settings_image_is_where_it_pushes() -> None:
     t = FakeTools()
-    _, result = go(t, QUAY_PARENT, files=settings('image = "quay.io/crunchtools/other"\n'))
-    assert result is not None and result["ref"] == "quay.io/crunchtools/other"
-    assert any(a[-1] == f"docker://quay.io/crunchtools/other:gated-{SHA}" for a in t.argvs)
+    _, result = go(t, QUAY_PARENT, files=settings('image = "quay.io/crunchtools/demo"\n'))
+    assert result is not None and result["ref"] == "quay.io/crunchtools/demo"
+    assert any(a[-1] == f"docker://quay.io/crunchtools/demo:gated-{SHA}" for a in t.argvs)
+
+
+def test_settings_image_of_another_repo_refused() -> None:
+    """The registry credentials are the org's: naming a sibling would push over it."""
+    msg = refused(FakeTools(), QUAY_PARENT, files=settings('image = "quay.io/crunchtools/other"\n'))
+    assert "quay.io/crunchtools/demo" in msg
 
 
 def test_settings_in_sdlc_toml_are_read() -> None:
     files = settings('image = "quay.io/crunchtools/other"\n', "sdlc.toml")
-    _, result = go(FakeTools(), QUAY_PARENT, files=files)
-    assert result is not None and result["ref"] == "quay.io/crunchtools/other"
+    msg = refused(FakeTools(), QUAY_PARENT, files=files)
+    assert "quay.io/crunchtools/demo" in msg
 
 
 def test_settings_image_outside_crunchtools_refused() -> None:
     msg = refused(FakeTools(), QUAY_PARENT, files=settings('image = "docker.io/evil/x"\n'))
-    assert "quay.io/crunchtools/" in msg
+    assert "quay.io/crunchtools/demo" in msg
 
 
 def test_settings_rhsm_needs_its_secrets() -> None:
