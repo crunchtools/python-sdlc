@@ -8,6 +8,10 @@ All notable changes to this project are documented here, following
 
 ### Changed
 
+- sdlc's own CI fetch adds an `origin` remote before fetching. Without one
+  the constitution validator names the repo after its mount point, `/repo`,
+  so sdlc's own exemptions (`sdlc_exempt`, `container_release_custom`) never
+  applied and `sdlc ci` failed the constitution check.
 - `convert_repo.py` takes the fleet's two Gatehouse variants as the template:
   the guard on `ubuntu-latest`, and triage handed `review_result`. A publish
   job may set up Python with `uv python install`.

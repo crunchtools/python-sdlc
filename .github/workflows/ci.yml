@@ -27,8 +27,8 @@ jobs:
     runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && vars.CACHED_RUNNER_LABEL || 'ubuntu-latest' }}  # a fork's PR on GitHub's machine
     permissions: { contents: read }
     env: { MODE: test }
-    steps:  # sdlc is public: the fetch needs no token and persists none
-      - &fetch { run: 'git init -q . && git fetch -q --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA" && git checkout -q FETCH_HEAD' }
+    steps:  # sdlc is public: the fetch needs no token and persists none; origin names the repo for the validator's exemptions
+      - &fetch { run: 'git init -q . && git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" && git fetch -q --depth=1 origin "$GITHUB_SHA" && git checkout -q FETCH_HEAD' }
       - run: scripts/self.sh  # podman build, then `sdlc ci` and the contract test from the built digest
   check:  # default-branch code only: builds it, runs `sdlc ci` from it, plans, uploads SARIF, keeps the schedule alive
     name: sdlc / plan (${{ github.event_name }})  # never the required name: test reports that
