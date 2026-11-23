@@ -4,11 +4,11 @@ Design for a1051. Nothing here is implemented: it is the target that
 `convert_repo.py` and `cutover.py` will be changed to write, and the list of
 `sdlc` internals that have to exist first.
 
-## The fleet file: 89 lines, seven jobs
+## The fleet file: 90 lines, seven jobs
 
 Every fleet repo carries exactly this `.github/workflows/ci.yml`, byte for
 byte, whatever kind of repo it is. The one exception is crunchtools/sdlc
-itself, below. The file is 89 lines without comments. It contains no `uses:`
+itself, below. The file is 90 lines without comments. It contains no `uses:`
 of any kind: no `actions/checkout`, no reusable-workflow call and no
 third-party action. Every job runs one image, the sdlc **bootstrap**, by a
 literal digest, and one command, `sdlc event`. That command reads
@@ -62,21 +62,22 @@ jobs:
     permissions: { contents: read }
     outputs: { result: "${{ steps.e.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", QUAY_USERNAME: "${{ secrets.QUAY_USERNAME }}", QUAY_PASSWORD: "${{ secrets.QUAY_PASSWORD }}",
-           RHSM_ACTIVATION_KEY: "${{ secrets.RHSM_ACTIVATION_KEY }}", RHSM_ORG_ID: "${{ secrets.RHSM_ORG_ID }}" }
+           RHSM_ACTIVATION_KEY: "${{ secrets.RHSM_ACTIVATION_KEY }}", RHSM_ORG_ID: "${{ secrets.RHSM_ORG_ID }}",
+           REGISTRY_REDHAT_IO_USER: "${{ secrets.REGISTRY_REDHAT_IO_USER }}", REGISTRY_REDHAT_IO_PASSWORD: "${{ secrets.REGISTRY_REDHAT_IO_PASSWORD }}" }
     steps: *event
   write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
     needs: [check, ai]
     if: >-
-      always() && !cancelled()
-      && (contains(fromJSON('["pull_request_target","issues","workflow_dispatch","schedule"]'), github.event_name)
-          || github.event_name == 'push' && fromJSON(needs.check.outputs.result || '{}').release)
+      always() && !cancelled() && !inputs.digest
+      && (github.event_name == 'pull_request_target' || github.event_name == 'issues'
+          || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
     runs-on: ubuntu-latest
     environment: ashigaru
     container: *boot
     permissions: {}
     outputs: { release: "${{ steps.e.outputs.release }}" }
-    env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
+    env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
            SDLC_AI: "${{ needs.ai.result }}", SDLC_AI_0: "${{ needs.ai.outputs.p0 }}", SDLC_AI_1: "${{ needs.ai.outputs.p1 }}", SDLC_AI_2: "${{ needs.ai.outputs.p2 }}", SDLC_AI_3: "${{ needs.ai.outputs.p3 }}" }
     steps: *event
   promote:  # the cosign key: signs, attests and moves tags on a digest it did not build; idempotent; version only from write
@@ -92,7 +93,7 @@ jobs:
     steps: *event
   pypi:  # OIDC only; re-derives the release from the API itself and must agree with write
     needs: [check, write]
-    if: always() && !cancelled() && github.event_name == 'push' && fromJSON(needs.check.outputs.result || '{}').release.publish == 'pypi'
+    if: always() && !cancelled() && needs.check.result == 'success' && github.event_name == 'push' && fromJSON(needs.check.outputs.result || '{}').release.publish == 'pypi'
     runs-on: ubuntu-latest
     environment: pypi
     container: *boot
@@ -113,7 +114,7 @@ jobs:
     steps: *event
 ```
 
-**Why 89 lines and not 20.** GitHub makes a separate job only where the
+**Why 90 lines and not 20.** GitHub makes a separate job only where the
 permissions, the secrets, the environment or the runner differ. Seven levels
 differ, and each job needs its `if`, `runs-on`, `environment`, `container`,
 `permissions`, `env` and `steps` lines. Merging any two would put a secret, a
@@ -192,7 +193,10 @@ sdlc's `sign` moves `:<major>`, and the next job runs it.
 `sdlc-signing` environment, so a fleet repo's signing key can never produce
 something `sdlc-boot` will run. The fleet key keeps signing the fleet's images.
 
-**Accepted risk.** Anyone with write access to `quay.io/crunchtools/sdlc` can
+**Accepted risk.** Write access to `quay.io/crunchtools/sdlc` is sdlc's own
+quay robot, held only in sdlc's `registry` and `sdlc-signing` environments,
+plus the quay org's admins. The fleet's QUAY_* robot has no write there.
+Anyone with that access can
 point `:<major>` at any **older signed** sdlc of the same major that is at or
 above the boot minimum, and the fleet will run it. They cannot make it run
 anything sdlc's key did not sign. The recovery is to raise the minimum, which
@@ -219,7 +223,7 @@ Break-glass is that same rollback; there is no other mode and no deny.
 Laptops keep `.sdlc/bin/sdlc`, which does the same resolve-and-verify against
 the same key.
 
-## sdlc's own workflow: 90 lines, the stated exception
+## sdlc's own workflow: 98 lines, the stated exception
 
 crunchtools/sdlc builds the image that `sdlc-boot` runs, so the jobs that
 build and sign it cannot run from `sdlc-boot`. It is the one repo whose
@@ -227,11 +231,12 @@ build and sign it cannot run from `sdlc-boot`. It is the one repo whose
 
 ```yaml
 # crunchtools/sdlc's own ci.yml: the trust root, and the one exception to
-# "every repo, byte for byte". check, image and sign build and act on sdlc
-# itself, so they run on the runner's host from this reviewed commit's scripts,
-# never from sdlc-boot. ai, write and gate are the fleet's jobs, unchanged.
-# sign never executes a release image: cosign runs from the digest-pinned image
-# below, and the release is data. Inputs reach scripts only through env:.
+# "every repo, byte for byte". A pull request's sdlc code runs only in `test`,
+# which holds no write permission, no secret and no socket of ours. Everything
+# that holds a token, a socket or a key runs reviewed default-branch code or a
+# released sdlc. ai, write and gate are the fleet's jobs, unchanged. sign never
+# executes a release image: cosign runs from the digest-pinned image below, and
+# the release is data. Inputs reach scripts only through env:.
 name: CI
 on:
   push:
@@ -239,7 +244,7 @@ on:
   pull_request_target: { types: [opened, synchronize, reopened] }  # zizmor: ignore[dangerous-triggers]
   pull_request_review_comment: { types: [created, edited, deleted] }
   issues: { types: [opened, labeled, reopened] }
-  schedule: [{ cron: "17 6 * * 1" }]  # weekly: rebuild the latest release tag, audit, keepalive
+  schedule: [{ cron: "17 6 * * 1" }]  # weekly: rebuild what :<major> carries, audit, keepalive
   workflow_dispatch:
     inputs:
       version: { type: string, default: "" }  # alone: open the release PR; with digest: roll :<major> back to it
@@ -247,18 +252,25 @@ on:
 permissions: {}
 env: { COSIGN_IMAGE: "ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca" }  # v2.6.5
 jobs:
-  check:  # no secret: builds this commit's image, runs `sdlc ci` and the contract test from it, and plans
+  test:  # the PR's own sdlc code, and nothing to steal: read-only contents, no secret, GitHub's machine
     name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    env: { MODE: test }
+    steps:  # sdlc is public: the fetch needs no token and persists none
+      - &fetch { run: 'git init -q . && git fetch -q --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA" && git checkout -q FETCH_HEAD' }
+      - run: scripts/self.sh  # podman build, then `sdlc ci` and the contract test from the built digest
+  check:  # default-branch code only: builds it, runs `sdlc ci` from it, plans, uploads SARIF, keeps the schedule alive
+    name: sdlc / check (${{ github.event_name }})
     if: >-
-      contains(fromJSON('["pull_request","schedule","workflow_dispatch"]'), github.event_name)
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
     permissions: { contents: read, security-events: write, actions: write }
     outputs: { result: "${{ steps.s.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", MODE: check }
-    steps:  # sdlc is public: the fetch needs no token and persists none
-      - &fetch { run: 'git init -q . && git fetch -q --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA" && git checkout -q FETCH_HEAD' }
-      - { id: s, run: scripts/self.sh }
+    steps: [*fetch, { id: s, run: scripts/self.sh }]
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
@@ -271,16 +283,16 @@ jobs:
   write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
     needs: [check, ai]
     if: >-
-      always() && !cancelled()
-      && (contains(fromJSON('["pull_request_target","issues","workflow_dispatch","schedule"]'), github.event_name)
-          || github.event_name == 'push' && fromJSON(needs.check.outputs.result || '{}').release)
+      always() && !cancelled() && !inputs.digest
+      && (github.event_name == 'pull_request_target' || github.event_name == 'issues'
+          || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
     runs-on: ubuntu-latest
     environment: ashigaru
     container: *boot
     permissions: {}
     outputs: { release: "${{ steps.e.outputs.release }}" }
-    env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
+    env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
            SDLC_AI: "${{ needs.ai.result }}", SDLC_AI_0: "${{ needs.ai.outputs.p0 }}", SDLC_AI_1: "${{ needs.ai.outputs.p1 }}", SDLC_AI_2: "${{ needs.ai.outputs.p2 }}", SDLC_AI_3: "${{ needs.ai.outputs.p3 }}" }
     steps: *event
   gate:  # required: guard, review done on this head, every finding answered; no secret. A collaborator's reply re-runs it where it counts
@@ -295,7 +307,7 @@ jobs:
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
     steps: *event
-  image:  # a release build only: the merge of a verified release PR, or the latest release tag weekly
+  image:  # a release build only: a verified release merge, or the version :<major> carries, weekly
     needs: [check, write]
     if: always() && !cancelled() && needs.check.result == 'success' && (fromJSON(needs.check.outputs.result || '{}').release || github.event_name == 'schedule')
     runs-on: ubuntu-latest
@@ -303,7 +315,7 @@ jobs:
     permissions: { contents: read }
     outputs: { result: "${{ steps.s.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", MODE: "${{ github.event_name == 'schedule' && 'weekly' || 'release' }}", SDLC_WRITE: "${{ needs.write.result }}",
-           SDLC_RELEASE: "${{ needs.write.outputs.release }}", QUAY_USERNAME: "${{ secrets.QUAY_USERNAME }}", QUAY_PASSWORD: "${{ secrets.QUAY_PASSWORD }}" }
+           SDLC_RELEASE: "${{ needs.write.outputs.release }}", SDLC_QUAY_USERNAME: "${{ secrets.SDLC_QUAY_USERNAME }}", SDLC_QUAY_PASSWORD: "${{ secrets.SDLC_QUAY_PASSWORD }}" }
     steps: [*fetch, { id: s, run: scripts/self.sh }]
   approve:  # no secret; sdlc-approval's reviewers (Josui Prime, Scott; prevent_self_review) are the approval
     if: github.event_name == 'workflow_dispatch' && inputs.digest != ''
@@ -320,24 +332,43 @@ jobs:
     permissions: { contents: read }
     env: { MODE: "${{ github.event_name == 'workflow_dispatch' && 'rollback' || github.event_name == 'schedule' && 'weekly' || 'release' }}", EVENT: "${{ github.event_name }}",
            BUILT: "${{ needs.image.outputs.result }}", APPROVED: "${{ needs.approve.result }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}",
-           SDLC_KEY: "${{ secrets.SDLC_COSIGN_KEY }}", SDLC_KEY_PASSWORD: "${{ secrets.SDLC_COSIGN_PASSWORD }}", QUAY_USERNAME: "${{ secrets.QUAY_USERNAME }}", QUAY_PASSWORD: "${{ secrets.QUAY_PASSWORD }}" }
+           SDLC_KEY: "${{ secrets.SDLC_COSIGN_KEY }}", SDLC_KEY_PASSWORD: "${{ secrets.SDLC_COSIGN_PASSWORD }}",
+           SDLC_QUAY_USERNAME: "${{ secrets.SDLC_QUAY_USERNAME }}", SDLC_QUAY_PASSWORD: "${{ secrets.SDLC_QUAY_PASSWORD }}" }
     steps: [*fetch, { run: scripts/self.sh }]
 ```
 
 **It is longer than the 54-line draft because it is now converted like every
 other repo.** It has the fleet's `ai`, `write` and `gate`, byte for byte,
 running from `sdlc-boot`. So sdlc gets Gatehouse review, Ashigaru and the
-required `sdlc / gate (pull_request_target)`. Only `check`, `image`, `approve`
-and `sign` are its own.
-- **`check`** runs on the host. It fetches the commit with `git` (sdlc is
-  public: no token, nothing persisted), builds this commit's image with
-  podman, and runs `sdlc ci` and the contract test from it by digest. It also
-  plans, as the fleet's `check` does.
+required `sdlc / gate (pull_request_target)`. Only `test`, `check`, `image`,
+`approve` and `sign` are its own.
+
+**The fleet invariant, applied to sdlc's own pull requests: code a PR wrote
+never runs where a token with write, a secret or a socket of ours is.** In the
+fleet that holds because PR code only ever runs nested, under the reviewed
+orchestrator. In sdlc the PR's code *is* the orchestrator, so sdlc runs it in
+a job that has nothing to take:
+- **`test`** is the required `sdlc / check (pull_request)`. It runs only on
+  `pull_request`, on GitHub's `ubuntu-latest`, with `permissions: { contents:
+  read }`, no `environment`, no secret and no `container:` socket mount. It
+  fetches the PR's merge commit with `git` (sdlc is public: no token, nothing
+  persisted), builds that commit's image with podman, and runs `sdlc ci` and
+  the contract test from it by digest. Whatever the PR's code does, it does
+  it on a throwaway VM with a read-only token.
+- **`check`** never runs on `pull_request`. It runs on a default-branch push,
+  the schedule and a dispatch, so the code it builds and runs is reviewed,
+  merged code. It holds the `security-events` and `actions` writes, uploads
+  SARIF, keeps the schedule alive, and plans, as the fleet's `check` does.
+- **`ai`, `write` and `gate`** run `sdlc-boot`, which runs a **released**,
+  signed sdlc, never the PR's tree.
 - **`image`** builds **only releases**. On a push, that means the merge of a
   release PR that `write` has verified with the full test (under "Releases run
   from the merge"). The version comes from `write`'s output, which is read
-  from the tree. On the weekly schedule it means the latest `vX.Y.Z` tag,
-  never the default branch. It pushes a candidate by digest. A
+  from the tree. On the weekly schedule it means **the version `:<major>`
+  carries now**, read from that image's `version` annotation and label (which
+  must agree), and rebuilt from its `vX.Y.Z` tag, never from the default
+  branch and never from the newest tag. After a rollback, the weekly run
+  rebuilds the rolled-back version. It pushes a candidate by digest. A
   non-release push builds nothing to quay, so no intermediate digest ever
   exists to be signed.
 - **`sign`** is the only job with the sdlc key, in `sdlc-signing` (default
@@ -346,18 +377,39 @@ and `sign` are its own.
   `COSIGN_IMAGE` named in the file. **It never executes the image it signs.**
   The release is data, a digest to sign and retag. It re-validates
   everything itself, starting from `MODE`, which is passed explicitly and
-  checked against `EVENT`:
-  - **`release`:** a verified release-merge push. It signs the built digest
-    with `-a repo=crunchtools/sdlc -a version=X.Y.Z` and moves `X.Y.Z`,
-    `<major>` and `latest`.
-  - **`weekly`:** a rebuild of the latest release tag. Version `X.Y.Z` is
-    re-signed and moves forward like any fleet image's rebuild. It never
-    moves backwards, and it never changes the version.
+  checked against `EVENT`.
+
+  **What `sign` takes from `image`, and what it checks itself.** It trusts
+  `image`'s output for one thing: which digest was built. That is reviewed
+  default-branch code in a job holding only the registry robot. Everything
+  else it re-validates before signing:
+  - the digest is a well-formed `sha256:` in `quay.io/crunchtools/sdlc`;
+  - the image at that digest carries a `version` annotation and label that
+    agree, are strict SemVer, and are of the current major;
+  - that version matches what `MODE` allows (below);
+  - **`:<major>` still carries the version it expects**, read again
+    immediately before the retag, inside the `sdlc-sign` concurrency group.
+    A weekly run queued behind a release therefore finds `:<major>` on a
+    newer version and refuses, rather than landing late and moving it back.
+
+  **`:<major>` moves only forward on a release, or anywhere on an approved
+  rollback.** The modes:
+  - **`release`:** a verified release-merge push. The version is `write`'s
+    output, and it must be newer than the one `:<major>` carries. It signs the
+    built digest with `-a repo=crunchtools/sdlc -a version=X.Y.Z` and moves
+    `X.Y.Z`, `<major>` and `latest`.
+  - **`weekly`:** a rebuild of the version `:<major>` carries. The built
+    version must equal it. It re-signs and moves `X.Y.Z` and `:<major>` to the
+    rebuilt digest, the version unchanged. It refuses any other version,
+    older or newer, so it can neither undo a rollback nor stand in for a
+    release.
   - **`rollback`:** a dispatch with `version` and `digest`. It needs `approve`
     to have succeeded, `VERSION` to be strict SemVer of the current major at
     or above the boot minimum, and `DIGEST` to already carry sdlc's signature
     with exactly that version. Then it retags `:<major>` to `DIGEST`. Nothing
-    is built or signed.
+    is built or signed. `write` does not run on that dispatch: its `if:`
+    carries `!inputs.digest`, and `sdlc event` also exits doing nothing when
+    `DIGEST` is set, so a rollback cannot open a release PR for `VERSION`.
 - **`approve`** runs in `sdlc-approval`. That environment holds no secret,
   admits the default branch only, and has required reviewers Josui Prime and
   Scott with `prevent_self_review` on. sdlc is public, so reviewers are
@@ -377,7 +429,12 @@ and `sign` are its own.
 
 sdlc gets its own environments (`ai`, `ashigaru`, `registry`, `sdlc-signing`,
 `sdlc-approval`). It has no `cosign-signing` and no `pypi`, because it neither
-signs with the fleet key nor publishes to PyPI. It moves to the new ruleset,
+signs with the fleet key nor publishes to PyPI. Its `registry` and
+`sdlc-signing` hold **sdlc's own quay robot** (`SDLC_QUAY_USERNAME`,
+`SDLC_QUAY_PASSWORD`), the only credential that can write
+`quay.io/crunchtools/sdlc`. The fleet's `QUAY_*` robot cannot, so no fleet
+repo's `registry` or `cosign-signing` can push or retag the trust root. It
+moves to the new ruleset,
 and it comes off every org secret's selected-repository list, like any
 converted repo.
 
@@ -417,9 +474,13 @@ converted repo.
 **"Needed" comes from the plan, and a skipped needed job is a failure.** A job
 whose `if:` is false is `skipped`, and GitHub lets a dependent job read that as
 benign. sdlc does not. Each job receives the results of the jobs it needs
-(`SDLC_AI`, `SDLC_WRITE`) together with `check`'s plan. If the plan says a job
-was needed and its result is anything but `success` (`skipped`, `failure`,
-`cancelled`), the dependent job fails. Three cases:
+(`SDLC_AI`, `SDLC_WRITE`) together with `check`'s plan. A job that acts on
+the plan also requires `needs.check.result == 'success'` in its `if:`. A
+`check` that failed may have printed a plan before failing, and nothing acts
+on it: `image`, `write` (outside the triage events) and `pypi` all carry that
+test, and `promote` follows `image`. If the plan says a job was needed and
+its result is anything but `success` (`skipped`, `failure`, `cancelled`), the
+dependent job fails. Three cases:
 - `promote` on a release merge fails if `write` did not succeed.
 - `pypi` fails if `write` did not succeed.
 - `gate` fails unless `ai` and `write` both succeeded for this head.
@@ -438,7 +499,7 @@ tag ruleset stays as it is today.
 | `check` | `sdlc / check (pull_request)` (required) | none; read token, `security-events`, the socket | pull_request (forks on `ubuntu-latest`), default-branch push, schedule, dispatch; our **uncached** runners otherwise | any secret |
 | `ai` | | `ai`: Claude and OpenRouter keys | issues, `pull_request_target`; `ubuntu-latest` | an App key, a write token |
 | `image` | | `registry`: quay, RHSM, registry.redhat.io | when `check` plans an image; `ubuntu-latest` | the cosign key |
-| `write` | | `ashigaru`: Ashigaru App key; queued | `pull_request_target`, issues, release dispatch, schedule, a release merge; `ubuntu-latest` | a model |
+| `write` | | `ashigaru`: Ashigaru App key; queued | `pull_request_target`, issues, a `version` dispatch; otherwise only when a successful `check` plans `write` (a release merge, the weekly audit); never a rollback dispatch; `ubuntu-latest` | a model |
 | `promote` | | `cosign-signing`: cosign key, quay; queued | after `image`, and after `write` on a release; `ubuntu-latest` | an App key, a build |
 | `pypi` | | `pypi`: OIDC only | a release merge that publishes to PyPI; `ubuntu-latest` | anything else |
 | `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; `ubuntu-latest` | any secret |
@@ -557,8 +618,8 @@ CodeQL uploads as `/language:python`, and zizmor as `zizmor`.
 | write | release merge push | verifies the release from the API, tags `vX.Y.Z`, publishes the GitHub Release, outputs `release` | release-tag.yml |
 | write | pull_request_target | posts the review; pushes the fix commit (leased) and its answers | review.yml, fix.yml publish |
 | write | issues | labels; opens the `ashigaru/issue-N` PR | triage.yml apply, code.yml publish |
-| write | workflow_dispatch with `version` | opens the release PR | release.yml open |
-| write | schedule | keeps the audit alert issue | dependency-audit.yml |
+| write | workflow_dispatch with `version`, no `digest` | opens the release PR; a dispatch with `digest` is sdlc's rollback, and `write` does not run | release.yml open |
+| write | schedule, when `check` plans it | keeps the audit alert issue; only when the weekly audit's plan sets `write`, so the 6-hourly polls never mint the App key | dependency-audit.yml |
 | promote | after image | signs, attests, moves `latest`, and `X.Y.Z` from `write`'s output | container-release promote |
 | pypi | release merge push | re-verifies, `uv build` nested, `uv publish` by OIDC | publish.yml |
 | gate | pull_request_target | fails unless `ai` and `write` succeeded; workflow guard; triage, which needs a review of the head SHA | gatehouse.yml guard, triage.yml |
@@ -620,6 +681,11 @@ Each must hold before the first canary converts, unless it says otherwise.
      to `ai`, ASHIGARU_APP_KEY to `ashigaru`, QUAY_*, RHSM_* and
      REGISTRY_REDHAT_IO_* to `registry`, and COSIGN_* plus a copy of QUAY_* to
      `cosign-signing`. ASHIGARU_CLIENT_ID stays a variable.
+   - In sdlc alone, `registry` and `sdlc-signing` get **sdlc's own quay
+     robot** (SDLC_QUAY_*) instead of QUAY_*. It is a separate robot with
+     write on `quay.io/crunchtools/sdlc` only, and the fleet robot loses
+     write there. The provisioner asserts both: no fleet environment holds
+     SDLC_QUAY_*, and the fleet robot's quay permissions omit that repo.
 3. **Org secrets scoped to selected repositories.**
    - Each org secret that moves is switched from "all repositories" to
      **selected repositories**, listing the unconverted repos.
@@ -652,6 +718,19 @@ Each must hold before the first canary converts, unless it says otherwise.
    unconditionally, unless `--include-private` is passed. A test pins that:
    a private repo in the listing, without the flag, is refused and named.
 10. **Spike #103** passes on both runner kinds.
+11. **"Require approval for all external contributors"** (Josui Prime, an
+    org setting, at cutover). Fork pull requests then wait for a
+    maintainer's approval before any workflow run, `test`'s and `check`'s
+    included. Defence in depth: neither holds anything a fork could use.
+12. **A branch ruleset on `ashigaru/release-*`** (Josui Prime, at cutover)
+    restricting creation and updates to the Ashigaru App. Today
+    `merged_release` in ashigaru's `scripts/release_publish.py` (lines
+    23–34) checks the PR's author, its merge, the `ashigaru/release-`
+    prefix, the head repo and the base. It does **not** check who created
+    or pushed the branch, so a collaborator could push a commit to a
+    release branch the App opened, and an App-authored PR would carry it.
+    `write`'s seven tests inherit that gap. The ruleset closes it, and
+    `cutover.py --check` asserts it exists.
 
 ## PyPI: re-registering 22 trusted publishers
 
@@ -934,9 +1013,16 @@ Two things are new and go in spike #103:
    `$GITHUB_WORKSPACE` by inspecting its own container through the socket, and
    it mounts only that.
 2. **Holding the socket is holding the runner.** On GitHub-hosted runners the
-   Docker socket is root on the VM. A job with a secret also has that socket,
-   but it runs no repo code beside it, only the verified sdlc image. The
-   socket is never passed down to repo code.
+   Docker socket is root on the VM. A job with a secret also has that socket.
+   It runs only the verified sdlc image, but that image does more than
+   orchestrate: `image` builds the repo's Containerfile through the socket,
+   beside the registry secrets. A `RUN` step cannot reach the socket or the
+   secrets (the build gets neither), but the Containerfile is still repo
+   code executing on the same VM. That is safe only because `image` runs on
+   a default-branch push or the schedule, so the Containerfile it builds is
+   reviewed, merged code. A PR's Containerfile is built only by `check`,
+   which holds no secret. The socket itself is never passed down to repo
+   code.
 
 ## What stays as `uses:`
 
@@ -988,7 +1074,7 @@ Prose only. Neither is changed by this PR.
 **convert_repo.py** stops replacing workflows one at a time and writes the
 single file:
 
-- **Writing the file.** It writes `examples/ci.yml`, the 89-line fleet file
+- **Writing the file.** It writes `examples/ci.yml`, the 90-line fleet file
   above, unchanged. There is nothing to template: the repo's kind, the
   default branch and Ashigaru enrolment (`vars.ASHIGARU_ENABLED`) are all read
   at run time by `sdlc event`.
@@ -1023,6 +1109,19 @@ exist in the repo:
   nothing to count. `add_schedule` goes, because the template carries the
   weekly cron.
 - **`drop_dependabot`** stays.
+- **Tests that pin the file's guards.** `tests/test_workflows.py` parses
+  `examples/ci.yml` and sdlc's own `ci.yml`, and asserts:
+  - `write`'s `if:` contains `!inputs.digest`, so a rollback dispatch never
+    runs `write`; and `sdlc event`, given `DIGEST` in `write`'s env, exits 0
+    having done nothing (a unit test on the dispatcher, the second guard);
+  - `write`'s `if:` outside the triage events, `image`'s and `pypi`'s all
+    contain `needs.check.result == 'success'`;
+  - `image`'s env maps `REGISTRY_REDHAT_IO_USER` and
+    `REGISTRY_REDHAT_IO_PASSWORD`;
+  - sdlc's `test` is the only job whose `if:` admits `pull_request` and it
+    has `permissions: { contents: read }`, no `environment` and no
+    `container`, and sdlc's `check` does not admit `pull_request`;
+  - `ai`, `write` and `gate` are byte for byte the same in both files.
 - **New work.** It deletes `.gemini/` where the org no longer has the app.
   It drops the repo from each moved org secret's selected-repository list in
   its merge run. It refuses a private repo unless `--include-private` is passed.
