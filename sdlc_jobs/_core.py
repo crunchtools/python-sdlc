@@ -106,8 +106,11 @@ class Tools:
                 check=False,
                 timeout=timeout,
             )
-        except subprocess.TimeoutExpired:
-            return subprocess.CompletedProcess(argv, TIMED_OUT, "", f"timed out after {timeout}s")
+        except subprocess.TimeoutExpired as exc:
+            out, err = text_of(exc.stdout), text_of(exc.stderr)
+            return subprocess.CompletedProcess(
+                argv, TIMED_OUT, out, f"{err}timed out after {timeout}s"
+            )
         except OSError as exc:
             cannot(f"could not start {argv[0]}: {exc}")
 
@@ -161,6 +164,11 @@ class Tools:
             return Response(exc.code, exc.read())
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             cannot(f"{method} {url}: {exc}")
+
+
+def text_of(output: str | bytes | None) -> str:
+    """What a timed-out process had said: TimeoutExpired keeps bytes even under text=True."""
+    return output.decode(errors="replace") if isinstance(output, bytes) else output or ""
 
 
 def converse_on(

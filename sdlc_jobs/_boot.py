@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sdlc_jobs._core import PODMAN_CANNOT_CREATE, cannot, json_line, show, step
+from sdlc_jobs._core import PODMAN_CANNOT_CREATE, TIMED_OUT, cannot, json_line, show, step
 
 if TYPE_CHECKING:
     from sdlc_jobs.image import Job
@@ -267,8 +267,10 @@ def checkout_path(root: Path, source: str) -> str:
         here = here / part
         try:
             mode = os.lstat(here).st_mode
-        except OSError:
+        except FileNotFoundError:
             cannot(f"[tool.sdlc.image] boot-run-args volume {source!r}: {part} does not exist")
+        except OSError as exc:
+            cannot(f"boot: cannot read the volume {source!r} in the checkout: {exc}")
         if stat.S_ISLNK(mode):
             cannot(f"[tool.sdlc.image] boot-run-args volume {source!r} goes through a symlink")
     if not here.resolve().is_relative_to(root.resolve()):
@@ -335,14 +337,22 @@ def remove(job: Job, *names: str) -> None:
 
 
 def engine(job: Job, proc: subprocess.CompletedProcess[str], name: str) -> str:
-    """'' unless a check's podman call failed in podman itself (125): then the finding
-    "the container exited" when it did, and a 2 when the engine failed under a live one."""
-    if proc.returncode != PODMAN_CANNOT_CREATE:
+    """'' unless a check's podman call failed in podman itself (125) or hung (TIMED_OUT).
+
+    Either way the engine is asked whether the container still runs: an engine
+    that cannot answer is a 2. After a 125, a live container is a 2 too, and a
+    gone one the finding "the container exited". A hung call into a live
+    container is the image's to answer for, so the check goes on judging it.
+    126 and 127 come from inside the container (#116): verdicts, not here.
+    """
+    if proc.returncode not in (PODMAN_CANNOT_CREATE, TIMED_OUT):
         return ""
     state = job.run([*job.podman, "inspect", "--format", "{{.State.Running}}", name])
     if state.returncode != 0:
         show(state)
         cannot(f"boot: podman cannot inspect {name} (exit {state.returncode}); nothing was judged")
+    if proc.returncode == TIMED_OUT:
+        return ""
     if state.stdout.strip() == "true":
         show(proc)
         cannot(f"boot: podman failed on the running {name} (exit 125); nothing was judged")

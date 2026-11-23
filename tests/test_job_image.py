@@ -1091,6 +1091,18 @@ def test_boot_engine_failure_inside_a_check_is_refused() -> None:
     assert not t.boot_calls(), "a container was started on an image podman could not read"
 
 
+def test_boot_hung_check_asks_the_engine() -> None:
+    """A check that timed out: a 2 when the engine cannot answer, else still judged."""
+    for profile in ("systemd", "healthcheck"):
+        t = FakeTools()
+        t.exec_rc = t.health_rc = 124
+        t.boot_inspect_rc = 125
+        assert "cannot inspect" in refused(t, QUAY_PARENT, files=boot(profile)), profile
+        t = FakeTools()
+        t.exec_rc = t.health_rc = 124
+        assert run_boot(t, profile) == 1 and not t.pushed(), profile
+
+
 def test_boot_container_that_exits_during_a_check_is_a_finding() -> None:
     """125 because the container is gone: the image died under test, a verdict."""
     for profile in ("systemd", "healthcheck"):
