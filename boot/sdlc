@@ -1,0 +1,157 @@
+#!/bin/sh
+# sdlc-boot: resolve the signed sdlc image, verify it, run it.
+#
+# The fleet file names this image by digest, so this is the trust root of every
+# job. In order:
+#   1. resolve quay.io/crunchtools/sdlc:<major> to a digest;
+#   2. verify that digest against the baked sdlc public key(s);
+#   3. read the signed `version` annotation and the image's `version` label,
+#      and refuse unless they agree and are at or above the baked minimum;
+#   4. run the image by that digest as a sibling container on the job's
+#      socket, with the job's workspace and environment;
+#   5. exit with whatever it exits with.
+#
+# Nothing from the image runs before its signature is checked: the pull only
+# stores bytes, and every question asked of them until step 4 is answered by
+# cosign and `docker image inspect`. It then runs by digest and --pull=never,
+# so a moving tag changes nothing mid-run.
+#
+# Accepted risk: whoever can write quay.io/crunchtools/sdlc can point :<major>
+# at an older signed release of the same major at or above the minimum, and it
+# will run. They cannot make it run what sdlc's key did not sign. Recovery is
+# raising the minimum, which is a new sdlc-boot digest in the fleet file.
+#
+# Every refusal is a 2, "GATE CANNOT RUN", so the inner command's own 1 (a
+# check failed) stays distinguishable from boot's (no check ran).
+
+set -u
+
+REPO=quay.io/crunchtools/sdlc
+# The trust policy is files baked into the image, never the environment: a
+# job's env: or an earlier step writing $GITHUB_ENV cannot loosen it. The test
+# runs a copy with this one line rewritten.
+ROOT=/etc/sdlc-boot
+
+cannot() { printf 'sdlc-boot: GATE CANNOT RUN: %s\n' "$*" >&2; exit 2; }
+
+# X.Y.Z, digits only, no leading zeros, no prerelease or build: a version that
+# can be compared field by field with nothing left to interpret.
+is_semver() {
+  case $1 in
+    *[!0-9.]*|.*|*.|*..*|*.*.*.*|'') return 1 ;;
+    *.*.*) ;;
+    *) return 1 ;;
+  esac
+  _rest=$1
+  while [ -n "$_rest" ]; do
+    _f=${_rest%%.*}
+    case $_f in 0[0-9]*) return 1 ;; esac
+    case $_rest in *.*) _rest=${_rest#*.} ;; *) _rest= ;; esac
+  done
+}
+
+# True when $1 >= $2, both already checked by is_semver. Numeric per field,
+# because 0.9.0 sorts above 0.12.0 as a string.
+semver_ge() {
+  _a=$1 _b=$2
+  for _ in 1 2 3; do
+    _x=${_a%%.*} _y=${_b%%.*}
+    [ "$_x" -gt "$_y" ] && return 0
+    [ "$_x" -lt "$_y" ] && return 1
+    _a=${_a#*.} _b=${_b#*.}
+  done
+  return 0
+}
+
+# Policy first: a boot that cannot say what it trusts runs nothing.
+keys=
+for k in "$ROOT"/keys/*.pub; do
+  [ -f "$k" ] && keys="$keys $k"
+done
+[ -n "$keys" ] || cannot "no sdlc public key in $ROOT/keys"
+
+MAJOR=$(cat "$ROOT/major" 2> /dev/null) || cannot "$ROOT/major is missing"
+MIN=$(cat "$ROOT/minimum" 2> /dev/null) || cannot "$ROOT/minimum is missing"
+case $MAJOR in
+  ''|*[!0-9]*|0[0-9]*) cannot "the baked major '$MAJOR' is not a major version" ;;
+esac
+is_semver "$MIN" || cannot "the baked minimum '$MIN' is not X.Y.Z"
+[ "${MIN%%.*}" = "$MAJOR" ] || cannot "the baked minimum $MIN is not in major $MAJOR"
+
+# Resolve. The tag is pulled every time, because it is what moves. The digest
+# is read back from the pulled image and checked for shape before it is
+# trusted with a command line.
+docker pull -q "$REPO:$MAJOR" > /dev/null || cannot "$REPO:$MAJOR could not be pulled"
+digest=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REPO:$MAJOR" \
+           | grep "^$REPO@sha256:" | head -n 1) || digest=
+hex=${digest#"$REPO"@sha256:}
+case $hex in *[!0-9a-f]*) hex= ;; esac
+[ "${#hex}" -eq 64 ] || cannot "$REPO:$MAJOR has no sha256 digest to verify"
+pinned=$REPO@sha256:$hex
+
+# Verify: the first key that accepts it wins, which is what lets a rotation
+# ship two. The repo annotation ties the signature to this repository, so a
+# signature made on another image with the same key does not count.
+err=$(mktemp) || cannot "no temporary file"
+trap 'rm -f "$err" "$err.all"' EXIT
+signed=
+for k in $keys; do
+  if signed=$(cosign verify --key "$k" --insecure-ignore-tlog=true \
+                -a repo=crunchtools/sdlc "$pinned" 2> "$err"); then
+    break
+  fi
+  signed=
+  sed 's/^/sdlc-boot:   /' "$err" >> "$err.all"
+done
+if [ -z "$signed" ]; then
+  cat "$err.all" >&2
+  cannot "$pinned ($REPO:$MAJOR) could not be verified as signed by sdlc"
+fi
+
+# Version: the signed annotation is the claim, the label is what the image
+# says of itself, and both must be one strict SemVer in this major at or above
+# the minimum. Two different annotations on one digest are refused, not picked
+# between.
+versions=$(printf '%s' "$signed" | jq -r '[.[].optional.version // empty] | unique | .[]') \
+  || cannot "$pinned: the signature payload could not be read"
+case $versions in
+  ''|*'
+'*) cannot "$pinned: the signature carries no single version annotation" ;;
+esac
+label=$(docker image inspect --format '{{index .Config.Labels "version"}}' "$pinned") \
+  || cannot "$pinned could not be inspected"
+[ "$versions" = "$label" ] \
+  || cannot "$pinned: signed version $versions is not the image's version label '$label'"
+is_semver "$versions" || cannot "$pinned: version $versions is not X.Y.Z"
+[ "${versions%%.*}" = "$MAJOR" ] || cannot "$pinned: version $versions is not in major $MAJOR"
+semver_ge "$versions" "$MIN" || cannot "$pinned: version $versions is below the minimum $MIN"
+
+# Run beside this container, not inside it. --volumes-from carries the
+# workspace, the runner's _temp (GITHUB_OUTPUT and friends, at the same paths)
+# and the socket, which sdlc event drives to start nested containers. The
+# job's environment goes by name only: `-e NAME` takes the value from boot's
+# own environment, so a multi-line value (an App PEM key) arrives intact and
+# never appears on a command line. A name outside [A-Za-z0-9_] is skipped, as
+# it could not be a shell variable and would split the flags below.
+[ -n "${HOSTNAME:-}" ] || cannot "HOSTNAME is empty, so this container cannot be found"
+self=$(docker inspect --format '{{.Id}}' "$HOSTNAME") && [ -n "$self" ] \
+  || cannot "could not inspect this container ($HOSTNAME)"
+
+envargs=
+for name in $(jq -rn 'env | keys[]'); do
+  case $name in
+    PATH|HOSTNAME|SHLVL|OLDPWD|PWD|_|SDLC_BOOT_*) continue ;;
+    *[!A-Za-z0-9_]*|[0-9]*) continue ;;
+  esac
+  envargs="$envargs -e $name"
+done
+
+# Not exec: the EXIT trap removes the scratch file. The status passes through,
+# except docker's own 125, 126 and 127 (the daemon refused, or the command in
+# the image could not be invoked): no check ran, so they are boot's 2. sdlc's
+# own verdicts are 0, 1 and 2.
+# shellcheck disable=SC2086
+docker run --rm --volumes-from "$self" -w "$PWD" $envargs --pull=never "$pinned" "$@"
+rc=$?
+case $rc in 125|126|127) cannot "$pinned could not be started (docker run exited $rc)" ;; esac
+exit "$rc"

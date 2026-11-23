@@ -23,6 +23,12 @@ All notable changes to this project are documented here, following
   removes `.gemini/` on request, and reports any `uses:` left.
 - `scripts/fleet_wave.py` refuses private repos without `--include-private`, opens
   the pull request without auto-merge, and drops `--constitution-ref` and `--weekly`.
+- `check`, `approve` and `sign` (and the fleet template's `check`) run on a
+  `workflow_dispatch` from the default branch only.
+- Inherits constitution v1.60.0. The pre-commit Gourmand and Gatehouse hooks float
+  (`:main`, `:latest`) with `--pull=newer`, and the Dependabot config and its
+  automerge workflow are gone (Renovate, XV). With `self.sh` naming the fetch's
+  origin, `sdlc ci` on sdlc itself passes the constitution check (#105).
 
 ### Added
 
@@ -45,6 +51,25 @@ All notable changes to this project are documented here, following
   guard, `ai` and `write` succeeded, and a port of Gatehouse's triage that
   counts only the App's review; a collaborator's reply re-runs it in the
   `pull_request_target` run.
+- The image half of the marketplace-free CI (a1088, docs/marketplace-free-ci.md).
+  The image gains podman-remote, skopeo, the docker CLI, cosign 2.6.5, syft 1.57.0,
+  zizmor 1.32.0, the claude CLI 2.1.323 (auto-updater off), gh 2.104.0, and PyJWT
+  2.15.1 with cryptography 50.0.2 in the interpreter `sdlc` runs under, each an ARG
+  pin with a label and a contract test. For `sdlc event`'s handlers it also carries
+  Ashigaru 5.4.0 (its release commit, tag pending)'s scripts, prompts and schemas at `/opt/ashigaru`, the constitution
+  v1.60.0's scripts at `/opt/constitution/scripts`, and `sdlc_jobs` on the path.
+- `sdlc-boot` (`boot/`): the fleet's trust root. It resolves
+  `quay.io/crunchtools/sdlc:<major>`, verifies it against sdlc's own key and a baked
+  minimum version, and runs it by digest beside the job container. Every refusal
+  is a 2. Built and smoke-tested by container.yml; nothing publishes it yet.
+- `scripts/self.sh`: the test, check, image and sign steps of sdlc's own new
+  ci.yml, which waits in `examples/sdlc-ci.yml` until the cutover. sign runs cosign
+  from a digest-pinned image and never runs the image it signs. The weekly
+  rebuild fetches the commit `:<major>`'s revision label names, never the movable
+  tag, and sign refuses a rebuild of any other revision. sdlc-boot's base is pinned
+  by digest (moved by `scripts/update_tools.py`), its policy is baked as files that
+  no job env can override, and Ashigaru and the constitution are fetched by commit.
+
 
 ## [0.11.1] - 2026-11-23
 

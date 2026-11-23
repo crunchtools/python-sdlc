@@ -94,7 +94,8 @@ jobs:
             tests/test_bootc_stack.sh tests/test_docs_stack.sh scripts/release-version.sh \
             scripts/revision-of.sh tests/test_revision_of.sh bin/sdlc-bootstrap \
             tests/test_bootstrap.sh scripts/sign-digest.sh tests/test_sign_digest.sh \
-            scripts/attest-digest.sh tests/test_attest_digest.sh .semgrep/run-tests.sh
+            scripts/attest-digest.sh tests/test_attest_digest.sh .semgrep/run-tests.sh \
+            boot/sdlc tests/test_boot.sh scripts/self.sh tests/test_self.sh
           tests/test_host_contract.sh
           tests/test_bootstrap.sh
           tests/test_sign_digest.sh
@@ -102,6 +103,8 @@ jobs:
           tests/test_provenance.py
           tests/test_revision_of.sh
           tests/test_release_version.py
+          tests/test_boot.sh
+          tests/test_self.sh
 
       - name: Build
         if: env.IS_TAG != 'true'
@@ -138,6 +141,16 @@ jobs:
         if: env.IS_TAG != 'true'
         run: tests/contract.sh "localhost/sdlc:$GITHUB_SHA"
 
+      # sdlc-boot, the next CI's trust root (docs/marketplace-free-ci.md). Built
+      # and smoke-tested here so it cannot rot before the cutover publishes it
+      # from examples/sdlc-ci.yml; nothing here pushes it.
+      - name: Build sdlc-boot
+        if: env.IS_TAG != 'true'
+        run: |
+          set -eu
+          podman build -f boot/Containerfile --build-arg "REVISION=$GITHUB_SHA" -t "localhost/sdlc-boot:$GITHUB_SHA" .
+          podman run --rm --entrypoint sh "localhost/sdlc-boot:$GITHUB_SHA" -c 'cosign version && docker --version && jq --version'
+
       # The planner and the CodeQL path matching, run in the image because
       # they need its interpreter and PyYAML.
       - name: Unit tests
@@ -153,6 +166,11 @@ jobs:
               --entrypoint /opt/constitution-venv/bin/python3 \
               "localhost/sdlc:$GITHUB_SHA" "$t"
           done
+          # sdlc's own next ci.yml, parked in examples/ until the cutover,
+          # held to the same guards the live file will be.
+          podman run --rm -v "$PWD:/src:ro,z" -w /src \
+            --entrypoint /opt/constitution-venv/bin/python3 \
+            "localhost/sdlc:$GITHUB_SHA" tests/test_workflows.py examples/sdlc-ci.yml
 
       # The container stack through the real launcher and a real podman: the
       # image mount grype scans is something only podman can prove.

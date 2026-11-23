@@ -21,6 +21,9 @@ ARG UV_VERSION=0.13.7
 ARG HADOLINT_VERSION=2.14.0
 ARG GRYPE_VERSION=0.121.0
 ARG LYCHEE_VERSION=0.24.2
+ARG DOCKER_CLI_VERSION=29.9.3
+ARG COSIGN_VERSION=2.6.5
+ARG SYFT_VERSION=1.57.0
 
 FROM quay.io/crunchtools/gourmand:${GOURMAND_VERSION} AS gourmand
 FROM quay.io/crunchtools/gatehouse:${GATEHOUSE_VERSION} AS gatehouse
@@ -33,6 +36,16 @@ FROM ghcr.io/hadolint/hadolint:v${HADOLINT_VERSION}@sha256:27086352fd5e1907ea2b9
 FROM docker.io/anchore/grype:v${GRYPE_VERSION}@sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea AS grype
 # The docs stack's link checker, a static Rust binary, the same way.
 FROM docker.io/lycheeverse/lychee:${LYCHEE_VERSION}@sha256:e2d19e57cf6ab037026f20b8e449a1f30d9d7f81eef4194763aab2eab20bd28d AS lychee
+# The runner's socket is driven, never an engine run, so the image carries
+# clients. The docker CLI is here because on a GitHub-hosted runner the mounted
+# socket is dockerd, whose API podman-remote cannot drive (it speaks libpod
+# endpoints); the docker CLI speaks dockerd and podman's compat API alike.
+FROM docker.io/library/docker:${DOCKER_CLI_VERSION}-cli@sha256:5a7af0dcb0e46c803efe9b45371dd21cb500e5b4453250394ac6f06d49b6e6f1 AS docker
+# cosign is v2 on purpose: v3 stores signatures where podman and bootc cannot
+# read them (see bin/sdlc-bootstrap). syft is for `sdlc image promote`, which
+# does what scripts/attest-digest.sh does.
+FROM ghcr.io/sigstore/cosign/cosign:v${COSIGN_VERSION}@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca AS cosign
+FROM docker.io/anchore/syft:v${SYFT_VERSION}@sha256:3c70e6d5979364cefdc22b51617a78fd264574d3bd6b4f84a351204147025e2a AS syft
 
 FROM quay.io/hummingbird/python:3.14-builder
 
@@ -53,14 +66,34 @@ ARG CODEQL_BUNDLE=codeql-bundle-v2.27.4
 # an exact RPM version would fail the weekly rebuild that exists to take errata.
 ARG NODE_MAJOR=24
 ARG MARKDOWNLINT_CLI2_VERSION=0.24.2
+ARG DOCKER_CLI_VERSION=29.9.3
+ARG COSIGN_VERSION=2.6.5
+ARG SYFT_VERSION=1.57.0
+ARG ZIZMOR_VERSION=1.32.0
+ARG CLAUDE_CODE_VERSION=2.1.323
+ARG CRYPTOGRAPHY_VERSION=50.0.2
+ARG PYJWT_VERSION=2.15.1
+# gh, because every Ashigaru script talks to GitHub through it (its
+# scripts/common.py `gh()`); there is no Hummingbird RPM, so the release tarball
+# by exact version and checksum, as CodeQL is fetched.
+ARG GH_VERSION=2.104.0
+ARG GH_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
+# What sdlc_jobs runs: Ashigaru's scripts, prompts and schemas, and the
+# constitution's scripts, each at a release and fetched by its commit, never
+# by a tag that can move. Ashigaru is v5.4.0, tag pending: write depends on
+# 5.4.0's staged_refusal patch filter.
+ARG ASHIGARU_VERSION=5.4.0
+ARG ASHIGARU_COMMIT=499e50cff233c7a40455f4304718247475e4a73d
+ARG CONSTITUTION_VERSION=1.60.0
+ARG CONSTITUTION_COMMIT=726518b50e38f11c1ceb010b44b5eac8c7b90a13
 
 # The base runs non-root; installing needs root. The image drops back at the end.
 USER root
 
 LABEL maintainer="fatherlinux <scott.mccarty@crunchtools.com>"
-LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest, Gourmand, Gatehouse, Semgrep, CodeQL, pip-audit, hadolint, grype, node and npm, markdownlint, lychee and the constitution validator."
+LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest, Gourmand, Gatehouse, Semgrep, CodeQL, pip-audit, hadolint, grype, node and npm, markdownlint, lychee and the constitution validator, plus the clients to drive a runner's socket (podman-remote, docker, skopeo, cosign, syft), zizmor and the claude CLI."
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/sdlc"
-LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python, container, node, bootc and docs repos."
+LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python, container, node, bootc and docs repos, with the clients a runner job needs."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 LABEL version="0.11.1"
 
@@ -78,6 +111,16 @@ LABEL com.crunchtools.sdlc.grype="${GRYPE_VERSION}"
 LABEL com.crunchtools.sdlc.node="${NODE_MAJOR}"
 LABEL com.crunchtools.sdlc.markdownlint-cli2="${MARKDOWNLINT_CLI2_VERSION}"
 LABEL com.crunchtools.sdlc.lychee="${LYCHEE_VERSION}"
+LABEL com.crunchtools.sdlc.docker="${DOCKER_CLI_VERSION}"
+LABEL com.crunchtools.sdlc.cosign="${COSIGN_VERSION}"
+LABEL com.crunchtools.sdlc.syft="${SYFT_VERSION}"
+LABEL com.crunchtools.sdlc.zizmor="${ZIZMOR_VERSION}"
+LABEL com.crunchtools.sdlc.claude-code="${CLAUDE_CODE_VERSION}"
+LABEL com.crunchtools.sdlc.cryptography="${CRYPTOGRAPHY_VERSION}"
+LABEL com.crunchtools.sdlc.pyjwt="${PYJWT_VERSION}"
+LABEL com.crunchtools.sdlc.gh="${GH_VERSION}"
+LABEL com.crunchtools.sdlc.ashigaru="${ASHIGARU_VERSION}"
+LABEL com.crunchtools.sdlc.constitution="${CONSTITUTION_VERSION}"
 
 # The commit and build time. NOT optional, and the reason is a trap trentina hit
 # in #689: its promote job refuses a release unless it can read
@@ -105,7 +148,18 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
     SDLC_GRYPE_VERSION=${GRYPE_VERSION} \
     SDLC_NODE_VERSION=${NODE_MAJOR} \
     SDLC_MARKDOWNLINT_CLI2_VERSION=${MARKDOWNLINT_CLI2_VERSION} \
-    SDLC_LYCHEE_VERSION=${LYCHEE_VERSION}
+    SDLC_LYCHEE_VERSION=${LYCHEE_VERSION} \
+    SDLC_DOCKER_VERSION=${DOCKER_CLI_VERSION} \
+    SDLC_COSIGN_VERSION=${COSIGN_VERSION} \
+    SDLC_SYFT_VERSION=${SYFT_VERSION} \
+    SDLC_ZIZMOR_VERSION=${ZIZMOR_VERSION} \
+    SDLC_CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
+    SDLC_CRYPTOGRAPHY_VERSION=${CRYPTOGRAPHY_VERSION} \
+    SDLC_PYJWT_VERSION=${PYJWT_VERSION} \
+    SDLC_GH_VERSION=${GH_VERSION} \
+    SDLC_ASHIGARU_VERSION=${ASHIGARU_VERSION} \
+    SDLC_CONSTITUTION_VERSION=${CONSTITUTION_VERSION} \
+    DISABLE_AUTOUPDATER=1
 
 # git-core, not git: no perl, no tk, and nothing here runs `git send-email`.
 # tar and zstd are for the CodeQL bundle below.
@@ -125,6 +179,13 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
 # crunchtools/claude-agent) declare `Requires: jq` in their own packages. That
 # is a shared protocol, not one repo's quirk.
 #
+# podman-remote and skopeo are not toolbox members either: they are for
+# driving the runner's socket (builds, nested runs, `podman login`) and for
+# copying images by digest. They float with the Hummingbird repo like git-core
+# (podman-remote 6.x, skopeo 1.25 today), so the weekly rebuild takes errata
+# and there is no ARG for them. There is no engine in this image: the socket
+# is the engine. A shell test does not get to reach for them.
+#
 # Node is here for the node stack (and the docs stack's markdownlint), not for
 # the toolbox: a shell test that reaches for it is still the case below.
 #
@@ -134,7 +195,7 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
 # here. Without that line this list becomes a host-tools grab bag, one repo at
 # a time. tests/contract.sh asserts the toolbox, so it is a tested property
 # rather than an accident of the base image.
-RUN dnf install -y git-core tar zstd which jq \
+RUN dnf install -y git-core tar zstd which jq podman-remote skopeo \
  && dnf clean all \
  && rm -rf /var/cache/dnf
 
@@ -164,14 +225,17 @@ ENV UV_TOOL_DIR=/opt/tools \
 RUN uv tool install "ruff==${RUFF_VERSION}" \
  && uv tool install "semgrep==${SEMGREP_VERSION}" \
  && uv tool install "pip-audit==${PIP_AUDIT_VERSION}" \
+ && uv tool install "zizmor==${ZIZMOR_VERSION}" \
  && rm -rf /root/.cache/uv
 
-# The constitution validator is a standalone script run by path, not a package
-# (its own pyproject declares no dependencies). It needs exactly one third-party
-# import, PyYAML, so that gets an environment of its own rather than joining a
-# tool venv it has nothing to do with.
+# The interpreter `sdlc` and the constitution validator run under, kept apart
+# from the tool venvs it has nothing to do with. PyYAML for both; PyJWT with
+# cryptography because sdlc_jobs signs the Ashigaru App's RS256 JWT inside the
+# `sdlc` process, so it has to be importable here and cannot live in a venv of
+# its own. cryptography is pinned beside it so the extra cannot float it.
 RUN uv venv /opt/constitution-venv \
  && VIRTUAL_ENV=/opt/constitution-venv uv pip install --quiet "pyyaml==${PYYAML_VERSION}" \
+      "pyjwt[crypto]==${PYJWT_VERSION}" "cryptography==${CRYPTOGRAPHY_VERSION}" \
  && rm -rf /root/.cache/uv
 
 # Gourmand is a single Rust binary -- 25 MB, linking only libc, libm and libgcc,
@@ -203,6 +267,22 @@ RUN npm install -g --prefix /opt/markdownlint-cli2 --omit=dev --no-audit --no-fu
  && rm -rf /root/.npm \
  && markdownlint-cli2 --help | head -1
 COPY --from=lychee /usr/local/bin/lychee /usr/local/bin/lychee
+
+# The runner-socket and supply-chain clients, each a static binary copied from
+# its digest-pinned image, as hadolint and grype are. Contract-tested for
+# running here rather than trusted.
+COPY --from=docker /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=cosign /ko-app/cosign /usr/local/bin/cosign
+COPY --from=syft /syft /usr/local/bin/syft
+
+# The claude CLI, from npm at an exact version, in a prefix of its own exactly
+# as markdownlint-cli2 is. DISABLE_AUTOUPDATER (in ENV above) is not optional:
+# an image must not update itself, its version is the pin.
+RUN npm install -g --prefix /opt/claude-code --omit=dev --no-audit --no-fund \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && ln -s /opt/claude-code/bin/claude /usr/local/bin/claude \
+ && rm -rf /root/.npm \
+ && claude --version
 
 # Gatehouse is a Python app in a self-contained venv. Copying it works ONLY
 # because that image and this one are both Hummingbird with python3.14 at the
@@ -249,6 +329,56 @@ RUN set -eu; \
     chmod -R a+rX /opt/codeql; \
     ln -s /opt/codeql/codeql /usr/local/bin/codeql; \
     codeql --version | head -1
+
+# gh, checksum-verified before it is unpacked. Unpacked by Python's tarfile
+# because the base has no gzip, and gzip would be one more toolbox member.
+RUN set -eu; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /tmp/gh.tgz \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"; \
+    echo "${GH_SHA256}  /tmp/gh.tgz" | sha256sum -c -; \
+    python3 -I -c 'import sys, tarfile; t = tarfile.open(sys.argv[1]); f = t.extractfile(sys.argv[2]); open("/usr/local/bin/gh", "wb").write(f.read())' \
+      /tmp/gh.tgz "gh_${GH_VERSION}_linux_amd64/bin/gh"; \
+    chmod 0755 /usr/local/bin/gh; \
+    rm -f /tmp/gh.tgz; \
+    gh --version | head -1
+
+# Ashigaru's scripts, prompts and schemas, and the constitution's scripts, at
+# the commits above: the paths sdlc_jobs/_tools.py names. Each must say it is
+# the version its ARG names (Ashigaru's VERSION file, the constitution's
+# `> **Version:**` line), or the build fails. Data the jobs run, not packages,
+# so one shallow fetch of the commit and nothing of its history.
+RUN set -eu; \
+    git init -q /tmp/ashigaru; \
+    git -C /tmp/ashigaru fetch -q --depth 1 https://github.com/crunchtools/ashigaru "${ASHIGARU_COMMIT}"; \
+    git -C /tmp/ashigaru -c advice.detachedHead=false checkout -q FETCH_HEAD; \
+    got=$(cat /tmp/ashigaru/VERSION); \
+    [ "$got" = "${ASHIGARU_VERSION}" ] || { \
+      echo "ASHIGARU_COMMIT ${ASHIGARU_COMMIT} is version $got, not ASHIGARU_VERSION ${ASHIGARU_VERSION}" >&2; exit 1; }; \
+    mkdir -p /opt/ashigaru; \
+    cp -r /tmp/ashigaru/scripts /tmp/ashigaru/prompts /tmp/ashigaru/schemas /opt/ashigaru/; \
+    git init -q /tmp/constitution; \
+    git -C /tmp/constitution fetch -q --depth 1 https://github.com/crunchtools/constitution "${CONSTITUTION_COMMIT}"; \
+    git -C /tmp/constitution -c advice.detachedHead=false checkout -q FETCH_HEAD; \
+    got=$(sed -n 's/^> \*\*Version:\*\* //p' /tmp/constitution/constitution.md | head -1); \
+    [ "$got" = "${CONSTITUTION_VERSION}" ] || { \
+      echo "CONSTITUTION_COMMIT ${CONSTITUTION_COMMIT} is version '$got', not CONSTITUTION_VERSION ${CONSTITUTION_VERSION}" >&2; exit 1; }; \
+    mkdir -p /opt/constitution; \
+    cp -r /tmp/constitution/scripts /opt/constitution/; \
+    rm -rf /tmp/ashigaru /tmp/constitution
+
+# sdlc_jobs, the ai/write/gate handlers `sdlc event` imports, on the
+# interpreter's path through a .pth file. A COPY whose only source is a glob
+# that matches nothing fails, so the package is staged beside a file every
+# tree has: that lets this build on a tree that does not carry it yet. The
+# package is flat, so the glob's copy-the-contents rule loses nothing.
+COPY pyproject.toml sdlc_job[s] /tmp/sdlc-lib/
+RUN set -eu; \
+    rm /tmp/sdlc-lib/pyproject.toml; \
+    mkdir -p /usr/local/lib/sdlc; \
+    if [ -e /tmp/sdlc-lib/__init__.py ]; then mv /tmp/sdlc-lib /usr/local/lib/sdlc/sdlc_jobs; fi; \
+    rm -rf /tmp/sdlc-lib; \
+    site=$(/opt/constitution-venv/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))'); \
+    echo /usr/local/lib/sdlc > "$site/sdlc.pth"
 
 # Leave /tmp empty: podman's --tmpfs does a COPY-UP of the image's directory
 # contents into the fresh tmpfs, so anything a build step leaves here reappears
