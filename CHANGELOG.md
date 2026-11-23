@@ -6,6 +6,16 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- The `image` job trusts a `quay.io/hummingbird/<name>` parent (a1128). That
+  registry is Hummingbird's unsigned mirror, so the job verifies the same
+  digest at `registry.access.redhat.com/hi/<name>` with Red Hat's release key
+  and builds from the mirror by that digest. A mirror digest Red Hat has not
+  signed, `quay.io/hummingbird-community` and any other registry still refuse.
+- The `image` job resolves a `name:tag@sha256:` parent by its digest alone.
+  skopeo refuses a reference with both, so every tag-and-digest `FROM` was a 2.
+
 ### Changed
 
 - `examples/ci.yml` is the fleet file of `docs/marketplace-free-ci.md` (a1051):
