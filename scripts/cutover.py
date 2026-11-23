@@ -373,8 +373,8 @@ def fleet(api: Api) -> list[dict]:
     for _ in range(MAX_PAGES):
         variables = {"org": ORG, "after": after}
         status, body = api.call("POST", "/graphql", {"query": REPOS_QUERY, "variables": variables})
-        data = body.get("data") if isinstance(body, dict) else None
-        org = data.get("organization") if isinstance(data, dict) else None
+        answered = body.get("data") if isinstance(body, dict) else None
+        org = answered.get("organization") if isinstance(answered, dict) else None
         if status != HTTPStatus.OK or not isinstance(org, dict):
             errors = body.get("errors") if isinstance(body, dict) else None
             raise ApiError(f"POST /graphql (repositories): HTTP {status} {errors or ''}".rstrip())
