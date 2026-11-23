@@ -251,9 +251,17 @@ class Job:
         """Counts and a sample of the log, printed and added to the step summary."""
         if not log.is_file():
             return
-        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
-        counts = [f"- {name}: {sum(needle in ln for ln in lines)}" for name, needle in COUNTS]
-        sample = [ln for ln in lines if SAMPLE.search(ln)][:SAMPLE_LINES]
+        # One pass, line by line: an org-wide log is never held whole.
+        found = dict.fromkeys((name for name, _ in COUNTS), 0)
+        sample: list[str] = []
+        with log.open(encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                line = raw.rstrip("\n")
+                for name, needle in COUNTS:
+                    found[name] += needle in line
+                if len(sample) < SAMPLE_LINES and SAMPLE.search(line):
+                    sample.append(line)
+        counts = [f"- {name}: {n}" for name, n in found.items()]
         text = "\n".join(["### Renovate", "", *counts, "", "```", *sample, "```", ""])
         print(text)
         summary = self.site.env.get("GITHUB_STEP_SUMMARY", "")
