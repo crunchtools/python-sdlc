@@ -436,7 +436,11 @@ for assoc in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", ""):
         f"association {assoc or 'missing'} does nothing",
         reply_run(api, comment_event(assoc)) == 0 and not api.calls,
     )
-for assoc in gate.TRUSTED_ASSOCIATIONS:
+# A literal, not gate.TRUSTED_ASSOCIATIONS: CodeQL reads "trusted" in a name as
+# a secret and flags it reaching check()'s print. The pin keeps the two in step.
+RERUN_ROLES = ("OWNER", "MEMBER", "COLLABORATOR")
+check("re-run associations pinned", gate.TRUSTED_ASSOCIATIONS == RERUN_ROLES)
+for assoc in RERUN_ROLES:
     api = retriage_api([run_row(1, 1)])
     check(
         f"association {assoc} re-runs",
