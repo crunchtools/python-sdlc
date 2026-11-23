@@ -296,10 +296,10 @@ RUN npm install -g --prefix /opt/claude-code --omit=dev --no-audit --no-fund \
 
 # Renovate, the same way: an exact version in a prefix of its own, run only by
 # the `renovate` job (sdlc_jobs/renovate.py). renovate-config-validator comes
-# with it. --omit=optional skips its two optional packages: re2, a native build
-# Renovate falls back from to RegExp, and openpgp, for encrypted config the
-# fleet does not use.
-RUN npm install -g --prefix /opt/renovate --omit=dev --omit=optional --no-audit --no-fund \
+# with it. npm runs none of its packages' install scripts, so re2's native
+# build is skipped and Renovate falls back to RegExp. 347 MB, the image's
+# largest npm prefix.
+RUN npm install -g --prefix /opt/renovate --omit=dev --no-audit --no-fund \
         "renovate@${RENOVATE_VERSION}" \
  && ln -s /opt/renovate/bin/renovate /usr/local/bin/renovate \
  && ln -s /opt/renovate/bin/renovate-config-validator /usr/local/bin/renovate-config-validator \
