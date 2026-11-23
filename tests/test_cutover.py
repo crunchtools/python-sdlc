@@ -1,54 +1,44 @@
 #!/usr/bin/env python3
-"""scripts/cutover.py, over small repos built here in the shapes the fleet has.
+"""scripts/cutover.py: the offline half over small repos, the API half over a fake.
 
-The cutover is what one consumer repo needs beyond convert_repo.py, so each
-change is pinned on its own fixture:
+Offline, each change is pinned on its own fixture:
 
-  - the constitution pins, `Inherits:` and the hook `rev:` move together, and
-    a `@v1` major-tag call is left alone
-  - every constitution call in every workflow ends at the target ref or a
-    major tag; one at another ref (a branch, a sha) is counted and hand work
-  - a bare `python-sdlc` becomes `sdlc` in a `downstream:` input and a dispatch
-    loop, and `python-sdlc-extras` is not touched
-  - every container-release.yml call signs: `sign: true` (added, or flipped
-    from false) and the two cosign secrets, placed before the comments that
-    introduce the next job; `secrets: inherit` and an already-signed call are
-    left as they are
-  - the weekly schedule goes before workflow_dispatch, for a repo in
-    `weekly` that has none, at a cron that is the same every run
-  - examples/release.yml becomes .github/workflows/release.yml, with the
-    default branch substituted, only in a repo that publishes an image and has
-    no release flow; any other release flow is reported, not merged
-  - a pre-router ashigaru.yml (triage, code and fix called one by one, a
-    release.yml@v2 job among them) becomes the target's router caller,
-    unchanged; a router caller at the tag, a repo with no ashigaru.yml and a
-    target with no caller are left alone
-  - a router repo gets examples/release-open.yml, which only opens the release
-    pull request; sdlc's full template becomes it, another release.yml loses
-    its tag job (and pull_request_target with it), a workflow that is only a
-    tag job goes, and every routed fixture ends with exactly one tag path; the
-    ashigaru repo itself is left alone
-  - a workflow that pushes an image itself is reported; a commented-out push
-    is not
+  - `Inherits:` and the constitution hook `rev:` move together; no workflow is
+    touched by the move
+  - a bare `python-sdlc` becomes `sdlc`, and `python-sdlc-extras` does not
+  - `.gemini/` goes when the caller says so, and never through a symlink
+  - any `uses:` left in a workflow is hand work; a comment is not one
   - Dependabot's removal is the target constitution's, and its failure is hand
     work; the target validator's verdict drops only the "newer than this
     validator" PIN line
   - a second run of every fixture finds nothing to do
 
-Run inside the image, which has the interpreter and PyYAML the script needs:
-  podman run --rm -v .:/src:ro,z -w /src --entrypoint /opt/constitution-venv/bin/python3 \
-      quay.io/crunchtools/sdlc:<tag> tests/test_cutover.py
+Online, an in-memory GitHub (routes to (status, body), every write recorded):
+
+  - the ruleset move: happy path, a re-run that PUTs nothing, and a refusal for a
+    reverted repo, a non-explicit include list and a new ruleset without the
+    required checks; private repos stay on the old list without --include-private
+  - --merge, in order: merge, rulesets, secret DELETEs, update-branch; each
+    refusal among its steps 1 to 7 writes nothing; a re-run on a merged PR resumes
+  - --check: a repo-level and an org-level moved secret, a refused read, rulesets
+    out of step and the missing release-branch ruleset
+  - a private repo without --include-private is refused and named (prerequisite 9)
+
+Run: python3 tests/test_cutover.py
 """
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import importlib.util
+import io
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-
-import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 _SPEC = importlib.util.spec_from_file_location("cutover", ROOT / "scripts" / "cutover.py")
@@ -57,12 +47,8 @@ sys.modules["cutover"] = cut  # dataclasses look their module up there
 _SPEC.loader.exec_module(cut)
 
 FAILED: list[str] = []
-REF = "v1.60.0"
-TARGET = cut.Target(constitution="1.60.0", constitution_ref=REF)
-TEMPLATE = (ROOT / "examples" / "release.yml").read_text()
-OPEN = (ROOT / "examples" / "release-open.yml").read_text()
-COSIGN = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
-CALL = "crunchtools/constitution/.github/workflows/container-release.yml"
+TARGET = cut.Target(constitution="1.60.0")
+GEMINI_TARGET = cut.Target(constitution="1.60.0", drop_gemini=True)
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -82,14 +68,13 @@ def make(files: dict[str, str]) -> Path:
 def run(
     files: dict[str, str],
     name: str = "app",
-    default: str = "main",
     target: cut.Target = TARGET,
     label: str = "",
 ) -> tuple[Path, cut.Result]:
     """Cut a fixture over, and pin that a second run finds nothing to do."""
     repo = make(files)
-    result = cut.cutover(repo, name, default, target)
-    again = cut.cutover(repo, name, default, target)
+    result = cut.cutover(repo, target)
+    again = cut.cutover(repo, target)
     check(
         f"idempotent: {label or name}: a second run changes nothing",
         not again.changed,
@@ -102,25 +87,6 @@ def read(repo: Path, path: str) -> str:
     return (repo / path).read_text()
 
 
-def jobs(repo: Path, path: str) -> dict:
-    return yaml.safe_load(read(repo, path))["jobs"]
-
-
-def release_job(secrets: str = "", with_: str = "      image: quay.io/crunchtools/app\n") -> str:
-    """A container.yml whose one job calls container-release.yml, at an exact release."""
-    body = f"    uses: {CALL}@v1.59.0\n"
-    if with_:
-        body += f"    with:\n{with_}"
-    body += secrets
-    return (
-        "name: Container\non:\n  push:\n    branches: [main]\n  workflow_dispatch:\n"
-        f"jobs:\n  build:\n{body}"
-    )
-
-
-QUAY = "    secrets:\n      QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}\n"
-CI_ONLY = "name: CI\non: [push]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n"
-
 # ------------------------------------------------------------ the constitution
 
 MANIFEST = "# Constitution\n\n> **Inherits:** crunchtools/constitution v1.59.0\n\nbody v1.59.0\n"
@@ -129,52 +95,35 @@ HOOKS = (
     "    hooks:\n      - id: validate\n"
     "  - repo: https://github.com/other/thing\n    rev: v1.59.0\n    hooks: []\n"
 )
-PINS = (
+OLD_PINS = (
     "name: P\non: [push]\njobs:\n"
     "  a:\n    uses: crunchtools/constitution/.github/workflows/gate.yml@v1.59.0\n"
-    "  b:\n    uses: crunchtools/constitution/.github/workflows/gate.yml@v1\n"
-    "  c:\n    uses: someone/else/.github/workflows/gate.yml@v1.59.0\n"
 )
 repo, result = run(
     {
         ".specify/memory/constitution.md": MANIFEST,
         ".pre-commit-config.yaml": HOOKS,
-        ".github/workflows/pins.yml": PINS,
+        ".github/workflows/ci.yml": OLD_PINS,
     },
-    label="pins",
-)
-pins = read(repo, ".github/workflows/pins.yml")
-check("pins: a workflow pin moves to the target ref", f"gate.yml@{REF}" in pins, pins)
-check(
-    "pins: a @v1 major-tag call is left alone",
-    "constitution/.github/workflows/gate.yml@v1\n" in pins,
+    label="constitution",
 )
 check(
-    "pins: another org's pin is left alone",
-    "someone/else/.github/workflows/gate.yml@v1.59.0" in pins,
-)
-check(
-    "pins: Inherits moves with them, and only Inherits",
+    "constitution: Inherits moves, and only Inherits",
     "Inherits:** crunchtools/constitution v1.60.0" in read(repo, ".specify/memory/constitution.md")
     and "body v1.59.0" in read(repo, ".specify/memory/constitution.md"),
 )
 hooks = read(repo, ".pre-commit-config.yaml")
-check("pins: the constitution hook rev moves", "constitution\n    rev: v1.60.0" in hooks, hooks)
-check("pins: another hook's rev does not", "other/thing\n    rev: v1.59.0" in hooks)
+check("constitution: the hook rev moves", "constitution\n    rev: v1.60.0" in hooks, hooks)
+check("constitution: another hook's rev does not", "other/thing\n    rev: v1.59.0" in hooks)
 check(
-    "pins: each file is reported",
-    sum(c.startswith("constitution:") for c in result.changed) == 3,
+    "constitution: a workflow pin is not moved any more",
+    read(repo, ".github/workflows/ci.yml") == OLD_PINS,
+)
+check(
+    "constitution: the two files are reported, nothing else",
+    sorted(c.split(" in ")[1] for c in result.changed)
+    == [".pre-commit-config.yaml", ".specify/memory/constitution.md"],
     str(result.changed),
-)
-
-repo, _ = run(
-    {".github/workflows/pins.yml": PINS},
-    target=cut.Target(constitution="1.60.0", constitution_ref="v1"),
-    label="pins, ref v1",
-)
-check(
-    "pins: a major-tag target ref is written as given",
-    "gate.yml@v1\n" in read(repo, ".github/workflows/pins.yml"),
 )
 
 # ---------------------------------------------------------------- the old name
@@ -183,10 +132,6 @@ RENAME = """\
 name: Dispatch
 on: [workflow_dispatch]
 jobs:
-  fan:
-    uses: crunchtools/constitution/.github/workflows/gate.yml@v1
-    with:
-      downstream: python-sdlc
   loop:
     runs-on: ubuntu-latest
     steps:
@@ -197,7 +142,6 @@ jobs:
 """
 repo, result = run({".github/workflows/dispatch.yml": RENAME}, label="rename")
 text = read(repo, ".github/workflows/dispatch.yml")
-check("rename: a downstream: input", "downstream: sdlc\n" in text, text)
 check("rename: a for-loop word", "for repo in sdlc; do" in text, text)
 check("rename: python-sdlc-extras is untouched", "for repo in python-sdlc-extras; do" in text)
 check("rename: a sentence's last word is renamed", "and sdlc." in text, text)
@@ -207,7 +151,6 @@ check(
     any(c.startswith("renamed:") for c in result.changed),
     str(result.changed),
 )
-
 repo, _ = run(
     {
         ".pre-commit-config.yaml": "# python-sdlc hooks\nrepos: []\n",
@@ -220,394 +163,75 @@ check(
     "python-sdlc" not in read(repo, ".pre-commit-config.yaml") + read(repo, "pyproject.toml"),
 )
 
-# ---------------------------------------------------------------- signing
+# ------------------------------------------------------------------ .gemini/
 
-
-def signed(repo: Path, path: str = ".github/workflows/container.yml", job: str = "build") -> bool:
-    j = jobs(repo, path)[job]
-    secrets = j.get("secrets")
-    return (j.get("with") or {}).get("sign") is True and (
-        secrets == "inherit" or all(s in secrets for s in COSIGN)
-    )
-
-
-repo, result = run(
-    {".github/workflows/container.yml": release_job(QUAY)}, label="sign, no sign key"
-)
-text = read(repo, ".github/workflows/container.yml")
-w = jobs(repo, ".github/workflows/container.yml")["build"]
-check("sign: a call with no sign key signs", signed(repo), text)
-check("sign: the pin moved in the same run", f"container-release.yml@{REF}" in text)
+GEMINI = {".gemini/config.yaml": "a: 1\n", ".gemini/styleguide.md": "# s\n", "README.md": "x\n"}
+repo, result = run(GEMINI, target=GEMINI_TARGET, label="gemini")
 check(
-    "sign: the existing input and secret survive",
-    w["with"]["image"] == "quay.io/crunchtools/app" and "QUAY_USERNAME" in w["secrets"],
-    str(w),
+    "gemini: the directory goes, and only it",
+    not (repo / ".gemini").exists() and (repo / "README.md").exists(),
 )
 check(
-    "sign: the note and the key sit at the end of with:, before secrets:",
-    text.index("image:")
-    < text.index("# Every published image")
-    < text.index("sign: true")
-    < text.index("    secrets:"),
-    text,
-)
-check(
-    "sign: the cosign secrets are passed by name",
-    all(f"{s}: ${{{{ secrets.{s} }}}}" in text for s in COSIGN),
-    text,
-)
-check(
-    "sign: it is reported", any(c.startswith("signing:") and "build" in c for c in result.changed)
-)
-
-repo, _ = run(
-    {".github/workflows/container.yml": release_job(QUAY, "      image: x\n      sign: false\n")},
-    label="sign: false",
-)
-text = read(repo, ".github/workflows/container.yml")
-check(
-    "sign: sign: false is flipped",
-    signed(repo) and "sign: false" not in text and text.count("sign:") == 1,
-    text,
-)
-
-repo, _ = run(
-    {
-        ".github/workflows/container.yml": release_job(
-            QUAY, "      image: x\n      sign: false  # kept by hand\n"
-        )
-    },
-    label="sign: false, comment",
-)
-text = read(repo, ".github/workflows/container.yml")
-check(
-    "sign: a trailing comment on the flipped line survives",
-    "sign: true  # kept by hand" in text,
-    text,
-)
-
-repo, _ = run({".github/workflows/container.yml": release_job(QUAY, "")}, label="sign, no with")
-text = read(repo, ".github/workflows/container.yml")
-check("sign: a call with no with: block gets one", signed(repo), text)
-check(
-    "sign: the new with: follows uses:",
-    text.index("uses:")
-    < text.index("    with:")
-    < text.index("sign: true")
-    < text.index("secrets:"),
-    text,
-)
-
-repo, _ = run({".github/workflows/container.yml": release_job("", "")}, label="sign, neither block")
-check(
-    "sign: a call with neither block gets both",
-    signed(repo),
-    read(repo, ".github/workflows/container.yml"),
-)
-
-inherit = release_job("    secrets: inherit\n")
-repo, result = run({".github/workflows/container.yml": inherit}, label="secrets: inherit")
-text = read(repo, ".github/workflows/container.yml")
-check("sign: secrets: inherit gets sign: true", signed(repo), text)
-check(
-    "sign: secrets: inherit gets no secrets added",
-    "COSIGN" not in text and "secrets: inherit" in text,
-    text,
-)
-
-# Comments after the secrets block introduce the next job; the new secrets go before them.
-FOLLOWED = (
-    release_job(QUAY)
-    + "\n  # the second job\n  # runs after the build\n  later:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
-)
-repo, _ = run({".github/workflows/container.yml": FOLLOWED}, label="sign, trailing comments")
-text = read(repo, ".github/workflows/container.yml")
-check(
-    "sign: secrets added before the next job's comments",
-    signed(repo) and text.index("COSIGN_PASSWORD") < text.index("# the second job"),
-    text,
-)
-check(
-    "sign: the next job is intact",
-    jobs(repo, ".github/workflows/container.yml")["later"]["steps"] == [{"run": "echo hi"}],
-)
-
-FOLLOWED_WITH = (
-    release_job(QUAY, "      image: x\n      # tail comment\n")
-    + "  # next\n  later:\n    runs-on: x\n"
-)
-repo, _ = run({".github/workflows/container.yml": FOLLOWED_WITH}, label="sign, comment ends with:")
-text = read(repo, ".github/workflows/container.yml")
-check(
-    "sign: the key goes before a comment that ends with:",
-    signed(repo) and text.index("sign: true") < text.index("# tail comment"),
-    text,
-)
-
-PARTIAL = release_job("    secrets:\n      COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}\n")
-repo, _ = run({".github/workflows/container.yml": PARTIAL}, label="sign, one cosign secret")
-text = read(repo, ".github/workflows/container.yml")
-check(
-    "sign: only the missing cosign secret is added",
-    signed(repo) and text.count("COSIGN_PRIVATE_KEY:") == 1,
-    text,
-)
-
-DONE_ALREADY = release_job(
-    "    secrets:\n      COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}\n      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n",
-    "      image: x\n      sign: true\n",
-).replace("@v1.59.0", f"@{REF}")
-repo, result = run(
-    {".github/workflows/container.yml": DONE_ALREADY, ".github/workflows/release.yml": TEMPLATE},
-    label="already signed",
-)
-check(
-    "sign: an already-signed call is byte-for-byte untouched",
-    read(repo, ".github/workflows/container.yml") == DONE_ALREADY,
-)
-check(
-    "sign: and nothing is reported",
-    result.changed == [] and result.hand == [],
-    str((result.changed, result.hand)),
-)
-
-TWO = (
-    "name: C\non: [push]\njobs:\n"
-    f"  one:\n    uses: {CALL}@v1\n    with:\n      image: a\n"
-    f"  two:\n    uses: {CALL}@v1\n    with:\n      image: b\n    secrets: inherit\n"
-    f"  other:\n    uses: crunchtools/constitution/.github/workflows/gate.yml@v1\n"
-)
-repo, _ = run({".github/workflows/container.yml": TWO}, label="sign, two calls")
-check("sign: every call in a file signs", signed(repo, job="one") and signed(repo, job="two"))
-check(
-    "sign: another reusable workflow does not",
-    "sign" not in str(jobs(repo, ".github/workflows/container.yml")["other"]),
-)
-
-repo, result = run({".github/workflows/ci.yml": CI_ONLY}, label="no release call")
-check(
-    "sign: a workflow with no release call is untouched",
-    read(repo, ".github/workflows/ci.yml") == CI_ONLY and result.changed == [],
-)
-
-# A job with no secrets key, followed by the next job's comments.
-NO_SECRETS = release_job("") + "  # next job\n  later:\n    runs-on: x\n"
-repo, _ = run(
-    {".github/workflows/container.yml": NO_SECRETS}, label="sign, no secrets key, comments follow"
-)
-text = read(repo, ".github/workflows/container.yml")
-check(
-    "sign: secrets for a job that had none go before the next job's comments",
-    signed(repo) and text.index("COSIGN_PASSWORD") < text.index("# next job"),
-    text,
-)
-
-# --------------------------------------------------------- self-publishing
-
-SELF = "name: Push\non: [push]\njobs:\n  p:\n    runs-on: ubuntu-latest\n    steps:\n      - run: |\n          {line}\n"
-for line, hand in (
-    ("podman push quay.io/x/y:latest", True),
-    ("docker push quay.io/x/y:latest", True),
-    ("skopeo copy docker://a docker://b", True),
-    ("# podman push quay.io/x/y:latest", False),
-    ("echo podman pushes nothing", False),
-):
-    repo, result = run(
-        {".github/workflows/push.yml": SELF.format(line=line)}, label=f"self-publish {line[:20]}"
-    )
-    got = any(
-        "publishes outside container-release.yml" in h and "push.yml" in h for h in result.hand
-    )
-    check(
-        f"self-publish: {line!r} is {'reported' if hand else 'not reported'}",
-        got == hand,
-        str(result.hand),
-    )
-
-# A flow-style job is valid YAML that signed_job cannot edit by line: the repo
-# gets a hand note and the workflow is left as it was, not a crash.
-FLOW = (
-    "name: C\non:\n  push:\njobs:\n  build: {uses: "
-    "crunchtools/constitution/.github/workflows/container-release.yml@v1, "
-    "with: {image: quay.io/crunchtools/app}}\n"
-)
-repo, result = run({".github/workflows/container.yml": FLOW}, label="signing, flow style")
-check(
-    "signing: a flow-style job is left unchanged",
-    read(repo, ".github/workflows/container.yml") == FLOW,
-)
-check(
-    "signing: and named for a human",
-    any(h.startswith("signing:") and "by hand" in h for h in result.hand),
-    str(result.hand),
-)
-
-# ---------------------------------------------------------------- schedule
-
-ON_FULL = release_job(QUAY).replace("@v1.59.0", f"@{REF}")
-SIGNED = ON_FULL.replace(
-    "      image: quay.io/crunchtools/app\n", "      image: x\n      sign: true\n"
-).replace(
-    QUAY,
-    QUAY
-    + "      COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}\n      COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}\n",
-)
-weekly = cut.Target("1.60.0", REF, weekly=frozenset({"app"}))
-repo, result = run({".github/workflows/container.yml": SIGNED}, target=weekly, label="schedule")
-text = read(repo, ".github/workflows/container.yml")
-on = yaml.safe_load(text)[True]
-check("schedule: a weekly repo gets one", on["schedule"] == [{"cron": cut.cron("app")}], str(on))
-check(
-    "schedule: it goes before workflow_dispatch",
-    text.index("  schedule:") < text.index("  workflow_dispatch:"),
-    text,
-)
-check(
-    "schedule: the other triggers survive",
-    on["push"] == {"branches": ["main"]} and "workflow_dispatch" in on,
-)
-check("schedule: it is reported", any(c.startswith("schedule:") for c in result.changed))
-
-repo, _ = run(
-    {".github/workflows/container.yml": SIGNED},
-    name="other",
-    target=weekly,
-    label="schedule, not weekly",
-)
-check(
-    "schedule: a repo not in weekly gets none",
-    "schedule" not in read(repo, ".github/workflows/container.yml"),
-)
-
-HAS = SIGNED.replace(
-    "  workflow_dispatch:\n", "  workflow_dispatch:\n  schedule:\n    - cron: '1 2 * * 3'\n"
-)
-repo, _ = run({".github/workflows/container.yml": HAS}, target=weekly, label="schedule exists")
-check(
-    "schedule: an existing schedule is left alone",
-    read(repo, ".github/workflows/container.yml") == HAS,
-)
-
-NO_DISPATCH = SIGNED.replace("  workflow_dispatch:\n", "")
-repo, _ = run(
-    {".github/workflows/container.yml": NO_DISPATCH}, target=weekly, label="schedule, no dispatch"
-)
-text = read(repo, ".github/workflows/container.yml")
-check(
-    "schedule: with no workflow_dispatch it goes at the end of on:",
-    yaml.safe_load(text)[True]["schedule"] == [{"cron": cut.cron("app")}]
-    and text.index("schedule:") < text.index("jobs:"),
-    text,
-)
-
-repo, _ = run(
-    {".github/workflows/ci.yml": CI_ONLY}, target=weekly, label="schedule, no release call"
-)
-check(
-    "schedule: a workflow that publishes nothing gets none",
-    read(repo, ".github/workflows/ci.yml") == CI_ONLY,
-)
-
-check("schedule: the cron is deterministic", cut.cron("app") == cut.cron("app") == cut.cron("app"))
-check(
-    "schedule: and varies by repo",
-    len({cut.cron(n) for n in ("gatehouse", "openclaw", "ubi10-httpd-php", "google-workspace-mcp")})
-    > 1,
-)
-minute, hour, dom, month, dow = cut.cron("app").split()
-check(
-    "schedule: the cron is a valid weekly slot",
-    0 <= int(minute) < 60 and 2 <= int(hour) <= 6 and dom == month == "*" and 0 <= int(dow) < 7,
-    cut.cron("app"),
-)
-
-# ----------------------------------------------------------------- release
-
-PUBLISHES = {".github/workflows/container.yml": SIGNED}
-
-repo, result = run(PUBLISHES, label="release, main")
-check(
-    "release: written for a main repo, as the template",
-    read(repo, ".github/workflows/release.yml") == TEMPLATE,
-)
-check(
-    "release: it is reported",
-    any(c.startswith("release:") for c in result.changed),
+    "gemini: it is reported with the file count",
+    result.changed == ["gemini: removed .gemini/ (2 file(s))"],
     str(result.changed),
 )
-
-repo, _ = run(PUBLISHES, default="master", label="release, master")
-text = read(repo, ".github/workflows/release.yml")
+repo, result = run(GEMINI, label="gemini, not asked")
+check("gemini: left alone unless the target says so", (repo / ".gemini/config.yaml").exists())
+repo, result = run({"README.md": "x\n"}, target=GEMINI_TARGET, label="gemini, absent")
+check("gemini: no directory, nothing to do", not result.changed and not result.hand)
+repo = make({"README.md": "x\n"})
+outside = make({"secret": "s\n"})
+(repo / ".gemini").mkdir()
+(repo / ".gemini" / "config.yaml").symlink_to(outside / "secret")
+result = cut.cutover(repo, GEMINI_TARGET)
 check(
-    "release: master is substituted for main",
-    "refs/heads/master" in text
-    and "refs/heads/main" not in text
-    and "--base master" in text
-    and "--base main" not in text,
-    text,
+    "gemini: a symlink inside is hand work, and nothing is deleted",
+    (repo / ".gemini/config.yaml").is_symlink()
+    and (outside / "secret").exists()
+    and not result.changed
+    and any(h.startswith("gemini:") and "symlink" in h for h in result.hand),
+    str((result.changed, result.hand)),
 )
-check("release: and the result is a workflow", yaml.safe_load(text)["jobs"])
-
-repo, result = run(PUBLISHES, default="m$(id)", label="release, unsafe branch")
+repo = make({"README.md": "x\n"})
+(repo / ".gemini").symlink_to(outside)
+result = cut.cutover(repo, GEMINI_TARGET)
 check(
-    "release: a default branch that is not a plain name is left to a human, never written",
-    not (repo / ".github/workflows/release.yml").exists()
-    and any("not a plain name" in h for h in result.hand),
+    "gemini: a symlinked directory is refused too",
+    (outside / "secret").exists() and any("symlink" in h for h in result.hand),
     str(result.hand),
 )
 
-repo, result = run({".github/workflows/ci.yml": CI_ONLY}, label="release, publishes nothing")
-check(
-    "release: not written for a repo that publishes nothing",
-    not (repo / ".github/workflows/release.yml").exists() and not result.hand,
-)
-
-ASHIGARU = (
-    "name: R\non: [workflow_dispatch]\njobs:\n  tag:\n"
-    "    uses: crunchtools/ashigaru/.github/workflows/release.yml@v2\n"
-)
-repo, result = run(
-    {**PUBLISHES, ".github/workflows/old-release.yml": ASHIGARU}, label="release, ashigaru v2"
-)
-check(
-    "release: an ashigaru release.yml@v2 caller is reported, not given a second flow",
-    not (repo / ".github/workflows/release.yml").exists()
-    and any(
-        h.startswith("release:") and "old-release.yml" in h and "release-tag.yml@v5" in h
-        for h in result.hand
-    ),
-    str(result.hand),
-)
-
-OTHER = "name: Mine\non: [workflow_dispatch]\njobs:\n  go:\n    runs-on: x\n    steps:\n      - run: ./release.sh\n"
-repo, result = run(
-    {**PUBLISHES, ".github/workflows/release.yml": OTHER}, label="release, different release.yml"
-)
-check(
-    "release: a different release.yml is kept and reported",
-    read(repo, ".github/workflows/release.yml") == OTHER
-    and any("exists" in h and "merge by hand" in h for h in result.hand),
-    str(result.hand),
-)
-
-V5 = ASHIGARU.replace("release.yml@v2", "release-tag.yml@v5")
-repo, result = run({**PUBLISHES, ".github/workflows/tag.yml": V5}, label="release, already v5")
-check(
-    "release: release-tag.yml@v5 already called is silent",
-    not (repo / ".github/workflows/release.yml").exists()
-    and not any(h.startswith("release:") for h in result.hand)
-    and not any(c.startswith("release:") for c in result.changed),
-    str((result.hand, result.changed)),
-)
+# ------------------------------------------------------------------ uses_left
 
 repo, result = run(
-    {**PUBLISHES, ".github/workflows/release.yml": TEMPLATE},
-    label="release, template already there",
+    {
+        ".github/workflows/ci.yml": "name: CI\non: [push]\njobs:\n  t:\n    runs-on: x\n"
+        "    steps:\n      - run: sdlc event\n",
+        ".github/workflows/old.yml": "# uses: actions/checkout@v4\nname: O\non: [push]\njobs:\n"
+        "  a:\n    uses: someone/else/.github/workflows/x.yml@v1\n"
+        "  b:\n    runs-on: x\n    steps:\n      - uses: actions/checkout@abc  # pinned\n",
+    },
+    label="uses",
 )
 check(
-    "release: the template already in place is silent",
-    not any(h.startswith("release:") for h in result.hand)
-    and read(repo, ".github/workflows/release.yml") == TEMPLATE,
+    "uses: every `uses:` counts, any owner, any ref, comments excluded",
+    result.uses_left
+    == [
+        ".github/workflows/old.yml:6 uses someone/else/.github/workflows/x.yml@v1",
+        ".github/workflows/old.yml:10 uses actions/checkout@abc",
+    ],
+    str(result.uses_left),
+)
+check("uses: the repo is hand work", len(result.hand) == 1 and "2 `uses:`" in result.hand[0])
+repo, result = run(
+    {".github/workflows/ci.yml": "# uses: x/y@v1\nname: CI\non: [push]\njobs: {}\n"},
+    label="no uses",
+)
+check("uses: a comment alone leaves nothing", not result.uses_left and not result.hand)
+check(
+    "uses: no workflows, no pins",
+    cut.cutover(make({"README.md": "x"}), TARGET).uses_left == [],
 )
 
 # --------------------------------------------------------------- Dependabot
@@ -628,9 +252,7 @@ validator = SimpleNamespace(own_version=lambda: "1.60.0", validate=lambda _p: []
 repo = make({"README.md": "x\n"})
 result = cut.cutover(
     repo,
-    "app",
-    "main",
-    cut.Target("1.60.0", REF, bump=SimpleNamespace(drop_dependabot=drop), validator=validator),
+    cut.Target("1.60.0", bump=SimpleNamespace(drop_dependabot=drop), validator=validator),
 )
 check(
     "dependabot: the constitution's own teardown is called with the checkout and validator",
@@ -648,9 +270,7 @@ check(
 )
 result = cut.cutover(
     repo,
-    "app",
-    "main",
-    cut.Target("1.60.0", REF, bump=SimpleNamespace(drop_dependabot=boom), validator=validator),
+    cut.Target("1.60.0", bump=SimpleNamespace(drop_dependabot=boom), validator=validator),
 )
 check(
     "dependabot: a RuntimeError is hand work, not a crash",
@@ -660,11 +280,9 @@ check(
 seen.clear()
 cut.cutover(
     repo,
-    "app",
-    "main",
-    cut.Target("1.60.0", REF, bump=SimpleNamespace(drop_dependabot=drop), validator=None),
+    cut.Target("1.60.0", bump=SimpleNamespace(drop_dependabot=drop), validator=None),
 )
-cut.cutover(repo, "app", "main", cut.Target("1.60.0", REF, bump=None, validator=validator))
+cut.cutover(repo, cut.Target("1.60.0", bump=None, validator=validator))
 check("dependabot: skipped when either module is None", seen == [])
 
 # ----------------------------------------------------------------- validate
@@ -672,7 +290,7 @@ check("dependabot: skipped when either module is None", seen == [])
 
 def judging(verdict: list[str], own: str | None = "1.59.0") -> cut.Target:
     v = SimpleNamespace(own_version=lambda: own, validate=lambda _path: list(verdict))
-    return cut.Target("1.60.0", REF, validator=v)
+    return cut.Target("1.60.0", validator=v)
 
 
 VERDICT = [
@@ -708,7 +326,6 @@ cut.validate(
     repo,
     cut.Target(
         "1.60.0",
-        REF,
         validator=SimpleNamespace(
             own_version=lambda: "1", validate=lambda p: asked.append(p) or []
         ),
@@ -720,271 +337,766 @@ check(
     str(asked),
 )
 
-# ------------------------------------------------- the target constitution
+# ======================================================================= the API
 
-# constitution_modules() over a checkout shaped like constitution's: fleet-bump.py
-# imports fleet_common from scripts/, and the validator sits at the top.
-fake = make(
-    {
-        "scripts/fleet_common.py": "MARK = 'common'\n",
-        "scripts/fleet-bump.py": (
-            "from fleet_common import MARK\n"
-            "def drop_dependabot(root, validator):\n"
-            "    return [MARK + ':' + validator.own_version()]\n"
-        ),
-        "validate-constitution.py": (
-            "def own_version():\n    return '1.60.0'\ndef validate(path):\n    return []\n"
-        ),
+# The fleet file names sdlc-boot by a placeholder until prerequisite 4, and
+# every mode refuses that (pinned below); the API tests run on a pinned copy.
+UNPINNED = cut.FLEET_FILE
+PINNED_DIR = Path(tempfile.mkdtemp())
+(PINNED_DIR / "ci.yml").write_text(
+    UNPINNED.read_text().replace("sdlc-boot@sha256:<digest>", "sdlc-boot@sha256:" + "a" * 64)
+)
+cut.FLEET_FILE = PINNED_DIR / "ci.yml"
+FLEET = cut.FLEET_FILE.read_bytes()
+NEW, OLD, SHA, TOKEN = cut.NEW_RULESET, cut.OLD_RULESET, "a" * 40, "ghp_SECRETTOKEN"
+O = "/repos/crunchtools"  # noqa: E741
+GA = {"app": {"slug": "github-actions"}}
+
+
+def b64(data: bytes) -> dict:
+    return {"content": base64.b64encode(data).decode()}
+
+
+class FakeApi(cut.Api):
+    """An in-memory GitHub: (method, path) -> (status, body) or a callable giving one.
+
+    A path is looked up whole, then without its query. Every write is recorded in
+    `writes`, in order, and answers as GitHub does unless the table says otherwise.
+    """
+
+    def __init__(self, routes: dict) -> None:
+        super().__init__(TOKEN)
+        self.routes = routes
+        self.writes: list[tuple[str, str, object]] = []
+        self.calls = 0
+
+    def call(self, method: str, path: str, body: object = None) -> tuple[int, object]:
+        self.calls += 1
+        if method != "GET":
+            self.writes.append((method, path, body))
+        for key in (path, path.split("?", maxsplit=1)[0]):
+            if (method, key) in self.routes:
+                answer = self.routes[(method, key)]
+                return answer(body) if callable(answer) else answer
+        if method == "DELETE":
+            return 204, None
+        if method == "PUT":
+            return (202 if path.endswith("/update-branch") else 200), {}
+        return 404, {"message": "Not Found"}
+
+
+def ruleset(rid: int, name: str, include: list[str], checks: bool = True) -> dict:
+    required = [{"context": c, "integration_id": cut.ACTIONS_APP} for c in cut.REQUIRED_CHECKS]
+    return {
+        "id": rid,
+        "name": name,
+        "enforcement": "active",
+        "conditions": {
+            "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
+            "repository_name": {"include": include, "exclude": []},
+        },
+        "rules": [
+            {
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": required if checks else required[:1]},
+            }
+        ],
     }
-)
-bump, validator = cut.constitution_modules(fake)
-loaded = cut.Target("1.60.0", REF, bump=bump, validator=validator)
-result = cut.Result()
-cut.drop_dependabot(make({}), loaded, result)
+
+
+class World:
+    """The org: done1 and done2 converted, app about to be, old1 old2 and private priv not."""
+
+    def __init__(self, merged: bool = False) -> None:
+        names = {"done1": 11, "done2": 12, "app": 42, "old1": 13, "old2": 14, "priv": 15}
+        self.repos = {
+            n: {
+                "name": n,
+                "full_name": f"crunchtools/{n}",
+                "id": i,
+                "private": n == "priv",
+                "archived": False,
+                "default_branch": "main",
+            }
+            for n, i in names.items()
+        }
+        self.converted = {"done1", "done2"} | ({"app"} if merged else set())
+        old = ["old1", "old2", "priv"] + ([] if merged else ["app"])
+        self.rs = {
+            1: ruleset(1, NEW, sorted(self.converted)),
+            2: ruleset(2, OLD, sorted(old)),
+            3: {
+                "id": 3,
+                "name": "Ashigaru release branches",
+                "enforcement": "active",
+                "conditions": {"ref_name": {"include": [cut.RELEASE_REF], "exclude": []}},
+                "rules": [],
+            },
+        }
+        self.pr = {
+            "number": 7,
+            "state": "open",
+            "merged": False,
+            "user": {"type": "Bot", "login": "fleet"},
+            "head": {
+                "ref": cut.BRANCH,
+                "sha": SHA,
+                "repo": {"full_name": "crunchtools/app"},
+            },
+            "base": {"ref": "main"},
+        }
+        self.open = [
+            self.pr,
+            {
+                "number": 9,
+                "user": {"type": "Bot", "login": "renovate[bot]"},
+                "head": {"ref": "renovate/x", "sha": "b" * 40},
+            },
+        ]
+        self.secrets: dict[str, str] = {
+            "CLAUDE_CODE_OAUTH_TOKEN": "selected",
+            "QUAY_USERNAME": "selected",
+        }
+        self.runs = [
+            {"id": 1, "name": c, "conclusion": "success", **GA} for c in cut.REQUIRED_CHECKS
+        ]
+        self.routes: dict = {
+            ("GET", "/orgs/crunchtools/repos"): lambda _b=None: (200, list(self.repos.values())),
+            ("GET", "/orgs/crunchtools/rulesets"): lambda _b=None: (
+                200,
+                [{"id": i, "name": r["name"]} for i, r in self.rs.items()],
+            ),
+            ("GET", f"{O}/app"): lambda _b=None: (200, self.repos["app"]),
+            ("GET", f"{O}/priv"): lambda _b=None: (200, self.repos["priv"]),
+            ("GET", f"{O}/app/pulls/7"): lambda _b=None: (200, self.pr),
+            ("GET", f"{O}/app/pulls"): lambda _b=None: (200, self.open),
+            ("GET", f"{O}/app/contents/.github/workflows/ci.yml?ref={SHA}"): (200, b64(FLEET)),
+            ("GET", f"{O}/app/commits/{SHA}/check-runs"): lambda _b=None: (
+                200,
+                {"check_runs": self.runs},
+            ),
+            ("PUT", f"{O}/app/pulls/7/merge"): self.merge,
+        }
+        for rid in self.rs:
+            self.register(rid)
+        for name in cut.MOVED_SECRETS:
+            self.routes[("GET", f"/orgs/crunchtools/actions/secrets/{name}")] = (
+                lambda _b=None, name=name: (
+                    (200, {"name": name, "visibility": self.secrets[name]})
+                    if name in self.secrets
+                    else (404, {"message": "Not Found"})
+                )
+            )
+        for name in self.repos:
+            self.routes[("GET", f"{O}/{name}/contents/.github/workflows/ci.yml")] = (
+                lambda _b=None, name=name: (
+                    (200, b64(FLEET)) if name in self.converted else (404, {})
+                )
+            )
+
+    def register(self, rid: int) -> None:
+        self.routes[("GET", f"/orgs/crunchtools/rulesets/{rid}")] = lambda _b=None: (
+            200,
+            self.rs[rid],
+        )
+        self.routes[("PUT", f"/orgs/crunchtools/rulesets/{rid}")] = lambda body: self.put_ruleset(
+            rid, body
+        )
+
+    def merge(self, _body: object) -> tuple[int, object]:
+        # The contents API lags a squash merge: the default branch still reads
+        # as unconverted here, so the move must count the merge itself.
+        self.pr.update(state="closed", merged=True)
+        return 200, {"merged": True}
+
+    def put_ruleset(self, rid: int, body: dict) -> tuple[int, object]:
+        self.rs[rid]["conditions"] = body["conditions"]
+        return 200, self.rs[rid]
+
+    def include(self, rid: int) -> list[str]:
+        return self.rs[rid]["conditions"]["repository_name"]["include"]
+
+
+HEAD_CI = ("GET", f"{O}/app/contents/.github/workflows/ci.yml?ref={SHA}")
+ORGS = "/orgs/crunchtools/actions/secrets"
+
+
+def named(*names: str) -> dict:
+    return {"secrets": [{"name": n} for n in names]}
+
+
+def refusing(_body: object = None) -> tuple[int, object]:
+    raise cut.ApiError("GET x: HTTP 403 Resource not accessible")
+
+
+def cli(world: World, *argv: str) -> tuple[int, FakeApi, str, str]:
+    api = FakeApi(world.routes)
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        code = cut.main(list(argv), api=api)
+    return code, api, out.getvalue(), err.getvalue()
+
+
+def merge_cli(world: World, *extra: str) -> tuple[int, FakeApi, str, str]:
+    return cli(world, "--merge", "app", "--pr", "7", *extra)
+
+
+def paths(api: FakeApi) -> list[str]:
+    return [f"{m} {p}" for m, p, _b in api.writes]
+
+
+# ---------------------------------------------------------- the ruleset move
+
+w = World()
+code, api, out, err = cli(w, "--move-rulesets")
 check(
-    "constitution_modules: fleet-bump.py loads with its fleet_common and drives the drop",
-    result.changed == ["Dependabot: common:1.60.0"] and not result.hand,
-    str(result),
+    "move: the new list is the converted repos, the old list the rest",
+    code == 0
+    and w.include(1) == ["done1", "done2"]
+    and w.include(2) == ["app", "old1", "old2", "priv"],
+    f"{code} {w.include(1)} {w.include(2)}",
+)
+check("move: nothing to change is no PUT", not api.writes and "already in step" in out, out)
+
+w = World()
+w.converted.add("app")
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: app converted: on the new list, off the old, new PUT first",
+    code == 0
+    and w.include(1) == ["app", "done1", "done2"]
+    and w.include(2) == ["old1", "old2", "priv"]
+    and paths(api) == ["PUT /orgs/crunchtools/rulesets/1", "PUT /orgs/crunchtools/rulesets/2"],
+    f"{code} {paths(api)} {err}",
 )
 check(
-    "constitution_modules: the validator loads and judges a manifest",
-    cut.validate(make({".specify/memory/constitution.md": MANIFEST}), loaded) == [],
+    "move: conditions go whole, the other keys kept",
+    api.writes[0][2]["conditions"]["ref_name"] == {"include": ["~DEFAULT_BRANCH"], "exclude": []}
+    and "repository_name" in api.writes[1][2]["conditions"],
+)
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: a second run changes nothing and PUTs nothing",
+    code == 0 and not api.writes and w.include(1) == ["app", "done1", "done2"],
+    str(api.writes),
 )
 
-# --------------------------------------------------------------- everything
+w = World()
+w.converted.add("app")
+w.rs[1]["conditions"]["repository_name"]["include"] = ["app", "done1", "done2"]  # crash after PUT 1
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: after a crash between the two PUTs only the old list is written",
+    code == 0 and paths(api) == ["PUT /orgs/crunchtools/rulesets/2"],
+    f"{code} {paths(api)}",
+)
 
-# One repo with all of it: the changes are independent, and a second run is quiet.
-ALL = {
-    ".specify/memory/constitution.md": MANIFEST,
-    ".pre-commit-config.yaml": HOOKS,
-    ".github/workflows/container.yml": release_job(QUAY) + "      # more\n",
-    ".github/workflows/dispatch.yml": RENAME,
+w = World()
+w.converted.add("app")
+w.rs[1]["conditions"]["repository_name"]["include"] = ["done1", "done2", "old1"]
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: a repo on the new list that is not converted refuses, writing nothing",
+    code == 1 and not api.writes and "old1" in err and "reverted" in err,
+    f"{code} {err}",
+)
+
+w = World()
+w.converted = {"app"}
+w.rs[1]["conditions"]["repository_name"]["include"] = []  # the first canary
+w.rs[2]["conditions"]["repository_name"]["include"] = ["app", "old1"]
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: an empty new list fills",
+    code == 0 and w.include(1) == ["app"] and w.include(2) == ["old1"],
+    f"{code} {w.include(1)} {w.include(2)} {err}",
+)
+
+w = World()
+w.converted = {"app"}
+w.rs[1]["conditions"]["repository_name"]["include"] = []
+w.rs[2]["conditions"]["repository_name"]["include"] = ["app"]  # the last repo of the wave
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: an active ruleset is never PUT an empty list; nothing is written",
+    code == 1 and not api.writes and "no repos" in err and "disabled" in err,
+    f"{code} {paths(api)} {err}",
+)
+w.rs[2]["enforcement"] = "disabled"  # what the refusal asks a person to do
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: a disabled old ruleset that would empty is left as it is",
+    code == 0 and paths(api) == ["PUT /orgs/crunchtools/rulesets/1"] and w.include(2) == ["app"],
+    f"{code} {paths(api)} {err}",
+)
+
+# An archived (or deleted) repo leaves both lists; it is not a revert.
+w = World()
+w.repos["old2"]["archived"] = True
+w.repos["done2"]["archived"] = True
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: archived repos leave both lists, and are not read as reverted",
+    code == 0 and w.include(1) == ["done1"] and w.include(2) == ["app", "old1", "priv"],
+    f"{code} {w.include(1)} {w.include(2)} {err}",
+)
+
+# sdlc's own ci.yml is the stated exception: its own jobs, the fleet's names and gate.
+fleet_jobs = cut.yaml.safe_load(FLEET)["jobs"]
+own = {
+    "jobs": {
+        "test": {"name": fleet_jobs["check"]["name"], "runs-on": "ubuntu-latest"},
+        "gate": fleet_jobs["gate"],
+    }
 }
-repo, result = run(ALL, default="master", target=weekly, label="everything")
-kinds = {c.split(":")[0] for c in result.changed}
+own_text = cut.yaml.safe_dump(own).encode()
+check("converted: sdlc's own file counts for sdlc", cut.is_converted("sdlc", own_text))
 check(
-    "everything: each kind of change is reported once over",
-    {"constitution", "renamed", "signing", "schedule", "release"} <= kinds,
-    str(kinds),
+    "converted: sdlc's own file does not count for a fleet repo",
+    not cut.is_converted("app", own_text),
+)
+check("converted: the fleet file counts for a fleet repo", cut.is_converted("app", FLEET))
+own["jobs"]["gate"] = {**fleet_jobs["gate"], "permissions": {"contents": "write"}}
+check(
+    "converted: sdlc with a gate that is not the fleet's does not count",
+    not cut.is_converted("sdlc", cut.yaml.safe_dump(own).encode()),
+)
+check("converted: no file is not converted", not cut.is_converted("sdlc", None))
+
+for label, include in (("~ALL", ["~ALL"]), ("a wildcard", ["old*", "app"])):
+    w = World()
+    w.rs[2]["conditions"]["repository_name"]["include"] = include
+    code, api, out, err = cli(w, "--move-rulesets")
+    check(
+        f"move: {label} in the old include is refused, naming the prerequisite",
+        code == 1 and not api.writes and "explicit" in err and OLD in err,
+        f"{code} {err}",
+    )
+w = World()
+del w.rs[1]["conditions"]["repository_name"]
+code, api, out, err = cli(w, "--move-rulesets")
+check("move: a new ruleset with no include list is refused", code == 1 and not api.writes, err)
+
+w = World()
+w.rs[1] = ruleset(1, NEW, ["done1", "done2"], checks=False)
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: a new ruleset without both required checks is refused",
+    code == 1 and not api.writes and "must require" in err,
+    err,
+)
+w = World()
+for rule in w.rs[1]["rules"]:
+    for c in rule["parameters"]["required_status_checks"]:
+        c["integration_id"] = 999
+code, api, out, err = cli(w, "--move-rulesets")
+check("move: checks pinned to another app are refused", code == 1 and not api.writes, err)
+w = World()
+del w.rs[2]
+code, api, out, err = cli(w, "--move-rulesets")
+check("move: a missing old ruleset is refused", code == 1 and OLD in err, err)
+
+w = World()
+w.rs[4] = ruleset(4, "Other gates", ["old2", "app"])
+w.register(4)
+w.converted.add("app")
+code, api, out, err = cli(
+    w, "--move-rulesets", "--old-ruleset", OLD, "--old-ruleset", "Other gates"
 )
 check(
-    "everything: every workflow still parses",
-    all(yaml.safe_load(p.read_text()) for p in (repo / ".github/workflows").glob("*.yml")),
+    "move: --old-ruleset repeats, and each old list loses the converted",
+    code == 0 and w.include(2) == ["old1", "old2", "priv"] and w.include(4) == ["old2"],
+    f"{code} {w.include(2)} {w.include(4)} {err}",
 )
 
-
-# ------------------------------------------------------ constitution leftovers
-
-SPREAD = {
-    f".github/workflows/{name}.yml": release_job(QUAY).replace("@v1.59.0", f"@{ref}")
-    for name, ref in (("container-base", "v1.51.0"), ("container-dev", "v1.46.0"), ("ci", "v1"))
-}
-repo, result = run(SPREAD, label="pins, every workflow")
+w = World()
+w.converted |= {"priv", "app"}
+code, api, out, err = cli(w, "--move-rulesets")
 check(
-    "pins: every exact constitution call in every workflow moves, none left",
-    not result.pins_left
-    and all(f"container-release.yml@{REF}" in read(repo, p) for p in SPREAD if "ci" not in p)
-    and not any(h.startswith("constitution:") for h in result.hand),
-    str((result.pins_left, result.hand)),
+    "move: a private repo stays on the old list without --include-private",
+    code == 0 and "priv" not in w.include(1) and "priv" in w.include(2),
+    f"{w.include(1)} {w.include(2)}",
 )
-repo, result = run(
-    {".github/workflows/odd.yml": release_job(QUAY).replace("@v1.59.0", "@main  # v1.59.0")},
-    label="pins, a branch",
+code, api, out, err = cli(w, "--move-rulesets", "--include-private")
+check(
+    "move: --include-private moves it",
+    code == 0 and "priv" in w.include(1) and "priv" not in w.include(2),
+    f"{w.include(1)} {w.include(2)}",
+)
+
+w = World()
+w.rs[1]["conditions"]["repository_name"]["include"] = ["done1", "done2", "priv"]
+w.converted.add("priv")
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: a private repo on the new list is not counted converted without the flag",
+    code == 1 and "priv" in err and not api.writes,
+    err,
+)
+
+w = World()
+w.routes[("GET", "/orgs/crunchtools/rulesets")] = (403, {"message": "x"})
+w.routes[("GET", "/orgs/crunchtools/repos")] = lambda _b=None: (_ for _ in ()).throw(
+    cut.ApiError(f"GET /orgs: HTTP 403 {TOKEN}")
+)
+code, api, out, err = cli(w, "--move-rulesets")
+check("move: an API error is exit 2", code == 2 and not api.writes, f"{code} {err}")
+
+# ------------------------------------------------------------------ the merge
+
+w = World()
+code, api, out, err = merge_cli(w)
+check("merge: happy path exits 0", code == 0, f"{code} {out} {err}")
+check(
+    "merge: in order: merge, new ruleset, old ruleset, secret DELETEs, update-branch",
+    paths(api)
+    == [
+        f"PUT {O}/app/pulls/7/merge",
+        "PUT /orgs/crunchtools/rulesets/1",
+        "PUT /orgs/crunchtools/rulesets/2",
+        "DELETE /orgs/crunchtools/actions/secrets/CLAUDE_CODE_OAUTH_TOKEN/repositories/42",
+        "DELETE /orgs/crunchtools/actions/secrets/QUAY_USERNAME/repositories/42",
+        f"PUT {O}/app/pulls/9/update-branch",
+    ],
+    str(paths(api)),
 )
 check(
-    "pins: a call at a branch is counted and hand work, and a comment is not a call",
-    result.pins_left == [".github/workflows/odd.yml:8 @main"]
-    and any(
-        h.startswith("constitution: 1 call(s) at neither v1.60.0 nor a major tag")
-        for h in result.hand
+    "merge: squash at the head sha, the ruleset move from real state",
+    api.writes[0][2] == {"merge_method": "squash", "sha": SHA}
+    and w.include(1) == ["app", "done1", "done2"]
+    and w.include(2) == ["old1", "old2", "priv"],
+)
+check(
+    "merge: only the Bot PR is updated, at its own head sha",
+    api.writes[-1][2] == {"expected_head_sha": "b" * 40},
+)
+check(
+    "merge: one line per step",
+    all(f"\n{n} " in "\n" + out for n in range(1, 12)),
+    out,
+)
+check("merge: the token is never printed", TOKEN not in out + err)
+
+# A re-run on the merged PR resumes at 8: no merge, the rest still happens.
+code2, api2, out2, err2 = merge_cli(w)
+check(
+    "merge: a re-run on a merged PR does not merge again and moves nothing twice",
+    code2 == 0
+    and f"PUT {O}/app/pulls/7/merge" not in paths(api2)
+    and "PUT /orgs/crunchtools/rulesets/1" not in paths(api2),
+    f"{code2} {paths(api2)} {err2}",
+)
+w = World()
+w.pr.update(state="closed", merged=True)  # the crash came after the merge, before the move
+code, api, out, err = merge_cli(w)
+check(
+    "merge: a crash between merge and move is finished by the re-run",
+    code == 0
+    and paths(api)[0] == "PUT /orgs/crunchtools/rulesets/1"
+    and w.include(2) == ["old1", "old2", "priv"]
+    and f"PUT {O}/app/pulls/7/merge" not in paths(api)
+    and "resuming" in out,
+    f"{code} {paths(api)} {out} {err}",
+)
+
+w = World()
+w.pr.update(state="closed", merged=True)
+w.routes[HEAD_CI] = (200, b64(b"name: CI\n"))  # merged, but not the conversion
+code, api, out, err = merge_cli(w)
+check(
+    "merge: a merged PR without the fleet ci.yml does not resume; nothing written",
+    code == 1 and not api.writes and "does not carry the fleet ci.yml" in err,
+    f"{code} {paths(api)} {err}",
+)
+
+# Every mode refuses while the fleet file has no sdlc-boot digest.
+cut.FLEET_FILE = UNPINNED
+for argv in (["--check"], ["--move-rulesets"], ["--merge", "app", "--pr", "7"]):
+    w = World()
+    code, api, out, err = cli(w, *argv)
+    check(
+        f"unpinned: {argv[0]} exits 2 and touches nothing",
+        code == 2 and not api.calls and "no sdlc-boot digest" in err,
+        f"{code} {err}",
+    )
+cut.FLEET_FILE = PINNED_DIR / "ci.yml"
+
+
+def refused(label: str, mutate: object, *extra: str, needs: str = "") -> None:
+    world = World()
+    mutate(world)
+    code, api, _out, err = merge_cli(world, *extra)
+    check(
+        f"merge refuses, writing nothing: {label}",
+        code == 1 and not api.writes and needs in err,
+        f"{code} {api.writes} {err}",
+    )
+
+
+refused("archived", lambda w: w.repos["app"].update(archived=True), needs="archived")
+refused(
+    "a PR from another branch",
+    lambda w: w.pr["head"].update(ref="feature"),
+    needs=cut.BRANCH,
+)
+refused("a PR from a fork", lambda w: w.pr["head"].update(repo={"full_name": "x/app"}))
+refused("a PR with no head repo", lambda w: w.pr["head"].update(repo=None))
+refused("a PR into another branch", lambda w: w.pr["base"].update(ref="dev"), needs="main")
+refused("a closed, unmerged PR", lambda w: w.pr.update(state="closed"), needs="closed")
+refused(
+    "a head whose ci.yml is not the fleet file",
+    lambda w: w.routes.update({HEAD_CI: (200, b64(b"x"))}),
+    needs="fleet ci.yml",
+)
+refused(
+    "a head with no ci.yml",
+    lambda w: w.routes.update({HEAD_CI: (404, {})}),
+)
+refused(
+    "a person's open PR, named",
+    lambda w: w.open.append(
+        {"number": 12, "user": {"type": "User", "login": "alice"}, "head": {"ref": "x", "sha": "c"}}
     ),
-    str((result.pins_left, result.hand)),
+    needs="#12",
 )
-
-# --------------------------------------------------------- Ashigaru caller
-
-CALLER = (
-    "# Ashigaru: copy unchanged.\nname: Ashigaru\non:\n  issues:\n  pull_request_target:\n"
-    "permissions: {}\njobs:\n  ashigaru:\n    name: Ashigaru\n"
-    f"    uses: crunchtools/ashigaru/.github/workflows/router.yml@{cut.ASHIGARU_TAG}\n"
-    "    secrets:\n      ASHIGARU_APP_KEY: ${{ secrets.ASHIGARU_APP_KEY }}\n"
+refused(
+    "an old-flow release PR, though a Bot opened it",
+    lambda w: w.open.append(
+        {
+            "number": 13,
+            "user": {"type": "Bot", "login": "ashigaru[bot]"},
+            "head": {"ref": "ashigaru/release-1.2.3", "sha": "c"},
+        }
+    ),
+    needs="release",
 )
-ROUTED = cut.Target(
-    "1.60.0", REF, ashigaru_caller=CALLER, ashigaru_source="crunchtools/ashigaru@abc123"
-)
-PRE_ROUTER = "name: Ashigaru\non:\n  issues:\njobs:\n" + "".join(
-    f"  {job}:\n    uses: crunchtools/ashigaru/.github/workflows/{job}.yml@{ref}\n"
-    for job, ref in (("triage", "v2"), ("code", "v3"), ("fix", "v2"), ("release", "v2"))
-)
-CALLER_PATH = ".github/workflows/ashigaru.yml"
-
-repo, result = run({CALLER_PATH: PRE_ROUTER}, target=ROUTED, label="caller, pre-router")
-check(
-    "caller: a pre-router ashigaru.yml becomes the router caller", read(repo, CALLER_PATH) == CALLER
-)
-check(
-    "caller: the re-copy is reported with its source",
-    any(c.startswith("ashigaru:") and "crunchtools/ashigaru@abc123" in c for c in result.changed),
-    str(result.changed),
-)
-
-RELEASE_PATH = ".github/workflows/release.yml"
+PYPI = '[project]\nname = "app-dist"\n[tool.sdlc]\npublish = "pypi"\n'
 
 
-def one_tag_path(repo: Path) -> bool:
-    return cut.tag_paths(repo) == [f"{CALLER_PATH}:ashigaru"]
+def pypi(w: World) -> None:
+    w.routes[("GET", f"{O}/app/contents/pyproject.toml?ref={SHA}")] = (200, b64(PYPI.encode()))
 
 
-repo, result = run(
-    {**PUBLISHES, CALLER_PATH: PRE_ROUTER}, target=ROUTED, label="caller, pre-router publisher"
+refused("a PyPI repo with no ledger", pypi, needs="pypi.org/manage/project/app-dist/settings/pub")
+ledger = Path(tempfile.mkdtemp()) / "ledger.tsv"
+HEADER = "repo\tproject\tadded_by\tremoved_by\n"
+ledger.write_text(HEADER + "other\tx\tme\tme\napp\tapp-dist\tscott\t\n")
+refused("a PyPI row with no removed_by", pypi, "--pypi-ledger", str(ledger), needs="app-dist")
+ledger.write_text(HEADER + "other\tx\tme\tme\n")
+refused("a PyPI repo with no ledger row", pypi, "--pypi-ledger", str(ledger), needs="app-dist")
+ledger.write_text(HEADER + "app\tapp-dist\tscott\tscott\n")
+w = World()
+pypi(w)
+code, api, out, err = merge_cli(w, "--pypi-ledger", str(ledger))
+check("merge: a complete ledger row merges", code == 0 and bool(api.writes), f"{code} {err}")
+w = World()
+w.routes[("GET", f"{O}/app/contents/pyproject.toml?ref={SHA}")] = (
+    200,
+    b64(b'[project]\nname = "app"\n[tool.sdlc]\npublish = "none"\n'),
 )
-check(
-    "open: a re-copied repo gets the open-only release.yml, one tag path, no hand work",
-    read(repo, RELEASE_PATH) == OPEN and one_tag_path(repo) and not result.hand,
-    str((result.hand, result.changed, cut.tag_paths(repo))),
+code, api, out, err = merge_cli(w)
+check("merge: a project that does not publish to PyPI needs no ledger", code == 0, err)
+
+refused(
+    "an org secret visible to all",
+    lambda w: w.secrets.update(QUAY_USERNAME="all"),
+    needs="prerequisite 3",
 )
-check(
-    "open: the open-only template is the full one without its tag job and trigger",
-    yaml.safe_load(OPEN)["jobs"] == {"open": yaml.safe_load(TEMPLATE)["jobs"]["open"]}
-    and list(yaml.safe_load(OPEN)[True]) == ["workflow_dispatch"],
+refused(
+    "an org secret that cannot be read",
+    lambda w: w.routes.update({("GET", f"{ORGS}/QUAY_PASSWORD"): (422, {})}),
+    needs="QUAY_PASSWORD",
 )
-repo, result = run({CALLER_PATH: PRE_ROUTER}, target=ROUTED, label="open, no image")
-check(
-    "open: a router repo that publishes no image gets it too",
-    read(repo, RELEASE_PATH) == OPEN and one_tag_path(repo),
+refused(
+    "a ruleset move that would refuse (a reverted repo)",
+    lambda w: w.rs[1]["conditions"]["repository_name"]["include"].append("old1"),
+    needs="old1",
 )
-repo, _ = run({CALLER_PATH: PRE_ROUTER}, target=ROUTED, default="master", label="open, master")
+refused(
+    "a ruleset move over a wildcard include",
+    lambda w: w.rs[2]["conditions"]["repository_name"].update(include=["*"]),
+    needs="explicit",
+)
+refused("a check that has not run", lambda w: w.runs.pop(), needs="gate (pull_request_target)")
+refused(
+    "a required check that failed",
+    lambda w: w.runs[0].update(conclusion="failure"),
+    needs="check (pull_request)",
+)
+refused("a required check from another app", lambda w: w.runs[1].update(app={"slug": "other"}))
+refused("a required check that is skipped", lambda w: w.runs[0].update(conclusion="skipped"))
+w = World()
+w.runs.append({"id": 9, "name": cut.REQUIRED_CHECKS[0], "conclusion": "failure", **GA})
+code, api, out, err = merge_cli(w)
+check("merge refuses: the newest run of a check decides", code == 1 and not api.writes, err)
+
+w = World()
+w.routes[("PUT", f"{O}/app/pulls/7/merge")] = (405, {"message": "not mergeable"})
+code, api, out, err = merge_cli(w)
 check(
-    "open: master is substituted for main",
-    "refs/heads/master" in read(repo, RELEASE_PATH) and "--base master" in read(repo, RELEASE_PATH),
+    "merge: a refused merge stops before any ruleset is touched",
+    code == 1 and paths(api) == [f"PUT {O}/app/pulls/7/merge"] and "not mergeable" in err,
+    f"{paths(api)} {err}",
 )
 
-# rotv's and mcp-slack's shape: the router already in, no release.yml.
-repo, result = run({CALLER_PATH: CALLER}, target=ROUTED, label="open, already routed")
+w = World()
+w.routes[("DELETE", "/orgs/crunchtools/actions/secrets/QUAY_USERNAME/repositories/42")] = (409, {})
+w.routes[("PUT", f"{O}/app/pulls/9/update-branch")] = (422, {})
+code, api, out, err = merge_cli(w)
 check(
-    "open: a repo already on the router, with no release.yml, gets the open-only one",
-    read(repo, CALLER_PATH) == CALLER
-    and read(repo, RELEASE_PATH) == OPEN
-    and one_tag_path(repo)
-    and not any(c.startswith("ashigaru:") for c in result.changed),
-    str(result.changed),
+    "merge: a failed secret DELETE and update-branch are named, exit 1, the rest done",
+    code == 1
+    and "QUAY_USERNAME" in out
+    and "PR #9" in out
+    and w.include(1) == ["app", "done1", "done2"]
+    and len(paths(api)) == 6,
+    f"{code} {out}",
 )
 
-UNSAFE = "m$(id)"
-UNSAFE_TEMPLATE = TEMPLATE.replace("refs/heads/main", f"refs/heads/{UNSAFE}").replace(
-    "--base main", f"--base {UNSAFE}"
-)
-repo, result = run(
-    {CALLER_PATH: CALLER, RELEASE_PATH: UNSAFE_TEMPLATE},
-    target=TARGET,
-    default=UNSAFE,
-    label="open, unsafe branch swap",
-)
+w = World()
+w.secrets["QUAY_USERNAME"] = "all"
+w.pr.update(state="closed", merged=True)
+w.converted.add("app")
+code, api, out, err = merge_cli(w)
 check(
-    "open: a default branch that is not a plain name is never written by the swap",
-    read(repo, RELEASE_PATH) == UNSAFE_TEMPLATE
-    and any("not a plain name" in h and "by hand" in h for h in result.hand),
-    str(result.hand),
-)
-repo, result = run({CALLER_PATH: CALLER}, target=TARGET, default=UNSAFE, label="open, unsafe new")
-check(
-    "open: nor by a fresh open-only release.yml",
-    not (repo / RELEASE_PATH).exists() and any("not a plain name" in h for h in result.hand),
-    str(result.hand),
+    "merge: after the merge a secret that is not scoped is a problem, never deleted from",
+    code == 1 and not any(p.startswith("DELETE") and "QUAY" in p for p in paths(api)),
+    f"{code} {paths(api)}",
 )
 
-# The router already in, and the full template beside it.
-repo, result = run(
-    {**PUBLISHES, CALLER_PATH: CALLER, RELEASE_PATH: TEMPLATE}, target=TARGET, label="open, rotv"
+# ------------------------------------------------------ private repos (prereq 9)
+
+w = World()
+w.repos["app"]["private"] = True
+code, api, out, err = merge_cli(w)
+check(
+    "private: a private repo without --include-private is refused and named",
+    code == 1 and not api.writes and "crunchtools/app" in err and "--include-private" in err,
+    f"{code} {err}",
+)
+code, api, out, err = merge_cli(w, "--include-private")
+check(
+    "private: --include-private lets it through",
+    code == 0 and f"PUT {O}/app/pulls/7/merge" in paths(api),
+    f"{code} {err}",
 )
 check(
-    "open: a router caller beside the full template keeps one tag path: the template opens only",
-    read(repo, RELEASE_PATH) == OPEN and one_tag_path(repo) and not result.hand,
-    str((result.hand, cut.tag_paths(repo))),
+    "private: the refusal helper names the repo and the flag, and is None otherwise",
+    "--include-private" in (cut.refuse_private({"name": "p", "private": True}, False) or "")
+    and cut.refuse_private({"name": "p", "private": True}, True) is None
+    and cut.refuse_private({"name": "p", "private": False}, False) is None,
 )
 
-# developer's and rhel10-bootc-server's shape: their own release.yml, with a tag job.
-CUSTOM_RELEASE = TEMPLATE.replace("# Release: let", "# Ours, edited.\n# Release: let")
-repo, result = run(
-    {**PUBLISHES, CALLER_PATH: PRE_ROUTER, RELEASE_PATH: CUSTOM_RELEASE},
-    target=ROUTED,
-    label="open, own release.yml",
-)
-left = yaml.safe_load(read(repo, RELEASE_PATH))
-check(
-    "open: another release.yml loses its tag job and pull_request_target, and keeps the rest",
-    list(left["jobs"]) == ["open"]
-    and list(left[True]) == ["workflow_dispatch"]
-    and read(repo, RELEASE_PATH).startswith("# Ours, edited.")
-    and "pull_request_target" not in read(repo, RELEASE_PATH)
-    and one_tag_path(repo)
-    and not result.hand,
-    read(repo, RELEASE_PATH)[-400:] + str(result.hand),
-)
-repo, result = run(
-    {**PUBLISHES, CALLER_PATH: CALLER, ".github/workflows/tag.yml": V5},
-    target=TARGET,
-    label="open, a lone tag workflow",
-)
-check(
-    "open: a workflow that is only a tag job goes; release.yml opens",
-    not (repo / ".github/workflows/tag.yml").exists()
-    and read(repo, RELEASE_PATH) == OPEN
-    and one_tag_path(repo),
-    str(result.changed),
-)
-FLOW = (
-    "name: R\non: [workflow_dispatch, pull_request_target]\njobs:\n"
-    "  open:\n    runs-on: x\n    steps:\n      - run: echo ashigaru/release-1\n"
-    '  "tag":\n    uses: crunchtools/ashigaru/.github/workflows/release-tag.yml@v5\n'
-)
-repo, result = run({CALLER_PATH: CALLER, RELEASE_PATH: FLOW}, target=TARGET, label="open, flow on")
-check(
-    "open: a tag job it cannot drop is hand work, and two tag paths are named",
-    read(repo, RELEASE_PATH) == FLOW
-    and any("drop its tag job by hand" in h for h in result.hand)
-    and any("2 tag paths" in h for h in result.hand),
-    str(result.hand),
-)
-repo, result = run(
-    {CALLER_PATH: CALLER, RELEASE_PATH: OTHER}, target=TARGET, label="open, other release.yml"
-)
-check(
-    "open: a release.yml that opens nothing is kept and named",
-    read(repo, RELEASE_PATH) == OTHER and any("release-open.yml by hand" in h for h in result.hand),
-    str(result.hand),
-)
-repo, result = run(
-    {CALLER_PATH: CALLER, RELEASE_PATH: TEMPLATE},
-    name="ashigaru",
-    target=TARGET,
-    label="open, ashigaru",
-)
-check(
-    "open: the ashigaru repo itself is left alone",
-    read(repo, RELEASE_PATH) == TEMPLATE and not result.changed and not result.hand,
-)
+# -------------------------------------------------------------------- --check
 
-CUSTOM = CALLER.replace("# Ashigaru: copy unchanged.", "# ours, edited")
-repo, result = run({CALLER_PATH: CUSTOM}, target=ROUTED, label="caller, router edited")
-check(
-    "caller: a router caller at the tag is left as it is, edits and all",
-    read(repo, CALLER_PATH) == CUSTOM
-    and not any(c.startswith("ashigaru:") for c in result.changed),
-)
-OLD_ROUTER = CALLER.replace(f"router.yml@{cut.ASHIGARU_TAG}", "router.yml@v4")
-repo, _ = run({CALLER_PATH: OLD_ROUTER}, target=ROUTED, label="caller, router v4")
-check("caller: a router caller at an older tag is re-copied", read(repo, CALLER_PATH) == CALLER)
 
-repo, result = run({".github/workflows/ci.yml": CI_ONLY}, target=ROUTED, label="caller, none")
+def consistent() -> World:
+    w = World(merged=True)
+    for name in w.repos:
+        w.routes[("GET", f"{O}/{name}/actions/secrets")] = (200, {"secrets": []})
+        w.routes[("GET", f"{O}/{name}/actions/organization-secrets")] = (200, {"secrets": []})
+    return w
+
+
+w = consistent()
+code, api, out, err = cli(w, "--check")
+check("check: a clean fleet exits 0", code == 0 and "clean" in out, f"{out} {err}")
+
+w = consistent()
+w.routes[("GET", f"{O}/done1/actions/secrets")] = (200, named("QUAY_PASSWORD", "KEEP_ME"))
+w.routes[("GET", f"{O}/done2/actions/organization-secrets")] = (200, named("COSIGN_PASSWORD"))
+code, api, out, err = cli(w, "--check")
 check(
-    "caller: a repo with no ashigaru.yml is not enrolled, and gets no release.yml",
-    not (repo / CALLER_PATH).exists() and not result.changed,
+    "check: a moved repo secret and a moved org secret are named by repo, scope and name",
+    code == 1
+    and "done1: moved repo secret QUAY_PASSWORD" in out
+    and "done2: moved org secret COSIGN_PASSWORD" in out
+    and "KEEP_ME" not in out,
+    out,
 )
-repo, result = run({CALLER_PATH: PRE_ROUTER}, target=TARGET, label="caller, no target caller")
+w = consistent()
+w.routes[("GET", f"{O}/done1/actions/secrets")] = (404, {"message": "Not Found"})
+w.routes[("GET", f"{O}/done2/actions/organization-secrets")] = refusing
+code, api, out, err = cli(w, "--check")
 check(
-    "caller: without a caller in the target, ashigaru.yml is untouched",
-    read(repo, CALLER_PATH) == PRE_ROUTER and not result.changed and not result.hand,
+    "check: a refused read is a problem, never none found",
+    code == 1
+    and "done1: could not read repo secrets" in out
+    and "done2: could not read org secrets" in out,
+    out,
+)
+w = consistent()
+w.rs[2]["conditions"]["repository_name"]["include"].append("done1")
+code, api, out, err = cli(w, "--check")
+check("check: rulesets out of step is a problem", code == 1 and "rulesets out of step" in out, out)
+w = consistent()
+del w.rs[3]
+code, api, out, err = cli(w, "--check")
+check("check: no release-branch ruleset is a problem", code == 1 and "prerequisite 12" in out, out)
+w = consistent()
+w.rs[3]["enforcement"] = "disabled"
+code, api, out, err = cli(w, "--check")
+check("check: a disabled release ruleset is no guard", code == 1 and "prerequisite 12" in out, out)
+w = consistent()
+w.rs[3]["conditions"]["ref_name"]["include"] = ["refs/heads/ashigaru/*"]
+code, api, out, err = cli(w, "--check")
+check("check: a wider pattern covers the release branches", code == 0, out)
+
+# ------------------------------------------------------------- the CLI and Api
+
+for argv in (
+    ["--merge", "app"],
+    ["--merge", "app", "--pr", "7", "--check"],
+    ["--check", "--move-rulesets"],
+    [],
+):
+    # argparse exits on a usage error: run the script, as a person would.
+    code = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "cutover.py"), *argv],
+        capture_output=True,
+        check=False,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+    ).returncode
+    check(f"cli: bad arguments {argv} exit 2", code == 2, str(code))
+with contextlib.redirect_stderr(io.StringIO()):
+    code = cut.main(["--check", "--token-env", "NO_SUCH_VARIABLE_XYZ"])
+check("cli: an empty token variable exits 2", code == 2, str(code))
+
+
+class FakeConnection:
+    """http.client's half the Api uses: one request, one 403 echoing the credential."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, object, dict]] = []
+        self.status = 403
+
+    def request(self, method: str, path: str, body: object, headers: dict) -> None:
+        self.sent.append((method, path, body, headers))
+
+    def getresponse(self) -> FakeConnection:
+        return self
+
+    def read(self) -> bytes:
+        return b'{"message": "Bad credentials ' + TOKEN.encode() + b'"}'
+
+    def close(self) -> None:
+        pass
+
+
+conn = FakeConnection()
+try:
+    cut.Api(TOKEN, connect=lambda: conn).call("GET", "/orgs/crunchtools/repos")
+    error = ""
+except cut.ApiError as exc:
+    error = str(exc)
+check(
+    "Api: the token is sent as a bearer header",
+    bool(conn.sent) and conn.sent[0][3].get("Authorization") == f"Bearer {TOKEN}",
+)
+check("Api: a 403 raises, redacted", "HTTP 403" in error and TOKEN not in error, error)
+check(
+    "Api: authenticated follows the token",
+    cut.Api(TOKEN).authenticated and not cut.Api(None).authenticated,
 )
 
 

@@ -6,6 +6,24 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- `examples/ci.yml` is the fleet file of `docs/marketplace-free-ci.md` (a1051):
+  one workflow, no `uses:`, seven trust-level jobs each running `sdlc event` in
+  `sdlc-boot`. `tests/test_workflows.py` pins its guards (`!inputs.digest` on
+  `write`, `check`'s success before acting on its plan, the registry.redhat.io
+  secrets on `image`, sdlc's own `test` and shared jobs).
+- `scripts/convert_repo.py` writes that file and deletes every other workflow
+  whose every job `sdlc event` runs; any other workflow refuses the repo (exit 2),
+  named, for `[tool.sdlc.commands]` by hand. A PyPI publish becomes
+  `publish = "pypi"`, a `container-release.yml` call's inputs `[tool.sdlc.image]`.
+  Runner lifting, step floating and mixed workflows are gone.
+- `scripts/cutover.py` sheds signing, the weekly schedule, the release flow and
+  the Ashigaru caller; it moves `Inherits:` and the hook `rev:`, drops Dependabot,
+  removes `.gemini/` on request, and reports any `uses:` left.
+- `scripts/fleet_wave.py` refuses private repos without `--include-private`, opens
+  the pull request without auto-merge, and drops `--constitution-ref` and `--weekly`.
+
 ### Added
 
 - `sdlc event`: the one command each job of the fleet's single `ci.yml` runs. It
@@ -18,6 +36,12 @@ All notable changes to this project are documented here, following
   version backwards; `pypi` re-verifies the release and publishes by OIDC.
 - `bin/sdlc` honours `SDLC_HOST_REPO`, the repo's path on the machine podman runs
   on, for a job container that drives the runner's socket.
+- `cutover.py --merge REPO --pr N`: refuses a busy repo (a person's open PR, an old
+  `ashigaru/release-*`), an unrecorded PyPI publisher swap (`--pypi-ledger`), a
+  private repo, org secrets not scoped to selected repositories, or red new checks;
+  then merges by admin bypass, moves the rulesets idempotently, drops the repo from
+  each moved org secret and updates bot PRs. `--move-rulesets` and `--check`
+  (moved secrets still readable, rulesets out of step, no `ashigaru/release-*` guard).
 
 ## [0.11.1] - 2026-11-23
 
