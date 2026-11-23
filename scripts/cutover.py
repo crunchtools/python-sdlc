@@ -306,7 +306,10 @@ class Api:
             raise ApiError(self.redact(f"{method} {path}: {exc}")) from exc
         finally:
             conn.close()
-        decoded = json.loads(raw) if raw.strip() else None
+        try:
+            decoded = json.loads(raw) if raw.strip() else None
+        except json.JSONDecodeError as exc:
+            raise ApiError(self.redact(f"{method} {path}: HTTP {status}, not JSON")) from exc
         if status in UNANSWERED or status >= HTTPStatus.INTERNAL_SERVER_ERROR:
             message = decoded.get("message", "") if isinstance(decoded, dict) else ""
             raise ApiError(self.redact(f"{method} {path}: HTTP {status} {message}".rstrip()))
@@ -637,14 +640,14 @@ def move_rulesets(run: Run) -> None:
 def remove_secret_access(run: Run, problems: list[str]) -> None:
     """Step 10: take the repo off each moved org secret's list; failures join `problems`."""
     for name in MOVED_SECRETS:
-        status, secret = run.api.call("GET", f"/orgs/{ORG}/actions/secrets/{name}")
+        status, entry = run.api.call("GET", f"/orgs/{ORG}/actions/secrets/{name}")
         if status == HTTPStatus.NOT_FOUND:
             continue
-        if status != HTTPStatus.OK or not isinstance(secret, dict):
+        if status != HTTPStatus.OK or not isinstance(entry, dict):
             problems.append(f"org secret {name}: reading it gave HTTP {status}; re-run")
             continue
-        if secret.get("visibility") != "selected":
-            problems.append(f"org secret {name} is visible to {secret.get('visibility')}")
+        if entry.get("visibility") != "selected":
+            problems.append(f"org secret {name} is visible to {entry.get('visibility')}")
             continue
         status, _ = run.api.call(
             "DELETE", f"/orgs/{ORG}/actions/secrets/{name}/repositories/{run.record['id']}"

@@ -871,6 +871,39 @@ check(
 )
 
 
+# ------------------------------------------------- the sdlc-boot placeholder
+
+PINNED_BOOT = "quay.io/crunchtools/sdlc-boot@sha256:" + "a" * 64
+check(
+    "boot: the placeholder digest is unpinned", W.unpinned('image: "x/sdlc-boot@sha256:<digest>"')
+)
+check("boot: a real digest is pinned", not W.unpinned(f'image: "{PINNED_BOOT}"'))
+check("boot: a tag is unpinned", W.unpinned('image: "quay.io/crunchtools/sdlc-boot:1"'))
+if W.unpinned(W.cutover.FLEET_FILE.read_text()):
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "fleet_wave.py"),
+            "--constitution-dir",
+            "/nonexistent",
+            "--constitution",
+            "1.60.0",
+            "--sdlc",
+            "0.12.0",
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "GH_TOKEN": "x"},
+    )
+    check(
+        "boot: --apply refuses while the fleet file has no sdlc-boot digest",
+        proc.returncode == 2 and "no sdlc-boot digest" in proc.stderr,
+        proc.stderr,
+    )
+
+
 def main() -> int:
     print()
     if FAILED:

@@ -204,6 +204,14 @@ Api = cutover.Api
 ApiError = cutover.ApiError
 
 
+BOOT_PIN = re.compile(r"sdlc-boot@sha256:[0-9a-f]{64}\b")
+
+
+def unpinned(text: str) -> bool:
+    """The fleet file names sdlc-boot by anything but a real digest."""
+    return "sdlc-boot" in text and not BOOT_PIN.search(text)
+
+
 def org_repos(api: Api) -> dict[str, dict]:
     """Every non-archived repo the token can see: name -> its API record, whole.
 
@@ -213,19 +221,7 @@ def org_repos(api: Api) -> dict[str, dict]:
     Image repos are private too (openbao, rhel10-bootc-workstation); without a
     token the listing has only the public ones.
     """
-    repos: dict[str, dict] = {}
-    for page in range(1, 50):
-        status, page_repos = api.call(
-            "GET", f"/orgs/{ORG}/repos?type=all&per_page={PAGE}&page={page}"
-        )
-        if status != HTTPStatus.OK or not isinstance(page_repos, list):
-            raise ApiError(f"listing {ORG}'s repos: HTTP {status}")
-        for repo in page_repos:
-            if not repo["archived"]:
-                repos[repo["name"]] = repo
-        if len(page_repos) < PAGE:
-            break
-    return repos
+    return {r["name"]: r for r in cutover.fleet(api)}
 
 
 def open_prs_from(api: Api, branch: str) -> dict[str, dict]:
@@ -765,6 +761,14 @@ def main() -> int:
     token = os.environ.get(args.token_env, "")
     if args.apply and not token:
         print(f"fleet_wave: --apply needs {args.token_env} in the environment", file=sys.stderr)
+        return 2
+    if args.apply and unpinned(cutover.FLEET_FILE.read_text()):
+        # The fleet file names sdlc-boot by a placeholder until sdlc's trust root
+        # records the real digest (cutover prerequisite 4): never pushed as is.
+        print(
+            f"fleet_wave: --apply: {cutover.FLEET_FILE.name} has no sdlc-boot digest yet",
+            file=sys.stderr,
+        )
         return 2
     # convert_repo.py runs under this interpreter. Without PyYAML every repo
     # would come back refused, which reads as a plan.

@@ -299,11 +299,9 @@ def jobs_of(parsed: dict) -> dict:
     return jobs if isinstance(jobs, dict) else {}
 
 
-def keys_of(value: object) -> set:
-    """The keys of a mapping, none for an absent one, a key no list of keys has otherwise."""
-    if isinstance(value, dict):
-        return set(value)
-    return set() if value is None else {object}
+def keys_within(value: object, allowed: set[str]) -> bool:
+    """An absent mapping, or one with no key outside `allowed`; anything else is not."""
+    return value is None or (isinstance(value, dict) and set(value) <= allowed)
 
 
 def run_lines(step: dict) -> list[str]:
@@ -339,7 +337,7 @@ def is_checkout(step: dict) -> bool:
     return (
         CHECKOUT.match(str(step.get("uses", ""))) is not None
         and set(step) <= {"name", "uses", "with"}
-        and keys_of(step.get("with")) <= {"persist-credentials", "fetch-depth"}
+        and keys_within(step.get("with"), {"persist-credentials", "fetch-depth"})
     )
 
 
@@ -535,7 +533,7 @@ def pypi_step(step: object) -> str | None:
         return pypi_run(step)
     uses = str(step.get("uses", ""))
     if uses.startswith(PYPI_ACTION):
-        return "publish" if keys_of(step.get("with")) <= PYPI_ACTION_WITH else None
+        return "publish" if keys_within(step.get("with"), PYPI_ACTION_WITH) else None
     if CHECKOUT.match(uses):
         return "" if is_checkout(step) else None
     return "" if PYPI_USES.match(uses) else None
@@ -588,7 +586,7 @@ def is_automerge_job(job: dict) -> bool:
             return False
         if "uses" in step:
             ok = str(step["uses"]).startswith("dependabot/fetch-metadata@")
-            ok = ok and "run" not in step and keys_of(step.get("with")) <= {"github-token"}
+            ok = ok and "run" not in step and keys_within(step.get("with"), {"github-token"})
         else:
             lines = run_lines(step)
             ok = bool(lines) and all(GH_PR.match(line) for line in lines) and "with" not in step
@@ -642,7 +640,7 @@ def judge(where: str, parsed: dict, text: str, local: set[str]) -> Judged:
         for jid, job in jobs.items():
             if call_of(job, local) == IMAGE_CALL:
                 out.images.append((str(jid), image_inputs(f"{where} job {jid}", job)))
-                out.dropped += sorted(IMAGE_DROPPED & keys_of(job.get("with")))
+                out.dropped += sorted(IMAGE_DROPPED & set(job.get("with") or {}))
     return out
 
 
