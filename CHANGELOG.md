@@ -31,6 +31,12 @@ All notable changes to this project are documented here, following
   issue from anyone but an owner, member or collaborator stay on
   `ubuntu-latest`. The
   design doc's runner rule says so, and `tests/test_workflows.py` pins the routes.
+- `docs/marketplace-free-ci.md` takes spike #103's findings (a1118): a skipped
+  job's check carries its `name:` literally, so no skipped job matches a
+  required name; the image and `sdlc-boot` drive the socket with the docker
+  CLI, since `podman --remote` fails against the Docker 29 socket; an Exedore
+  build's `RUN` steps cannot be `--network=none` under chroot isolation; and a
+  450 KB variable cannot exec, so `ai`'s result stays four chunks.
 - `examples/ci.yml` is the fleet file of `docs/marketplace-free-ci.md` (a1051):
   one workflow, no `uses:`, seven trust-level jobs each running `sdlc event` in
   `sdlc-boot`. `tests/test_workflows.py` pins its guards (`!inputs.digest` on
