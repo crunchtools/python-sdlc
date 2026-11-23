@@ -1070,10 +1070,17 @@ class FakeConnection:
         pass
 
 
-class PagedApi(cut.Api):
-    """Answers a commit's runs with one more page of check runs than was read."""
+PAGED_ASKED: list[tuple[str, str]] = []
 
-    def call(self, _method: str, _path: str, _body: object = None) -> tuple[int, object]:
+
+class PagedApi(cut.Api):
+    """Answers a commit's runs with one more page of check runs than was read.
+
+    It records what it was asked, and the test checks that was one POST /graphql.
+    """
+
+    def call(self, method: str, path: str, _body: object = None) -> tuple[int, object]:
+        PAGED_ASKED.append((method, path))
         status, answer = runs_as_graphql((200, {"check_runs": []}))
         answer["data"]["repository"]["object"]["checkSuites"]["nodes"] = [
             {
@@ -1089,6 +1096,11 @@ try:
     paged = ""
 except cut.ApiError as exc:
     paged = str(exc)
+check(
+    "commit_runs: asks for a commit's runs by one POST /graphql",
+    PAGED_ASKED == [("POST", "/graphql")],
+    str(PAGED_ASKED),
+)
 check(
     "commit_runs: a run past the first page is an error, not a refusal",
     "more than 100" in paged,
