@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """`sdlc event`: the one command every job of the fleet's ci.yml runs.
 
-It routes on GITHUB_JOB to sdlc_jobs.<job>.main, so the rules that keep a job
+It routes on GITHUB_JOB to sdlc_jobs.<job>.run, so the rules that keep a job
 from passing by accident are pinned here:
 
   - no job, no event name or an unreadable payload is a 2, never a no-op
@@ -35,10 +35,11 @@ assert _SPEC is not None and _SPEC.loader is not None
 S = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(S)
 
-import sdlc_jobs._core as core  # noqa: E402
+core = importlib.import_module("sdlc_jobs._core")
 
 FAILED: list[str] = []
 CALLS: list[tuple[str, dict]] = []
+SEEN: list[tuple[object, object]] = []  # the (env, tools) each call got
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -48,16 +49,17 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 
 def fake_job(name: str, result: object) -> None:
-    """Register sdlc_jobs.<name> whose main records its call and returns or raises `result`."""
+    """Register sdlc_jobs.<name> whose run records its call and returns or raises `result`."""
 
-    def main(event_name: str, event: dict, env: object) -> object:  # noqa: ARG001
+    def run(event_name: str, event: dict, env: object, tools: object) -> object:
         CALLS.append((event_name, event))
+        SEEN.append((env, tools))
         if isinstance(result, Exception):
             raise result
         return result
 
     module = types.ModuleType(f"sdlc_jobs.{name}")
-    module.main = main  # type: ignore[attr-defined]
+    vars(module)["run"] = run
     sys.modules[f"sdlc_jobs.{name}"] = module
 
 
@@ -115,9 +117,13 @@ def test_missing_module_names_it() -> None:
 def test_routes_on_github_job() -> None:
     fake_job("ev_found", 1)
     CALLS.clear()
+    SEEN.clear()
     rc, _ = event(None, {"GITHUB_JOB": "ev_found", "GITHUB_EVENT_NAME": "issues"}, {"n": 7})
     check("GITHUB_JOB picks the module and its verdict is the exit", rc == 1, str(rc))
     check("the job gets the event name and payload", CALLS == [("issues", {"n": 7})], str(CALLS))
+    (env, tools), *_ = SEEN
+    check("the job gets the process environment", env is os.environ, str(env))
+    check("and the real Tools", type(tools) is core.Tools, str(tools))
     CALLS.clear()
     rc, _ = event("ev_found", {"GITHUB_JOB": "other"})
     check("an argument overrides GITHUB_JOB", rc == 1 and len(CALLS) == 1, str(rc))

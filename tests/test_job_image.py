@@ -17,13 +17,13 @@ import json
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sdlc_jobs import image
-from sdlc_jobs._core import CannotRunError
+from sdlc_jobs._core import CannotRunError, Tools
 
 REPO = "crunchtools/demo"
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -82,7 +82,7 @@ def plan_text(*, bootc: bool = False) -> str:
     return "".join(f"{n}\tmain\t{m}\t{US.join(a)}\n" for n, m, a in rows)
 
 
-class FakeTools:
+class FakeTools(Tools):
     def __init__(self) -> None:
         self.argvs: list[list[str]] = []
         self.envs: list[dict[str, str]] = []
@@ -93,47 +93,61 @@ class FakeTools:
         self.bootc = False
         self.policy: dict | None = None
         self.built_file = ""
+        self.plan = ""  # the plan `sdlc plan ci` prints; empty is the stock one
+        self.stdin: list[str | None] = []
 
-    def run(self, argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        input: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         self.argvs.append(argv)
-        env = kw.get("env")
-        self.envs.append(dict(env) if isinstance(env, dict) else {})
-        cwd = str(kw.get("cwd") or ".")
+        self.stdin.append(input)
+        self.envs.append(dict(env or {}))
         if argv[0] == "skopeo":
             return self.skopeo(argv)
         if argv[0] == "cosign":
             return cp(self.verify_rc)
         if argv[:2] == ["sdlc", "plan"]:
-            return cp(0, plan_text(bootc=self.bootc))
+            return cp(0, self.plan or plan_text(bootc=self.bootc))
         if argv[0] == "sdlc":
             return cp(0)
         assert argv[:3] == ["podman", "--remote", "--url"], argv
-        return self.podman(argv[4:], cwd)
+        return self.podman(argv[4:], cwd or ".")
 
-    def podman(self, sub: list[str], cwd: str) -> subprocess.CompletedProcess[str]:  # noqa: PLR0911
-        if sub[0] == "inspect" and len(sub) == INSPECT_ME:
-            mounts = [{"Destination": cwd, "Source": HOST}]
-            return cp(0, json.dumps([{"Mounts": mounts, "Image": "imgid"}]))
-        if sub[0] == "build":
-            self.built_file = (Path(cwd) / sub[sub.index("-f") + 1]).read_text()
-            return cp(self.build_rc)
-        if sub[0] == "image":
-            return cp(0, "{}")
-        if sub[0] == "inspect":
-            if "ExitCode" in sub[-2]:
-                return cp(0, "true 0 false" if self.smoke_up == "true" else "false 1 false")
-            return cp(0, self.smoke_up if self.smoke_up == "true" else "false")
-        if sub[0] == "run" and "-d" not in sub:
-            return cp(self.scan_rc)
-        return cp(0)
+    def podman(self, sub: list[str], cwd: str) -> subprocess.CompletedProcess[str]:
+        rc, out = 0, ""
+        up = self.smoke_up == "true"
+        match sub[0]:
+            case "inspect" if len(sub) == INSPECT_ME:
+                mounts = [{"Destination": cwd, "Source": HOST}]
+                out = json.dumps([{"Mounts": mounts, "Image": "imgid"}])
+            case "build":
+                self.built_file = (Path(cwd) / sub[sub.index("-f") + 1]).read_text()
+                rc = self.build_rc
+            case "image":
+                out = "{}"
+            case "inspect":
+                state_query = "ExitCode" in sub[-2]
+                out = (
+                    ("true 0 false" if up else "false 1 false") if state_query else str(up).lower()
+                )
+            case "run" if "-d" not in sub:
+                rc = self.scan_rc
+        return cp(rc, out)
 
     def skopeo(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
-        if argv[1] == "--policy":
-            self.policy = json.loads(Path(argv[2]).read_text())
-            return cp(self.verify_rc)
-        if argv[1] == "inspect":
-            return cp(0, PUSHED if ":gated-" in argv[-1] else PARENT)
-        return cp(0)
+        rc, out = 0, ""
+        match argv[1]:
+            case "--policy":
+                self.policy = json.loads(Path(argv[2]).read_text())
+                rc = self.verify_rc
+            case "inspect":
+                out = PUSHED if ":gated-" in argv[-1] else PARENT
+        return cp(rc, out)
 
     def pushed(self) -> bool:
         return any(a[4:5] == ["push"] for a in self.argvs)
@@ -172,7 +186,7 @@ def go(
             **(extra or {}),
         }
         with contextlib.redirect_stdout(io.StringIO()):
-            rc = image.run(event, {}, env, tools=tools)  # type: ignore[arg-type]
+            rc = image.run(event, {}, env, tools=tools)
         text = out.read_text() if out.exists() else ""
         result = json.loads(text.split("\n")[1]) if text else None
         return rc, result
@@ -182,18 +196,20 @@ QUAY_PARENT = "FROM quay.io/crunchtools/ubi10-core:latest\nRUN true\n"
 RH_PARENT = "FROM registry.redhat.io/ubi10/ubi-minimal:10.1\nRUN true\n"
 
 
-def refused(tools: FakeTools, containerfile: str, **kw: object) -> None:
+def refused(tools: FakeTools, containerfile: str, *, event: str = "push") -> str:
+    """The message of the refusal (exit 2) `image.run` raises, or a failed assertion."""
     try:
-        go(tools, containerfile, **kw)  # type: ignore[arg-type]
-    except CannotRunError:
+        go(tools, containerfile, event=event)
+    except CannotRunError as exc:
         assert not tools.pushed(), "something was pushed after a refusal"
-        return
+        return str(exc)
     raise AssertionError("expected a refusal (exit 2)")
 
 
 def test_pull_request_refused() -> None:
     t = FakeTools()
-    refused(t, QUAY_PARENT, event="pull_request")
+    msg = refused(t, QUAY_PARENT, event="pull_request")
+    assert "pull_request" in msg, msg
     assert not t.argvs, "a pull request ran something"
 
 
@@ -309,16 +325,9 @@ def test_advisory_smoke_does_not_gate() -> None:
 
 def test_gate_words_are_held() -> None:
     t = FakeTools()
-    plan = plan_text().replace("--rm", "--rm\x1f--privileged", 1)
-    orig = t.run
-
-    def bad(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
-        if argv[:2] == ["sdlc", "plan"]:
-            return cp(0, plan)
-        return orig(argv, **kw)
-
-    t.run = bad  # type: ignore[method-assign]
-    refused(t, QUAY_PARENT)
+    t.plan = plan_text().replace("--rm", "--rm\x1f--privileged", 1)
+    msg = refused(t, QUAY_PARENT)
+    assert "--privileged" in msg, msg
 
 
 def test_output_shape() -> None:

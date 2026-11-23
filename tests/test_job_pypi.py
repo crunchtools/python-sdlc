@@ -139,14 +139,22 @@ def refusal(tools: FakeTools, env: dict[str, str], event: str = "push") -> str:
 
 
 def refused(
-    want: str, tweak: Callable[[dict], None] | None = None, *, event: str = "push", **kw: object
-) -> None:
-    tools, env, tmp = make(tweak, **kw)  # type: ignore[arg-type]
+    tweak: Callable[[dict], None] | None = None,
+    *,
+    pyproject: str = PYPROJECT,
+    changelog: str = CHANGELOG,
+    default: str = "main",
+    pulls: object = None,
+) -> str:
+    """The refusal message for this scenario; nothing was built or published meanwhile."""
+    tools, env, tmp = make(
+        tweak, pyproject=pyproject, changelog=changelog, default=default, pulls=pulls
+    )
     with tmp:
-        msg = refusal(tools, env, event)
-        assert want in msg, f"wanted {want!r} in {msg}"
+        msg = refusal(tools, env)
         assert "podman run" not in " ".join(tools.verbs()), "built after a refusal"
         assert "uv publish" not in " ".join(tools.verbs()), "published after a refusal"
+        return msg
 
 
 def test_happy_path() -> None:
@@ -167,7 +175,10 @@ def test_happy_path() -> None:
 
 
 def test_not_a_push() -> None:
-    refused("runs on a push", event="pull_request")
+    tools, env, tmp = make()
+    with tmp:
+        assert "runs on a push" in refusal(tools, env, "pull_request")
+        assert not tools.argvs
 
 
 def test_write_skipped() -> None:
@@ -180,7 +191,8 @@ def test_write_skipped() -> None:
 
 
 def test_plan_says_pypi_tree_does_not() -> None:
-    refused('publish = "pypi"', pyproject=PYPROJECT.replace('publish = "pypi"', ""))
+    msg = refused(pyproject=PYPROJECT.replace('publish = "pypi"', ""))
+    assert 'publish = "pypi"' in msg
 
 
 def test_release_mismatch() -> None:
@@ -198,7 +210,7 @@ def test_no_release_output() -> None:
     tools, env, tmp = make()
     with tmp:
         env["SDLC_RELEASE"] = ""
-        refusal(tools, env)
+        assert "SDLC_RELEASE is not JSON" in refusal(tools, env)
 
 
 def _set(path: str, value: object) -> Callable[[dict], None]:
@@ -213,22 +225,27 @@ def _set(path: str, value: object) -> Callable[[dict], None]:
 
 
 def test_seven_tests() -> None:
-    refused("test 1", pulls=[])
-    refused("test 1", pulls=[PULL, PULL])
-    refused("test 1", _set("merged_at", None))
-    refused("test 2", _set("merge_commit_sha", "f" * 40))
-    refused("test 3", _set("user.login", "someone"))
-    refused("test 4", _set("base.ref", "dev"))
-    refused("test 4", default="trunk")
-    refused("test 5", _set("head.repo.full_name", "evil/mcp-example"))
-    refused("test 5", _set("head.repo", None))
-    refused("test 6", _set("head.ref", "feature/x"))
-    refused("test 6", _set("head.ref", "ashigaru/release-1.2"))
-    refused("test 6", _set("head.ref", "ashigaru/release-v1.2.3"))
-    refused("test 7", pyproject=PYPROJECT.replace(VERSION, "1.2.4"))
-    refused("test 7", changelog=CHANGELOG.replace(f"## [{VERSION}]", "## [1.2.4]"))
-    refused("test 7", changelog="# Changelog\n\n## [Unreleased]\n")
-    refused("test 7", pyproject='[project]\nname = "x"\n[tool.sdlc]\npublish = "pypi"\n')
+    cases: list[tuple[str, dict]] = [
+        ("test 1", {"pulls": []}),
+        ("test 1", {"pulls": [PULL, PULL]}),
+        ("test 1", {"tweak": _set("merged_at", None)}),
+        ("test 2", {"tweak": _set("merge_commit_sha", "f" * 40)}),
+        ("test 3", {"tweak": _set("user.login", "someone")}),
+        ("test 4", {"tweak": _set("base.ref", "dev")}),
+        ("test 4", {"default": "trunk"}),
+        ("test 5", {"tweak": _set("head.repo.full_name", "evil/mcp-example")}),
+        ("test 5", {"tweak": _set("head.repo", None)}),
+        ("test 6", {"tweak": _set("head.ref", "feature/x")}),
+        ("test 6", {"tweak": _set("head.ref", "ashigaru/release-1.2")}),
+        ("test 6", {"tweak": _set("head.ref", "ashigaru/release-v1.2.3")}),
+        ("test 7", {"pyproject": PYPROJECT.replace(VERSION, "1.2.4")}),
+        ("test 7", {"changelog": CHANGELOG.replace(f"## [{VERSION}]", "## [1.2.4]")}),
+        ("test 7", {"changelog": "# Changelog\n\n## [Unreleased]\n"}),
+        ("test 7", {"pyproject": '[project]\nname = "x"\n[tool.sdlc]\npublish = "pypi"\n'}),
+    ]
+    for want, scenario in cases:
+        msg = refused(**scenario)
+        assert want in msg, f"wanted {want!r} in {msg}: {scenario}"
 
 
 def test_custom_app_login() -> None:

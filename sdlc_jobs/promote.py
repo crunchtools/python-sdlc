@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -62,10 +63,6 @@ OK = 200
 SECRET_KEYS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 
 
-def main(event_name: str, event: dict, env: Mapping[str, str]) -> int:
-    return run(event_name, event, env, tools=Tools())
-
-
 @dataclass
 class Job:
     tools: Tools
@@ -73,7 +70,7 @@ class Job:
     repo: str
     ref: str
     digest: str
-    tmp: Path
+    scratch: Path
     labels: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -83,22 +80,22 @@ class Job:
     def child(self, *, key: bool = False) -> dict[str, str]:
         """The environment for a tool; the cosign key only when it must have it."""
         env = {k: v for k, v in self.env.items() if key or k not in SECRET_KEYS}
-        env["DOCKER_CONFIG"] = str(self.tmp / "docker")
-        env["REGISTRY_AUTH_FILE"] = str(self.tmp / "docker" / "config.json")
+        env["DOCKER_CONFIG"] = str(self.scratch / "docker")
+        env["REGISTRY_AUTH_FILE"] = str(self.scratch / "docker" / "config.json")
         return env
 
-    def run(self, argv: list[str], *, key: bool = False, **kw: object):
-        return self.tools.run(argv, env=self.child(key=key), **kw)  # type: ignore[arg-type]
+    def run(self, argv: list[str], *, key: bool = False) -> subprocess.CompletedProcess[str]:
+        return self.tools.run(argv, env=self.child(key=key))
 
-    def must(self, argv: list[str], *, key: bool = False, **kw: object) -> str:
-        return must(self.tools, argv, env=self.child(key=key), **kw)
+    def must(self, argv: list[str], *, key: bool = False, input: str | None = None) -> str:
+        return must(self.tools, argv, input=input, env=self.child(key=key))
 
 
 def parse_json(raw: str | None, what: str) -> dict:
     try:
         doc = json.loads(raw or "")
-    except ValueError:
-        cannot(f"{what} is missing or not JSON")
+    except ValueError as exc:
+        cannot(f"{what} is missing or not JSON: {exc}")
     if not isinstance(doc, dict):
         cannot(f"{what} is not an object")
     return doc
@@ -134,16 +131,17 @@ def release_version(env: Mapping[str, str], planned: object) -> str | None:
     return version
 
 
-def run(_event_name: str, _event: dict, env: Mapping[str, str], tools: Tools) -> int:
+def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
+    del event_name, event  # the job contract passes them; promote reads only the environment
     repo = env.get("GITHUB_REPOSITORY", "")
     if repo.count("/") != 1:
         cannot("GITHUB_REPOSITORY is not owner/name")
     ref, digest = validate_image(env, repo)
     version = release_version(env, plan(env).get("release"))
-    tmp = Path(tempfile.mkdtemp(prefix="sdlc-promote-", dir=env.get("RUNNER_TEMP") or None))
-    tmp.chmod(0o700)
-    (tmp / "docker").mkdir()
-    job = Job(tools, env, repo, ref, digest, tmp)
+    scratch = Path(tempfile.mkdtemp(prefix="sdlc-promote-", dir=env.get("RUNNER_TEMP") or None))
+    scratch.chmod(0o700)
+    (scratch / "docker").mkdir()
+    job = Job(tools, env, repo, ref, digest, scratch)
     try:
         login(job)
         job.labels = inspect_labels(job)
@@ -154,7 +152,7 @@ def run(_event_name: str, _event: dict, env: Mapping[str, str], tools: Tools) ->
         attest(job)
         move_tags(job, moves)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
     return CLEAN
 
 
@@ -162,7 +160,7 @@ def login(job: Job) -> None:
     user, password = job.env.get("QUAY_USERNAME"), job.env.get("QUAY_PASSWORD")
     if not user or not password:
         cannot("QUAY_USERNAME and QUAY_PASSWORD are required")
-    config = job.tmp / "docker" / "config.json"
+    config = job.scratch / "docker" / "config.json"
     job.must(
         ["skopeo", "login", "--authfile", str(config), "-u", user, "--password-stdin", QUAY],
         input=password,
@@ -207,7 +205,7 @@ def refuse_mislabelled(job: Job, version: str) -> None:
 
 
 def verifies(job: Job, *extra: str, kind: str = "verify") -> bool:
-    pub = job.tmp / "fleet.pub"
+    pub = job.scratch / "fleet.pub"
     pub.write_text(FLEET_PUBLIC_KEY)
     argv = ["cosign", kind, "--insecure-ignore-tlog", "--key", str(pub), *extra, job.at]
     return job.run(argv).returncode == 0
@@ -237,7 +235,7 @@ def attest(job: Job) -> None:
     if verifies(job, "--type", "spdxjson", kind="verify-attestation"):
         print("an SBOM is already attested", flush=True)
     else:
-        sbom = job.tmp / "sbom.spdx.json"
+        sbom = job.scratch / "sbom.spdx.json"
         env = {**job.child(), "SYFT_CHECK_FOR_APP_UPDATE": "false"}
         must(job.tools, ["syft", "scan", f"registry:{job.at}", "-o", f"spdx-json={sbom}"], env=env)
         attest_one(job, "spdxjson", sbom)
@@ -248,7 +246,7 @@ def attest(job: Job) -> None:
     if predicate is None:
         print("the image records no run of this repo's ci.yml: no provenance attested", flush=True)
         return
-    path = job.tmp / "provenance.json"
+    path = job.scratch / "provenance.json"
     path.write_text(json.dumps(predicate))
     attest_one(job, "slsaprovenance1", path)
 

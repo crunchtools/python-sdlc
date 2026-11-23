@@ -48,6 +48,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import types
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3372,7 +3373,7 @@ def event_payload() -> tuple[str, dict]:
     return event_name, event
 
 
-def job_module(job: str) -> object:
+def job_module(job: str) -> types.ModuleType:
     """sdlc_jobs.<job>, or a 2 naming the handler this sdlc does not have."""
     for where in JOBS_PATHS:
         if (where / "sdlc_jobs").is_dir() and str(where) not in sys.path:
@@ -3386,7 +3387,7 @@ def job_module(job: str) -> object:
 
 
 def t_event(job: str | None) -> int:
-    """Run this workflow job's trust level for this event: sdlc_jobs.<job>.main.
+    """Run this workflow job's trust level for this event: sdlc_jobs.<job>.run.
 
     The job is the argument, or GITHUB_JOB. A job with no module yet is a 2
     naming it, never a silent pass. `write` with DIGEST set is sdlc's rollback
@@ -3404,12 +3405,9 @@ def t_event(job: str | None) -> int:
     core = importlib.import_module("sdlc_jobs._core")
     step(f"sdlc event: job {job}, event {event_name}")
     try:
-        rc = module.main(event_name, event, os.environ)  # type: ignore[attr-defined]
+        return core.run_job(module, event_name, event, os.environ)
     except core.CannotRunError as exc:
         cannot(str(exc))
-    if rc not in (CLEAN, FOUND, CANNOT_RUN, DEFERRED):
-        cannot(f"job {job} returned {rc!r}, outside the exit contract")
-    return rc
 
 
 TOOL_COMMANDS = {

@@ -17,12 +17,15 @@ import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from types import ModuleType
+from typing import NoReturn, TypedDict, Unpack
 
 CLEAN = 0
 FOUND = 1
 CANNOT_RUN = 2
 DEFERRED = 3
+
+FROM_AS_WORDS = 3  # image, AS, name
 
 # The runner's container socket, as the job container sees it: GitHub mounts it there.
 SOCKET = "unix:///var/run/docker.sock"
@@ -35,6 +38,7 @@ nHVNg0KnBqqs/x+WThX8zEKaGmiZ2SM5336mPfJKZl68/lXBnoWlU0E9Tg==
 
 SEMVER = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+BUILD_VAR = re.compile(r"\$(?:\{(?P<braced>\w+)(?::?-(?P<default>[^}]*))?\}|(?P<bare>\w+))")
 
 
 class CannotRunError(Exception):
@@ -45,8 +49,22 @@ def cannot(msg: str) -> NoReturn:
     raise CannotRunError(msg)
 
 
+def show(proc: subprocess.CompletedProcess[str]) -> None:
+    """Print what a tool said, stdout then stderr, into the job's log."""
+    print(proc.stdout + proc.stderr, end="", flush=True)
+
+
 def step(msg: str) -> None:
     print(f"\n== {msg}", flush=True)
+
+
+class RunOptions(TypedDict, total=False):
+    """The keyword arguments `Tools.run` takes, for the helpers that pass them on."""
+
+    input: str | None
+    env: Mapping[str, str] | None
+    cwd: str | None
+    stream: bool
 
 
 @dataclass
@@ -71,14 +89,17 @@ class Tools:
         input: str | None = None,
         env: Mapping[str, str] | None = None,
         cwd: str | None = None,
+        stream: bool = False,
     ) -> subprocess.CompletedProcess[str]:
+        """argv's verdict. `stream` sends its output straight to the job log instead of
+        holding it, for the long runs (gates) whose output nothing parses."""
         try:
             return subprocess.run(
                 argv,
                 input=input,
                 env=None if env is None else dict(env),
                 cwd=cwd,
-                capture_output=True,
+                capture_output=not stream,
                 text=True,
                 check=False,
             )
@@ -86,11 +107,11 @@ class Tools:
             cannot(f"could not start {argv[0]}: {exc}")
 
     def http(
-        self, method: str, url: str, headers: Mapping[str, str], data: bytes | None = None
+        self, method: str, url: str, headers: Mapping[str, str], payload: bytes | None = None
     ) -> Response:
         if not url.startswith("https://"):
             cannot(f"refusing a non-https URL: {url}")
-        req = urllib.request.Request(url, data=data, method=method, headers=dict(headers))  # noqa: S310
+        req = urllib.request.Request(url, data=payload, method=method, headers=dict(headers))  # noqa: S310
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
                 return Response(resp.status, resp.read())
@@ -100,9 +121,9 @@ class Tools:
             cannot(f"{method} {url}: {exc}")
 
 
-def must(tools: Tools, argv: list[str], **kw: object) -> str:
+def must(tools: Tools, argv: list[str], **kw: Unpack[RunOptions]) -> str:
     """Run argv; its stdout, or exit 2 naming what failed. For steps that are not gates."""
-    proc = tools.run(argv, **kw)  # type: ignore[arg-type]
+    proc = tools.run(argv, **kw)
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-5:]
         cannot(f"`{' '.join(argv[:3])}` exited {proc.returncode}: {' / '.join(tail)}")
@@ -123,11 +144,11 @@ def call(
     }
     if env.get("GITHUB_TOKEN"):
         headers["Authorization"] = f"Bearer {env['GITHUB_TOKEN']}"
-    data = None
+    payload = None
     if body is not None:
-        data = json.dumps(body).encode()
+        payload = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
-    return tools.http(method, base + path, headers, data)
+    return tools.http(method, base + path, headers, payload)
 
 
 def api(
@@ -238,3 +259,62 @@ def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, s
     if best is None or not image:
         cannot(f"the workspace {root} is not a mount of this container, or its image is unknown")
     return best[1], str(image)
+
+
+def run_job(job: ModuleType, event_name: str, event: dict, env: Mapping[str, str]) -> int:
+    """Run a job module's `run` with the real tools, the one place `Tools` is made.
+
+    Its verdict must be one of the exit codes; anything else is a 2.
+    """
+    verdict = job.run(event_name, event, env, Tools())
+    if verdict == DEFERRED:
+        cannot(f"job {job.__name__} deferred to CI, and a job is CI: nothing was judged")
+    if verdict not in (CLEAN, FOUND, CANNOT_RUN):
+        cannot(f"job {job.__name__} returned {verdict!r}, outside the exit contract")
+    return verdict
+
+
+def expand_build_vars(image: str, args: Mapping[str, str], *, strict: bool) -> str:
+    """`image` with its $VAR and ${VAR:-default} filled in from the Containerfile's ARGs.
+
+    Strict, an unset variable with no default is a 2; otherwise it expands to nothing.
+    """
+
+    def value(m: re.Match[str]) -> str:
+        name = m["braced"] or m["bare"]
+        if strict and name not in args and m["default"] is None:
+            cannot(f"FROM {image} uses a build variable with no default: the parent is unknown")
+        return args.get(name, m["default"] or "")
+
+    return BUILD_VAR.sub(value, image)
+
+
+def final_stage(text: str, *, strict: bool) -> tuple[int, str] | None:
+    """(index of the FROM the last stage is built on, its image), None without a FROM.
+
+    Global ARG defaults are filled in, and a `FROM <earlier stage>` is followed back to
+    the FROM that names a real image. Small on purpose: the root `sdlc` script's
+    `final_base` is the thorough one. See `expand_build_vars` for `strict`.
+    """
+    args: dict[str, str] = {}
+    stages: list[tuple[str, str | None]] = []
+    for raw in re.sub(r"\\\n", " ", text).splitlines():
+        words = raw.split()
+        op = words[0].upper() if words else ""
+        if op == "ARG" and not stages:
+            args.update(
+                {k: v.strip("\"'") for k, eq, v in (w.partition("=") for w in words[1:]) if eq}
+            )
+        elif op == "FROM":
+            rest = [w for w in words[1:] if not w.startswith("--")]
+            if rest:
+                aliased = len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS"
+                stages.append((rest[0], rest[2].lower() if aliased else None))
+    index = len(stages) - 1
+    while index >= 0:
+        image = expand_build_vars(stages[index][0], args, strict=strict).strip("\"'")
+        earlier = [i for i in range(index) if stages[i][1] == image.lower()]
+        if not earlier:
+            return index, image
+        index = earlier[-1]
+    return None

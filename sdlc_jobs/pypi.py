@@ -37,8 +37,8 @@ INDEX_CHECK = "https://pypi.org/simple/"
 def parse_release(raw: str | None) -> dict:
     try:
         doc = json.loads(raw or "")
-    except ValueError:
-        cannot("SDLC_RELEASE is not JSON: write's output is missing")
+    except ValueError as exc:
+        cannot(f"SDLC_RELEASE is not JSON, so write's output is missing: {exc}")
     if not isinstance(doc, dict) or not all(
         isinstance(doc.get(k), str) for k in ("version", "sha")
     ):
@@ -79,6 +79,11 @@ def build(tools: Tools, env: Mapping[str, str], root: Path, version: str) -> lis
             "dist",
         ],
     )
+    return dist_files(root, out, version)
+
+
+def dist_files(root: Path, out: Path, version: str) -> list[Path]:
+    """The files `uv build` left in `out`, each named for this project at this version."""
     name = tomllib.loads((root / "pyproject.toml").read_text())["project"]["name"]
     stem = re.sub(r"[-_.]+", "_", name).lower()
     files = sorted(p for p in out.glob("*") if p.is_file())
@@ -124,7 +129,3 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         cwd=str(root),
     )
     return CLEAN
-
-
-def main(event_name: str, event: dict, env: Mapping[str, str]) -> int:
-    return run(event_name, event, env, tools=Tools())

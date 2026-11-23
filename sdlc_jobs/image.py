@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from collections.abc import Mapping
@@ -42,10 +43,12 @@ from sdlc_jobs._core import (
     FOUND,
     Tools,
     cannot,
+    final_stage,
     host_mount,
     must,
     podman,
     set_output,
+    show,
     step,
     workspace,
 )
@@ -67,15 +70,13 @@ SECRETS = (
     "REGISTRY_REDHAT_IO_PASSWORD",
     "GITHUB_TOKEN",
 )
-BUILD_VAR = re.compile(r"\$(?:\{(?P<braced>\w+)(?::?-(?P<default>[^}]*))?\}|(?P<bare>\w+))")
 FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE)
 # Podman options a repo's config must not be able to put on a host step.
 DENIED = ("--privileged", "--cap-add", "--device", "--userns", "--pid", "--ipc", "--uts")
+PLAN_FIELDS = 4  # name, stage, mode, argv
+STATE_FIELDS = 3  # running, exit code, OOM-killed
+PODMAN_CANNOT_CREATE = 125
 SYSTEMD = ("/sbin/init", "/usr/sbin/init", "/lib/systemd/systemd", "/usr/lib/systemd/systemd")
-
-
-def main(event_name: str, event: dict, env: Mapping[str, str]) -> int:
-    return run(event_name, event, env, tools=Tools())
 
 
 @dataclass
@@ -83,7 +84,7 @@ class Job:
     tools: Tools
     env: Mapping[str, str]
     root: Path
-    tmp: Path
+    scratch: Path
     name: str
     sha: str
     podman: list[str]
@@ -93,14 +94,24 @@ class Job:
     image_id: str = ""
     child_env: dict[str, str] = field(default_factory=dict)
 
-    def run(self, argv: list[str], **kw: object):
-        return self.tools.run(argv, env=self.child_env, cwd=str(self.root), **kw)  # type: ignore[arg-type]
+    def run(self, argv: list[str], *, input: str | None = None) -> subprocess.CompletedProcess[str]:
+        return self.tools.run(argv, input=input, env=self.child_env, cwd=str(self.root))
 
-    def must(self, argv: list[str], **kw: object) -> str:
-        return must(self.tools, argv, env=self.child_env, cwd=str(self.root), **kw)
+    def must(self, argv: list[str], *, input: str | None = None) -> str:
+        return must(self.tools, argv, input=input, env=self.child_env, cwd=str(self.root))
 
 
-def run(event_name: str, _event: dict, env: Mapping[str, str], tools: Tools) -> int:
+def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
+    """Build, gate and push this commit's image; 0 pushed, 1 a gate found something.
+
+    `event_name` must not be `pull_request`: this job holds the registry secrets.
+    `event` is unused, because everything comes from `env`: GITHUB_REPOSITORY,
+    GITHUB_SHA, GITHUB_WORKSPACE, HOSTNAME (this container, for the host path),
+    QUAY_*, RHSM_* and REGISTRY_REDHAT_IO_*. `tools` runs podman, skopeo and cosign
+    (a fake in the suites). Raises CannotRunError, which is exit 2, when an input is
+    malformed, the parent does not verify, or a step that is not a gate fails.
+    """
+    del event  # the job contract passes it; image reads only the environment
     if event_name == "pull_request":
         cannot("image never runs on pull_request: it holds the registry secrets")
     repo = env.get("GITHUB_REPOSITORY", "")
@@ -109,17 +120,17 @@ def run(event_name: str, _event: dict, env: Mapping[str, str], tools: Tools) -> 
         cannot("GITHUB_REPOSITORY and GITHUB_SHA are required, and the SHA is 40 hex digits")
     root = workspace(env)
     name = repo.rpartition("/")[2]
-    tmp = Path(tempfile.mkdtemp(prefix="sdlc-image-", dir=env.get("RUNNER_TEMP") or None))
-    tmp.chmod(0o700)
+    scratch = Path(tempfile.mkdtemp(prefix="sdlc-image-", dir=env.get("RUNNER_TEMP") or None))
+    scratch.chmod(0o700)
     job = Job(
         tools,
         env,
         root,
-        tmp,
+        scratch,
         name,
         sha,
         podman(env),
-        tmp / "auth.json",
+        scratch / "auth.json",
         f"sdlc-cache-{env.get('GITHUB_RUN_ID', '0')}-{env.get('GITHUB_RUN_ATTEMPT', '0')}",
     )
     job.child_env = {k: v for k, v in env.items() if k not in SECRETS}
@@ -128,7 +139,7 @@ def run(event_name: str, _event: dict, env: Mapping[str, str], tools: Tools) -> 
         return build_and_push(job)
     finally:
         job.run([*job.podman, "volume", "rm", "-f", job.volume])
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def build_and_push(job: Job) -> int:
@@ -197,41 +208,15 @@ class Parent:
 
 
 def parent_stage(text: str) -> Parent | None:
-    """(index of the FROM that names a registry image, that image), None for scratch.
+    """The FROM that names a registry image and that image; None for scratch.
 
-    Global ARG defaults are filled in and a `FROM <earlier stage>` is followed back,
-    as `sdlc`'s own `final_base` does. An unset variable is a 2: nothing to verify.
+    An unset build variable is a 2: nothing to verify.
     """
-    args: dict[str, str] = {}
-    stages: list[tuple[str, str | None]] = []
-    for raw in re.sub(r"\\\n", " ", text).splitlines():
-        words = raw.split()
-        op = words[0].upper() if words else ""
-        if op == "ARG" and not stages:
-            args.update(
-                {k: v.strip("\"'") for k, eq, v in (w.partition("=") for w in words[1:]) if eq}
-            )
-        elif op == "FROM":
-            rest = [w for w in words[1:] if not w.startswith("--")]
-            if rest:
-                aliased = len(rest) >= 3 and rest[1].upper() == "AS"  # noqa: PLR2004
-                stages.append((rest[0], rest[2].lower() if aliased else None))
-    index = len(stages) - 1
-    while index >= 0:
-        image = expand(stages[index][0], args)
-        earlier = [i for i in range(index) if stages[i][1] == image.lower()]
-        if not earlier:
-            return None if image.lower() == "scratch" else Parent(index, image)
-        index = earlier[-1]
-    cannot("the Containerfile has no FROM to verify")
-    return None
-
-
-def expand(image: str, args: dict[str, str]) -> str:
-    for m in BUILD_VAR.finditer(image):
-        if (m["braced"] or m["bare"]) not in args and m["default"] is None:
-            cannot(f"FROM {image} uses a build variable with no default: the parent is unknown")
-    return BUILD_VAR.sub(lambda m: args.get(m["braced"] or m["bare"], m["default"] or ""), image)
+    found = final_stage(text, strict=True)
+    if found is None:
+        cannot("the Containerfile has no FROM to verify")
+    index, image = found
+    return None if image.lower() == "scratch" else Parent(index, image)
 
 
 def split_ref(image: str) -> tuple[str, str]:
@@ -258,12 +243,12 @@ def verify_parent(job: Job, parent: Parent) -> None:
         cannot(f"{image} resolved to {digest!r}, not a sha256 digest")
     pinned = f"{name}@{digest}"
     if host == QUAY and path.startswith(f"{ORG}/") and path.count("/") == 1:
-        key = job.tmp / "fleet.pub"
+        key = job.scratch / "fleet.pub"
         key.write_text(FLEET_PUBLIC_KEY)
         argv = ["cosign", "verify", "--insecure-ignore-tlog", "--key", str(key)]
         job.must([*argv, "-a", f"repo={path}", pinned])
     elif host in RED_HAT:
-        policy = job.tmp / "policy.json"
+        policy = job.scratch / "policy.json"
         entry = [
             {
                 "type": "sigstoreSigned",
@@ -287,7 +272,7 @@ def verify_parent(job: Job, parent: Parent) -> None:
                 "copy",
                 "-q",
                 f"docker://{pinned}",
-                f"dir:{job.tmp / 'parent'}",
+                f"dir:{job.scratch / 'parent'}",
             ]
         )
     else:
@@ -329,8 +314,8 @@ def gate_plan(job: Job) -> dict[str, tuple[str, str]]:
     )
     plan: dict[str, tuple[str, str]] = {}
     for line in job.must(["sdlc", "plan", "ci"]).splitlines():
-        parts = line.split("\t", 3)
-        if len(parts) == 4:  # noqa: PLR2004
+        parts = line.split("\t", PLAN_FIELDS - 1)
+        if len(parts) == PLAN_FIELDS:
             plan.setdefault(parts[0], (parts[2], parts[3]))
     return plan
 
@@ -339,7 +324,7 @@ def lint(job: Job) -> bool:
     """containerfile-lint runs here: this container is the sdlc image. True is a finding."""
     step("containerfile-lint")
     proc = job.run(["sdlc", "containerfile-lint"])
-    print(proc.stdout + proc.stderr, end="", flush=True)
+    show(proc)
     if proc.returncode in (0, 4):  # 4: hadolint could not parse it, skipped, never a pass
         return False
     if proc.returncode != 1:
@@ -363,9 +348,10 @@ def pin_args(job: Job, text: str, parent: Parent | None, argv: list[str]) -> lis
         m = FROM_LINE.match(line)
         if m:
             seen += 1
-            if seen == parent.index:
-                line = f"{m[1]}{parent.pinned}{line[m.end() :]}"  # noqa: PLW2901
-        kept.append(line)
+        if m and seen == parent.index:
+            kept.append(f"{m[1]}{parent.pinned}{line[m.end() :]}")
+        else:
+            kept.append(line)
     copy = pinned_file(job)
     copy.write_text("".join(kept))
     if "-f" not in argv:
@@ -396,9 +382,9 @@ def build(job: Job, plan: dict[str, tuple[str, str]], text: str, parent: Parent 
     key, org = job.env.get("RHSM_ACTIVATION_KEY", ""), job.env.get("RHSM_ORG_ID", "")
     if key:
         # Files, not env=: the runner's podman predates env-sourced secrets. Both
-        # spellings are in the fleet's Containerfiles; an unused secret costs nothing.
+        # spellings are in the fleet's Containerfiles; an extra secret costs nothing.
         for fname, value in (("activation_key", key), ("org_id", org)):
-            path = job.tmp / fname
+            path = job.scratch / fname
             path.write_text(value)
             path.chmod(0o600)
         for sid, fname in (
@@ -407,14 +393,14 @@ def build(job: Job, plan: dict[str, tuple[str, str]], text: str, parent: Parent 
             ("RHSM_ACTIVATION_KEY", "activation_key"),
             ("RHSM_ORG_ID", "org_id"),
         ):
-            argv += ["--secret", f"id={sid},src={job.tmp / fname}"]
+            argv += ["--secret", f"id={sid},src={job.scratch / fname}"]
     copy = pinned_file(job)
     try:
         argv += pin_args(job, text, parent, words[2:])
         proc = job.run(argv)
     finally:
         copy.unlink(missing_ok=True)
-    print(proc.stdout + proc.stderr, end="", flush=True)
+    show(proc)
     if proc.returncode != 0:
         print("image: the build failed", flush=True)
         cannot(f"podman build exited {proc.returncode}")
@@ -435,7 +421,7 @@ def run_gate(job: Job, name: str, mode: str, payload: str) -> bool:
         ok = stays_up(job, name, safe, words, seconds)
         return ok or mode == "host-up-advisory"
     proc = job.run([*job.podman, "run", "--log-driver=none", *safe, *words])
-    print(proc.stdout + proc.stderr, end="", flush=True)
+    show(proc)
     if proc.returncode == 0:
         return True
     if proc.returncode != 1:
@@ -466,10 +452,12 @@ def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: in
     image = words[words.index("--") + 1] if "--" in words else ""
     pid1 = job.run([*job.podman, "image", "inspect", "--format", "{{json .Config}}", image])
     try:
-        cfg = json.loads(pid1.stdout)
-        first = ((cfg.get("Entrypoint") or []) + (cfg.get("Cmd") or []) + [""])[0]
-    except ValueError, IndexError, AttributeError:
-        first = ""
+        config = json.loads(pid1.stdout)
+    except ValueError:
+        config = None
+    if not isinstance(config, dict):
+        config = {}
+    first = ((config.get("Entrypoint") or []) + (config.get("Cmd") or []) + [""])[0]
     if first in SYSTEMD or first in ("init", "systemd"):
         print(f"{name}: SKIPPED: the image starts {first} as PID 1; never a pass", flush=True)
         return True
@@ -477,7 +465,7 @@ def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: in
         [*job.podman, "run", "-d", "--name", cname, "--log-driver=k8s-file", *safe, *words]
     )
     try:
-        if started.returncode == 125:  # noqa: PLR2004
+        if started.returncode == PODMAN_CANNOT_CREATE:
             cannot(f"{name}: podman could not create the container; nothing was judged")
         if started.returncode != 0:
             print(f"{name}: the image could not start its entrypoint", flush=True)
@@ -501,11 +489,11 @@ def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: in
             ]
         )
         logs = job.run([*job.podman, "logs", cname])
-        print(logs.stdout + logs.stderr, end="", flush=True)
+        show(logs)
     finally:
         job.run([*job.podman, "rm", "-f", "-v", cname])
     got = state.stdout.split()
-    if len(got) != 3:  # noqa: PLR2004
+    if len(got) != STATE_FIELDS:
         cannot(f"{name}: podman could not report the container state; nothing was judged")
     return got[0] == "true" or (got[1] == "0")
 
@@ -527,6 +515,3 @@ def push(job: Job, tag: str, pinned: str) -> int:
     set_output(job.env, "result", json.dumps(result, separators=(",", ":")))
     print(f"built once: {ref}@{digest} ({gated})", flush=True)
     return CLEAN
-
-
-__all__ = ["main", "run"]

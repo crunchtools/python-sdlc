@@ -18,13 +18,13 @@ import json
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sdlc_jobs import promote
-from sdlc_jobs._core import CannotRunError, Response
+from sdlc_jobs._core import CannotRunError, Response, Tools
 from sdlc_jobs.image import FLEET_PUBLIC_KEY
 
 REPO = "crunchtools/demo"
@@ -52,7 +52,7 @@ def built_labels(version: str = "1.2.3") -> dict[str, str]:
     }
 
 
-class FakeTools:
+class FakeTools(Tools):
     """A registry with tags, labels, signatures and attestations, and a log of argvs."""
 
     def __init__(self) -> None:
@@ -64,11 +64,22 @@ class FakeTools:
         self.attested: set[tuple[str, str]] = set()
         self.release_tags: dict[str, str] = {}  # "1.2.3" -> commit
         self.key = FLEET_PUBLIC_KEY
+        self.image_missing = False  # the registry has no manifest at the digest
+        self.stdin: list[str | None] = []
+        self.cwds: list[str | None] = []
 
-    def run(self, argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        input: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         self.argvs.append(argv)
-        env = kw.get("env")
-        self.envs.append(dict(env) if isinstance(env, dict) else {})
+        self.stdin.append(input)
+        self.cwds.append(cwd)
+        self.envs.append(dict(env or {}))
         if argv[0] == "skopeo":
             return self.skopeo(argv)
         if argv[0] == "syft":
@@ -82,6 +93,8 @@ class FakeTools:
         if argv[1] == "inspect" and "--format" in argv:
             tag = target.rpartition(":")[2]
             return cp(0, self.tags[tag]) if tag in self.tags else cp(1, "", "manifest unknown")
+        if argv[1] == "inspect" and self.image_missing:
+            return cp(1, "", "manifest unknown")
         if argv[1] == "inspect":
             digest = target.partition("@")[2] or self.tags[target.rpartition(":")[2]]
             return cp(0, json.dumps({"Labels": self.labels.get(digest, {})}))
@@ -93,18 +106,20 @@ class FakeTools:
     def cosign(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         digest = argv[-1].partition("@")[2]
         notes = {argv[i + 1] for i, a in enumerate(argv) if a == "-a"}
-        if argv[1] == "public-key":
-            return cp(0, self.key)
-        if argv[1] == "sign":
-            self.signed.append((digest, notes))
-        elif argv[1] == "attest":
-            self.attested.add((digest, argv[argv.index("--type") + 1]))
-        elif argv[1] == "verify":
-            ok = any(d == digest and notes <= n for d, n in self.signed)
-            return cp(0 if ok else 1)
-        elif argv[1] == "verify-attestation":
-            return cp(0 if (digest, argv[argv.index("--type") + 1]) in self.attested else 1)
-        return cp()
+        kind = argv[argv.index("--type") + 1] if "--type" in argv else ""
+        rc, out = 0, ""
+        match argv[1]:
+            case "public-key":
+                out = self.key
+            case "sign":
+                self.signed.append((digest, notes))
+            case "attest":
+                self.attested.add((digest, kind))
+            case "verify":
+                rc = 0 if any(d == digest and notes <= n for d, n in self.signed) else 1
+            case "verify-attestation":
+                rc = 0 if (digest, kind) in self.attested else 1
+        return cp(rc, out)
 
     def http(self, method: str, url: str, _headers: object, _data: bytes | None = None) -> Response:
         path = url.removeprefix("https://api.github.com")
@@ -151,15 +166,31 @@ def go(
     }
     with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):
         env["RUNNER_TEMP"] = tmp
-        return promote.run("push", {}, env, tools=tools)  # type: ignore[arg-type]
+        return promote.run("push", {}, env, tools=tools)
 
 
-def refused(tools: FakeTools, **kw: object) -> None:
+def refused(
+    tools: FakeTools,
+    *,
+    release: str | None = None,
+    plan_version: str | None = None,
+    write: str = "success",
+    result: dict | None = None,
+    **extra: str,
+) -> str:
+    """The message of the refusal (exit 2) `promote.run` raises, or a failed assertion."""
     try:
-        go(tools, **kw)  # type: ignore[arg-type]
-    except CannotRunError:
+        go(
+            tools,
+            release=release,
+            plan_version=plan_version,
+            write=write,
+            result=result,
+            **extra,
+        )
+    except CannotRunError as exc:
         assert not tools.signs() and not tools.copies(), "acted after a refusal"
-        return
+        return str(exc)
     raise AssertionError("expected a refusal (exit 2)")
 
 
@@ -182,35 +213,28 @@ def test_bad_digest_wrong_repo_wrong_sha_refused() -> None:
 def test_image_must_exist() -> None:
     t = FakeTools()
     t.labels = {}
-    orig = t.skopeo
-
-    def missing(argv: list[str]) -> subprocess.CompletedProcess[str]:
-        if argv[1] == "inspect" and "--format" not in argv:
-            return cp(1, "", "manifest unknown")
-        return orig(argv)
-
-    t.skopeo = missing  # type: ignore[method-assign]
-    refused(t)
+    t.image_missing = True
+    assert "manifest unknown" in refused(t)
 
 
 def test_release_needs_write_success() -> None:
     for write in ("skipped", "failure", "cancelled", ""):
         t = FakeTools()
-        refused(t, release="1.2.3", write=write)
+        assert "`write` was needed" in refused(t, release="1.2.3", write=write), write
 
 
 def test_release_version_comes_from_write() -> None:
     t = FakeTools()
-    refused(t, release="1.2.3", plan_version="1.2.4")
-    t = FakeTools()
-    refused(t, release="1.2", plan_version="1.2")
-    t = FakeTools()
-    refused(t, release="01.2.3", plan_version="01.2.3")
+    assert "does not match" in refused(t, release="1.2.3", plan_version="1.2.4")
+    for loose in ("1.2", "01.2.3"):
+        t = FakeTools()
+        assert "not strict SemVer" in refused(t, release=loose, plan_version=loose), loose
     t = FakeTools()
     # The plan says a release and write output nothing: the plan alone is never enough.
-    refused(t, plan_version="1.2.3")
+    assert "missing or not JSON" in refused(t, plan_version="1.2.3")
     t = FakeTools()
-    refused(t, release="1.2.3", SDLC_RELEASE=json.dumps({"version": "1.2.3", "sha": OTHER_SHA}))
+    other = json.dumps({"version": "1.2.3", "sha": OTHER_SHA})
+    assert "another commit" in refused(t, release="1.2.3", SDLC_RELEASE=other)
 
 
 def test_release_moves_version_and_latest_and_signs_version() -> None:
@@ -247,14 +271,15 @@ def test_release_moves_latest_forward_and_keeps_rollback() -> None:
 def test_version_tag_is_never_moved() -> None:
     t = FakeTools()
     t.tags["1.2.3"] = OLD
-    refused(t, release="1.2.3")
+    assert "never moved" in refused(t, release="1.2.3")
+    assert t.tags["1.2.3"] == OLD
 
 
 def test_mislabelled_release_refused() -> None:
     t = FakeTools()
     t.labels[NEW] = built_labels("1.2.2")
     t.release_tags["1.2.2"] = OTHER_SHA
-    refused(t, release="1.2.3")
+    assert "another release" in refused(t, release="1.2.3")
     t = FakeTools()  # a label that names no release of this repo is inherited, and fine
     t.labels[NEW] = built_labels("3.14.10")
     assert go(t, release="1.2.3") == 0
@@ -317,7 +342,7 @@ def test_rerun_is_a_no_op() -> None:
 def test_wrong_signing_key_refused() -> None:
     t = FakeTools()
     t.key = "-----BEGIN PUBLIC KEY-----\nother\n-----END PUBLIC KEY-----\n"
-    refused(t)
+    assert "not the private half" in refused(t)
 
 
 def test_syft_runs_without_the_key_and_nothing_executes_the_image() -> None:

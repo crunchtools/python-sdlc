@@ -17,13 +17,13 @@ import json
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sdlc_jobs import check
-from sdlc_jobs._core import CannotRunError, Response
+from sdlc_jobs._core import CannotRunError, Response, Tools
 
 REPO = "crunchtools/demo"
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -48,7 +48,7 @@ def gated(t: FakeTools, command: str = "ci") -> bool:
     return any(c == command for c, _ in t.launched)
 
 
-class FakeTools:
+class FakeTools(Tools):
     def __init__(self, gate_rc: int = 0, prs: list | None = None) -> None:
         self.argvs: list[list[str]] = []
         self.launched: list[tuple[str, dict]] = []
@@ -58,18 +58,30 @@ class FakeTools:
         self.audit_rc = 0
         self.base: str | None = DIGEST_A  # None: skopeo cannot read the parent
         self.built_on: str | None = DIGEST_A  # None: the published image has no label
+        self.image = SDLC_REF  # what this container says it was run from
+        self.stdin: list[str | None] = []
+        self.cwds: list[str | None] = []
 
-    def run(self, argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+    def run(
+        self,
+        argv: list[str],
+        *,
+        input: str | None = None,
+        env: Mapping[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         self.argvs.append(argv)
+        self.stdin.append(input)
+        self.cwds.append(cwd)
         if argv[0] == "podman" and argv[-2:] == ["inspect", "job-ctr"]:
             mount = {"Destination": tempfile.gettempdir(), "Source": "/host/tmp"}
             return cp(
-                0, json.dumps([{"Mounts": [mount], "ImageName": SDLC_REF, "Image": "c0ffee"}])
+                0, json.dumps([{"Mounts": [mount], "ImageName": self.image, "Image": "c0ffee"}])
             )
-        if argv == [check.SDLC, "launcher", SDLC_REF]:
+        if argv == [check.SDLC, "launcher", self.image]:
             return cp(0, "#!/bin/sh\n")
         if ran_launcher(argv):
-            self.launched.append((argv[1], dict(_kw.get("env") or {})))  # type: ignore[call-overload]
+            self.launched.append((argv[1], dict(env or {})))
             return cp(self.gate_rc) if argv[1] == "ci" else cp(self.audit_rc, "CVE-1 in foo")
         if argv[:2] == ["skopeo", "inspect"] and "--format" in argv:
             return cp(0, self.base) if self.base else cp(1)
@@ -78,9 +90,11 @@ class FakeTools:
             return cp(0, json.dumps({"Labels": labels}))
         raise AssertionError(f"unexpected argv {argv}")
 
-    def http(self, method: str, url: str, _headers: object, data: bytes | None = None) -> Response:
+    def http(
+        self, method: str, url: str, _headers: object, payload: bytes | None = None
+    ) -> Response:
         path = url.removeprefix("https://api.github.com")
-        self.calls.append((method, path, data))
+        self.calls.append((method, path, payload))
         if method == "GET" and path.endswith("/pulls"):
             return Response(200, json.dumps(self.prs).encode())
         return Response(204 if method == "PUT" else 201, b"")
@@ -95,19 +109,19 @@ def pr(ref: str = "ashigaru/release-1.2.3", user: str = "ashigaru[bot]", repo: s
     }
 
 
-def go(  # noqa: PLR0913
+def go(
     event_name: str,
     tools: FakeTools,
     *,
     files: dict[str, str] | None = None,
     cron: str | None = None,
     ref: str = "refs/heads/main",
-    sarif: bool = False,
 ) -> tuple[int, dict]:
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
         ws.mkdir()
         for name, text in (files or {}).items():
+            (ws / name).parent.mkdir(parents=True, exist_ok=True)
             (ws / name).write_text(text)
         out = Path(tmp) / "out"
         env = {
@@ -117,15 +131,12 @@ def go(  # noqa: PLR0913
             "GITHUB_REPOSITORY": REPO,
             "GITHUB_SHA": SHA,
             "GITHUB_REF": ref,
-            "SDLC_SARIF_DIR": str(Path(tmp) / "sarif"),
+            "SDLC_SARIF_DIR": str(ws / "sarif"),
         }
-        if sarif:
-            (Path(tmp) / "sarif").mkdir()
-            (Path(tmp) / "sarif" / "codeql-results.sarif").write_text('{"runs": [{}]}')
         event = dict(EVENT)
         if cron:
             event["schedule"] = cron
-        rc = check.run(event_name, event, env, tools)  # type: ignore[arg-type]
+        rc = check.run(event_name, event, env, tools)
         text = out.read_text() if out.exists() else ""
         lines = text.splitlines()
         plan = json.loads(lines[1]) if len(lines) > 1 else {}
@@ -133,6 +144,7 @@ def go(  # noqa: PLR0913
 
 
 IMAGE = {"Containerfile": "FROM quay.io/ubi/ubi10:latest\nRUN true\n"}
+SARIF = {"sarif/codeql-results.sarif": '{"runs": [{}]}'}  # what the CodeQL gate leaves
 PYPI = {"pyproject.toml": '[tool.sdlc]\npublish = "pypi"\n'}
 
 
@@ -275,7 +287,7 @@ def test_dispatch_gates_and_plans_nothing() -> None:
 
 def test_sarif_only_on_default_push() -> None:
     t = FakeTools()
-    go("push", t, sarif=True)
+    go("push", t, files=SARIF)
     sent = uploads(t)
     assert len(sent) == 1
     body = json.loads(sent[0][2] or b"")
@@ -284,7 +296,7 @@ def test_sarif_only_on_default_push() -> None:
     assert doc["runs"][0]["automationDetails"]["id"] == "/language:python/"
     for name, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/topic")):
         t = FakeTools()
-        go(name, t, sarif=True, ref=ref)
+        go(name, t, files=SARIF, ref=ref)
         assert not uploads(t), name
     t = FakeTools()
     go("push", t)  # no file, nothing to upload
@@ -302,15 +314,13 @@ def test_launcher_is_pinned_and_mounts_the_host_path() -> None:
 
 
 def test_launcher_refuses_an_unpinned_image() -> None:
-    global SDLC_REF  # noqa: PLW0603
-    saved, SDLC_REF = SDLC_REF, "quay.io/crunchtools/sdlc:1"
+    t = FakeTools()
+    t.image = "quay.io/crunchtools/sdlc:1"
     msg = ""
     try:
-        go("pull_request", FakeTools())
+        go("pull_request", t)
     except CannotRunError as exc:
         msg = str(exc)
-    finally:
-        SDLC_REF = saved
     assert "pinned" in msg, "an unpinned image ran the gates"
 
 

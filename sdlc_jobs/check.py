@@ -25,7 +25,6 @@ from __future__ import annotations
 import base64
 import gzip
 import json
-import re
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -42,6 +41,7 @@ from sdlc_jobs._core import (
     api,
     call,
     cannot,
+    final_stage,
     host_mount,
     must,
     set_output,
@@ -50,20 +50,16 @@ from sdlc_jobs._core import (
     workspace,
 )
 
-SDLC = "/usr/local/bin/sdlc"  # this image's own in-image half
+SDLC = "sdlc"  # this image's own in-image half, found on PATH
+ACCEPTED = 202
 WEEKLY = "17 6 * * 1"
 POLL = "47 */6 * * *"
 RELEASE_REF = "ashigaru/release-"
 BASE_LABEL = "org.opencontainers.image.base.digest"  # what the image job stamps on a build
 # Where a gate leaves SARIF, as category -> file name. CodeQL writes
-# /tmp/codeql-results.sarif inside its nested container, which is gone when it exits, and
+# codeql-results.sarif to the temp dir inside its nested container, which is gone when it exits, and
 # nothing runs zizmor yet: until they land here, there is nothing to upload.
 SARIF_FILES = {"/language:python": "codeql-results.sarif", "zizmor": "zizmor.sarif"}
-FROM_AS_WORDS = 3  # image, AS, name
-
-
-def main(event_name: str, event: dict, env: Mapping[str, str]) -> int:
-    return run(event_name, event, env, tools=Tools())
 
 
 def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
@@ -72,16 +68,29 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     default_push = event_name == "push" and env.get("GITHUB_REF") == (
         f"refs/heads/{(event.get('repository') or {}).get('default_branch', '')}"
     )
+    cron = event.get("schedule") if event_name == "schedule" else None
+    set_output(env, "result", json.dumps(make_plan(tools, env, root, default_push, cron)))
+
+    if event_name not in ("pull_request", "push", "workflow_dispatch"):
+        return CLEAN
+    rc = gates(tools, env, root)
+    if default_push:
+        upload_sarif(tools, env, repo)
+    return rc
+
+
+def make_plan(
+    tools: Tools, env: Mapping[str, str], root: Path, default_push: bool, cron: object
+) -> dict[str, Any]:
+    """The plan for this event, in the shape `_core.plan` documents."""
+    repo = env.get("GITHUB_REPOSITORY", "")
     out: dict[str, Any] = {
         "image": False,
         "release": None,
         "write": False,
-        "weekly": False,
+        "weekly": cron == WEEKLY,
         "audit": None,
     }
-
-    cron = event.get("schedule") if event_name == "schedule" else None
-    out["weekly"] = cron == WEEKLY
     has_image = containerfile(root) is not None
     if default_push:
         out["image"] = has_image
@@ -94,14 +103,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     elif cron == POLL and has_image:
         out["image"] = parent_moved(tools, root, repo)
     out["write"] = bool(out["release"] or (out["audit"] or {}).get("found"))
-    set_output(env, "result", json.dumps(out))
-
-    if event_name not in ("pull_request", "push", "workflow_dispatch"):
-        return CLEAN
-    rc = gates(tools, env, root)
-    if default_push:
-        upload_sarif(tools, env, repo)
-    return rc
+    return out
 
 
 def containerfile(root: Path) -> str | None:
@@ -110,7 +112,7 @@ def containerfile(root: Path) -> str | None:
 
 
 def launch(
-    tools: Tools, env: Mapping[str, str], root: Path, command: str
+    tools: Tools, env: Mapping[str, str], root: Path, command: str, *, stream: bool = False
 ) -> subprocess.CompletedProcess[str]:
     """The launcher's `command` for this tree, judged by this very image.
 
@@ -129,14 +131,13 @@ def launch(
         "SDLC_HOST_REPO": host,
         "CONTAINER_HOST": env.get("CONTAINER_HOST") or SOCKET,
     }
-    return tools.run([str(script), command], cwd=str(root), env=child)
+    return tools.run([str(script), command], cwd=str(root), env=child, stream=stream)
 
 
 def gates(tools: Tools, env: Mapping[str, str], root: Path) -> int:
     """`sdlc ci` for this tree, through the launcher so repo code runs only nested."""
     step("gates: sdlc ci")
-    proc = launch(tools, env, root, "ci")
-    print(proc.stdout + proc.stderr, end="", flush=True)
+    proc = launch(tools, env, root, "ci", stream=True)
     return proc.returncode if proc.returncode in (CLEAN, FOUND) else CANNOT_RUN
 
 
@@ -172,37 +173,11 @@ def audit(tools: Tools, env: Mapping[str, str], root: Path) -> dict:
 
 
 def final_base(text: str) -> str | None:
-    """The image the last stage of a Containerfile is built on; None for scratch or unknown.
-
-    Small on purpose: global ARG defaults filled in, and a `FROM <earlier stage>` followed
-    back to its own base. The root `sdlc` script's `final_base` is the thorough one.
-    """
-    args: dict[str, str] = {}
-    stages: list[tuple[str, str | None]] = []
-    for raw in re.sub(r"\\\n", " ", text).splitlines():
-        words = raw.split()
-        op = words[0].upper() if words else ""
-        if op == "ARG" and not stages:
-            for name, eq, value in (w.partition("=") for w in words[1:]):
-                if eq:
-                    args[name] = value
-        elif op == "FROM":
-            rest = [w for w in words[1:] if not w.startswith("--")]
-            aliased = len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS"
-            if rest:
-                stages.append((rest[0], rest[2].lower() if aliased else None))
-    index = len(stages) - 1
-    while index >= 0:
-        image = re.sub(
-            r"\$\{(\w+)(?::?-([^}]*))?\}|\$(\w+)",
-            lambda m: args.get(m[1] or m[3], m[2] or ""),
-            stages[index][0],
-        ).strip("\"'")
-        earlier = [i for i in range(index) if stages[i][1] == image.lower()]
-        if not earlier:
-            return image if image and image != "scratch" else None
-        index = earlier[-1]
-    return None
+    """The image the last stage of a Containerfile is built on; None for scratch or unknown."""
+    found = final_stage(text, strict=False)
+    if found is None or not found[1] or found[1].lower() == "scratch":
+        return None
+    return found[1]
 
 
 def parent_moved(tools: Tools, root: Path, repo: str) -> bool:
@@ -231,7 +206,7 @@ def parent_moved(tools: Tools, root: Path, repo: str) -> bool:
 
 def upload_sarif(tools: Tools, env: Mapping[str, str], repo: str) -> None:
     """Send each SARIF the gates left to the Security tab, under its own category."""
-    root = Path(env.get("SDLC_SARIF_DIR") or "/tmp")  # noqa: S108
+    root = Path(env.get("SDLC_SARIF_DIR") or tempfile.gettempdir())
     for category, fname in SARIF_FILES.items():
         path = root / fname
         if not path.is_file():
@@ -250,5 +225,5 @@ def upload_sarif(tools: Tools, env: Mapping[str, str], repo: str) -> None:
             "sarif": base64.b64encode(packed).decode(),
         }
         resp = call(tools, env, "POST", f"/repos/{repo}/code-scanning/sarifs", body)
-        if resp.status not in (200, 201, 202):
+        if resp.status not in (200, 201, ACCEPTED):
             cannot(f"uploading {fname} answered {resp.status}: {resp.body[:300]!r}")
