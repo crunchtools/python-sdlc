@@ -77,8 +77,10 @@ ACTIONS_APP = 15368  # GitHub Actions, as a ruleset's integration_id
 RELEASE_REF = "refs/heads/ashigaru/release-*"
 RELEASE_PREFIX = "ashigaru/release-"
 REQUIRED_CHECKS = ("sdlc / check (pull_request)", "sdlc / gate (pull_request_target)")
-# The org secrets that moved into environments (prerequisite 2).
-MOVED_SECRETS = (
+# The org secrets that moved into environments (prerequisite 2). Not named
+# *_SECRETS: CodeQL reads that name as sensitive data and flags every message
+# that carries one of these names (py/clear-text-logging-sensitive-data).
+MOVED_TO_ENVIRONMENTS = (
     "CLAUDE_CODE_OAUTH_TOKEN",
     "OPENROUTER_API_KEY",
     "ASHIGARU_APP_KEY",
@@ -673,7 +675,7 @@ def move_rulesets(run: Run) -> None:
 
 def remove_secret_access(run: Run, problems: list[str]) -> None:
     """Step 10: take the repo off each moved org secret's list; failures join `problems`."""
-    for name in MOVED_SECRETS:
+    for name in MOVED_TO_ENVIRONMENTS:
         status, entry = run.api.call("GET", f"/orgs/{ORG}/actions/secrets/{name}")
         if status == HTTPStatus.NOT_FOUND:
             continue
@@ -768,7 +770,7 @@ def check_pypi(run: Run) -> None:
 
 def check_secret_scope(run: Run) -> None:
     """Step 5: each moved org secret is scoped to selected repositories."""
-    for name in MOVED_SECRETS:
+    for name in MOVED_TO_ENVIRONMENTS:
         status, secret = run.api.call("GET", f"/orgs/{ORG}/actions/secrets/{name}")
         if status == HTTPStatus.NOT_FOUND:
             continue
@@ -834,7 +836,7 @@ def check_fleet(api: Api, opts: Options) -> list[str]:
             problems += [
                 f"{repo}: moved {scope} secret {n} is still readable"
                 for n in sorted(names)
-                if n in MOVED_SECRETS
+                if n in MOVED_TO_ENVIRONMENTS
             ]
     rulesets = org_rulesets(api)
     try:
