@@ -27,9 +27,10 @@
 set -u
 
 REPO=quay.io/crunchtools/sdlc
-ROOT=${SDLC_BOOT_ROOT:-/etc/sdlc-boot}
-MAJOR=${SDLC_BOOT_MAJOR:-}
-MIN=${SDLC_BOOT_MIN:-}
+# The trust policy is files baked into the image, never the environment: a
+# job's env: or an earlier step writing $GITHUB_ENV cannot loosen it. The test
+# runs a copy with this one line rewritten.
+ROOT=/etc/sdlc-boot
 
 cannot() { printf 'sdlc-boot: GATE CANNOT RUN: %s\n' "$*" >&2; exit 2; }
 
@@ -69,11 +70,13 @@ for k in "$ROOT"/keys/*.pub; do
 done
 [ -n "$keys" ] || cannot "no sdlc public key in $ROOT/keys"
 
+MAJOR=$(cat "$ROOT/major" 2> /dev/null) || cannot "$ROOT/major is missing"
+MIN=$(cat "$ROOT/minimum" 2> /dev/null) || cannot "$ROOT/minimum is missing"
 case $MAJOR in
-  ''|*[!0-9]*|0[0-9]*) cannot "SDLC_BOOT_MAJOR=$MAJOR is not a major version" ;;
+  ''|*[!0-9]*|0[0-9]*) cannot "the baked major '$MAJOR' is not a major version" ;;
 esac
-is_semver "$MIN" || cannot "SDLC_BOOT_MIN=$MIN is not X.Y.Z"
-[ "${MIN%%.*}" = "$MAJOR" ] || cannot "SDLC_BOOT_MIN=$MIN is not in major $MAJOR"
+is_semver "$MIN" || cannot "the baked minimum '$MIN' is not X.Y.Z"
+[ "${MIN%%.*}" = "$MAJOR" ] || cannot "the baked minimum $MIN is not in major $MAJOR"
 
 # Resolve. The tag is pulled every time, because it is what moves. The digest
 # is read back from the pulled image and checked for shape before it is

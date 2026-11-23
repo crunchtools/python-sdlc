@@ -17,6 +17,11 @@ printf '== boot/sdlc\n\n'
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 mkdir "$W/bin"
+# boot/sdlc's policy root is a literal, not an override, so the test runs a
+# copy with that one line pointed at the scratch dir.
+sed "s|^ROOT=/etc/sdlc-boot\$|ROOT=$W/keys|" "$BOOT" > "$W/sdlc"
+[ "$(grep -c "^ROOT=$W/keys\$" "$W/sdlc")" -eq 1 ] || { echo "boot/sdlc has no ROOT=/etc/sdlc-boot line"; exit 1; }
+BOOT=$W/sdlc
 HEX=$(printf 'a%.0s' $(seq 64))
 REPO=quay.io/crunchtools/sdlc
 
@@ -63,16 +68,17 @@ reset() {
   rm -rf "$W/log" "$W/pull-fails" "$W/no-self" "$W/keys"
   mkdir -p "$W/keys/keys"
   : > "$W/keys/keys/a.pub"
+  printf '0\n' > "$W/keys/major"
+  printf '0.12.0\n' > "$W/keys/minimum"
   printf '%s@sha256:%s\n' "$REPO" "$HEX" > "$W/repodigests"
   printf '0.12.1\n' > "$W/label"
   printf '0.12.1\n' > "$W/versions"
   printf 'a.pub\n' > "$W/accept"
   printf '0\n' > "$W/inner-rc"
 }
-run() {              # args...: set RC and OUT; env SDLC_BOOT_* overridable
+run() {              # args...: set RC and OUT
   RC=0
-  OUT=$(env PATH="$W/bin:$PATH" HOSTNAME="${HN-abc123}" SDLC_BOOT_ROOT="$W/keys" \
-          SDLC_BOOT_MAJOR="${MAJOR-0}" SDLC_BOOT_MIN="${MIN-0.12.0}" \
+  OUT=$(env PATH="$W/bin:$PATH" HOSTNAME="${HN-abc123}" \
           SDLC_TEST_PEM='-----BEGIN KEY-----
 line two
 -----END KEY-----' GITHUB_OUTPUT=/tmp/out \
@@ -155,7 +161,7 @@ refused "a version below the minimum is refused" "below the minimum"
 
 reset
 printf '0.9.0\n' > "$W/label"; printf '0.9.0\n' > "$W/versions"
-MIN=0.12.0 run event
+run event
 refused "0.9.0 is below 0.12.0 by number, not by string" "below the minimum"
 
 reset
@@ -210,15 +216,30 @@ touch "$W/no-self"
 run event
 refused "a HOSTNAME that is not a container is refused"
 
-for bad_policy in "MAJOR=x" "MAJOR=01" "MAJOR=" "MIN=0.12" "MIN=0.12.0-rc1" "MIN=1.0.0" "MIN=00.1.0"; do
+for bad_policy in "major=x" "major=01" "major=" "minimum=0.12" "minimum=0.12.0-rc1" \
+                  "minimum=1.0.0" "minimum=00.1.0"; do
   reset
-  env_assign=$bad_policy
-  RC=0
-  OUT=$(env PATH="$W/bin:$PATH" HOSTNAME=abc SDLC_BOOT_ROOT="$W/keys" \
-          SDLC_BOOT_MAJOR=0 SDLC_BOOT_MIN=0.12.0 "SDLC_BOOT_$env_assign" \
-          sh "$BOOT" event 2>&1) || RC=$?
+  printf '%s\n' "${bad_policy#*=}" > "$W/keys/${bad_policy%%=*}"
+  run event
   refused "baked policy $bad_policy is refused"
 done
+for gone in major minimum; do
+  reset
+  rm "$W/keys/$gone"
+  run event
+  refused "a missing baked $gone is refused" "$gone is missing"
+done
+
+# The environment cannot loosen the policy: the old override names, set to a
+# lower minimum and another key directory, change nothing.
+reset
+printf '0.9.0\n' > "$W/label"
+printf '0.9.0\n' > "$W/versions"
+mkdir -p "$W/other/keys"
+RC=0
+OUT=$(env PATH="$W/bin:$PATH" HOSTNAME=abc SDLC_BOOT_ROOT="$W/other" SDLC_BOOT_MIN=0.1.0 \
+        SDLC_BOOT_MAJOR=0 sh "$BOOT" event 2>&1) || RC=$?
+refused "SDLC_BOOT_* in the environment does not lower the minimum" "below the minimum 0.12.0"
 
 reset
 printf '1\n' > "$W/inner-rc"

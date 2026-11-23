@@ -8,6 +8,8 @@ Every network call is mocked: the lookups are module functions, replaced here.
   - lychee moves its two ARG copies AND the @sha256: of its FROM line
   - a lychee version with no digest (or a malformed one) raises and writes nothing
   - a run with every pin current writes nothing
+  - the sdlc-boot base digest (boot/Containerfile ARG) moves when quay's does,
+    bumps IMAGE_TAG once even with a tool move, and a bad answer writes nothing
   - the image PATCH version, LABEL, pyproject and CHANGELOG move with any bump
 
 Run: python3 tests/test_update_tools.py
@@ -49,6 +51,10 @@ ARG MARKDOWNLINT_CLI2_VERSION=0.24.0
 LABEL version="3.4.5"
 """
 
+BOOT_CONTAINERFILE = f"""ARG BOOT_BASE_DIGEST={OLD}
+FROM quay.io/hummingbird/core-runtime:2-builder@${{BOOT_BASE_DIGEST}}
+"""
+
 failures = 0
 
 
@@ -67,16 +73,20 @@ def raises(fn) -> bool:
     return False
 
 
-def run(versions: dict[str, str], digest=None) -> tuple[int, dict[str, str]]:
+def run(versions: dict[str, str], digest=None, boot=lambda: OLD) -> tuple[int, dict[str, str]]:
     """main() in a scratch copy of the repo; returns the exit code and the files."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         (root / "Containerfile").write_text(CONTAINERFILE)
+        (root / "boot").mkdir()
+        (root / "boot" / "Containerfile").write_text(BOOT_CONTAINERFILE)
         (root / "IMAGE_TAG").write_text("3.4.5\n")
         (root / "pyproject.toml").write_text('[project]\nversion = "3.4.5"\n')
         (root / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n\n### Added\n\n- x\n")
         saved = (ut.ROOT, ut.latest_release, ut.latest_npm, ut.latest_lychee, ut.lychee_digest)
+        saved_boot = ut.boot_base_digest
         ut.ROOT = root
+        ut.boot_base_digest = boot
         ut.latest_release = lambda repo: versions[repo.split("/")[1]]
         ut.latest_npm = lambda _pkg: versions["markdownlint-cli2"]
         ut.latest_lychee = lambda: versions["lychee"]
@@ -93,8 +103,10 @@ def run(versions: dict[str, str], digest=None) -> tuple[int, dict[str, str]]:
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 code = ut.main()
-            files = {p.name: p.read_text() for p in root.iterdir()}
+            files = {p.name: p.read_text() for p in root.iterdir() if p.is_file()}
+            files["boot/Containerfile"] = (root / "boot" / "Containerfile").read_text()
         finally:
+            ut.boot_base_digest = saved_boot
             ut.ROOT, ut.latest_release, ut.latest_npm, ut.latest_lychee, ut.lychee_digest = saved
             ut.TOOLS = tools
         return code, files
@@ -184,6 +196,67 @@ check(
     raises(lambda: run({**CURRENT, "lychee": "0.25.0"}, ut.lychee_digest)),
 )
 
+# sdlc-boot base digest.
+BOOT_NEW = "sha256:" + "c" * 64
+_, files = run(CURRENT)
+check("current boot digest writes nothing", files["boot/Containerfile"] == BOOT_CONTAINERFILE)
+check("current boot digest keeps IMAGE_TAG", files["IMAGE_TAG"] == "3.4.5\n")
+
+_, files = run(CURRENT, boot=lambda: BOOT_NEW)
+check(
+    "moved boot digest rewrites boot/Containerfile",
+    f"ARG BOOT_BASE_DIGEST={BOOT_NEW}\n" in files["boot/Containerfile"]
+    and OLD not in files["boot/Containerfile"]
+    and "@${BOOT_BASE_DIGEST}" in files["boot/Containerfile"],
+)
+check(
+    "moved boot digest leaves the tool pins",
+    files["Containerfile"] == CONTAINERFILE.replace('"3.4.5"', '"3.4.6"'),
+)
+check("moved boot digest bumps IMAGE_TAG", files["IMAGE_TAG"] == "3.4.6\n")
+check("moved boot digest bumps LABEL", 'LABEL version="3.4.6"' in files["Containerfile"])
+check(
+    "moved boot digest in CHANGELOG",
+    "- sdlc-boot base core-runtime:2-builder sha256:aaaaaaaaaaaa -> sha256:cccccccccccc."
+    in files["CHANGELOG.md"],
+)
+
+_, files = run({**CURRENT, "gourmand": "1.1.0"}, boot=lambda: BOOT_NEW)
+check("boot plus tool move bumps IMAGE_TAG once", files["IMAGE_TAG"] == "3.4.6\n")
+check("boot plus tool move: two CHANGELOG lines", files["CHANGELOG.md"].count("->") == 2)
+check("boot plus tool move: one new entry", files["CHANGELOG.md"].count("## [3.4.6]") == 1)
+
+for label, payload in (
+    ("zero tags", {"tags": []}),
+    ("two tags", {"tags": [{"manifest_digest": OLD}, {"manifest_digest": NEW}]}),
+    ("no tags key", {}),
+    ("malformed digest", {"tags": [{"manifest_digest": "sha256:abc"}]}),
+    ("missing digest", {"tags": [{"name": "2-builder"}]}),
+):
+    ut.http_json = lambda _url, p=payload: p
+    check(f"boot base: {label} raises", raises(ut.boot_base_digest))
+    check(
+        f"boot base: {label} aborts the run",
+        raises(lambda: run({**CURRENT, "gourmand": "1.1.0"}, boot=ut.boot_base_digest)),
+    )
+ut.http_json = lambda url: (
+    {"tags": [{"name": "2-builder", "manifest_digest": NEW}]} if url == ut.BOOT_BASE_TAG_URL else {}
+)
+check("boot base digest is read from quay's tag record", ut.boot_base_digest() == NEW)
+check(
+    "boot base URL asks for the one active 2-builder tag",
+    "specificTag=2-builder" in ut.BOOT_BASE_TAG_URL
+    and "onlyActiveTags=true" in ut.BOOT_BASE_TAG_URL,
+)
+
+# A boot Containerfile with zero or two ARG lines, or none at all, writes nothing.
+for label, body in (("zero", "FROM x\n"), ("two", BOOT_CONTAINERFILE * 2)):
+    check(f"{label} boot ARG lines raises", raises(lambda b=body: ut.boot_pinned(b)))
+saved_boot_cf = BOOT_CONTAINERFILE
+BOOT_CONTAINERFILE = "FROM x\n"
+check("boot Containerfile without the ARG aborts the run", raises(lambda: run(CURRENT)))
+BOOT_CONTAINERFILE = saved_boot_cf
+
 # Version discovery.
 ut.http_json = lambda url: {"dist-tags": {"latest": "0.25.1"}}
 check("npm latest", ut.latest_npm("markdownlint-cli2") == "0.25.1")
@@ -251,6 +324,13 @@ check(
     real.count(f"ARG LYCHEE_VERSION={ut.pinned(real, 'LYCHEE_VERSION')}\n") == 2,
 )
 check("real Containerfile: markdownlint ARG x1", real.count("ARG MARKDOWNLINT_CLI2_VERSION=") == 1)
+
+real_boot = (REPO / "boot" / "Containerfile").read_text()
+check(
+    "real boot/Containerfile: one ARG BOOT_BASE_DIGEST",
+    len(ut.BOOT_ARG.findall(real_boot)) == 1,
+    "boot/Containerfile does not carry the ARG yet",
+)
 
 shutil.rmtree(REPO / "scripts" / "__pycache__", ignore_errors=True)
 print(f"{failures} failure(s)")

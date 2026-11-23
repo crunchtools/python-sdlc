@@ -23,6 +23,8 @@ All notable changes to this project are documented here, following
   removes `.gemini/` on request, and reports any `uses:` left.
 - `scripts/fleet_wave.py` refuses private repos without `--include-private`, opens
   the pull request without auto-merge, and drops `--constitution-ref` and `--weekly`.
+- `check`, `approve` and `sign` (and the fleet template's `check`) run on a
+  `workflow_dispatch` from the default branch only.
 - Inherits constitution v1.60.0. The pre-commit Gourmand and Gatehouse hooks float
   (`:main`, `:latest`) with `--pull=newer`, and the Dependabot config and its
   automerge workflow are gone (Renovate, XV). With `self.sh` naming the fetch's
@@ -62,7 +64,11 @@ All notable changes to this project are documented here, following
   is a 2. Built and smoke-tested by container.yml; nothing publishes it yet.
 - `scripts/self.sh`: the test, check, image and sign steps of sdlc's own new
   ci.yml, which waits in `examples/sdlc-ci.yml` until the cutover. sign runs cosign
-  from a digest-pinned image and never runs the image it signs.
+  from a digest-pinned image and never runs the image it signs. The weekly
+  rebuild fetches the commit `:<major>`'s revision label names, never the movable
+  tag, and sign refuses a rebuild of any other revision. sdlc-boot's base is pinned
+  by digest (moved by `scripts/update_tools.py`), its policy is baked as files that
+  no job env can override, and Ashigaru and the constitution are fetched by commit.
 
 
 ## [0.11.1] - 2026-11-23

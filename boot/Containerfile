@@ -8,6 +8,10 @@
 # Build context is the repo root: podman build -f boot/Containerfile .
 
 ARG DOCKER_CLI_VERSION=29.9.3
+# The base by digest: this image is the fleet's trust root and is itself named
+# by digest, so nothing in it floats. scripts/update_tools.py moves this when
+# 2-builder's digest moves on quay.
+ARG BOOT_BASE_DIGEST=sha256:3d625fad86d7259f9f04dfa83a876771a62e5de7ae7bd65fa4a3ad572d50c717
 
 # The docker CLI, not podman-remote: the job container's socket is dockerd on
 # GitHub-hosted runners, which podman-remote cannot speak (it uses libpod
@@ -15,7 +19,7 @@ ARG DOCKER_CLI_VERSION=29.9.3
 # API on gha-runner.
 FROM docker.io/library/docker:${DOCKER_CLI_VERSION}-cli@sha256:5a7af0dcb0e46c803efe9b45371dd21cb500e5b4453250394ac6f06d49b6e6f1 AS docker
 
-FROM quay.io/hummingbird/core-runtime:2-builder
+FROM quay.io/hummingbird/core-runtime:2-builder@${BOOT_BASE_DIGEST}
 
 ARG COSIGN_VERSION=2.6.5
 ARG DOCKER_CLI_VERSION=29.9.3
@@ -38,13 +42,11 @@ RUN dnf install -y jq && dnf clean all && rm -rf /var/cache/dnf /var/cache/libdn
 COPY --from=ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca /ko-app/cosign /usr/local/bin/cosign
 COPY --from=docker /usr/local/bin/docker /usr/local/bin/docker
 
-# The trust policy, baked: the major to follow and the oldest release it may
-# run. A job's env: could override these, which is why the fleet file is the
-# only thing that sets one and is checked byte for byte.
-ENV SDLC_BOOT_MAJOR=${SDLC_MAJOR} \
-    SDLC_BOOT_MIN=${SDLC_MIN_VERSION}
-
 COPY boot/keys/ /etc/sdlc-boot/keys/
+# The trust policy, as files and not ENV: the major to follow and the oldest
+# release it may run. A job's env: can override ENV; it cannot rewrite these.
+RUN printf '%s\n' "${SDLC_MAJOR}" > /etc/sdlc-boot/major \
+ && printf '%s\n' "${SDLC_MIN_VERSION}" > /etc/sdlc-boot/minimum
 COPY boot/sdlc /usr/local/bin/sdlc
 RUN chmod 0755 /usr/local/bin/sdlc
 

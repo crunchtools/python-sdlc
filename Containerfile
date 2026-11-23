@@ -79,11 +79,13 @@ ARG PYJWT_VERSION=2.15.1
 ARG GH_VERSION=2.104.0
 ARG GH_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
 # What sdlc_jobs runs: Ashigaru's scripts, prompts and schemas, and the
-# constitution's scripts, each at a release. Ashigaru by its release commit:
-# v5.4.0, tag pending. write depends on 5.4.0's staged_refusal patch filter.
+# constitution's scripts, each at a release and fetched by its commit, never
+# by a tag that can move. Ashigaru is v5.4.0, tag pending: write depends on
+# 5.4.0's staged_refusal patch filter.
 ARG ASHIGARU_VERSION=5.4.0
 ARG ASHIGARU_COMMIT=499e50cff233c7a40455f4304718247475e4a73d
 ARG CONSTITUTION_VERSION=1.60.0
+ARG CONSTITUTION_COMMIT=726518b50e38f11c1ceb010b44b5eac8c7b90a13
 
 # The base runs non-root; installing needs root. The image drops back at the end.
 USER root
@@ -341,8 +343,10 @@ RUN set -eu; \
     gh --version | head -1
 
 # Ashigaru's scripts, prompts and schemas, and the constitution's scripts, at
-# the releases above (Ashigaru's VERSION file must agree with its ARG): the paths sdlc_jobs/_tools.py names. Data the jobs
-# run, not packages, so a shallow clone of the tag and nothing of its history.
+# the commits above: the paths sdlc_jobs/_tools.py names. Each must say it is
+# the version its ARG names (Ashigaru's VERSION file, the constitution's
+# `> **Version:**` line), or the build fails. Data the jobs run, not packages,
+# so one shallow fetch of the commit and nothing of its history.
 RUN set -eu; \
     git init -q /tmp/ashigaru; \
     git -C /tmp/ashigaru fetch -q --depth 1 https://github.com/crunchtools/ashigaru "${ASHIGARU_COMMIT}"; \
@@ -350,8 +354,10 @@ RUN set -eu; \
     [ "$(cat /tmp/ashigaru/VERSION)" = "${ASHIGARU_VERSION}" ]; \
     mkdir -p /opt/ashigaru; \
     cp -r /tmp/ashigaru/scripts /tmp/ashigaru/prompts /tmp/ashigaru/schemas /opt/ashigaru/; \
-    git -c advice.detachedHead=false clone -q --depth 1 --branch "v${CONSTITUTION_VERSION}" \
-      https://github.com/crunchtools/constitution /tmp/constitution; \
+    git init -q /tmp/constitution; \
+    git -C /tmp/constitution fetch -q --depth 1 https://github.com/crunchtools/constitution "${CONSTITUTION_COMMIT}"; \
+    git -C /tmp/constitution -c advice.detachedHead=false checkout -q FETCH_HEAD; \
+    grep -qx "> \*\*Version:\*\* ${CONSTITUTION_VERSION}" /tmp/constitution/constitution.md; \
     mkdir -p /opt/constitution; \
     cp -r /tmp/constitution/scripts /opt/constitution/; \
     rm -rf /tmp/ashigaru /tmp/constitution

@@ -10,7 +10,8 @@
 #   check  default-branch push, schedule, dispatch. The same on reviewed code,
 #          then the plan (`result`) and the 60-day schedule keepalive.
 #   image  release: the verified release merge, version from write's output.
-#          weekly: the version :<major> carries, rebuilt from its vX.Y.Z tag.
+#          weekly: the version :<major> carries, rebuilt from the commit its
+#          revision label names (never the mutable vX.Y.Z tag).
 #          Pushes candidates by digest; signs nothing and moves no tag.
 #   sign   the only step with sdlc's key. Never runs the image it signs: cosign
 #          runs from COSIGN_IMAGE, a digest the workflow pins, and the release
@@ -207,16 +208,24 @@ cosign_key() {
     -e SDLC_KEY -e COSIGN_PASSWORD -- "$COSIGN_IMAGE" "$@"
 }
 
-# The one version sdlc's key signed $1 with for repo $2, or nothing. When no
-# key verifies, cosign's own words go to stderr: "not signed" and "could not
-# reach the registry" read the same to the caller, and only they tell apart.
+# The one version sdlc's key signed $1 with for repo $2, or nothing when no
+# key verifies it. When none does, cosign's own words go to stderr: "not
+# signed" and "could not reach the registry" read the same to the caller, and
+# only they tell apart. Verified but with no version, or with two, is neither
+# signed nor unsigned: that is a 1, and every caller dies on it rather than
+# add a signature beside it.
 signed_version() {
   : > "$work/verify.err"
   for _k in "$work/keys/"*.pub; do
     if cosign verify --key "/keys/${_k##*/}" --insecure-ignore-tlog=true \
          -a "repo=$2" "$1" > "$work/verify.json" 2>> "$work/verify.err"; then
       _vs=$(jq -r '[.[].optional.version // empty] | unique | .[]' "$work/verify.json")
-      [ "$(printf '%s\n' "$_vs" | grep -c .)" -eq 1 ] && printf '%s' "$_vs"
+      if [ "$(printf '%s\n' "$_vs" | grep -c .)" -ne 1 ]; then
+        printf "self.sh: %s is signed by sdlc's key as repo=%s with versions '%s', not one\n" \
+          "$1" "$2" "$(printf '%s' "$_vs" | tr '\n' ' ')" >&2
+        return 1
+      fi
+      printf '%s' "$_vs"
       return 0
     fi
   done
@@ -225,6 +234,15 @@ signed_version() {
 }
 label_version() {
   skopeo inspect --authfile "$AUTH" --format '{{ index .Labels "version" }}' "docker://$1"
+}
+# The commit an image says it was built from, which must be a full sha.
+revision_of() {
+  _r=$(skopeo inspect --authfile "$AUTH" \
+         --format '{{ index .Labels "org.opencontainers.image.revision" }}' "docker://$1") \
+    || die "cannot read the revision label of $1"
+  case $_r in *[!0-9a-f]*|'') die "$1's revision label '$_r' is not a commit sha" ;; esac
+  [ "${#_r}" -eq 40 ] || die "$1's revision label '$_r' is not a commit sha"
+  printf '%s' "$_r"
 }
 # The digest a tag names, or nothing when the tag does not exist. Any other
 # failure is fatal: a guard that cannot read what it guards waves it through.
@@ -241,7 +259,8 @@ tag_digest() {
 current() {
   _cd=$(tag_digest "$QUAY:$MAJOR")
   [ -n "$_cd" ] || return 0
-  _cv=$(signed_version "$QUAY@$_cd" crunchtools/sdlc)
+  _cv=$(signed_version "$QUAY@$_cd" crunchtools/sdlc) \
+    || die "$QUAY:$MAJOR ($_cd) carries an ambiguous sdlc signature"
   _cl=$(label_version "$QUAY@$_cd")
   [ -n "$_cv" ] && [ "$_cv" = "$_cl" ] \
     || die "$QUAY:$MAJOR ($_cd) carries annotation '$_cv' and label '$_cl'; they must agree"
@@ -309,12 +328,15 @@ mode_image() {
     _cur=$(current)
     [ -n "$_cur" ] || die "$QUAY:$MAJOR does not exist; there is no release to rebuild"
     _v=${_cur#* }
-    # From the tag, never the default branch and never the newest tag: after a
-    # rollback the weekly run rebuilds the rolled-back version.
-    git -C "$here" fetch -q --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "refs/tags/v$_v:refs/tags/v$_v"
-    git -C "$here" worktree add -q --detach "$work/src" "v$_v"
+    # From the commit :<major>'s signed image says it was built from: never the
+    # default branch, never the newest tag, and never the vX.Y.Z tag itself,
+    # which anyone with contents: write (the Ashigaru App included) could move.
+    # After a rollback the weekly run rebuilds the rolled-back version.
+    _was=$(revision_of "$QUAY@${_cur%% *}")
+    git -C "$here" fetch -q --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$_was"
+    git -C "$here" worktree add -q --detach "$work/src" "$_was"
     _src=$work/src
-    [ "$(tree_version "$_src")" = "$_v" ] || die "v$_v's tree is not version $_v"
+    [ "$(tree_version "$_src")" = "$_v" ] || die "$_was's tree is not version $_v"
   fi
   [ "$(major "$_v")" = "$MAJOR" ] || die "$_v is not of major $MAJOR, which boot/Containerfile follows"
   _rev=$(git -C "$_src" rev-parse HEAD)
@@ -340,11 +362,12 @@ mode_image() {
 # Signs $1@$2 for repo annotation $3 at version $4, unless sdlc's key already
 # did (a re-run). A signature with another version is a refusal, not a skip.
 sign_one() {
-  _have=$(signed_version "$1@$2" "$3")
+  _have=$(signed_version "$1@$2" "$3") \
+    || die "$1@$2 carries an ambiguous sdlc signature; refusing to add another"
   if [ -z "$_have" ]; then
     cosign_key sign --yes --tlog-upload=false --key env://SDLC_KEY \
       -a "repo=$3" -a "version=$4" "$1@$2"
-    _have=$(signed_version "$1@$2" "$3")
+    _have=$(signed_version "$1@$2" "$3") || die "$1@$2 is ambiguous after signing"
   fi
   [ "$_have" = "$4" ] || die "$1@$2 is signed as '$_have', not $4"
   say "signed $1@$2 as $4"
@@ -369,7 +392,8 @@ mode_sign() {
     [ "$(major "$VERSION")" = "$MAJOR" ] || die "$VERSION is not of major $MAJOR"
     [ "$(vcmp "$VERSION" "$MINIMUM")" -ge 0 ] || die "$VERSION is below sdlc-boot's minimum $MINIMUM"
     digest_ok "${DIGEST:-}" || die "DIGEST '${DIGEST:-}' is not sha256:<64 hex>"
-    _sv=$(signed_version "$QUAY@$DIGEST" crunchtools/sdlc)
+    _sv=$(signed_version "$QUAY@$DIGEST" crunchtools/sdlc) \
+      || die "$QUAY@$DIGEST carries an ambiguous sdlc signature"
     [ "$_sv" = "$VERSION" ] || die "$QUAY@$DIGEST is not signed by sdlc's key as $VERSION ('$_sv')"
     [ "$(label_version "$QUAY@$DIGEST")" = "$VERSION" ] || die "$QUAY@$DIGEST's version label is not $VERSION"
     # Nothing is built or signed: only :<major> moves.
@@ -391,6 +415,11 @@ mode_sign() {
   else
     [ -n "$_cur" ] || die "$QUAY:$MAJOR does not exist; a weekly run rebuilds only what it carries"
     [ "$_v" = "${_cur#* }" ] || die "the rebuild is $_v, $QUAY:$MAJOR carries ${_cur#* }; weekly neither undoes a rollback nor releases"
+    # The same version is not enough: it must be the same commit, or a moved
+    # tag would have Monday's run sign other code under this version.
+    _was=$(revision_of "$QUAY@${_cur%% *}")
+    _now=$(revision_of "$QUAY@$_d")
+    [ "$_now" = "$_was" ] || die "the rebuild is of $_now, $QUAY:$MAJOR was built from $_was; refusing"
   fi
   # sdlc-boot is checked before anything is signed, so a refusal signs nothing.
   _b=
@@ -398,7 +427,8 @@ mode_sign() {
   if [ -n "$_b" ]; then
     digest_ok "$_b" || die "image's output names a malformed sdlc-boot digest: $_b"
     [ "$(label_version "$BOOT@$_b")" = "$_v" ] || die "$BOOT@$_b is not labelled $_v"
-    _bs=$(signed_version "$BOOT@$_b" crunchtools/sdlc-boot)
+    _bs=$(signed_version "$BOOT@$_b" crunchtools/sdlc-boot) \
+      || die "$BOOT@$_b carries an ambiguous sdlc signature"
     [ -z "$_bs" ] || [ "$_bs" = "$_v" ] || die "$BOOT@$_b is signed as '$_bs', not $_v"
   fi
   sign_one "$QUAY" "$_d" crunchtools/sdlc "$_v"
@@ -406,7 +436,10 @@ mode_sign() {
 
   # Read again, inside the sdlc-sign concurrency group, immediately before the
   # move: a weekly run queued behind a release finds :<major> moved and stops.
-  [ "$(current)" = "$_cur" ] || die "$QUAY:$MAJOR moved while this run was signing; refusing"
+  # On its own line: inside `[ "$(current)" = ... ]` a die in current() would
+  # only end the substitution, and on a first release "" = "" would retag.
+  _again=$(current)
+  [ "$_again" = "$_cur" ] || die "$QUAY:$MAJOR moved while this run was signing; refusing"
   retag "$QUAY" "$_d" "$_v"
   retag "$QUAY" "$_d" "$MAJOR"
   if [ "$MODE" = release ]; then

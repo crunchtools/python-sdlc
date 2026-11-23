@@ -40,8 +40,8 @@ jobs:
   check:  # default-branch code only: builds it, runs `sdlc ci` from it, plans, uploads SARIF, keeps the schedule alive
     name: sdlc / plan (${{ github.event_name }})  # never the required name: test reports that
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-      || github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      github.event_name == 'schedule'
+      || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
     permissions: { contents: read, security-events: write, actions: write }
     outputs: { result: "${{ steps.s.outputs.result }}" }
@@ -94,14 +94,14 @@ jobs:
            SDLC_RELEASE: "${{ needs.write.outputs.release }}", SDLC_QUAY_USERNAME: "${{ secrets.SDLC_QUAY_USERNAME }}", SDLC_QUAY_PASSWORD: "${{ secrets.SDLC_QUAY_PASSWORD }}" }
     steps: [*fetch, { id: s, run: scripts/self.sh }]
   approve:  # no secret; sdlc-approval's reviewers (Josui Prime, Scott; prevent_self_review) are the approval
-    if: github.event_name == 'workflow_dispatch' && inputs.digest != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.digest != '' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     environment: sdlc-approval
     permissions: {}
     steps: [{ run: "true" }]
   sign:  # the only job with the sdlc key: cosign and validation on the host; release images are data
     needs: [image, approve]
-    if: always() && !cancelled() && (needs.image.result == 'success' || needs.approve.result == 'success')
+    if: always() && !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (needs.image.result == 'success' || needs.approve.result == 'success')
     concurrency: { group: sdlc-sign, queue: max }
     runs-on: ubuntu-latest
     environment: sdlc-signing

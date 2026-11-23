@@ -94,10 +94,14 @@ case $1 in
           _c=$(( $(cat "$W/count" 2> /dev/null || echo 0) + 1 )); echo "$_c" > "$W/count"
           if [ -e "$W/swap-at" ] && [ "$_c" = "$(cat "$W/swap-at")" ]; then
             cp "$W/swap-to" "$W/reg/tag/$(san "$_ref")"
+          fi
+          if [ -e "$W/err-at" ] && [ "$_c" = "$(cat "$W/err-at")" ]; then
+            echo 'Error: unauthorized: authentication required' >&2; exit 1
           fi ;;
         esac
         _f=$W/reg/tag/$(san "$_ref")
         if [ -s "$_f" ]; then cat "$_f"; else echo 'Error: manifest unknown' >&2; exit 1; fi ;;
+      *image.revision*) cat "$W/reg/rev/$(san "$_ref")" 2> /dev/null || : ;;
       *) cat "$W/reg/label/$(san "$_ref")" 2> /dev/null || : ;;
     esac ;;
   copy)
@@ -109,7 +113,7 @@ esac
 EOF
 
 # git: ls-remote answers from `tags` (or fails on `ls-remote-fails`); all else
-# is the real git.
+# is the real git, with fetches logged.
 { printf '#!/bin/sh\nW=%s\n' "$W"; cat <<EOF; } > "$W/bin/git"
 if [ "\$1" = ls-remote ]; then
   printf 'git %s\n' "\$*" >> "\$W/log"
@@ -117,6 +121,7 @@ if [ "\$1" = ls-remote ]; then
   cat "\$W/tags" 2> /dev/null || :
   exit 0
 fi
+case " \$* " in *" fetch "*) printf 'git %s\n' "\$*" >> "\$W/log" ;; esac
 exec $REALGIT "\$@"
 EOF
 # curl: the keepalive. Its stdin is the header, which must not be in argv.
@@ -151,7 +156,7 @@ git -C "$W/repo" -c user.name=t -c user.email=t@t commit -q -m init
 REV=$(git -C "$W/repo" rev-parse HEAD)
 
 reset() {
-  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/count" "$W/swap-at" "$W/swap-to" "$W/tags" \
+  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/tags" \
          "$W/ls-remote-fails" "$W/curl-stdin" "$W/login-stdin" "$W/repo/boot/keys/"*
   mkdir -p "$W/reg/tag" "$W/reg/label"
   write_tree
@@ -162,10 +167,13 @@ reset() {
 san() { printf '%s' "$1" | tr '/:@' '___'; }
 reg_tag()    { printf '%s' "$2" > "$W/reg/tag/$(san "$1")"; }
 reg_label()  { printf '%s\n' "$2" > "$W/reg/label/$(san "$1")"; }
+reg_rev()    { mkdir -p "$W/reg/rev"; printf '%s\n' "$2" > "$W/reg/rev/$(san "$1")"; }
 mark_signed() { mkdir -p "$W/signed"; printf '%s\n' "$3" > "$W/signed/$(san "$1")__$(san "$2")"; }
 tag_of()     { cat "$W/reg/tag/$(san "$1")" 2> /dev/null || :; }
-# :0 as a release carried it: tagged, signed and labelled $2 at digest $1.
-carry()      { reg_tag "$A:0" "$1"; mark_signed "$A@$1" crunchtools/sdlc "$2"; reg_label "$A@$1" "$2"; }
+# :0 as a release carried it: tagged, signed and labelled $2 at digest $1,
+# built from the fake repo's commit.
+carry()      { reg_tag "$A:0" "$1"; mark_signed "$A@$1" crunchtools/sdlc "$2"; reg_label "$A@$1" "$2"
+               reg_rev "$A@$1" "$REV"; }
 
 run() {              # job mode [VAR=value...]: sets RC and OUT
   _j=$1 _m=$2; shift 2
@@ -318,13 +326,18 @@ reset; img 'SDLC_RELEASE={"version":"0.13.0"}' SDLC_QUAY_PASSWORD=
 refused "release: no SDLC_QUAY_PASSWORD is refused" "SDLC_QUAY_PASSWORD"
 reset; printf 'garbage' > "$W/digest-sdlc"; img 'SDLC_RELEASE={"version":"0.13.0"}'
 check "release: a push that reports no digest fails" rc_is 1
-# weekly rebuilds from the tag, which here is the fake repo itself.
-reset; git -C "$W/repo" tag v0.13.0; carry "$D0" 0.13.0
+# weekly rebuilds the commit :0's revision label names, fetched from the fake
+# repo itself. No tag is fetched: a tag can be moved, the signed label cannot.
+reset; carry "$D0" 0.13.0
 run image weekly GITHUB_EVENT_NAME=schedule GITHUB_SERVER_URL="file://$W" GITHUB_REPOSITORY=repo
 if [ "$RC" -eq 0 ] && grep -qxF "result={\"digest\":\"$D1\",\"version\":\"0.13.0\",\"boot\":\"\"}" "$W/out" \
+   && in_log "^git .*fetch -q --depth=1 file://$W/repo $REV\$" && ! in_log 'refs/tags' \
    && in_log '^podman build --no-cache' && ! in_log "^podman push .*$B"; then
-  ok "weekly: rebuilds what :0 carries from its tag, uncached, and pushes no sdlc-boot"
+  ok "weekly: rebuilds the commit :0 names (not a tag), uncached, and pushes no sdlc-boot"
 else bad "weekly image: exit $RC"; dump; fi
+reset; carry "$D0" 0.13.0; reg_rev "$A@$D0" "v0.13.0"
+run image weekly GITHUB_EVENT_NAME=schedule GITHUB_SERVER_URL="file://$W" GITHUB_REPOSITORY=repo
+refused "weekly: a revision label that is not a commit sha is refused" "is not a commit sha"
 reset
 run image weekly GITHUB_EVENT_NAME=schedule GITHUB_SERVER_URL="file://$W" GITHUB_REPOSITORY=repo
 refused "weekly: no :0 means no release to rebuild" "does not exist"
@@ -416,10 +429,20 @@ refused ":0 whose label and annotation disagree is refused" "must agree"
 rel_setup; carry "$D0" 0.12.0; mark_signed "$A@$D2" crunchtools/sdlc 0.12.0; reg_label "$A@$D2" 0.12.0
 printf 2 > "$W/swap-at"; printf '%s' "$D2" > "$W/swap-to"; rel
 refused_late ":0 moving between the first read and the retag is refused" "moved while this run was signing"
+# A first release reads :0 as absent; a registry error on the re-read must stop
+# the retag, not compare "" with "" and go ahead.
+rel_setup; printf 2 > "$W/err-at"; rel
+refused_late "a registry error re-reading :0 on a first release stops the retag" "cannot read $A:0"
+# Two versions under sdlc's key: neither signed nor unsigned, and no third
+# signature is added beside them.
+rel_setup; mark_signed "$A@$D1" crunchtools/sdlc 0.13.0
+printf '0.12.9\n' >> "$W/signed/$(san "$A@$D1")__crunchtools_sdlc"; rel
+refused "an ambiguous signature is refused before anything is signed" "refusing to add another"
+check "  and cosign sign never ran" [ "$(n_log ' sign --yes ')" -eq 0 ]
 
 printf '\n%s\n' '-- sign weekly'
 BUILT_W="{\"digest\":\"$D1\",\"version\":\"0.13.0\",\"boot\":\"$DB\"}"
-wk_setup() { reset; reg_label "$A@$D1" 0.13.0; carry "$D0" 0.13.0; }
+wk_setup() { reset; reg_label "$A@$D1" 0.13.0; carry "$D0" 0.13.0; reg_rev "$A@$D1" "$REV"; }
 # shellcheck disable=SC2119,SC2120
 wk() { run sign weekly EVENT=schedule BUILT="$BUILT_W" "$@"; }
 reset; reg_label "$A@$D1" 0.13.0; wk
@@ -428,6 +451,11 @@ wk_setup; carry "$D0" 0.12.9; wk
 refused "a rebuild whose version is not :0's is refused" "weekly neither undoes a rollback nor releases"
 wk_setup; reg_label "$A@$D0" 0.13.1; wk
 refused ":0's annotation and label disagreeing is refused" "must agree"
+# A moved vX.Y.Z tag builds other code under the same version: the revision
+# label is what tells, and nothing is signed or tagged.
+wk_setup; reg_rev "$A@$D1" "$(printf 'f%.0s' $(seq 40))"; wk
+refused "a rebuild of another commit than :0's is refused" "was built from $REV"
+check "  and nothing was signed" [ "$(n_log ' sign --yes ')" -eq 0 ]
 wk_setup; wk
 if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0.13.0")" = "$D1" ] && [ "$(tag_of "$A:0")" = "$D1" ] \
    && [ -z "$(tag_of "$A:latest")" ] && [ "$(n_log ' sign --yes ')" -eq 1 ] \
