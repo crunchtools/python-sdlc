@@ -144,9 +144,11 @@ for name in $(jq -rn 'env | keys[]'); do
 done
 
 # Not exec: the EXIT trap removes the scratch file. The status passes through,
-# except docker's own 125 (the container never started), which is boot's 2.
+# except docker's own 125, 126 and 127 (the daemon refused, or the command in
+# the image could not be invoked): no check ran, so they are boot's 2. sdlc's
+# own verdicts are 0, 1 and 2.
 # shellcheck disable=SC2086
 docker run --rm --volumes-from "$self" -w "$PWD" $envargs --pull=never "$pinned" "$@"
 rc=$?
-[ "$rc" -ne 125 ] || cannot "$pinned could not be started"
+case $rc in 125|126|127) cannot "$pinned could not be started (docker run exited $rc)" ;; esac
 exit "$rc"

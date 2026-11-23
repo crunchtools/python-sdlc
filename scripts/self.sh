@@ -207,16 +207,21 @@ cosign_key() {
     -e SDLC_KEY -e COSIGN_PASSWORD -- "$COSIGN_IMAGE" "$@"
 }
 
-# The one version sdlc's key signed $1 with for repo $2, or nothing.
+# The one version sdlc's key signed $1 with for repo $2, or nothing. When no
+# key verifies, cosign's own words go to stderr: "not signed" and "could not
+# reach the registry" read the same to the caller, and only they tell apart.
 signed_version() {
+  : > "$work/verify.err"
   for _k in "$work/keys/"*.pub; do
     if cosign verify --key "/keys/${_k##*/}" --insecure-ignore-tlog=true \
-         -a "repo=$2" "$1" > "$work/verify.json" 2> /dev/null; then
+         -a "repo=$2" "$1" > "$work/verify.json" 2>> "$work/verify.err"; then
       _vs=$(jq -r '[.[].optional.version // empty] | unique | .[]' "$work/verify.json")
       [ "$(printf '%s\n' "$_vs" | grep -c .)" -eq 1 ] && printf '%s' "$_vs"
       return 0
     fi
   done
+  printf "self.sh: %s is not verified by sdlc's key as repo=%s; cosign said:\n" "$1" "$2" >&2
+  sed 's/^/self.sh:   /' "$work/verify.err" >&2
 }
 label_version() {
   skopeo inspect --authfile "$AUTH" --format '{{ index .Labels "version" }}' "docker://$1"

@@ -229,6 +229,18 @@ else
   bad "inner exit 1 became $RC"
 fi
 
+# docker's own failures mean no check ran, so they are boot's 2, never a verdict.
+for rc in 125 126 127; do
+  reset
+  printf '%s\n' "$rc" > "$W/inner-rc"
+  run event
+  if [ "$RC" -eq 2 ]; then
+    ok "docker run exiting $rc is boot's 2"
+  else
+    bad "docker run exiting $rc became $RC"
+  fi
+done
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
   printf 'boot test PASSED\n'
