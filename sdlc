@@ -37,6 +37,7 @@ import argparse
 import errno
 import fcntl
 import hashlib
+import importlib
 import itertools
 import json
 import os
@@ -501,6 +502,7 @@ WRITES_TREE = ("ruff-check", "ruff-format", "gourmand")
 RESERVED = (
     *COMMANDS,
     "plan",
+    "event",
     "tiers",
     "list",
     "versions",
@@ -3347,6 +3349,69 @@ def t_launcher(ref: str | None) -> int:
     return CLEAN
 
 
+# ------------------------------------------------------------------ sdlc event
+
+# Where sdlc_jobs/ is found: beside this script in a checkout, and where the
+# image installs it.
+JOBS_PATHS = (Path(__file__).resolve().parent, Path("/usr/share/sdlc"))
+JOB_NAME = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def event_payload() -> tuple[str, dict]:
+    """GITHUB_EVENT_NAME and the payload at GITHUB_EVENT_PATH."""
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    if not event_name:
+        cannot("GITHUB_EVENT_NAME is not set: `sdlc event` runs inside a workflow job")
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    try:
+        event = json.loads(Path(event_path).read_text()) if event_path else {}
+    except (OSError, ValueError) as exc:
+        cannot(f"the event payload at {event_path} does not load: {exc}")
+    if not isinstance(event, dict):
+        cannot(f"the event payload at {event_path} is not an object")
+    return event_name, event
+
+
+def job_module(job: str) -> object:
+    """sdlc_jobs.<job>, or a 2 naming the handler this sdlc does not have."""
+    for where in JOBS_PATHS:
+        if (where / "sdlc_jobs").is_dir() and str(where) not in sys.path:
+            sys.path.insert(0, str(where))
+    try:
+        return importlib.import_module(f"sdlc_jobs.{job}")
+    except ModuleNotFoundError as exc:
+        if exc.name in ("sdlc_jobs", f"sdlc_jobs.{job}"):
+            cannot(f"this sdlc has no handler for job `{job}` (sdlc_jobs/{job}.py)")
+        raise
+
+
+def t_event(job: str | None) -> int:
+    """Run this workflow job's trust level for this event: sdlc_jobs.<job>.main.
+
+    The job is the argument, or GITHUB_JOB. A job with no module yet is a 2
+    naming it, never a silent pass. `write` with DIGEST set is sdlc's rollback
+    dispatch, and does nothing: the workflow's `if:` already skips it, and this
+    is the second guard.
+    """
+    job = job or os.environ.get("GITHUB_JOB", "")
+    if not JOB_NAME.fullmatch(job):
+        cannot(f"no job to run: GITHUB_JOB is {job!r}")
+    event_name, event = event_payload()
+    if job == "write" and os.environ.get("DIGEST"):
+        step("write: DIGEST is set, a rollback dispatch; nothing to do")
+        return CLEAN
+    module = job_module(job)
+    core = importlib.import_module("sdlc_jobs._core")
+    step(f"sdlc event: job {job}, event {event_name}")
+    try:
+        rc = module.main(event_name, event, os.environ)  # type: ignore[attr-defined]
+    except core.CannotRunError as exc:
+        cannot(str(exc))
+    if rc not in (CLEAN, FOUND, CANNOT_RUN, DEFERRED):
+        cannot(f"job {job} returned {rc!r}, outside the exit contract")
+    return rc
+
+
 TOOL_COMMANDS = {
     "tiers": t_tiers,
     "list": t_list,
@@ -3368,6 +3433,8 @@ def main() -> int:
     ap.add_argument("arg", nargs="?", help="for plan: commit, push, ci or a check name")
     args = ap.parse_args()
 
+    if args.what == "event":
+        return t_event(args.arg)
     if args.what == "launcher":
         return t_launcher(args.arg)
     if args.what == "npm-install":

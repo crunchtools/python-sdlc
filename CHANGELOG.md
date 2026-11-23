@@ -6,6 +6,19 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `sdlc event`: the one command each job of the fleet's single `ci.yml` runs. It
+  routes on `GITHUB_JOB` to `sdlc_jobs/<job>.py`; a job with no module is a 2
+  naming it, and `write` with `DIGEST` set (sdlc's rollback dispatch) does nothing.
+- The `check`, `image`, `promote` and `pypi` jobs (docs/marketplace-free-ci.md):
+  `check` gates through the launcher pinned to its own image and writes the plan;
+  `image` verifies the parent, builds FROM its digest, gates and pushes
+  `gated-<sha>`; `promote` signs, attests and moves tags without ever moving a
+  version backwards; `pypi` re-verifies the release and publishes by OIDC.
+- `bin/sdlc` honours `SDLC_HOST_REPO`, the repo's path on the machine podman runs
+  on, for a job container that drives the runner's socket.
+
 ## [0.11.1] - 2026-11-23
 
 ### Changed

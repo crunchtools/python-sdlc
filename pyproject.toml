@@ -35,7 +35,7 @@ python_version = "3.14"
 scripts_are_modules = true
 # What `sdlc push` checks when it runs mypy bare. tests/ is not here yet: the
 # suites load `sdlc` through importlib, so mypy sees a module of Any.
-files = ["sdlc", "validate", "scripts"]
+files = ["sdlc", "validate", "scripts", "sdlc_jobs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
