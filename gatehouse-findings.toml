@@ -121,6 +121,19 @@ and tests/contract.sh asserts the major. Every tool a check runs \
 """
 
 [[findings]]
+agent = "performance"
+category = "performance"
+file = "sdlc_jobs/gate.py"
+evidence = "for owner, name, number in sorted(refs):\n        try:\n            issue = api.request(\"GET\", f\"/repos/{owner}/{name}/issues/{number}\")"
+status = "not-a-bug"
+reason = """
+One GET per distinct issue a `deferred:` reply names, deduplicated first, and \
+those are a handful per pull request. triage.yml made the same calls one by \
+one. The REST API has no batch issue read, and concurrency would add \
+complexity to the required check for a saving of milliseconds.
+"""
+
+[[findings]]
 agent = "constitution"
 category = "constitution"
 file = "examples/ci.yml"

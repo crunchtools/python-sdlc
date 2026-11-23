@@ -32,6 +32,19 @@ All notable changes to this project are documented here, following
   then merges by admin bypass, moves the rulesets idempotently, drops the repo from
   each moved org secret and updates bot PRs. `--move-rulesets` and `--check`
   (moved secrets still readable, rulesets out of step, no `ashigaru/release-*` guard).
+- `sdlc_jobs/`: the `ai`, `write` and `gate` jobs of the one-file ci.yml
+  (docs/marketplace-free-ci.md), each a `main(event_name, event, env)` that
+  `sdlc event` calls. `ai` runs Gatehouse's review (its own CLI, with what it
+  would post recorded rather than posted) and Ashigaru's triage, code and fix
+  agents with model keys and a read token, and hands the result to `write` in
+  four outputs of at most 112,500 bytes. `write` mints an Ashigaru App token
+  per step and posts the review, applies the fix round, triage and issue PR
+  through Ashigaru's own scripts, opens the release PR, verifies and tags a
+  release merge, and keeps the audit alert issue; it exits at once on a
+  dispatch carrying `DIGEST`. `gate` is the required check: the fork workflow
+  guard, `ai` and `write` succeeded, and a port of Gatehouse's triage that
+  counts only the App's review; a collaborator's reply re-runs it in the
+  `pull_request_target` run.
 
 ## [0.11.1] - 2026-11-23
 

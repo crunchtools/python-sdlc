@@ -32,7 +32,10 @@ justification = """
   path but an explicit tmpfs bin/sdlc mounts (sized, exec, mode 1777) because \
   the repo is read-only for most targets; ARG001 on sdlc, where every target \
   takes cfg so one dispatch table can call them uniformly and three have no \
-  settings to read; S101 and PT018 under tests/, because a test asserts. No \
+  settings to read; S101 and PT018 under tests/, because a test asserts; \
+  PLR2004, S105 and S106 on the sdlc_jobs suites and their fake, which assert \
+  counts as the numbers they are and hand the jobs fake credentials so that \
+  nothing real is ever near a test. No \
   threshold is raised anywhere and no check is disabled -- \
   [tool.ruff.lint.pylint] and [tool.ruff.lint.mccabe] are set to the fleet's \
   values explicitly so that raising one would be a visible change.
@@ -70,4 +73,97 @@ justification = """
   maps image labels to an SLSA predicate dict. The match is three statements, \
   an assignment and an early `return None`, the opening of most lookups in \
   Python, not duplicated logic, so there is no shared helper to extract.
+"""
+
+# The image layout, not a guess. sdlc_jobs runs only inside the sdlc image,
+# whose Containerfile puts Ashigaru's scripts and the constitution's scripts
+# at these paths; the tests point the module attributes at fixtures.
+[[exceptions]]
+check = "CH001-absolute_paths"
+path = "sdlc_jobs/_tools.py"
+classification = "by_design"
+justification = """
+  ASHIGARU_SCRIPTS and CONSTITUTION_SCRIPTS name where the sdlc image's \
+  Containerfile installs the code the jobs call into, the same way sdlc names \
+  /repo and /cache. They are module attributes, not environment toggles, so \
+  a run cannot be pointed at other code by a variable (design: no variable \
+  chooses code), and tests patch the attributes to fixtures.
+"""
+
+# Revoking the App token is cleanup after the step's work has succeeded.
+[[exceptions]]
+check = "EV004-redundant_error_handling"
+path = "sdlc_jobs/_app_token.py"
+classification = "by_design"
+justification = """
+  The DELETE /installation/token in app_token's finally block runs after the \
+  step has already posted, pushed or tagged. A failed revoke is reported as a \
+  ::warning:: and not raised because the token expires within the hour by \
+  GitHub's design, and failing the job here would mark `write` failed after \
+  its work landed, so a re-run would post the same review twice. The handler \
+  decides that outcome; it does not hide one.
+"""
+
+# GitHub is instantiated in ai.main and gate.main, and is Site's default
+# api_for; nothing in the repo imports sdlc_jobs yet because the `sdlc event`
+# dispatcher that calls each job's main lands in its own pull request.
+[[exceptions]]
+check = "DC004-dead_structs"
+path = "sdlc_jobs/_github.py"
+classification = "gourmand_bug"
+justification = """
+  GitHub is constructed in sdlc_jobs/ai.py's main and sdlc_jobs/gate.py's \
+  main, and is the default api_for of _tools.Site, which write.py's main \
+  builds. Those mains are entry points called by `sdlc event`, whose \
+  dispatcher is a separate change, so no production module imports them yet \
+  and the class looks test-only. It is the only HTTP client the jobs have.
+"""
+
+# A shape match, not a copy. gate._triage reads a PR's reviews, comments and
+# commits and judges them; write's apply_fix resolves ids and runs
+# fix_publish.py. They share a run of assign/call/return statements only.
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/gate.py"
+classification = "gourmand_bug"
+justification = """
+  gate._triage and write.Job.apply_fix share no line, call or identifier: \
+  one pages a pull request's reviews, comments and commits and returns the \
+  unanswered findings, the other checks the branch head, swaps pending \
+  finding ids for real ones and runs Ashigaru's fix_publish.py. The match is \
+  ten assignments and calls of similar length, the shape of most short \
+  Python functions, so there is no shared helper to extract.
+"""
+
+# The same shape match again: CH012 pairs fleet_wave.py's ashigaru_caller
+# (reads Ashigaru's tagged caller workflow) with whichever sdlc_jobs function
+# has a similar run of assign/if/raise statements, and moves to another one
+# each time that one is reshaped -- write.apply_fix, then ai.Job.issue.
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "scripts/fleet_wave.py"
+classification = "gourmand_bug"
+justification = """
+  ashigaru_caller resolves a tag to a commit and reads examples/ashigaru.yml \
+  at it; the sdlc_jobs functions it is paired with route an issue event or \
+  apply a fix round. They share no line, call or identifier. Reshaping the \
+  sdlc_jobs side twice moved the match to a different function each time, \
+  which is what a shape match does and duplicated logic does not.
+"""
+
+# Three statements: run one of Ashigaru's scripts, check it, return what it
+# set. ai's guard and write's publish_code call different scripts with
+# different credentials; the shared shape is the one-line contract of
+# _tools.ashigaru and _tools.checked, which are already the shared helpers.
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/ai.py"
+classification = "gourmand_bug"
+justification = """
+  Job.guard (guard.py, read token, ai) and write's Job.publish_code \
+  (publish.py, App token, write) match on three statements: call \
+  _tools.ashigaru, pass the result to _tools.checked, return an output. The \
+  logic they share already lives in those two helpers; merging the callers \
+  would put the read token and the App token behind one function, which the \
+  ai/write split exists to prevent.
 """
