@@ -340,10 +340,9 @@ check(
 
 # ======================================================================= the API
 
-# The fleet file names sdlc-bootstrap by a placeholder until prerequisite 4, and
-# every mode refuses that (pinned below); the API tests run on a pinned copy.
-# The fleet file as it was before sdlc-bootstrap's first release, and pinned to
-# a stand-in digest, whatever the real file pins today.
+# Two fixtures from the real fleet file, whatever digest it pins: one with the
+# placeholder it carried before sdlc-bootstrap's first release, which every
+# mode must refuse, and one pinned to a stand-in digest for the API tests.
 PLACEHOLDER = "sdlc-bootstrap@sha256:<digest>"
 FLEET_TEXT = re.sub(r"sdlc-bootstrap@sha256:[0-9a-f]{64}", PLACEHOLDER, cut.FLEET_FILE.read_text())
 PINNED_DIR = Path(tempfile.mkdtemp())

@@ -418,6 +418,20 @@ else:
         only_test = admitting == ["test"]
         check("own: test is the only job that admits pull_request", only_test, str(admitting))
         test = own["test"]
+        same_repo_pr = event(
+            "pull_request", **{"github.event.pull_request.head.repo.full_name": "crunchtools/app"}
+        )
+        fork_pr = event(
+            "pull_request", **{"github.event.pull_request.head.repo.full_name": "stranger/app"}
+        )
+        cached = {"vars.CACHED_RUNNER_LABEL": "crunchtools-cached"}
+        for label, ctx, want in (
+            ("a same-repo PR, cached label set", {**same_repo_pr, **cached}, "crunchtools-cached"),
+            ("a same-repo PR, no cached label", same_repo_pr, "ubuntu-latest"),
+            ("a fork's PR, cached label set", {**fork_pr, **cached}, "ubuntu-latest"),
+        ):
+            got = evaluate(str(test["runs-on"]), ctx)
+            check(f"own: test runs {label} on {want}", got == want, str(got))
         read_only = test.get("permissions") == {"contents": "read"}
         check("own: test has permissions { contents: read }", read_only)
         check("own: test has no environment", "environment" not in test)
