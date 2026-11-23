@@ -12,8 +12,12 @@ Run: tests/test_pip_audit_resilience.py   (needs the image's python3 and PyYAML)
 
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
+import json
+import os
 import sys
 import tempfile
 from collections.abc import Callable
@@ -287,10 +291,107 @@ def unpinned() -> bool:
         return check(got == "cannot" and not h.calls, "no baked pip-audit version is a 2")
 
 
+def report_path(args: list[str] | None) -> Path | str | None:
+    """pip_audit_report_path under SDLC_ARGS=args (unset for None), or "cannot"."""
+    saved = os.environ.pop("SDLC_ARGS", None)
+    if args is not None:
+        os.environ["SDLC_ARGS"] = _SDLC.UNIT_SEPARATOR.join(args)
+    try:
+        return _SDLC.pip_audit_report_path()
+    except _SDLC.CannotRunError:
+        return "cannot"
+    finally:
+        os.environ.pop("SDLC_ARGS", None)
+        if saved is not None:
+            os.environ["SDLC_ARGS"] = saved
+
+
+def report_mode() -> bool:
+    """`-- --report`: the path, the report's reader, the printed line, and the argv."""
+    ok = True
+    ok &= check(report_path(None) is None, "no SDLC_ARGS: no report path")
+    path = report_path(["--report"])
+    ok &= check(isinstance(path, Path) and path.name == "audit.json", "--report: a report path")
+    if isinstance(path, Path):
+        path.parent.rmdir()
+    for args in (["--format", "json"], ["--report", "--fix"], ["-k", "x"]):
+        ok &= check(report_path(args) == "cannot", f"{args}: COULD NOT RUN")
+
+    dep = {"name": "requests", "version": "2.32.3", "vulns": []}
+    with tempfile.TemporaryDirectory() as tmp:
+        report = Path(tmp) / "audit.json"
+
+        def read(**kw: dict) -> object:
+            try:
+                return _SDLC.pip_audit_report(report, **kw)
+            except _SDLC.CannotRunError:
+                return "cannot"
+
+        report.write_text(json.dumps({"dependencies": [dep]}), encoding="utf-8")
+        ok &= check(read() == [dep], "a valid report reads back its dependencies")
+        report.write_text("{}", encoding="utf-8")
+        ok &= check(read() == [], "a report with no dependencies key is an empty list")
+        report.unlink()
+        ok &= check(read() == "cannot", "no report file is COULD NOT RUN")
+        ok &= check(read(missing={}) == [], "no report file, with missing={}, is an empty list")
+        report.write_text("{not json", encoding="utf-8")
+        ok &= check(read() == "cannot", "a malformed report is COULD NOT RUN")
+        for what, doc in {
+            "a list document": [],
+            "dependencies a string": {"dependencies": "requests"},
+            "dependencies a dict": {"dependencies": {}},
+            "a dependency that is not an object": {"dependencies": [dep, "requests"]},
+        }.items():
+            report.write_text(json.dumps(doc), encoding="utf-8")
+            ok &= check(read() == "cannot", f"{what} is COULD NOT RUN")
+
+        report.write_text(json.dumps({"dependencies": [dep], "fixes": [1]}), encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            _SDLC.print_pip_audit_report(report)
+        lines = out.getvalue().splitlines()
+        ok &= check(
+            len(lines) == 1
+            and lines[0].startswith(_SDLC.AUDIT_REPORT)
+            and json.loads(lines[0].removeprefix(_SDLC.AUDIT_REPORT)) == {"dependencies": [dep]},
+            "the printed report is one AUDIT_REPORT line of {dependencies: [...]}",
+        )
+
+        skip = {
+            "name": "petit-plus",
+            "version": "0.1.0",
+            "skip_reason": "Dependency not found on PyPI and could not be audited: petit-plus",
+        }
+        with tempfile.TemporaryDirectory() as proj:
+            h = Harness(Path(proj), [(0, "No known vulnerabilities found\n")])
+
+            def run(cmd: list[str], **_: object) -> tuple[int, str]:
+                h.calls.append(cmd)
+                report.write_text(json.dumps({"dependencies": [dep, skip]}), encoding="utf-8")
+                return 0, "No known vulnerabilities found\n"
+
+            _SDLC.run = run
+            _rc, _out, unaudited = _SDLC.pip_audit_once({}, report)
+            ok &= check(
+                h.calls[0][-4:] == ["--format", "json", "--output", str(report)],
+                "with a report, pip-audit gets --format json --output <report>",
+            )
+            ok &= check(
+                unaudited == ["petit-plus"],
+                "with a report, skip reasons are read back from it",
+            )
+            h.calls.clear()
+            _SDLC.run = h.run
+            _SDLC.pip_audit_once({})
+            ok &= check("--output" not in h.calls[0], "without a report, the argv is unchanged")
+    return ok
+
+
 def main() -> int:
     ok = cases()
     ok &= bad_lock()
     ok &= unpinned()
+    ok &= report_mode()
     print("pip-audit resilience PASSED" if ok else "pip-audit resilience FAILED")
     return 0 if ok else 1
 

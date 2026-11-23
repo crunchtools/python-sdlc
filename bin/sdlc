@@ -82,6 +82,10 @@ REPO=$(git rev-parse --show-toplevel 2>/dev/null) \
   || die "not inside a git repository"
 cd "$REPO"
 PROJECT=$(basename "$REPO")
+# Where the repo is on the machine podman runs on. The same path on a laptop;
+# in a CI job container driving the runner's socket, `sdlc event` sets it to the
+# host path of the workspace, because a nested container mounts host paths.
+HOST_REPO=${SDLC_HOST_REPO:-$REPO}
 
 # ------------------------------------------------------------- an image override
 #
@@ -443,7 +447,7 @@ run_in_image() {
     ${PULL_NEWER:+--pull=newer} \
     --cap-drop=all --security-opt=no-new-privileges \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
-    -v "$REPO:/repo:$_mode,z" -w /repo \
+    -v "$HOST_REPO:/repo:$_mode,z" -w /repo \
     -v "$CACHE_VOLUME:/cache" \
     ${CONSTITUTION_MOUNT:+-v "$CONSTITUTION_MOUNT"} \
     --tmpfs /tmp:rw,exec,size=4g,mode=1777 \
@@ -456,7 +460,7 @@ run_in_image() {
     -e "SDLC_MEMORY=$GATE_MEMORY" \
     -e "SDLC_DEFAULT_BRANCH=$(default_branch 2>/dev/null || :)" \
     ${SDLC_TIER:+-e SDLC_TIER} \
-    -e "SDLC_HOST_REPO=$REPO" \
+    -e "SDLC_HOST_REPO=$HOST_REPO" \
     -e "SDLC_CACHE_VOLUME=$CACHE_VOLUME" \
     ${SDLC_SKIP:+-e SDLC_SKIP} \
     ${SDLC_ARGS:+-e SDLC_ARGS} \

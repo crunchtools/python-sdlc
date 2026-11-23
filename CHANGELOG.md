@@ -32,6 +32,25 @@ All notable changes to this project are documented here, following
 
 ### Added
 
+- `sdlc event`: the one command each job of the fleet's single `ci.yml` runs. It
+  routes on `GITHUB_JOB` to `sdlc_jobs/<job>.py`; a job with no module is a 2
+  naming it, and `write` with `DIGEST` set (sdlc's rollback dispatch) does nothing.
+- The `check`, `image`, `promote` and `pypi` jobs (docs/marketplace-free-ci.md):
+  `check` gates through the launcher pinned to its own image and writes the plan;
+  `image` verifies the parent, builds FROM its digest, gates and pushes
+  `gated-<sha>`; `promote` signs, attests and moves tags without ever moving a
+  version backwards; `pypi` re-verifies the release and publishes by OIDC.
+- The `image` job reads `[tool.sdlc.image]` (#107's contract): `image` may only
+  restate the repo's own quay.io/crunchtools/<repo>, `rhsm` and
+  `redhat-registry` make their secrets required, `format` overrides docker/oci. `containerfile`/`context` other
+  than the root are refused for `[tool.sdlc.ci.container-build]`; the boot gate's
+  inputs are accepted and printed as not enforced yet (#110).
+- `sdlc pip-audit -- --report` prints pip-audit's JSON report on one
+  `SDLC-AUDIT-REPORT` line. The weekly `check` hands it on as `audit`, clean or
+  not, so `write`'s `audit_alert` can also close the issue; `release` is
+  `{version, publish}`.
+- `bin/sdlc` honours `SDLC_HOST_REPO`, the repo's path on the machine podman runs
+  on, for a job container that drives the runner's socket.
 - `cutover.py --merge REPO --pr N`: refuses a busy repo (a person's open PR, an old
   `ashigaru/release-*`), an unrecorded PyPI publisher swap (`--pypi-ledger`), a
   private repo, org secrets not scoped to selected repositories, or red new checks;
@@ -77,6 +96,24 @@ All notable changes to this project are documented here, following
   ignored a failed fetch and never compared it; the Python bundle's sha256 is
   now pinned as `CODEQL_SHA256` beside `CODEQL_BUNDLE` and checked with
   `sha256sum -c`.
+
+### Fixed
+
+- `[tool.sdlc] image` as a table no longer fails config: a string stays the
+  seat's launcher tag, now deprecated for `SDLC_IMAGE`.
+- The jobs read `sdlc.toml`'s `[tool.sdlc]` tables; they read its top level.
+- A gate's `--network=host` / `--net=host` is refused like the two-word form.
+- `containerfile-lint` exit 4 (hadolint could not parse) is a 2, not a pass.
+- `[tool.sdlc] publish = "pypi"` no longer fails config as a stray key.
+- `promote` sends `GITHUB_TOKEN` and refuses any tag-API status but 200/404;
+  it requires the image's revision labels and `gated-<sha>` to match the digest.
+- `image` takes the digest from `podman push --digestfile`, checks gate options
+  against an allowlist (`--opt=value` included), and verifies and pins every
+  registry FROM, builder stages too: an untrusted builder is now a 2.
+- Every job names the events it runs on and refuses the rest; an unexpected
+  exception in a job is a 2, never a 1.
+- `check` caps the audit report under GitHub's output limit (only vulnerable
+  dependencies when large); `pypi` reads `[project].name` before the build.
 
 ## [0.11.1] - 2026-11-23
 

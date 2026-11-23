@@ -176,3 +176,26 @@ repos can read an org secret across the org with its repo-level secrets, and \
 both lists must be read per repo, because a refused read is an error, never \
 "none found" (provision-cosign-env.py's stale(), which this follows).
 """
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "Containerfile"
+evidence = "RUN dnf install -y git-core tar zstd which jq podman-remote skopeo \\"
+status = "not-a-bug"
+reason = """
+Main's line, from #106 (ee239e1), reviewed and merged there; it reaches this \
+branch only through the merge of main into feat/a1097-event-core. Whether \
+podman-remote and skopeo take exact RPM pins is #106's call, not this PR's.
+"""
+
+[[findings]]
+agent = "tests"
+category = "testing"
+file = "scripts/self.sh"
+evidence = "retag() {\n  skopeo copy --authfile \"$AUTH\" --all --preserve-digests \"docker://$1@$2\" \"docker://$1:$3\"\n  [ \"$(tag_digest \"$1:$3\")\" = \"$2\" ] || die \"$1:$3 does not resolve to $2 after the copy\"\n  say \"moved $1:$3 to $2\"\n}"
+status = "not-a-bug"
+reason = """
+Main's script, from #106 (ee239e1), reviewed and merged there; it reaches \
+this branch only through the merge of main. Its test coverage is #106's.
+"""

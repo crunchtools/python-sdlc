@@ -167,3 +167,118 @@ justification = """
   would put the read token and the App token behind one function, which the \
   ai/write split exists to prevent.
 """
+
+[[exceptions]]
+check = "EV001-lint_suppression"
+path = "sdlc_jobs/_core.py"
+classification = "by_design"
+justification = """
+  Two `noqa: S310` on Tools.http's Request and urlopen, both guarded by the \
+  `startswith("https://")` refusal at the top of the same function. The \
+  scheme is fixed to https before any URL reaches urllib, so the file:// and \
+  custom-scheme risk S310 exists for is not reachable. Redirects must still \
+  be followed (GitHub answers a renamed repo with one), which rules out \
+  swapping to http.client.
+"""
+
+[[exceptions]]
+check = "EV001-lint_suppression"
+path = "sdlc_jobs/pypi.py"
+classification = "by_design"
+justification = """
+  `noqa: S108` on the `--tmpfs /tmp:rw,exec,size=4g,mode=1777` argument of \
+  the nested `uv build` container. S108 is about a program opening a \
+  predictable file in the shared /tmp; here the string is a mount point \
+  inside a fresh container with its own private tmpfs (sized, exec because \
+  build backends run scripts from it), and HOME=/tmp points at the same \
+  mount. The host's /tmp is never touched.
+"""
+
+[[exceptions]]
+check = "CH001-absolute_paths"
+path = "sdlc_jobs/image.py"
+classification = "by_design"
+justification = """
+  RH_KEY and RH_REKOR are where Red Hat's release public key and Rekor \
+  signing key are installed in gha-runner, the image this job runs in, and \
+  the keyPath values of the skopeo policy.json the job writes for \
+  registry.redhat.io. They are fixed, named once as module constants, and \
+  asserted by tests/test_job_image.py; there is no config to move them to \
+  because the file layout is the image's, not the repo's.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/image.py"
+classification = "gourmand_bug"
+justification = """
+  The matches pair functions that share a silhouette (a few guards that call \
+  cannot(), assignments, a loop, one return) and nothing else: run_gate \
+  (runs a planned podman gate), build_and_push (the job's sequence), \
+  pin_args (rewrites one FROM line), build (assembles podman build argv) and \
+  run (sets up the scratch dir and Job). The real duplicates were extracted \
+  into _core (final_stage, expand_build_vars, show); what is left shares no \
+  line, call or identifier, so there is no helper to extract.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/_core.py"
+classification = "gourmand_bug"
+justification = """
+  host_mount (inspects this container and maps the workspace to a host \
+  path) is paired with image.build (assembles podman build argv): eleven \
+  assign/if/loop statements of similar length, with no line, call or \
+  identifier in common. Shape, not duplicated logic.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/check.py"
+classification = "gourmand_bug"
+justification = """
+  run (reads the event, writes the plan, runs the gates) is paired with \
+  release_plan (asks the API whether this push merged an Ashigaru release \
+  PR): a run of assign/if/return statements of similar length with no line, \
+  call or identifier in common. The real duplicates were extracted into \
+  _core (final_stage, expand_build_vars, show) and the plan building was \
+  split out of run; what is left is the shape of most short Python \
+  functions, not copied logic.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/_verify_release.py"
+classification = "gourmand_bug"
+justification = """
+  verify_release (re-derives a release from the GitHub API through seven \
+  numbered tests) is paired with the entry-point functions of the other job \
+  modules by statement count and shape alone: guards that call cannot(), \
+  assignments, one return. It shares no line, call or identifier with them, \
+  so there is no helper to extract.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/pypi.py"
+classification = "gourmand_bug"
+justification = """
+  run (refuses unless write succeeded, the tree asks for PyPI and the API \
+  agrees with write, then builds and publishes) is paired with promote's run \
+  and two functions in scripts/fleet_wave.py: nine statements of guards, \
+  assignments and one return, with no line, call or identifier in common. \
+  The helpers they might share (parse_release, needed, verify_release) are \
+  already shared or specific to each job.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/promote.py"
+classification = "gourmand_bug"
+justification = """
+  sign (cosign sign with the fleet key, then verify it) is paired with \
+  scripts/fleet_wave.py's convert, and run with pypi's run: nine statements \
+  of assignments, guards and one return, sharing no line, call or \
+  identifier. They sign an image and convert a repository; there is no \
+  helper to extract.
+"""
