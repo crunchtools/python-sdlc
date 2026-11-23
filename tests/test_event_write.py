@@ -176,7 +176,12 @@ def with_result(result: dict[str, Any] | None, ai: str = "success", **extra: str
 
 
 def pr_event(number: int = 7, ref: str = BRANCH, head: str = HEAD) -> dict[str, Any]:
-    return {"pull_request": {"number": number, "head": {"sha": head, "ref": ref}}}
+    return {
+        "pull_request": {
+            "number": number,
+            "head": {"sha": head, "ref": ref, "repo": {"full_name": "o/r"}},
+        }
+    }
 
 
 def pr_result(**over: Any) -> dict[str, Any]:
@@ -498,6 +503,15 @@ check(
 )
 check("fix: and runs nothing", rig.git("fix_publish.py") == [])
 
+rig = Rig()
+fork_event = pr_event()
+fork_event["pull_request"]["head"]["repo"] = {"full_name": "evil/r"}
+why = refusal(rig.job(with_result(pr_result(fix=FIX))).route, "pull_request_target", fork_event)
+check(
+    "fix: a fix round for a branch in another repository is CannotRunError",
+    why is not None and "evil/r" in why and rig.git("fix_publish.py") == [],
+)
+
 rig = Rig(script_exit=1)
 why = refusal(rig.job(with_result(pr_result(fix=FIX))).route, "pull_request_target", pr_event())
 check(
@@ -540,6 +554,17 @@ CODE = {"result": {"summary": "s"}, "patch": "CODE PATCH", "base": "main"}
 def issue_event() -> dict[str, Any]:
     return {"issue": {"number": 9}, "repository": {"default_branch": "main"}}
 
+
+rig = Rig()
+why = refusal(
+    rig.job(with_result(ISSUE | {"code": CODE | {"base": "release-1.x"}})).route,
+    "issues",
+    issue_event(),
+)
+check(
+    "issue code: a patch for a branch other than the default is CannotRunError",
+    why is not None and "release-1.x" in why and rig.git("publish.py") == [],
+)
 
 rig = Rig()
 code = rig.route("issues", issue_event(), with_result(ISSUE | {"triage": TRIAGE}, ai="success"))

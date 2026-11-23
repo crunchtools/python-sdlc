@@ -23,12 +23,15 @@ from pathlib import Path
 from typing import Any
 
 from sdlc_jobs import _tools as tools
-from sdlc_jobs._github import APP_LOGIN, APP_SLUG, Api, ApiError, CannotRunError
+from sdlc_jobs._github import APP_LOGIN, APP_SLUG, Api, ApiError
 from sdlc_jobs._tools import Site
 
 _VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 _BRANCH = "ashigaru/release-"
 _NOT_FOUND = 404
+# A pyproject.toml that is there but cannot be read as one. A named tuple, not
+# PEP 758's bare list, which Gourmand's parser cannot read.
+_UNREADABLE = (KeyError, ValueError, UnicodeDecodeError)
 
 # Run under `python3 -I`, with the repo, version and sha as argv and never
 # spliced into the code. `publish` returns 1 for a CHANGELOG that is not at the
@@ -130,7 +133,7 @@ def _tree_version(api: Api, repo: str, sha: str) -> str | bool | None:
     try:
         text = base64.b64decode(got["content"]).decode()
         found = tomllib.loads(text).get("project", {}).get("version")
-    except KeyError, ValueError, UnicodeDecodeError:
+    except _UNREADABLE:
         return None
     return found if isinstance(found, str) else None
 
@@ -188,13 +191,8 @@ def publish_release(
         env=tools.child_env(site.env, GH_TOKEN=token),
         timeout=tools.GIT_SECONDS,
     )
-    if done.stdout:
-        print(done.stdout, end="" if done.stdout.endswith("\n") else "\n")
-    if done.returncode == 1:
+    if tools.verdict(done, "release_publish"):
         return _error(f"{repo} v{version} was not published: {done.stdout.strip()[-300:]}"), None
-    if done.returncode != 0:
-        tail = (done.stderr or done.stdout).strip()[-600:]
-        raise CannotRunError(f"release_publish failed (exit {done.returncode}): {tail}")
     release = {
         "version": version,
         "sha": sha,
@@ -211,8 +209,8 @@ def audit_issue(site: Site, audit: Mapping[str, Any], token: str, run_url: str) 
     `audit_alert` decides what to create, rewrite or close; this runs it with
     the App's token and teaches it that the App's issues are its own.
     """
-    with tempfile.TemporaryDirectory(prefix="sdlc-audit-") as tmp:
-        report = Path(tmp) / "audit.json"
+    with tempfile.TemporaryDirectory(prefix="sdlc-audit-") as scratch:
+        report = Path(scratch) / "audit.json"
         report.write_text(json.dumps(audit), encoding="utf-8")
         done = site.runner(
             [
@@ -233,9 +231,4 @@ def audit_issue(site: Site, audit: Mapping[str, Any], token: str, run_url: str) 
             env=tools.child_env(site.env, GH_TOKEN=token),
             timeout=tools.GIT_SECONDS,
         )
-    if done.stdout:
-        print(done.stdout, end="" if done.stdout.endswith("\n") else "\n")
-    if done.returncode in (0, 1):
-        return done.returncode
-    tail = (done.stderr or done.stdout).strip()[-600:]
-    raise CannotRunError(f"audit_alert failed (exit {done.returncode}): {tail}")
+    return tools.verdict(done, "audit_alert")

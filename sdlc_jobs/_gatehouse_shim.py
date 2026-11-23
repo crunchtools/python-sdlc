@@ -14,6 +14,7 @@ the rest are gatehouse's own. The exit status is the CLI's.
 
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 from typing import Any
@@ -33,6 +34,12 @@ async def _record(repo: str, pr_number: int, token: str, payload: dict[str, Any]
 
 if __name__ == "__main__":
     capture = sys.argv.pop(1)
+    # The seam is gatehouse's private function. If a release renames it or
+    # makes it synchronous, replacing it would post for real or not at all, so
+    # the shim refuses (2: the review could not run) rather than guess.
+    if not inspect.iscoroutinefunction(getattr(gatehouse.github, "_post_review", None)):
+        print("gatehouse.github._post_review is gone or not async; not reviewing.", file=sys.stderr)
+        sys.exit(2)
     # Looked up as a module global at call time, so replacing it here reaches
     # every caller inside gatehouse.github.
     gatehouse.github._post_review = _record

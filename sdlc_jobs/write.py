@@ -41,6 +41,7 @@ from sdlc_jobs._github import (
     Api,
     CannotRunError,
     contract,
+    default_branch,
     repo_of,
     set_output,
 )
@@ -198,12 +199,7 @@ class Job:
     ) -> None:
         """fix.yml's publish job: fix_publish.py on the PR branch, this run's findings resolved."""
         number, head, branch = int(pr["number"]), str(pr["head"]["sha"]), str(fix["branch"])
-        if branch != pr["head"]["ref"]:
-            raise CannotRunError(f"ai's fix is for {branch}, not {pr['head']['ref']}")
-        now = api.request("GET", f"/repos/{self.repo}/git/ref/heads/{branch}")["object"]["sha"]
-        if now != head:
-            # A newer push started its own run, which reviews and fixes that head.
-            print(f"write: {branch} moved from {head[:7]} to {now[:7]}; this round is stale")
+        if not self.branch_still_at_head(api, pr, branch):
             return
         ids = real_ids(api, self.repo, number, posted)
         collected, answer = resolve(dict(fix["findings"]), dict(fix.get("result") or {}), ids)
@@ -235,6 +231,25 @@ class Job:
         )
         tools.checked(done, "fix_publish.py")
 
+    def branch_still_at_head(self, api: Api, pr: Mapping[str, Any], branch: str) -> bool:
+        """Whether ai's fix round may land: refused outright, or skipped as stale.
+
+        The branch must be the PR's own and live in this repository: ai checks
+        that too, and write does not take its word for it. A branch that has
+        moved since the event is stale, not wrong: the newer push started a run
+        of its own, which reviews and fixes that head.
+        """
+        if branch != pr["head"]["ref"]:
+            raise CannotRunError(f"ai's fix is for {branch}, not {pr['head']['ref']}")
+        head_repo = (pr["head"].get("repo") or {}).get("full_name")
+        if head_repo != self.repo:
+            raise CannotRunError(f"a fix round for a branch in {head_repo}, not {self.repo}")
+        head = str(pr["head"]["sha"])
+        now = api.request("GET", f"/repos/{self.repo}/git/ref/heads/{branch}")["object"]["sha"]
+        if now != head:
+            print(f"write: {branch} moved from {head[:7]} to {now[:7]}; this round is stale")
+        return bool(now == head)
+
     # -- issues ------------------------------------------------------------------------------
 
     def issue(self, event: Mapping[str, Any]) -> int:
@@ -251,6 +266,11 @@ class Job:
                 self.apply_triage(token, number, triage, str(result.get("trust", "")))
             code = result.get("code")
             if code and self.env.get("SDLC_AI") == "success":
+                if code.get("base") != default_branch(event):
+                    raise CannotRunError(
+                        f"ai's patch is for {code.get('base')!r}, "
+                        f"not the default branch {default_branch(event)!r}"
+                    )
                 self.publish_code(token, number, code)
         return OK
 
@@ -358,14 +378,6 @@ def check_plan(env: Mapping[str, str]) -> dict[str, Any]:
     if not isinstance(plan, dict):
         raise CannotRunError("check's plan is not an object")
     return plan
-
-
-def default_branch(event: Mapping[str, Any]) -> str:
-    """The event's repository.default_branch; an event without one is CannotRunError."""
-    branch = (event.get("repository") or {}).get("default_branch")
-    if not branch:
-        raise CannotRunError("the event names no default branch")
-    return str(branch)
 
 
 def clean_review(payload: Any, head: str) -> dict[str, Any]:

@@ -160,6 +160,14 @@ def repo_of(event: Mapping[str, Any], env: Mapping[str, str]) -> str:
     return repo
 
 
+def default_branch(event: Mapping[str, Any]) -> str:
+    """The event's repository.default_branch; an event without one is CannotRunError."""
+    branch = (event.get("repository") or {}).get("default_branch")
+    if not branch:
+        raise CannotRunError("the event names no default branch")
+    return str(branch)
+
+
 def contract(fn: Callable[..., int]) -> Callable[..., int]:
     """Keep a job's main inside 0/1/2: a refusal or a crash is a 2, said out loud.
 

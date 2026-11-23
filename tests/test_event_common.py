@@ -798,5 +798,25 @@ with tempfile.TemporaryDirectory(prefix="shim-") as shim_dir:
             done.stdout + done.stderr,
         )
 
+# The seam gone or made synchronous: the shim refuses rather than guess.
+with tempfile.TemporaryDirectory(prefix="shim-sync-") as sync_dir:
+    package = Path(sync_dir) / "gatehouse"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "github.py").write_text(
+        "def _post_review(repo, pr_number, token, payload):\n    return True\n"
+    )
+    (package / "cli.py").write_text("def main():\n    raise AssertionError('ran')\n")
+    capture = Path(sync_dir) / "posts.json"
+    done = _tools.run(
+        [sys.executable, str(_tools.SHIM), str(capture), "--stdin"],
+        env={**_tools.child_env({}), "PYTHONPATH": sync_dir},
+    )
+    check(
+        "shim: a synchronous _post_review is refused with 2, gatehouse never runs",
+        done.returncode == 2 and not capture.exists() and "not async" in done.stderr,
+        done.stdout + done.stderr,
+    )
+
 if __name__ == "__main__":
     sys.exit(finish())

@@ -97,8 +97,18 @@ def _guard(api: Api, repo: str, pr: Mapping[str, Any]) -> str | None:
         print(f"guard: head branch is in {repo}; allowed.")
         return None
     number = pr["number"]
+    files = api.pages(f"/repos/{repo}/pulls/{number}/files")
+    # The files endpoint stops at 3,000 entries. Past that, a fork could bury a
+    # workflow change under filler that sorts first, so a list shorter than the
+    # PR's own count is a rejection, never a pass on what was read.
+    changed_files = int(api.request("GET", f"/repos/{repo}/pulls/{number}")["changed_files"])
+    if len(files) < changed_files:
+        return (
+            f"the PR changes {changed_files} files and GitHub lists only {len(files)}, "
+            "so a fork's change to .github/workflows/ or .sdlc/ cannot be ruled out"
+        )
     paths: list[str] = []
-    for changed in api.pages(f"/repos/{repo}/pulls/{number}/files"):
+    for changed in files:
         # Both sides of a rename: a fork could move a file out of a guarded
         # directory unseen if only the new path were read.
         paths += [p for p in (changed.get("filename"), changed.get("previous_filename")) if p]

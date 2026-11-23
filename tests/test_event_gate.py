@@ -95,6 +95,9 @@ def pull_api(**knobs: Any) -> FakeGitHub:
             {"sha": sha} for sha in knobs.get("commits", (SHA,))
         ],
         ("GET", "/repos/o/r/pulls/7/files"): knobs.get("files") or [],
+        ("GET", "/repos/o/r/pulls/7"): {
+            "changed_files": knobs.get("changed_files", len(knobs.get("files") or []))
+        },
         ("GET", "/repos/o/r/issues/7/comments"): knobs.get("issue_comments") or [],
         ("POST", "/repos/o/r/issues/7/comments"): {},
     }
@@ -146,6 +149,18 @@ check(
 api = pull_api(files=[{"filename": "docs/a.md", "previous_filename": ".sdlc/launcher"}])
 check("rename out of .sdlc/ is caught", gate_pr(api, fork) == 1)
 check("fork with ordinary files passes", gate_pr(pull_api(files=[{"filename": "a.py"}]), fork) == 0)
+# GitHub's files endpoint stops at 3,000 entries: filler sorting before
+# .github/ would push ci.yml off the list. A short list is a rejection.
+capped = [{"filename": f"-{i:04d}"} for i in range(3000)]
+code, said = run(pull_api(files=capped, changed_files=3001), "pull_request_target", fork)
+check(
+    "fork PR whose file list is capped short of changed_files fails the guard",
+    code == 1 and "lists only 3000" in said,
+)
+check(
+    "a same-repo PR is not read at all, capped or not",
+    gate_pr(pull_api(files=capped, changed_files=3001)) == 0,
+)
 api = pull_api(files=touch)
 check(
     "same-repo head may change workflows",

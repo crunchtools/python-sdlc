@@ -683,7 +683,16 @@ check(
 )
 check(
     "fix: --settings carries the /proc deny rule",
-    arg_after(cargv, "--settings") == ai.SETTINGS and "Read(//proc/**)" in ai.SETTINGS,
+    arg_after(cargv, "--settings") == ai.SETTINGS
+    and json.loads(ai.SETTINGS)["permissions"]["deny"]
+    == [
+        "Read(//proc/**)",
+        "Grep(//proc/**)",
+        "Glob(//proc/**)",
+        "Read(//sys/**)",
+        "Grep(//sys/**)",
+        "Glob(//sys/**)",
+    ],
 )
 check(
     "fix: edit tools, 80 turns, sonnet in round 2",

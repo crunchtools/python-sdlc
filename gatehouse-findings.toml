@@ -121,31 +121,6 @@ and tests/contract.sh asserts the major. Every tool a check runs \
 """
 
 [[findings]]
-agent = "bugs"
-category = "bug"
-file = "sdlc_jobs/ai.py"
-evidence = "except OSError, ValueError, KeyError, TypeError:"
-status = "not-a-bug"
-reason = """
-Valid Python 3.14: PEP 758 allows an except clause to list several exception \
-types without parentheses when there is no `as`. This repo targets 3.14 \
-(requires-python and ruff's target-version py314), and ruff format itself \
-writes this form; mypy and the suites import the module under 3.14.
-"""
-
-[[findings]]
-agent = "bugs"
-category = "bug"
-file = "sdlc_jobs/_release.py"
-evidence = "except KeyError, ValueError, UnicodeDecodeError:"
-status = "not-a-bug"
-reason = """
-Valid Python 3.14 (PEP 758, unparenthesized except without `as`), written by \
-ruff format for this repo's py314 target; tests/test_event_release.py imports \
-and exercises this branch.
-"""
-
-[[findings]]
 agent = "performance"
 category = "performance"
 file = "sdlc_jobs/gate.py"

@@ -46,6 +46,7 @@ from sdlc_jobs._github import (
     CannotRunError,
     GitHub,
     contract,
+    default_branch,
     repo_of,
     set_output,
 )
@@ -59,7 +60,11 @@ RELEASE_BRANCH = "ashigaru/release-"
 AGENT_BRANCH = "ashigaru/"
 # Every agent Ashigaru runs gets the same deny rule its workflows gave it: the
 # model may not read this process's environment, which holds its own token.
-SETTINGS = '{"permissions":{"deny":["Read(//proc/**)","Read(//sys/**)"]}}'
+# Every tool that reads files is denied both trees: Grep over /proc/*/environ
+# would read this job's own environment (the model keys, the read token and
+# the GITHUB_OUTPUT path) as surely as Read would.
+DENIED = [f"{tool}(//{tree}/**)" for tree in ("proc", "sys") for tool in ("Read", "Grep", "Glob")]
+SETTINGS = json.dumps({"permissions": {"deny": DENIED}}, separators=(",", ":"))
 READ_ONLY_TOOLS = "Read,Glob,Grep"
 EDIT_TOOLS = "Read,Edit,Write,Glob,Grep"
 
@@ -79,6 +84,9 @@ CODE = Agent("code", "sonnet", 80, EDIT_TOOLS)
 FIX = Agent("fix", "sonnet", 80, EDIT_TOOLS)  # the round's model replaces sonnet
 MAX_ROUNDS, ESCALATE_AT = 5, 3
 SHA_LEN = 40
+# The shim's capture file missing or malformed. A named tuple, not PEP 758's
+# bare list, which Gourmand's parser cannot read.
+UNREADABLE_CAPTURE = (OSError, ValueError, KeyError, TypeError)
 MODEL_SECONDS = 3600  # one agent or one review, as the workflows' job timeouts allowed
 AUTO_CATEGORIES = {"bug", "documentation", "performance"}
 MIN_CONFIDENCE = 0.7
@@ -97,8 +105,8 @@ def main(event_name: str, event: dict[str, Any], env: Mapping[str, str]) -> int:
         return OK
     repo = repo_of(event, env)
     api = GitHub(env.get("GITHUB_TOKEN", ""))
-    with tempfile.TemporaryDirectory(prefix="sdlc-ai-") as tmp:
-        site = tools.Site(repo, env, tools.run, Path(tmp))
+    with tempfile.TemporaryDirectory(prefix="sdlc-ai-") as scratch:
+        site = tools.Site(repo, env, tools.run, Path(scratch))
         code, result = run(event_name, event, Job(site, api))
     return hand_on(env, result, code)
 
@@ -215,8 +223,13 @@ class Job:
                     )
                     return {"event": "COMMENT", "commit_id": head, "body": body}
         except (ApiError, KeyError, TypeError) as err:
-            print(f"::notice::ai: could not check for an unchanged patch ({err}); reviewing.")
+            return self.no_skip(err)
         return None
+
+    @staticmethod
+    def no_skip(err: Exception) -> None:
+        """review.yml's rule: a skip that cannot be proven is a review, said once."""
+        print(f"::notice::ai: could not check for an unchanged patch ({err}); reviewing.")
 
     def patch_id(self, base: str, sha: str) -> str:
         """`git patch-id --verbatim` of base...sha, or "" when it cannot be had."""
@@ -231,7 +244,11 @@ class Job:
         try:
             return str(self.api.request("GET", f"/repos/{self.repo}/pulls/{number}", accept=PATCH))
         except ApiError as err:
-            print(f"::warning::could not fetch the PR diff ({err}); rebuilding it from its files.")
+            return self.rebuilt_diff(number, err)
+
+    def rebuilt_diff(self, number: int, why: ApiError) -> str:
+        """The diff from the PR's file list, when the diff endpoint refused (#75: 300 files)."""
+        print(f"::warning::could not fetch the PR diff ({why}); rebuilding it from its files.")
         files = self.api.pages(f"/repos/{self.repo}/pulls/{number}/files")
         changed = int(
             self.api.request("GET", f"/repos/{self.repo}/pulls/{number}")["changed_files"]
@@ -274,7 +291,7 @@ class Job:
         print(done.stderr, end="", file=sys.stderr)
         try:
             posts = [p["payload"] for p in json.loads(capture.read_text(encoding="utf-8"))]
-        except OSError, ValueError, KeyError, TypeError:
+        except UNREADABLE_CAPTURE:
             return self.failed(head, f"the reviewer could not be run (exit {done.returncode}).")
         if done.returncode not in (0, 1):
             # Gatehouse's own 2: no review happened, and it says so in a post
@@ -359,7 +376,7 @@ class Job:
         checkout = tools.clone(self.site, default_branch(event), self.work / "repo")
         if stage == "triage":
             queue = "fresh" if event.get("action") == "opened" else "backlog"
-            verdict = self.triage(number, checkout)
+            verdict = self.on_issue(TRIAGE, number, checkout)
             result["triage"] = {"verdict": verdict, "queue": queue}
             if not starts_now(verdict, trust, queue):
                 return OK, result
@@ -384,27 +401,24 @@ class Job:
         tools.checked(done, "guard.py")
         return outputs.get("allowed") == "true", outputs.get("trust", "none")
 
-    def triage(self, number: int, checkout: Path) -> dict[str, Any]:
-        """Run the triage agent on issue `number` and return its structured verdict."""
+    def on_issue(self, agent: Agent, number: int, checkout: Path) -> dict[str, Any]:
+        """One of the issue agents (triage or code) on issue `number`: its structured answer.
+
+        The prompt carries the issue, its comments and up to five of its images,
+        as prompt.py renders them; the agent works in `checkout`.
+        """
         attachments = self.work / "attachments"
         attachments.mkdir(exist_ok=True)
         prompt = self.prompt(
-            "triage",
+            agent.schema,
             ["--repo", self.repo, "--issue", str(number), "--attachments", str(attachments)],
             checkout,
         )
-        return self.model(prompt, TRIAGE, checkout)
+        return self.model(prompt, agent, checkout)
 
     def code(self, number: int, checkout: Path, base: str) -> dict[str, Any]:
         """code.yml's agent job, less its pre-commit retries (see the PR: those run repo code)."""
-        attachments = self.work / "attachments"
-        attachments.mkdir(exist_ok=True)
-        prompt = self.prompt(
-            "code",
-            ["--repo", self.repo, "--issue", str(number), "--attachments", str(attachments)],
-            checkout,
-        )
-        answer = self.model(prompt, CODE, checkout)
+        answer = self.on_issue(CODE, number, checkout)
         return {"result": answer, "patch": self.collect(checkout), "base": base}
 
     # -- shared ------------------------------------------------------------------------------
@@ -533,14 +547,6 @@ def issue_stage(event: Mapping[str, Any]) -> str | None:
     return None
 
 
-def default_branch(event: Mapping[str, Any]) -> str:
-    """The event's repository.default_branch; an event without one is CannotRunError."""
-    branch = (event.get("repository") or {}).get("default_branch")
-    if not branch:
-        raise CannotRunError("the event names no default branch")
-    return str(branch)
-
-
 def starts_now(verdict: Mapping[str, Any], trust: str, queue: str) -> bool:
     """triage_apply.py's own decision, called rather than restated, so ai and write agree."""
     apply = ashigaru_module("triage_apply")
@@ -551,13 +557,13 @@ def starts_now(verdict: Mapping[str, Any], trust: str, queue: str) -> bool:
 def structured(stdout: str, schema: str) -> dict[str, Any]:
     """The structured output of `claude -p --output-format json --json-schema`."""
     try:
-        data = json.loads(stdout)
+        printed = json.loads(stdout)
     except json.JSONDecodeError as err:
         raise CannotRunError(f"claude ({schema}) printed no JSON: {err}") from err
-    answer = data.get("structured_output") if isinstance(data, dict) else None
-    if answer is None and isinstance(data, dict):
+    answer = printed.get("structured_output") if isinstance(printed, dict) else None
+    if answer is None and isinstance(printed, dict):
         try:
-            answer = json.loads(str(data.get("result", "")))
+            answer = json.loads(str(printed.get("result", "")))
         except json.JSONDecodeError:
             answer = None
     if not isinstance(answer, dict):

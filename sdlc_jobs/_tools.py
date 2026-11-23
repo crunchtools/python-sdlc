@@ -124,6 +124,21 @@ def git_auth(token: str) -> dict[str, str]:
     }
 
 
+def echo(done: Done) -> None:
+    """Print a child's stdout into the job's log, ending on a newline."""
+    if done.stdout:
+        print(done.stdout, end="" if done.stdout.endswith("\n") else "\n")
+
+
+def verdict(done: Done, what: str) -> int:
+    """A child whose 0 and 1 are verdicts: echoed, and anything else is CannotRunError."""
+    echo(done)
+    if done.returncode in (0, 1):
+        return done.returncode
+    tail = (done.stderr or done.stdout).strip()[-600:]
+    raise CannotRunError(f"{what} failed (exit {done.returncode}): {tail}")
+
+
 def checked(done: Done, what: str) -> Done:
     """`done` itself, or CannotRunError naming `what` and the child's last words."""
     if done.returncode != 0:
@@ -193,6 +208,5 @@ def ashigaru(
         outputs = read_outputs(path.read_text(encoding="utf-8")) if path.exists() else {}
     finally:
         path.unlink(missing_ok=True)
-    if done.stdout:
-        print(done.stdout, end="" if done.stdout.endswith("\n") else "\n")
+    echo(done)
     return done, outputs
