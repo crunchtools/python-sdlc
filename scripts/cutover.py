@@ -286,7 +286,9 @@ class Api:
         }
         conn = self._connect()
         try:
-            conn.request(method, self._prefix + path, None if body is None else json.dumps(body), headers)
+            conn.request(
+                method, self._prefix + path, None if body is None else json.dumps(body), headers
+            )
             response = conn.getresponse()
             status, raw = response.status, response.read()
         except (OSError, http.client.HTTPException) as exc:

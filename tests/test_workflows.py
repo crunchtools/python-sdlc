@@ -261,7 +261,7 @@ for job_id, job in fleet.items():
         str(job.get("environment")),
     )
     holds = SECRET.search(yaml.safe_dump(job)) or job.get("environment") == "pypi"
-    if holds and job_id != "renovate":
+    if holds:
         check(
             f"fleet: {job_id} shares the secret jobs' runner", job.get("runs-on") == GUARDED_RUNNER
         )

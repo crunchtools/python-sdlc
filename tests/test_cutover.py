@@ -36,6 +36,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -343,7 +344,9 @@ check(
 UNPINNED = cut.FLEET_FILE
 PINNED_DIR = Path(tempfile.mkdtemp())
 (PINNED_DIR / "ci.yml").write_text(
-    UNPINNED.read_text().replace("sdlc-bootstrap@sha256:<digest>", "sdlc-bootstrap@sha256:" + "a" * 64)
+    UNPINNED.read_text().replace(
+        "sdlc-bootstrap@sha256:<digest>", "sdlc-bootstrap@sha256:" + "a" * 64
+    )
 )
 cut.FLEET_FILE = PINNED_DIR / "ci.yml"
 FLEET = cut.FLEET_FILE.read_bytes()
@@ -505,6 +508,8 @@ class World:
 
 
 HEAD_CI = ("GET", f"{O}/app/contents/.github/workflows/ci.yml?ref={SHA}")
+
+
 def refusing(_body: object = None) -> tuple[int, object]:
     raise cut.ApiError("GET x: HTTP 403 Resource not accessible")
 
@@ -912,7 +917,10 @@ w.routes[("PUT", f"{O}/app/pulls/9/update-branch")] = (422, {})
 code, api, out, err = merge_cli(w)
 check(
     "merge: a failed update-branch is named, exit 1, the rest done",
-    code == 1 and "PR #9" in out and w.include(1) == ["app", "done1", "done2"] and len(paths(api)) == 4,
+    code == 1
+    and "PR #9" in out
+    and w.include(1) == ["app", "done1", "done2"]
+    and len(paths(api)) == 4,
     f"{code} {out}",
 )
 
@@ -1022,6 +1030,54 @@ check("Api: a 403 raises, redacted", "HTTP 403" in error and TOKEN not in error,
 check(
     "Api: authenticated follows the token",
     cut.Api(TOKEN).authenticated and not cut.Api(None).authenticated,
+)
+
+
+conn = FakeConnection()
+with contextlib.suppress(cut.ApiError):
+    cut.Api(TOKEN, connect=lambda: conn).call("GET", "/orgs/crunchtools/repos")
+check("Api: by default a path goes as it is", conn.sent[0][1] == "/orgs/crunchtools/repos")
+conn = FakeConnection()
+with contextlib.suppress(cut.ApiError):
+    cut.Api(TOKEN, connect=lambda: conn, base="http://gw:8019/proxy/http/github-api/").call(
+        "GET", "/orgs/crunchtools/repos"
+    )
+check(
+    "Api: a base URL's path prefixes every request",
+    conn.sent[0][1] == "/proxy/http/github-api/orgs/crunchtools/repos",
+    str(conn.sent),
+)
+
+opened: list[tuple[str, str]] = []
+
+
+def opener(kind: str) -> Callable[..., FakeConnection]:
+    def open_(host: str, **_kw: object) -> FakeConnection:
+        opened.append((kind, host))
+        return FakeConnection()
+
+    return open_
+
+
+real = (cut.http.client.HTTPConnection, cut.http.client.HTTPSConnection)
+KINDS = ("HTTPConnection", "HTTPSConnection")
+for name, kind in zip(KINDS, ("http", "https"), strict=True):
+    setattr(cut.http.client, name, opener(kind))
+try:
+    for base in ("", "http://gw:8019/proxy/http/github-api"):
+        with contextlib.suppress(cut.ApiError):
+            cut.Api(TOKEN, base=base).call("GET", "/x")
+    os.environ["CUTOVER_TEST_TOKEN"] = TOKEN
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        cut.main(["--check", "--token-env", "CUTOVER_TEST_TOKEN", "--api-url", "http://gw:1/p"])
+finally:
+    for name, cls in zip(KINDS, real, strict=True):
+        setattr(cut.http.client, name, cls)
+    os.environ.pop("CUTOVER_TEST_TOKEN", None)
+check(
+    "Api: https to api.github.com by default, http to a gateway named by --api-url",
+    opened[:2] == [("https", cut.API_HOST), ("http", "gw:8019")] and ("http", "gw:1") in opened,
+    str(opened),
 )
 
 
