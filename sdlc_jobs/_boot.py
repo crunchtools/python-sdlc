@@ -33,6 +33,7 @@ import os
 import re
 import shlex
 import stat
+import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -314,7 +315,7 @@ def boot_mcp(job: Job, spec: Boot, image: str) -> str:
     try:
         replies, why, rc = job.tools.converse(argv, msgs, timeout=spec.timeout, env=job.child_env)
     finally:
-        job.run([*job.podman, "rm", "-f", "-v", name])
+        remove(job, name)
     if rc == PODMAN_CANNOT_CREATE:
         cannot(f"boot: podman could not run the server (exit {rc}); nothing was judged:\n{why}")
     return why or judge_tools(replies.get(1), replies.get(2))
@@ -322,6 +323,30 @@ def boot_mcp(job: Job, spec: Boot, image: str) -> str:
 
 def boot_name(job: Job) -> str:
     return f"sdlc-boot-{job.volume}"
+
+
+def remove(job: Job, *names: str) -> None:
+    """`podman rm -f -v` each, in order (a dependent first); a failure is logged, not hidden."""
+    for name in names:
+        proc = job.run([*job.podman, "rm", "-f", "-v", name])
+        if proc.returncode != 0:
+            said = (proc.stderr or proc.stdout).strip()
+            print(f"boot: could not remove {name} (exit {proc.returncode}): {said}", flush=True)
+
+
+def engine(job: Job, proc: subprocess.CompletedProcess[str], name: str) -> str:
+    """'' unless a check's podman call failed in podman itself (125): then the finding
+    "the container exited" when it did, and a 2 when the engine failed under a live one."""
+    if proc.returncode != PODMAN_CANNOT_CREATE:
+        return ""
+    state = job.run([*job.podman, "inspect", "--format", "{{.State.Running}}", name])
+    if state.returncode != 0:
+        show(state)
+        cannot(f"boot: podman cannot inspect {name} (exit {state.returncode}); nothing was judged")
+    if state.stdout.strip() == "true":
+        show(proc)
+        cannot(f"boot: podman failed on the running {name} (exit 125); nothing was judged")
+    return "the container exited before it was judged"
 
 
 # Run inside the sdlc image, in the server container's network namespace: the
@@ -375,11 +400,32 @@ def boot_mcp_http(job: Job, spec: Boot, image: str) -> str:
     """The server detached; a client in its network namespace speaks streamable HTTP."""
 
     def check(name: str) -> str:
-        proc = job.run(
+        # Named, and removed before the server: it holds the server's namespace,
+        # and a client stopped at its timeout outlives `--rm`.
+        client = f"{name}-client"
+        try:
+            proc = client_run(name, client)
+        finally:
+            remove(job, client)
+        try:
+            got = json.loads(proc.stdout.strip().splitlines()[-1])
+        except ValueError, IndexError:
+            got = None
+        if proc.returncode != 0 or not isinstance(got, dict):
+            show(proc)
+            cannot(f"boot: the MCP HTTP client could not run (exit {proc.returncode})")
+        if "error" in got:
+            return str(got["error"])
+        return judge_tools(got.get("init"), got.get("tools"))
+
+    def client_run(name: str, client: str) -> subprocess.CompletedProcess[str]:
+        return job.run(
             [
                 *job.podman,
                 "run",
                 "--rm",
+                "--name",
+                client,
                 "--pull=never",
                 "--network",
                 f"container:{name}",
@@ -398,16 +444,6 @@ def boot_mcp_http(job: Job, spec: Boot, image: str) -> str:
             ],
             timeout=spec.timeout + GRACE,
         )
-        try:
-            got = json.loads(proc.stdout.strip().splitlines()[-1])
-        except ValueError, IndexError:
-            got = None
-        if proc.returncode != 0 or not isinstance(got, dict):
-            show(proc)
-            cannot(f"boot: the MCP HTTP client could not run (exit {proc.returncode})")
-        if "error" in got:
-            return str(got["error"])
-        return judge_tools(got.get("init"), got.get("tools"))
 
     return detached(job, spec, image, check, *CONFINED)
 
@@ -417,9 +453,18 @@ def boot_systemd(job: Job, spec: Boot, image: str) -> str:
 
     def systemctl(name: str, *args: str) -> str:
         argv = [*job.podman, "exec", name, "systemctl", *args]
-        return job.run(argv, timeout=EXEC_TIMEOUT).stdout
+        proc = job.run(argv, timeout=EXEC_TIMEOUT)
+        if exited := engine(job, proc, name):
+            raise Exited(exited)
+        return proc.stdout
 
     def check(name: str) -> str:
+        try:
+            return judged(name)
+        except Exited as exc:
+            return str(exc)
+
+    def judged(name: str) -> str:
         state = ""
         deadline = time.monotonic() + spec.timeout
         for _ in range(max(1, spec.timeout // POLL_SECONDS)):
@@ -442,9 +487,13 @@ def boot_systemd(job: Job, spec: Boot, image: str) -> str:
 
 def boot_healthcheck(job: Job, spec: Boot, image: str) -> str:
     """The image's own HEALTHCHECK passes within boot-timeout."""
-    declared = job.run(
+    inspected = job.run(
         [*job.podman, "image", "inspect", "--format", "{{json .Config.Healthcheck}}", image]
-    ).stdout.strip()
+    )
+    if inspected.returncode != 0:
+        show(inspected)
+        cannot(f"boot: podman cannot inspect {image} (exit {inspected.returncode})")
+    declared = inspected.stdout.strip()
     if declared in ("", "null", "<nil>", "{}"):
         return (
             "boot: healthcheck, but the image carries no HEALTHCHECK "
@@ -454,6 +503,8 @@ def boot_healthcheck(job: Job, spec: Boot, image: str) -> str:
     def check(name: str) -> str:
         for _ in range(max(1, spec.timeout // POLL_SECONDS)):
             ran = job.run([*job.podman, "healthcheck", "run", name], timeout=EXEC_TIMEOUT)
+            if exited := engine(job, ran, name):
+                return exited
             if ran.returncode == 0:
                 print("  healthy")
                 return ""
@@ -494,7 +545,11 @@ def detached(job: Job, spec: Boot, image: str, check: Callable[[str], str], *con
             print((logs.stdout + logs.stderr)[-LOG_TAIL:], flush=True)
         return finding
     finally:
-        job.run([*job.podman, "rm", "-f", "-v", name])
+        remove(job, name)
+
+
+class Exited(Exception):  # noqa: N818 -- a finding raised out of a check, not an error
+    """The container under test exited while a check was asking it something."""
 
 
 PROFILE_RUN: dict[str, Callable[[Job, Boot, str], str]] = {

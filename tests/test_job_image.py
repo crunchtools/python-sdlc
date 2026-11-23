@@ -115,6 +115,12 @@ class FakeTools(Tools):
         self.inactive: set[str] = set()  # units `systemctl is-active` says are not
         self.http_rc = 0  # what the mcp-http client container exits
         self.http_out = json.dumps({"init": INIT_OK, "tools": TOOLS_OK})
+        self.exec_rc = 0  # what `podman exec` itself exits; 125, podman failed
+        self.boot_running = "true"  # `inspect {{.State.Running}}` of the boot container
+        self.boot_inspect_rc = 0  # what that inspect exits; non-zero, the engine is gone
+        self.rm_rc: dict[str, int] = {}  # container name -> what `podman rm -f -v` exits
+        self.image_inspect_rc = 0  # what `podman image inspect` exits
+        self.log = ""  # what the job printed, kept by go()
 
     def run(  # noqa: PLR0913 -- keyword-only, as the code under test
         self,
@@ -165,8 +171,8 @@ class FakeTools(Tools):
             case "build":
                 self.built_file = (Path(cwd) / sub[sub.index("-f") + 1]).read_text()
                 rc = self.build_rc
-            case "image":
-                out = self.healthcheck if "{{json .Config.Healthcheck}}" in sub else "{}"
+            case "inspect" if sub[-1].startswith("sdlc-boot-"):
+                return self.podman_boot(sub)
             case "inspect":
                 state_query = "ExitCode" in sub[-2]
                 out = (
@@ -175,20 +181,26 @@ class FakeTools(Tools):
             case "push":
                 if self.digest is not None:
                     Path(sub[sub.index("--digestfile") + 1]).write_text(self.digest + "\n")
-            case "run" | "exec" | "healthcheck":
+            case "run" | "exec" | "healthcheck" | "image" | "rm":
                 return self.podman_boot(sub)
         return cp(rc, out)
 
     def podman_boot(self, sub: list[str]) -> subprocess.CompletedProcess[str]:
-        """`run` (a gate, or the boot gate's server and client), `exec` and `healthcheck`."""
+        """`run` (a gate, or the boot gate's server and client), `exec`, `healthcheck`,
+        `image inspect`, `rm` and the boot container's `inspect`."""
         rc, out = 0, ""
         match sub[0]:
-            case "run" if "python3" in sub:  # the mcp-http client, in the server's namespace
-                rc, out = self.http_rc, self.http_out
-            case "run" if "--name" in sub and sub[sub.index("--name") + 1].startswith("sdlc-boot-"):
-                rc = self.boot_rc
-            case "run" if "-d" not in sub:
-                rc = self.scan_rc
+            case "image":
+                rc = self.image_inspect_rc
+                out = self.healthcheck if "{{json .Config.Healthcheck}}" in sub else "{}"
+            case "inspect":
+                rc, out = self.boot_inspect_rc, self.boot_running
+            case "rm" if self.rm_rc.get(sub[-1]):
+                return cp(self.rm_rc[sub[-1]], "", f"Error: {sub[-1]} has dependent containers")
+            case "run":
+                return self.podman_run(sub)
+            case "exec" if self.exec_rc:
+                rc = self.exec_rc
             case "exec" if sub[3:] == ["is-system-running"]:
                 out = self.systemd + "\n"
             case "exec" if sub[3:4] == ["is-active"]:
@@ -196,6 +208,14 @@ class FakeTools(Tools):
             case "healthcheck":
                 rc = self.health_rc
         return cp(rc, out)
+
+    def podman_run(self, sub: list[str]) -> subprocess.CompletedProcess[str]:
+        """A gate's `run`, or the boot gate's server and its mcp-http client."""
+        if "python3" in sub:  # the mcp-http client, in the server's namespace
+            return cp(self.http_rc, self.http_out)
+        if "--name" in sub and sub[sub.index("--name") + 1].startswith("sdlc-boot-"):
+            return cp(self.boot_rc)
+        return cp(self.scan_rc if "-d" not in sub else 0)
 
     def skopeo(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         rc, out = 0, ""
@@ -259,8 +279,12 @@ def go(  # noqa: PLR0913 -- keyword-only, as the code under test
             "QUAY_PASSWORD": "pw",
             **(extra or {}),
         }
-        with contextlib.redirect_stdout(io.StringIO()):
-            rc = image.run(event, {}, env, tools=tools)
+        log = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(log):
+                rc = image.run(event, {}, env, tools=tools)
+        finally:
+            tools.log = log.getvalue()
         text = out.read_text() if out.exists() else ""
         result = json.loads(text.split("\n")[1]) if text else None
         return rc, result
@@ -1046,6 +1070,53 @@ def test_boot_execs_and_the_http_client_are_bounded() -> None:
     t = FakeTools()
     t.http_rc = 124  # what Tools.run reports for a client it stopped
     assert "exit 124" in refused(t, QUAY_PARENT, files=boot("mcp-http"))
+
+
+def test_boot_mcp_http_client_is_named_and_removed_before_the_server() -> None:
+    """The client holds the server's namespace: removed first, even when it timed out."""
+    for http_rc in (0, 124):
+        t = FakeTools()
+        t.http_rc = http_rc
+        go_or_refused = refused if http_rc else go
+        go_or_refused(t, QUAY_PARENT, files=boot("mcp-http"))
+        client = next(a for a in t.argvs if "python3" in a)
+        assert client[client.index("--name") + 1] == f"{BOOT}-client"
+        removed = [a[-1] for a in t.boot_calls() if a[:3] == ["rm", "-f", "-v"]]
+        assert removed == [f"{BOOT}-client", BOOT], (http_rc, removed)
+
+
+def test_boot_failed_rm_is_logged_not_hidden() -> None:
+    t = FakeTools()
+    t.rm_rc = {BOOT: 125}
+    assert run_boot(t, "healthcheck") == 0
+    assert f"could not remove {BOOT} (exit 125)" in t.log
+    assert "dependent containers" in t.log
+
+
+def test_boot_engine_failure_inside_a_check_is_refused() -> None:
+    """125 from exec or healthcheck under a live container is podman's failure: a 2."""
+    for profile in ("systemd", "healthcheck"):
+        t = FakeTools()
+        t.exec_rc = t.health_rc = 125
+        assert "exit 125" in refused(t, QUAY_PARENT, files=boot(profile)), profile
+        assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+        t = FakeTools()  # the engine is unreachable: even inspect fails
+        t.exec_rc = t.health_rc = 125
+        t.boot_inspect_rc = 125
+        assert "cannot inspect" in refused(t, QUAY_PARENT, files=boot(profile)), profile
+    t = FakeTools()  # the image's HEALTHCHECK cannot even be read
+    t.image_inspect_rc = 125
+    assert "cannot inspect" in refused(t, QUAY_PARENT, files=boot("healthcheck"))
+    assert not t.boot_calls(), "a container was started on an image podman could not read"
+
+
+def test_boot_container_that_exits_during_a_check_is_a_finding() -> None:
+    """125 because the container is gone: the image died under test, a verdict."""
+    for profile in ("systemd", "healthcheck"):
+        t = FakeTools()
+        t.exec_rc = t.health_rc = 125
+        t.boot_running = "false"
+        assert run_boot(t, profile) == 1 and not t.pushed(), profile
 
 
 def test_boot_none_needs_its_reason() -> None:
