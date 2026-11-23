@@ -8,7 +8,7 @@ Every network call is mocked: the lookups are module functions, replaced here.
   - lychee moves its two ARG copies AND the @sha256: of its FROM line
   - a lychee version with no digest (or a malformed one) raises and writes nothing
   - a run with every pin current writes nothing
-  - the sdlc-boot base digest (boot/Containerfile ARG) moves when quay's does,
+  - the sdlc-bootstrap base digest (boot/Containerfile ARG) moves when quay's does,
     bumps IMAGE_TAG once even with a tool move, and a bad answer writes nothing
   - the image PATCH version, LABEL, pyproject and CHANGELOG move with any bump
 
@@ -196,7 +196,7 @@ check(
     raises(lambda: run({**CURRENT, "lychee": "0.25.0"}, ut.lychee_digest)),
 )
 
-# sdlc-boot base digest.
+# sdlc-bootstrap base digest.
 BOOT_NEW = "sha256:" + "c" * 64
 _, files = run(CURRENT)
 check("current boot digest writes nothing", files["boot/Containerfile"] == BOOT_CONTAINERFILE)
@@ -217,7 +217,7 @@ check("moved boot digest bumps IMAGE_TAG", files["IMAGE_TAG"] == "3.4.6\n")
 check("moved boot digest bumps LABEL", 'LABEL version="3.4.6"' in files["Containerfile"])
 check(
     "moved boot digest in CHANGELOG",
-    "- sdlc-boot base core-runtime:2-builder sha256:aaaaaaaaaaaa -> sha256:cccccccccccc."
+    "- sdlc-bootstrap base core-runtime:2-builder sha256:aaaaaaaaaaaa -> sha256:cccccccccccc."
     in files["CHANGELOG.md"],
 )
 

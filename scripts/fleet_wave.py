@@ -747,10 +747,10 @@ def main() -> int:
         print(f"fleet_wave: --apply needs {args.token_env} in the environment", file=sys.stderr)
         return 2
     if args.apply and cutover.unpinned(cutover.FLEET_FILE.read_text()):
-        # The fleet file names sdlc-boot by a placeholder until sdlc's trust root
+        # The fleet file names sdlc-bootstrap by a placeholder until sdlc's trust root
         # records the real digest (cutover prerequisite 4): never pushed as is.
         print(
-            f"fleet_wave: --apply: {cutover.FLEET_FILE.name} has no sdlc-boot digest yet",
+            f"fleet_wave: --apply: {cutover.FLEET_FILE.name} has no sdlc-bootstrap digest yet",
             file=sys.stderr,
         )
         return 2

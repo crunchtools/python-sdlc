@@ -19,8 +19,8 @@ trap 'rm -rf "$W"' EXIT
 mkdir "$W/bin"
 # boot/sdlc's policy root is a literal, not an override, so the test runs a
 # copy with that one line pointed at the scratch dir.
-sed "s|^ROOT=/etc/sdlc-boot\$|ROOT=$W/keys|" "$BOOT" > "$W/sdlc"
-[ "$(grep -c "^ROOT=$W/keys\$" "$W/sdlc")" -eq 1 ] || { echo "boot/sdlc has no ROOT=/etc/sdlc-boot line"; exit 1; }
+sed "s|^ROOT=/etc/sdlc-bootstrap\$|ROOT=$W/keys|" "$BOOT" > "$W/sdlc"
+[ "$(grep -c "^ROOT=$W/keys\$" "$W/sdlc")" -eq 1 ] || { echo "boot/sdlc has no ROOT=/etc/sdlc-bootstrap line"; exit 1; }
 BOOT=$W/sdlc
 HEX=$(printf 'a%.0s' $(seq 64))
 REPO=quay.io/crunchtools/sdlc
@@ -86,7 +86,7 @@ line two
 }
 ran() { grep -q '^run ' "$W/log" 2> /dev/null; }
 refused() {          # description [why]: exit 2, said so (with why), nothing run
-  if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "^sdlc-boot: GATE CANNOT RUN: .*${2-}" && ! ran; then
+  if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "^sdlc-bootstrap: GATE CANNOT RUN: .*${2-}" && ! ran; then
     ok "$1"
   else
     bad "$1: exit $RC, run=$(ran && echo yes || echo no)"; printf '%s\n' "$OUT"
