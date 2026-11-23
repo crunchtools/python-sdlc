@@ -35,11 +35,15 @@ Run inside the image, which has the interpreter and PyYAML the script needs:
 
 from __future__ import annotations
 
+import ast
+import json
 import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -103,6 +107,87 @@ def acts_only_on_success(cond: str) -> bool:
     return CHECK_OK in cond or not STATUS.search(cond)
 
 
+# GitHub's expression syntax, as far as these files use it, parsed as Python:
+# a context path becomes a string the walker looks up, `&&`/`||`/`!` the Python
+# words (which return operands, as GitHub's do), and only the four functions
+# below are callable. Nothing is executed: the tree is walked.
+CONTEXT_PATH = re.compile(r"\b(?:github|vars|needs|inputs)(?:\.[\w-]+)+")
+FUNCTIONS = {
+    "fromJSON": json.loads,
+    "contains": lambda haystack, needle: needle in haystack,
+    "format": lambda fmt, *args: fmt.format(*args),
+    "always": lambda: True,
+}
+
+
+def bool_op(node: ast.BoolOp, ctx: dict[str, object]) -> object:
+    """`and`/`or` as GitHub's `&&`/`||`: the deciding operand, not a bool."""
+    value: object = None
+    for operand in node.values:
+        value = walk(operand, ctx)
+        if bool(value) == isinstance(node.op, ast.Or):
+            return value
+    return value
+
+
+def compare(node: ast.Compare, ctx: dict[str, object]) -> bool:
+    if len(node.ops) != 1 or not isinstance(node.ops[0], (ast.Eq, ast.NotEq)):
+        raise ValueError(f"not a comparison these files use: {ast.dump(node)}")
+    same = walk(node.left, ctx) == walk(node.comparators[0], ctx)
+    return same if isinstance(node.ops[0], ast.Eq) else not same
+
+
+def call(node: ast.Call, ctx: dict[str, object]) -> object:
+    if not isinstance(node.func, ast.Name) or node.func.id not in FUNCTIONS:
+        raise ValueError(f"not a function these files use: {ast.dump(node)}")
+    return FUNCTIONS[node.func.id](*(walk(a, ctx) for a in node.args))
+
+
+def unary(node: ast.UnaryOp, ctx: dict[str, object]) -> bool:
+    if not isinstance(node.op, ast.Not):
+        raise TypeError(f"not an operator these files use: {ast.dump(node)}")
+    return not walk(node.operand, ctx)
+
+
+WALKERS: dict[type, Callable[[Any, dict[str, object]], object]] = {
+    ast.Expression: lambda node, ctx: walk(node.body, ctx),
+    ast.Constant: lambda node, _ctx: node.value,
+    ast.Subscript: lambda node, ctx: ctx.get(str(walk(node.slice, ctx)), ""),  # ctx["a.b"]
+    ast.BoolOp: bool_op,
+    ast.UnaryOp: unary,
+    ast.Compare: compare,
+    ast.Call: call,
+}
+
+
+def walk(node: ast.AST, ctx: dict[str, object]) -> object:
+    """The value of one node of a parsed expression; anything unknown is an error."""
+    walker = WALKERS.get(type(node))
+    if walker is None:
+        raise ValueError(f"not an expression these files use: {ast.dump(node)}")
+    return walker(node, ctx)
+
+
+def evaluate(expr: str, ctx: dict[str, object]) -> object:
+    """An `if:` or `${{ }}` expression's value for the context `ctx` (dotted paths)."""
+    py = expr.strip().removeprefix("${{").removesuffix("}}")
+    py = CONTEXT_PATH.sub(lambda m: f"ctx[{m[0]!r}]", py)
+    py = py.replace("&&", " and ").replace("||", " or ")
+    py = re.sub(r"!(?!=)", " not ", py)
+    return walk(ast.parse(py.strip(), mode="eval"), ctx)
+
+
+def event(name: str, **rest: object) -> dict[str, object]:
+    base = {
+        "github.event_name": name,
+        "github.repository": "crunchtools/app",
+        "github.ref": "refs/heads/main",
+        "github.event.repository.default_branch": "main",
+        "vars.UNCACHED_RUNNER_LABEL": "gha-uncached",
+    }
+    return {**base, **rest}
+
+
 # ---------------------------------------------------------- the fleet file
 
 fleet_text = FLEET.read_text()
@@ -152,6 +237,55 @@ for job_id, job in fleet.items():
         check(f"fleet: {job_id} holds secrets on ubuntu-latest", on_hosted)
 for job_id in ("check", "gate"):
     check(f"fleet: {job_id} holds no secret", not SECRET.search(yaml.safe_dump(fleet[job_id])))
+# check: the one job a fork's PR runs, and the only one on our runners.
+check_if, check_runner = str(fleet["check"]["if"]), str(fleet["check"]["runs-on"])
+admitted = {
+    "pull_request": event("pull_request"),
+    "schedule": event("schedule"),
+    "workflow_dispatch": event("workflow_dispatch"),
+    "a default-branch push": event("push"),
+}
+refused = {
+    "a push to another branch": event("push", **{"github.ref": "refs/heads/topic"}),
+    "a tag push": event("push", **{"github.ref": "refs/tags/v1.0.0"}),
+    "pull_request_target": event("pull_request_target"),
+    "issues": event("issues"),
+    "a review comment": event("pull_request_review_comment"),
+}
+for label, ctx in admitted.items():
+    check(f"fleet: check runs on {label}", bool(evaluate(check_if, ctx)))
+for label, ctx in refused.items():
+    check(f"fleet: check does not run on {label}", not evaluate(check_if, ctx))
+same_repo = {"github.event.pull_request.head.repo.full_name": "crunchtools/app"}
+fork = {"github.event.pull_request.head.repo.full_name": "stranger/app"}
+routes = (
+    ("a same-repo PR", event("pull_request", **same_repo), "gha-uncached"),
+    ("a fork's PR", event("pull_request", **fork), "ubuntu-latest"),
+    ("a push", event("push"), "gha-uncached"),
+    (
+        "a push with no runner variable",
+        event("push", **{"vars.UNCACHED_RUNNER_LABEL": ""}),
+        "ubuntu-latest",
+    ),
+)
+for label, ctx, want in routes:
+    got = evaluate(check_runner, ctx)
+    check(f"fleet: check runs {label} on {want}", got == want, str(got))
+
+# gate: required, so it runs on pull_request_target and on a review comment
+# only from someone with write access, and on nothing else.
+gate_if = str(fleet["gate"]["if"])
+for who in ("OWNER", "MEMBER", "COLLABORATOR"):
+    ctx = event("pull_request_review_comment", **{"github.event.comment.author_association": who})
+    check(f"fleet: gate re-runs on a review comment by an {who}", bool(evaluate(gate_if, ctx)))
+for who in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE"):
+    ctx = event("pull_request_review_comment", **{"github.event.comment.author_association": who})
+    check(f"fleet: gate does not re-run on a review comment by {who}", not evaluate(gate_if, ctx))
+check(
+    "fleet: gate runs on pull_request_target", bool(evaluate(gate_if, event("pull_request_target")))
+)
+for name in ("pull_request", "push", "issues", "schedule", "workflow_dispatch"):
+    check(f"fleet: gate does not run on {name}", not evaluate(gate_if, event(name)))
 check(
     "fleet: the required checks carry their event in the name",
     fleet["check"]["name"] == "sdlc / check (${{ github.event_name }})"

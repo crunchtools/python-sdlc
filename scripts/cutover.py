@@ -135,7 +135,7 @@ class Result:
 
     changed: list[str] = field(default_factory=list)  # one line per change, for the report
     hand: list[str] = field(default_factory=list)  # what it would not guess at
-    pins_left: list[str] = field(default_factory=list)  # every `uses:` still in a workflow
+    uses_left: list[str] = field(default_factory=list)  # every `uses:` still in a workflow
 
 
 def load(path: Path, name: str) -> ModuleType:
@@ -180,7 +180,7 @@ def move_constitution(repo: Path, target: Target, result: Result) -> None:
             result.changed.append(f"constitution: v{target.constitution} in {rel(repo, path)}")
 
 
-def pins_left(repo: Path) -> list[str]:
+def uses_left(repo: Path) -> list[str]:
     """Each `uses:` still in a workflow, comments excluded: the fleet file has none."""
     left = []
     for path in sorted((repo / WORKFLOWS).glob("*.y*ml")):
@@ -241,11 +241,11 @@ def cutover(repo: Path, target: Target) -> Result:
     drop_dependabot(repo, target, result)
     rename(repo, result)
     remove_gemini(repo, target, result)
-    result.pins_left = pins_left(repo)
-    if result.pins_left:
+    result.uses_left = uses_left(repo)
+    if result.uses_left:
         result.hand.append(
-            f"workflows: {len(result.pins_left)} `uses:` left, and the fleet file has none: "
-            + ", ".join(result.pins_left)
+            f"workflows: {len(result.uses_left)} `uses:` left, and the fleet file has none: "
+            + ", ".join(result.uses_left)
         )
     return result
 
@@ -342,7 +342,7 @@ def paged(api: Api, path: str, key: str | None = None) -> list[Any]:
     """Every item of a list endpoint; `key` names the list inside an object body."""
     sep = "&" if "?" in path else "?"
     items: list[Any] = []
-    for page in range(1, MAX_PAGES):
+    for page in range(1, MAX_PAGES + 1):
         status, body = api.call("GET", f"{path}{sep}per_page={PAGE}&page={page}")
         got = body.get(key) if key and isinstance(body, dict) else body
         if status != HTTPStatus.OK or not isinstance(got, list):

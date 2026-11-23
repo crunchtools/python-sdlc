@@ -643,7 +643,7 @@ check(
     "cutover: a repo convert_repo.py refuses is hand work, and the rest still ships",
     got["odd"][1] == "would-open"
     and any(h.startswith("float: ") for h in wave.reports["odd"].hand)
-    and wave.reports["odd"].pins_left,
+    and wave.reports["odd"].uses_left,
     str((got["odd"], wave.reports["odd"])),
 )
 check(

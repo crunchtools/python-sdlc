@@ -202,7 +202,7 @@ check(
     str(result.hand),
 )
 
-# ------------------------------------------------------------------ pins_left
+# ------------------------------------------------------------------ uses_left
 
 repo, result = run(
     {
@@ -216,22 +216,22 @@ repo, result = run(
 )
 check(
     "uses: every `uses:` counts, any owner, any ref, comments excluded",
-    result.pins_left
+    result.uses_left
     == [
         ".github/workflows/old.yml:6 uses someone/else/.github/workflows/x.yml@v1",
         ".github/workflows/old.yml:10 uses actions/checkout@abc",
     ],
-    str(result.pins_left),
+    str(result.uses_left),
 )
 check("uses: the repo is hand work", len(result.hand) == 1 and "2 `uses:`" in result.hand[0])
 repo, result = run(
     {".github/workflows/ci.yml": "# uses: x/y@v1\nname: CI\non: [push]\njobs: {}\n"},
     label="no uses",
 )
-check("uses: a comment alone leaves nothing", not result.pins_left and not result.hand)
+check("uses: a comment alone leaves nothing", not result.uses_left and not result.hand)
 check(
     "uses: no workflows, no pins",
-    cut.cutover(make({"README.md": "x"}), TARGET).pins_left == [],
+    cut.cutover(make({"README.md": "x"}), TARGET).uses_left == [],
 )
 
 # --------------------------------------------------------------- Dependabot

@@ -416,10 +416,32 @@ def call_of(job: dict, local: set[str]) -> tuple[str, str] | None:
     return (repo, found["file"]) if found["file"] in REUSABLE.get(repo, ()) else None
 
 
+# The `if:` conditions the canonical callers put on a call (constitution's
+# gatehouse.yml, gatehouse-retriage.yml and pre-router ashigaru.yml), whitespace
+# folded: each only picks the event that `sdlc event` routes to the same row.
+# Any other condition narrows the call in a way the fleet file would drop -- a
+# release branch, a path, a label -- so the workflow is refused, not deleted.
+# `needs` and `concurrency` only order and serialize jobs that are all covered.
+CALL_CONDITIONS = {
+    "always()",
+    "github.event_name == 'pull_request_target'",
+    "github.event.workflow_run.event == 'pull_request_review_comment'",
+    "github.event_name == 'issues' && (github.event.action == 'opened' "
+    "|| github.event.label.name == 'ready-for-triage')",
+    "always() && github.event_name == 'issues' && (needs.triage.outputs.auto_code == 'true' "
+    "|| (github.event.action == 'labeled' && github.event.label.name == 'ready-to-code'))",
+    "github.event_name == 'workflow_run' && github.event.workflow_run.event == "
+    "'pull_request_target' && github.event.workflow_run.head_repository.full_name == "
+    "github.repository && startsWith(github.event.workflow_run.head_branch, 'ashigaru/')",
+}
+
+
 def is_covered_call(job: dict, local: set[str]) -> bool:
     call = call_of(job, local)
+    known_if = "if" not in job or " ".join(str(job["if"]).split()) in CALL_CONDITIONS
     # `with:` is config, and only container-release's has a home to move to.
-    return call is not None and set(job) <= CALL_KEYS | ({"with"} if call == IMAGE_CALL else set())
+    keys = CALL_KEYS | ({"with"} if call == IMAGE_CALL else set())
+    return call is not None and known_if and set(job) <= keys
 
 
 def image_inputs(where: str, job: dict) -> dict:

@@ -292,7 +292,7 @@ class Report:
     changes: list[str] = field(default_factory=list)
     hand: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)  # the target validator's verdict
-    pins_left: list[str] = field(default_factory=list)  # `uses:` lines left in a workflow
+    uses_left: list[str] = field(default_factory=list)  # `uses:` lines left in a workflow
 
 
 def git(cwd: Path, *args: str, stdin: str | None = None) -> str:
@@ -400,7 +400,7 @@ def convert(wave: Wave, repo: str, checkout: Path) -> list[str]:
         result = cutover.cutover(checkout, wave.target)
         report.changes += result.changed
         report.hand += result.hand
-        report.pins_left = result.pins_left
+        report.uses_left = result.uses_left
     changed = verify(wave, repo, checkout, floated=floated)
     if not changed:
         raise LeftAloneError("noop", "already cut over" if wave.target else "already floating")
@@ -639,14 +639,14 @@ def write_report(wave: Wave, path: Path, unbuilt: str) -> None:
     clean = [
         r for r, (action, _, _) in wave.outcomes.items() if action in DONE and not hand(wave, r)
     ]
-    off_ref = [r for r in wave.outcomes if wave.reports.get(r, Report()).pins_left]
+    with_uses = [r for r in wave.outcomes if wave.reports.get(r, Report()).uses_left]
     rows = [
         f"- **Clean** ({len(clean)}): {', '.join(clean) or 'none'}",
         f"- **Hand work** ({len(wave.outcomes) - len(clean)}): "
         + (", ".join(r for r in wave.outcomes if r not in clean) or "none"),
         "- **Workflows with a `uses:` left** "
-        f"({sum(len(wave.reports.get(r, Report()).pins_left) for r in wave.outcomes)}): "
-        + (", ".join(off_ref) or "none"),
+        f"({sum(len(wave.reports.get(r, Report()).uses_left) for r in wave.outcomes)}): "
+        + (", ".join(with_uses) or "none"),
     ]
     out = [
         REPORT_HEAD.format(

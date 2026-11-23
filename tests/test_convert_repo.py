@@ -546,6 +546,28 @@ for call in CALLS[:-1]:
         )
     gone(f"a call of {call}", {WF + "call.yml": text}, "call.yml")
 
+# A call's `if:` is kept only when it is one a canonical caller carries:
+# anything narrower (a release branch) would be dropped by the fleet file.
+GUARDED = (
+    "name: Call\non:\n  push:\njobs:\n  one:\n"
+    "    if: {cond}\n"
+    "    uses: crunchtools/gatehouse/.github/workflows/review.yml@v0\n"
+)
+refuses(
+    "a call narrowed by an unknown if:",
+    {WF + "call.yml": GUARDED.format(cond="github.ref == 'refs/heads/release'")},
+    "call.yml",
+)
+gone(
+    "a call with a canonical if:, whitespace aside",
+    {
+        WF + "call.yml": GUARDED.format(
+            cond=">-\n      github.event_name ==\n      'pull_request_target'"
+        )
+    },
+    "call.yml",
+)
+
 # The retriage caller as constitution has it, on workflow_run.
 RETRIAGE = """\
 name: Gatehouse retriage
