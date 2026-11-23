@@ -6,12 +6,16 @@ The conversion is the last PR wave, so what it writes is pinned case by case:
   - the rev-pinned python-sdlc hooks and the standalone Gourmand and Gatehouse
     hooks both become examples/pre-commit-floating.yaml, and a hooks file with
     other repos in it keeps them
-  - a workflow whose every job the CI stub covers is replaced by it; one that
-    shares its `sdlc ci` job with other jobs keeps them and floats in place
-  - what the stubs do not cover is kept, and a ci.yml it cannot replace is
-    refused rather than guessed at
-  - the result runs `sdlc ci` by the constitution validator's reading and by
-    the image's own, so the required check is the same job
+  - .github/workflows/ci.yml becomes examples/ci.yml byte for byte, and every
+    other workflow is deleted when each of its jobs is a row of the spec's
+    "What `sdlc event` runs" table: the `sdlc ci` job, an allowlisted reusable
+    call, gatehouse.yml and release.yml as the examples have them, an inline
+    CodeQL, PyPI publish or Dependabot automerge job
+  - one job no row covers refuses the whole repo (exit 2), naming the file and
+    the job, and writes nothing; the RPM and Pages workflows are told to become
+    [tool.sdlc.commands]
+  - a deleted PyPI publish becomes `publish = "pypi"`, a deleted container-release
+    call becomes [tool.sdlc.image], and neither replaces a value already there
   - nothing is written without --apply, a second run finds nothing to do, and
     .specify/ is never touched
 
@@ -23,8 +27,6 @@ Run inside the image, which has the interpreter and PyYAML the script needs:
 from __future__ import annotations
 
 import importlib.util
-import json
-import re
 import subprocess
 import sys
 import tempfile
@@ -38,16 +40,14 @@ SCRIPT = ROOT / "scripts" / "convert_repo.py"
 HOOKS = (ROOT / "examples" / "pre-commit-floating.yaml").read_text()
 CI = (ROOT / "examples" / "ci.yml").read_text()
 GATEHOUSE = (ROOT / "examples" / "gatehouse.yml").read_text()
+RELEASE = (ROOT / "examples" / "release.yml").read_text()
+RELEASE_OPEN = (ROOT / "examples" / "release-open.yml").read_text()
 BOOTSTRAP = (ROOT / "bin" / "sdlc-bootstrap").read_text()
-
-# constitution validate-constitution.py `_runs_sdlc_ci`, and the image's own
-# CodeQL-deferral reading (`_RUNS_SDLC_CI` in sdlc). Both must still see the job.
-VALIDATOR = re.compile(r"^\s*[\"']?(?:\S*/)?sdlc[\"']?\s+ci\b", re.M)
-IMAGE = re.compile(r"""(?:^|[\s;&|("'=])\S*bin/sdlc\s+ci\b""")
 
 FAILED: list[str] = []
 REFUSED = 2  # the script's exit code for a shape it will not guess at
 EXECUTABLE = 0o111
+WF = ".github/workflows/"
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -107,6 +107,16 @@ PINNED_STEP = """\
           $RUNNER_TEMP/sdlc/bin/sdlc ci
 """
 
+GOURMAND = """\
+name: Gourmand
+on:
+  pull_request:
+jobs:
+  gourmand:
+    name: Code Quality (Gourmand)
+    uses: crunchtools/gatehouse/.github/workflows/gourmand.yml@v0
+"""
+
 OLD_CI = (
     """\
 name: CI
@@ -127,14 +137,24 @@ jobs:
 """
 )
 
-GOURMAND = """\
-name: Gourmand
+FLOATING_CI = """\
+name: CI
 on:
-  pull_request:
+  push:
+    branches: [main]
 jobs:
-  gourmand:
-    name: Code Quality (Gourmand)
-    uses: crunchtools/gatehouse/.github/workflows/gourmand.yml@v0
+  sdlc:
+    name: sdlc ci
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: sdlc ci
+        env:
+          SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}
+        run: .sdlc/bin/sdlc ci
 """
 
 MIXED = (
@@ -156,19 +176,146 @@ jobs:
     + PINNED_STEP
 )
 
+# publish.yml as the PyPI repos have it: build, then the pypa action over OIDC.
 PUBLISH = """\
 name: Publish
 on:
   release:
+    types: [published]
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
     steps:
-      - run: podman pull quay.io/crunchtools/python-sdlc:0.8.0
-      - run: echo quay.io/crunchtools/python-sdlc-extras
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"""
+
+# The same, as two jobs with the dist handed between them.
+PUBLISH_SPLIT = """\
+name: Publish
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: |
+          python -m pip install --upgrade build
+          python -m build
+      - uses: actions/upload-artifact@v5
+        with:
+          name: dist
+          path: dist/
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"""
+
+PUBLISH_UV = PUBLISH.replace(
+    "      - uses: pypa/gh-action-pypi-publish@release/v1\n", "      - run: uv publish\n"
+)
+
+CODEQL = """\
+name: CodeQL
+on:
+  push:
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    strategy:
+      matrix:
+        language: [python]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/autobuild@v4
+      - uses: github/codeql-action/analyze@v4
+"""
+
+AUTOMERGE = """\
+name: Dependabot
+on:
+  pull_request:
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@v2
+      - run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ github.token }}
+"""
+
+CONTAINER_CALL = """\
+name: Container
+on:
+  push:
+jobs:
+  container:
+    uses: crunchtools/constitution/.github/workflows/container-release.yml@v1
+    permissions:
+      contents: read
+    with:
+      image: quay.io/crunchtools/mcp-example
+      boot: mcp
+      boot-env: |
+        EXAMPLE_API_KEY=gate-dummy
+      boot-timeout: 240
+      rhsm: true
+      sign: true
+      downstream: mcp-a mcp-b
+    secrets:
+      QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+"""
+
+PACKAGES = """\
+name: Packages
+on:
+  push:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rpmbuild -ba x.spec
+  pages:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/deploy-pages@v4
 """
 
 CONSTITUTION = "# per-repo constitution\nInherits: v1.44.0\n"
+HOOKED = {".pre-commit-config.yaml": PINNED_HOOKS}
 
 
 def make_repo(files: dict[str, str]) -> Path:
@@ -197,15 +344,54 @@ def convert(repo: Path, apply: bool = False, *extra: str) -> subprocess.Complete
     )
 
 
-def runs_sdlc_ci(text: str) -> bool:
-    for job in (yaml.safe_load(text).get("jobs") or {}).values():
-        if job.get("name") != "sdlc ci":
-            continue
-        for step in job.get("steps") or []:
-            run = str(step.get("run", ""))
-            if VALIDATOR.search(run) and any(IMAGE.search(line) for line in run.splitlines()):
-                return True
-    return False
+def sdlc_cfg(repo: Path, name: str = "sdlc.toml") -> dict:
+    return tomllib.loads(snapshot(repo).get(name, "")).get("tool", {}).get("sdlc", {})
+
+
+def converted(files: dict[str, str]) -> tuple[Path, subprocess.CompletedProcess]:
+    """A repo with the floating hooks and `files`, converted with --apply."""
+    repo = make_repo({**HOOKED, **files})
+    return repo, convert(repo, apply=True)
+
+
+def refuses(label: str, files: dict[str, str], *wanted: str) -> subprocess.CompletedProcess:
+    """`files` is refused (exit 2), nothing is written, and the message names `wanted`."""
+    repo = make_repo({**HOOKED, **files})
+    before = snapshot(repo)
+    refused = convert(repo, apply=True)
+    check(
+        f"{label}: refused (exit 2), nothing written, and named",
+        refused.returncode == REFUSED
+        and "NOT CONVERTED" in refused.stderr
+        and snapshot(repo) == before
+        and all(w in refused.stderr for w in wanted),
+        refused.stderr,
+    )
+    return refused
+
+
+def gone(label: str, files: dict[str, str], *deleted: str) -> Path:
+    """`files` converts: ci.yml is the example, `deleted` are gone, a second run is a no-op."""
+    repo, done = converted(files)
+    after = snapshot(repo)
+    check(
+        f"{label}: converts, ci.yml is examples/ci.yml byte for byte",
+        done.returncode == 0 and after.get(WF + "ci.yml") == CI,
+        done.stderr,
+    )
+    check(
+        f"{label}: {', '.join(deleted)} deleted, no other workflow left",
+        all(WF + d not in after for d in deleted)
+        and [k for k in after if k.startswith(WF)] == [WF + "ci.yml"],
+        str(sorted(after)),
+    )
+    again = convert(repo)
+    check(
+        f"{label}: a second run finds nothing to do",
+        again.returncode == 0 and again.stdout == "",
+        again.stderr + again.stdout,
+    )
+    return repo
 
 
 # ------------------------------------------------- a rev-pinned Python repo
@@ -213,10 +399,11 @@ def runs_sdlc_ci(text: str) -> bool:
 repo = make_repo(
     {
         ".pre-commit-config.yaml": PINNED_HOOKS,
-        ".github/workflows/ci.yml": OLD_CI,
-        ".github/workflows/gourmand.yml": GOURMAND,
-        ".github/workflows/gatehouse.yml": "# an older comment\n" + GATEHOUSE,
-        ".github/workflows/publish.yml": PUBLISH,
+        WF + "ci.yml": OLD_CI,
+        WF + "gourmand.yml": GOURMAND,
+        WF + "gatehouse.yml": "# an older comment\n" + GATEHOUSE,
+        WF + "publish.yml": PUBLISH,
+        "pyproject.toml": '[project]\nname = "x"\nversion = "0"\n',
         ".specify/memory/constitution.md": CONSTITUTION,
     }
 )
@@ -229,33 +416,26 @@ done = convert(repo, apply=True)
 after = snapshot(repo)
 check("python: --apply exits 0", done.returncode == 0, done.stderr)
 check("python: the hooks file is the floating example", after[".pre-commit-config.yaml"] == HOOKS)
-check("python: ci.yml is the stub", after.get(".github/workflows/ci.yml") == CI)
+check("python: ci.yml is examples/ci.yml byte for byte", after.get(WF + "ci.yml") == CI)
 check(
     "python: .sdlc/bin/sdlc is bin/sdlc-bootstrap, executable",
     after.get(".sdlc/bin/sdlc") == BOOTSTRAP
     and (repo / ".sdlc/bin/sdlc").stat().st_mode & EXECUTABLE == EXECUTABLE,
 )
 check(
-    "python: gourmand.yml, covered by the stub, is gone",
-    ".github/workflows/gourmand.yml" not in after,
-)
-check("python: gatehouse.yml is the stub", after[".github/workflows/gatehouse.yml"] == GATEHOUSE)
-check(
-    "python: publish.yml is kept, its image moved to quay.io/crunchtools/sdlc",
-    "podman pull quay.io/crunchtools/sdlc:0.8.0" in after[".github/workflows/publish.yml"]
-    and "quay.io/crunchtools/python-sdlc-extras" in after[".github/workflows/publish.yml"],
+    "python: gourmand.yml, gatehouse.yml and publish.yml are deleted",
+    [k for k in after if k.startswith(WF)] == [WF + "ci.yml"],
+    str(sorted(after)),
 )
 check(
-    "python: .specify is untouched",
-    after[".specify/memory/constitution.md"] == CONSTITUTION,
+    "python: the publish job became publish = pypi in pyproject.toml",
+    sdlc_cfg(repo, "pyproject.toml").get("publish") == "pypi",
+    after["pyproject.toml"],
 )
+check("python: .specify is untouched", after[".specify/memory/constitution.md"] == CONSTITUTION)
 check(
     "python: no hook repo is pinned at a rev",
     all("rev" not in r for r in yaml.safe_load(after[".pre-commit-config.yaml"])["repos"]),
-)
-check(
-    "python: the stub runs `sdlc ci` by both readings",
-    runs_sdlc_ci(after[".github/workflows/ci.yml"]),
 )
 again = convert(repo)
 check(
@@ -304,82 +484,451 @@ for config in ("pyproject.toml", "sdlc.toml"):
         moved,
     )
 
-# ------------------------------------------------ a container-only repo
-
+# A repo already floating, ci.yml and all: nothing to do but the old name.
 repo = make_repo(
     {
-        ".pre-commit-config.yaml": STANDALONE_HOOKS,
-        ".github/workflows/gourmand.yml": GOURMAND,
-        ".github/workflows/container.yml": (
-            "name: Container\non: push\njobs:\n  build:\n    uses: x/y/.github/workflows/c.yml@v1\n"
+        ".pre-commit-config.yaml": HOOKS,
+        ".sdlc/bin/sdlc": BOOTSTRAP,
+        WF + "ci.yml": CI,
+    }
+)
+(repo / ".sdlc/bin/sdlc").chmod(0o755)
+done = convert(repo, apply=True)
+check(
+    "floating: a repo already on the fleet file plans nothing",
+    done.returncode == 0 and done.stdout == "" and snapshot(repo)[WF + "ci.yml"] == CI,
+    done.stderr,
+)
+
+# ---------------------------------------------- what is deleted, by table row
+
+repo = gone("an old ci.yml (sdlc ci + Gourmand)", {WF + "ci.yml": OLD_CI}, "gourmand.yml")
+gone(
+    "a floating sdlc ci job on its own runner, in its own file",
+    {WF + "tests.yml": FLOATING_CI},
+    "tests.yml",
+)
+gone(
+    "a pinned sdlc ci job in a file of its own",
+    {WF + "tests.yml": MIXED.split("  unit:")[0] + "  sdlc:" + MIXED.split("  sdlc:")[1]},
+    "tests.yml",
+)
+
+# Each allowlisted reusable call is one row of the table.
+CALLS = (
+    "constitution/validate.yml@v1.46.0",
+    "constitution/container-release.yml@v1",
+    "constitution/dependency-audit.yml@v1",
+    "constitution/dependabot-automerge.yml@v1",
+    "gatehouse/gourmand.yml@v0",
+    "gatehouse/review.yml@v0",
+    "gatehouse/triage.yml@v0",
+    "gatehouse/retriage.yml@v0",
+    "ashigaru/router.yml@v5",
+    "ashigaru/triage.yml@v2",
+    "ashigaru/code.yml@v2",
+    "ashigaru/fix.yml@v2",
+    "ashigaru/review.yml@v2",
+    "ashigaru/release.yml@v5",
+    "ashigaru/release-tag.yml@v5",
+    "python-sdlc/ashigaru/router.yml@v5",
+)
+for call in CALLS[:-1]:
+    repo_name, rest = call.split("/", 1)
+    text = (
+        "name: Call\non:\n  pull_request:\njobs:\n  one:\n    permissions: {}\n"
+        f"    uses: crunchtools/{repo_name}/.github/workflows/{rest}\n"
+        "    secrets:\n      TOKEN: ${{ secrets.TOKEN }}\n"
+    )
+    if call.startswith("constitution/container-release"):
+        text = text.replace(
+            "    secrets:", "    with:\n      image: quay.io/x/y\n      boot: none\n    secrets:"
+        )
+    gone(f"a call of {call}", {WF + "call.yml": text}, "call.yml")
+
+# A call's `if:` is kept only when it is one a canonical caller carries:
+# anything narrower (a release branch) would be dropped by the fleet file.
+GUARDED = (
+    "name: Call\non:\n  push:\njobs:\n  one:\n"
+    "    if: {cond}\n"
+    "    uses: crunchtools/gatehouse/.github/workflows/review.yml@v0\n"
+)
+refuses(
+    "a call narrowed by an unknown if:",
+    {WF + "call.yml": GUARDED.format(cond="github.ref == 'refs/heads/release'")},
+    "call.yml",
+)
+gone(
+    "a call with a canonical if:, whitespace aside",
+    {
+        WF + "call.yml": GUARDED.format(
+            cond=">-\n      github.event_name ==\n      'pull_request_target'"
+        )
+    },
+    "call.yml",
+)
+
+# The retriage caller as constitution has it, on workflow_run.
+RETRIAGE = """\
+name: Gatehouse retriage
+on:
+  workflow_run:
+    workflows: [Gatehouse]
+    types: [completed]
+permissions: {}
+jobs:
+  retriage:
+    if: github.event.workflow_run.event == 'pull_request_review_comment'
+    permissions:
+      actions: write
+    uses: crunchtools/gatehouse/.github/workflows/retriage.yml@v0
+"""
+gone("gatehouse-retriage.yml", {WF + "gatehouse-retriage.yml": RETRIAGE}, "gatehouse-retriage.yml")
+
+# gatehouse.yml as the example has it, in all but comments, or with the old guard.
+gone("gatehouse.yml", {WF + "gatehouse.yml": "# an older comment\n" + GATEHOUSE}, "gatehouse.yml")
+OLD_GUARD = (
+    GATEHOUSE.replace("^(\\.github/workflows|\\.sdlc)/", "^\\.github/workflows/")
+    .replace(
+        "a file out of .github/workflows/ or .sdlc/ unseen",
+        "a workflow out of .github/workflows/ unseen",
+    )
+    .replace("modifies .github/workflows/ or .sdlc/ —", "modifies .github/workflows/ —")
+)
+check("the old guard is not the example's", OLD_GUARD != GATEHOUSE)
+gone(
+    "gatehouse.yml with the guard before gatehouse#150",
+    {WF + "gatehouse.yml": OLD_GUARD},
+    "gatehouse.yml",
+)
+refuses(
+    "a gatehouse.yml customized beyond the guard",
+    {WF + "gatehouse.yml": GATEHOUSE.replace("review.yml@v0", "review.yml@v1")},
+    "gatehouse.yml",
+    "guard",
+)
+refuses(
+    "a guard script changed beyond gatehouse#150's lines",
+    {
+        WF + "gatehouse.yml": OLD_GUARD.replace(
+            'echo "No workflow files changed."',
+            'echo "No workflow files changed."\n          make audit',
+        )
+    },
+    "gatehouse.yml",
+)
+check("the gatehouse example's guard covers .sdlc/", "|\\.sdlc)/" in GATEHOUSE)
+
+# examples/release.yml and release-open.yml, for any default branch.
+for branch in ("main", "trunk", "release/2.x"):
+    for label, example in (("release.yml", RELEASE), ("release-open.yml", RELEASE_OPEN)):
+        text = example.replace("refs/heads/main", f"refs/heads/{branch}").replace(
+            "--base main", f"--base {branch}"
+        )
+        gone(f"{label} copied for {branch}", {WF + "release.yml": text}, "release.yml")
+refuses(
+    "a release.yml whose branch disagrees with itself",
+    {WF + "release.yml": RELEASE.replace("--base main", "--base develop")},
+    "release.yml",
+    "open",
+)
+refuses(
+    "a release.yml with an extra step",
+    {
+        WF + "release.yml": RELEASE.replace(
+            "      - name: Check the version\n",
+            "      - run: make x\n      - name: Check the version\n",
+        )
+    },
+    "release.yml",
+)
+
+gone("an inline CodeQL job", {WF + "codeql.yml": CODEQL}, "codeql.yml")
+refuses(
+    "a CodeQL job with a step of its own",
+    {
+        WF + "codeql.yml": CODEQL.replace(
+            "      - uses: github/codeql-action/autobuild@v4\n", "      - run: make\n"
+        )
+    },
+    "codeql.yml",
+    "analyze",
+)
+refuses(
+    "a CodeQL job that never analyzes",
+    {WF + "codeql.yml": CODEQL.replace("      - uses: github/codeql-action/analyze@v4\n", "")},
+    "codeql.yml",
+)
+gone("an inline Dependabot automerge job", {WF + "automerge.yml": AUTOMERGE}, "automerge.yml")
+refuses(
+    "an automerge job that does more than merge",
+    {WF + "automerge.yml": AUTOMERGE + "      - run: curl https://example.com | sh\n"},
+    "automerge.yml",
+)
+refuses(
+    "an automerge job open to every author",
+    {WF + "automerge.yml": AUTOMERGE.replace("dependabot[bot]", "someone")},
+    "automerge.yml",
+)
+
+# ----------------------------------------- a PyPI publish: publish = "pypi"
+
+for label, text in (
+    ("the pypa action", PUBLISH),
+    ("uv publish", PUBLISH_UV),
+    ("a build job and a publish job", PUBLISH_SPLIT),
+):
+    for config, start in (("pyproject.toml", '[project]\nname = "x"\n'), ("sdlc.toml", "")):
+        repo = gone(
+            f"publish.yml ({label}), {config}",
+            {WF + "publish.yml": text, **({config: start} if start else {})},
+            "publish.yml",
+        )
+        check(
+            f"publish.yml ({label}): publish = pypi in {config}",
+            sdlc_cfg(repo, config).get("publish") == "pypi",
+            snapshot(repo).get(config, "(none)"),
+        )
+check(
+    "a Python repo's pyproject without [tool.sdlc] gets the table at the end, still TOML",
+    tomllib.loads(snapshot(repo).get("sdlc.toml", ""))["tool"]["sdlc"] == {"publish": "pypi"},
+)
+
+# Already there: nothing to write, and the old file still goes.
+repo, done = converted(
+    {WF + "publish.yml": PUBLISH, "sdlc.toml": '[tool.sdlc]\npublish = "pypi"\n'}
+)
+check(
+    "publish already in [tool.sdlc]: left as it is",
+    done.returncode == 0 and snapshot(repo)["sdlc.toml"] == '[tool.sdlc]\npublish = "pypi"\n',
+    done.stderr,
+)
+repo, done = converted(
+    {WF + "publish.yml": PUBLISH, "sdlc.toml": '[tool.sdlc]\nstacks = ["python"]\n'}
+)
+check(
+    "publish next to other keys of an existing [tool.sdlc]",
+    done.returncode == 0
+    and sdlc_cfg(repo) == {"publish": "pypi", "stacks": ["python"]}
+    and snapshot(repo)["sdlc.toml"].endswith('stacks = ["python"]\n'),
+    snapshot(repo)["sdlc.toml"],
+)
+refuses(
+    "a publish job beside a [tool.sdlc] publish that says otherwise",
+    {WF + "publish.yml": PUBLISH, "sdlc.toml": '[tool.sdlc]\npublish = "none"\n'},
+    "publish",
+)
+
+for label, text in (
+    (
+        "a token",
+        PUBLISH.replace(
+            "      - uses: pypa/gh-action-pypi-publish@release/v1\n",
+            "      - uses: pypa/gh-action-pypi-publish@release/v1\n        with:\n          password: ${{ secrets.PYPI_TOKEN }}\n",
         ),
-        "Containerfile": "FROM scratch\n",
-    }
-)
-done = convert(repo, apply=True)
-after = snapshot(repo)
-check("container: --apply exits 0", done.returncode == 0, done.stderr)
-check(
-    "container: the standalone hooks become the floating ones",
-    after[".pre-commit-config.yaml"] == HOOKS,
-)
-check("container: ci.yml is written", after.get(".github/workflows/ci.yml") == CI)
-check(
-    "container: gatehouse.yml is written", after.get(".github/workflows/gatehouse.yml") == GATEHOUSE
-)
-check("container: container.yml is kept", ".github/workflows/container.yml" in after)
-check("container: gourmand.yml is gone", ".github/workflows/gourmand.yml" not in after)
+    ),
+    ("twine", PUBLISH.replace("uv build", "pip install twine && twine upload dist/*")),
+    ("an uv publish token", PUBLISH_UV.replace("uv publish", "uv publish --token $T")),
+    (
+        "an unlisted run line",
+        PUBLISH.replace(
+            "      - run: uv build\n", "      - run: uv build\n      - run: make docs\n"
+        ),
+    ),
+    ("an unlisted action", PUBLISH.replace("astral-sh/setup-uv@v7", "someone/setup@v1")),
+    (
+        "an env on the step",
+        PUBLISH.replace(
+            "      - run: uv build\n", "      - run: uv build\n        env:\n          X: y\n"
+        ),
+    ),
+    (
+        "a build with no publish",
+        PUBLISH.replace("      - uses: pypa/gh-action-pypi-publish@release/v1\n", ""),
+    ),
+):
+    refuses(f"a publish.yml with {label}", {WF + "publish.yml": text}, "publish.yml")
 
-# ------------------------------- an sdlc ci job sharing its workflow
+# ------------------------------- a container-release call: [tool.sdlc.image]
 
-repo = make_repo(
+repo = gone(
+    "a container-release call",
+    {WF + "container.yml": CONTAINER_CALL, "Containerfile": "FROM scratch\n"},
+    "container.yml",
+)
+image = sdlc_cfg(repo).get("image", {})
+check(
+    "container-release: its inputs are [tool.sdlc.image], values as YAML gave them",
+    image
+    == {
+        "image": "quay.io/crunchtools/mcp-example",
+        "boot": "mcp",
+        "boot-env": "EXAMPLE_API_KEY=gate-dummy\n",
+        "boot-timeout": 240,
+        "rhsm": True,
+    },
+    str(image),
+)
+check(
+    "container-release: sign and downstream are dropped, with a note",
+    "sign" not in image and "downstream" not in image,
+)
+dry = convert(make_repo({**HOOKED, WF + "container.yml": CONTAINER_CALL}))
+check(
+    "container-release: the note says what was dropped",
+    "dropped: downstream, sign" in dry.stderr,
+    dry.stderr,
+)
+
+# Already the same values: nothing written; a different value is refused.
+same = '[tool.sdlc.image]\nimage = "quay.io/crunchtools/mcp-example"\nboot = "mcp"\n'
+repo, done = converted({WF + "container.yml": CONTAINER_CALL, "sdlc.toml": same})
+check(
+    "container-release: values already in [tool.sdlc.image] are kept, the rest added",
+    done.returncode == 0
+    and sdlc_cfg(repo)["image"]["boot"] == "mcp"
+    and sdlc_cfg(repo)["image"]["rhsm"] is True
+    and snapshot(repo)["sdlc.toml"].count("boot = ") == 1,
+    snapshot(repo)["sdlc.toml"],
+)
+refuses(
+    "a container-release input that differs from [tool.sdlc.image]",
+    {WF + "container.yml": CONTAINER_CALL, "sdlc.toml": same.replace('"mcp"', '"systemd"')},
+    "boot",
+    "[tool.sdlc.image]",
+)
+refuses(
+    "a container-release input that is an expression",
+    {WF + "container.yml": CONTAINER_CALL.replace("boot: mcp", "boot: ${{ vars.BOOT }}")},
+    "boot",
+    "expression",
+)
+refuses(
+    "two container-release calls that disagree",
     {
-        ".pre-commit-config.yaml": PINNED_HOOKS,
-        ".github/workflows/tests.yml": MIXED,
-        ".github/workflows/gourmand.yml": GOURMAND,
-    }
+        WF + "container.yml": CONTAINER_CALL,
+        WF + "other.yml": CONTAINER_CALL.replace("mcp-example", "mcp-other"),
+    },
+    "[tool.sdlc.image]",
 )
-done = convert(repo, apply=True)
-after = snapshot(repo)
-tests_yml = after[".github/workflows/tests.yml"]
-check("mixed: --apply exits 0", done.returncode == 0, done.stderr)
-check("mixed: no ci.yml stub beside it", ".github/workflows/ci.yml" not in after)
-check("mixed: the other job is kept", "make test" in tests_yml)
-check("mixed: gourmand.yml is kept, no stub took it", ".github/workflows/gourmand.yml" in after)
-check(
-    "mixed: the step floats, reading SDLC_IMAGE from the repository variable",
-    "\n        run: .sdlc/bin/sdlc ci\n" in tests_yml
-    and "set -eu" not in tests_yml
-    and "SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}" in tests_yml
-    and "git clone" not in tests_yml,
-)
-check("mixed: it still runs `sdlc ci` by both readings", runs_sdlc_ci(tests_yml))
-check("mixed: the result is still YAML", isinstance(yaml.safe_load(tests_yml), dict))
-again = convert(repo)
-check(
-    "mixed: a second run finds nothing to do",
-    again.returncode == 0 and again.stdout == "",
-    again.stdout,
+refuses(
+    "a `with:` on any other call",
+    {WF + "gourmand.yml": GOURMAND.replace("@v0\n", "@v0\n    with:\n      strict: true\n")},
+    "gourmand.yml",
 )
 
 # ------------------------------------------------------ what it refuses
 
-repo = make_repo(
-    {
-        ".pre-commit-config.yaml": STANDALONE_HOOKS,
-        ".github/workflows/ci.yml": (
-            "name: CI\non: push\njobs:\n  build:\n    runs-on: x\n    steps:\n      - run: make\n"
-        ),
-    }
+refused = refuses(
+    "packages.yml (RPM build, Pages)",
+    {WF + "packages.yml": PACKAGES},
+    "packages.yml",
+    "build",
+    "pages",
+    "[tool.sdlc.commands]",
+    "sdlc run",
+    "actions/deploy-pages",
 )
-before = snapshot(repo)
-refused = convert(repo, apply=True)
+check("the message names Pages as a human step", "human step" in refused.stderr, refused.stderr)
+
+refused = refuses(
+    "a workflow mixing sdlc ci with a job nothing covers",
+    {WF + "tests.yml": MIXED},
+    "tests.yml",
+    "unit",
+)
 check(
-    "a ci.yml the stub cannot replace is refused (exit 2), and nothing is written",
-    refused.returncode == REFUSED
-    and "NOT CONVERTED" in refused.stderr
-    and snapshot(repo) == before,
+    "a mixed workflow: the covered job is not named",
+    "sdlc" not in refused.stderr.split("unit")[0].split("jobs:")[-1],
     refused.stderr,
+)
+refused = refuses(
+    "two files, one uncovered: every uncovered file and job is named",
+    {WF + "ci.yml": OLD_CI, WF + "a.yml": PACKAGES, WF + "b.yml": MIXED},
+    "a.yml",
+    "b.yml",
+    "unit",
+    "build",
+)
+check("the covered ci.yml is not named", "ci.yml" not in refused.stderr, refused.stderr)
+refuses(
+    "a ci.yml the stub cannot replace",
+    {
+        WF
+        + "ci.yml": "name: CI\non: push\njobs:\n  build:\n    runs-on: x\n    steps:\n      - run: make\n"
+    },
+    "ci.yml",
+    "build",
+)
+refuses(
+    "a workflow with a workflow-level env",
+    {
+        WF + "tests.yml": MIXED.replace(
+            "on:\n  pull_request:\n", "on:\n  pull_request:\nenv:\n  A: b\n"
+        ).split("  unit:")[0]
+        + "  sdlc:"
+        + MIXED.split("  sdlc:")[1]
+    },
+    "tests.yml",
+    "env",
+)
+refuses(
+    "a workflow with no jobs", {WF + "empty.yml": "name: X\non: push\n"}, "empty.yml", "no jobs"
+)
+refuses(
+    "a local call of a workflow that is itself refused",
+    {
+        WF
+        + "caller.yml": "name: C\non: push\njobs:\n  c:\n    uses: ./.github/workflows/callee.yml\n",
+        WF
+        + "callee.yml": "name: D\non:\n  workflow_call:\njobs:\n  d:\n    runs-on: x\n    steps:\n      - run: make\n",
+    },
+    "callee.yml",
+)
+refuses(
+    "a call of a crunchtools workflow not on the list",
+    {
+        WF
+        + "x.yml": "name: X\non: push\njobs:\n  x:\n    uses: crunchtools/constitution/.github/workflows/gate.yml@v1\n"
+    },
+    "x.yml",
+)
+refuses(
+    "a call of another org's workflow",
+    {
+        WF
+        + "x.yml": "name: X\non: push\njobs:\n  x:\n    uses: someone/gatehouse/.github/workflows/review.yml@v0\n"
+    },
+    "x.yml",
+)
+refuses(
+    "an sdlc ci step with its own env",
+    {
+        WF + "ci.yml": OLD_CI.replace(
+            "      - name: sdlc ci\n", "      - name: sdlc ci\n        env:\n          FOO: bar\n"
+        )
+    },
+    "ci.yml",
+)
+refuses(
+    "an sdlc ci job with a service",
+    {
+        WF + "ci.yml": OLD_CI.replace(
+            "    runs-on: ubuntu-latest\n",
+            "    runs-on: ubuntu-latest\n    services:\n      db:\n        image: x\n",
+            1,
+        )
+    },
+    "ci.yml",
+)
+refuses(
+    "a kept workflow still cloning python-sdlc by rev",
+    {
+        WF + "ci.yml": OLD_CI,
+        WF
+        + "publish.yml": 'name: P\non: push\njobs:\n  p:\n    runs-on: x\n    steps:\n      - run: git clone --branch "$rev" https://github.com/crunchtools/python-sdlc x\n',
+    },
+    "publish.yml",
 )
 
 for broken in ("repos: [\n", "- a list\n"):
@@ -390,6 +939,8 @@ for broken in ("repos: [\n", "- a list\n"):
         refused.returncode == REFUSED and "Traceback" not in refused.stderr,
         refused.stderr,
     )
+refused = refuses("a workflow that is not YAML", {WF + "x.yml": "jobs: [\n"}, "x.yml")
+check("a workflow that is not YAML is not a traceback", "Traceback" not in refused.stderr)
 
 repo = make_repo({".pre-commit-config.yaml": "repos: []\n"})
 refused = convert(repo)
@@ -399,19 +950,17 @@ check(
     refused.stderr,
 )
 
-custom = GATEHOUSE.replace(
-    "uses: crunchtools/gatehouse/.github/workflows/review.yml@v0",
-    "uses: crunchtools/gatehouse/.github/workflows/review.yml@v0\n    with:\n      blocking: true",
+done_repo, done = converted({})
+check(
+    "a repo with no workflows gets ci.yml and the bootstrap",
+    done.returncode == 0 and snapshot(done_repo).get(WF + "ci.yml") == CI,
+    done.stderr,
 )
-repo = make_repo(
-    {
-        ".pre-commit-config.yaml": RUFF_AND_STANDALONE,
-        ".github/workflows/gatehouse.yml": custom,
-    }
-)
+
+# Other hooks beside the standalone ones: the floating ones are added.
+repo = make_repo({".pre-commit-config.yaml": RUFF_AND_STANDALONE, WF + "gatehouse.yml": GATEHOUSE})
 done = convert(repo, apply=True)
-after = snapshot(repo)
-hooks = yaml.safe_load(after[".pre-commit-config.yaml"])
+hooks = yaml.safe_load(snapshot(repo)[".pre-commit-config.yaml"])
 check("other hooks: --apply exits 0", done.returncode == 0, done.stderr)
 check(
     "other hooks: ruff is kept, the standalone hooks are gone, the floating ones added",
@@ -422,57 +971,6 @@ check(
     "other hooks: both hook types are installed",
     hooks.get("default_install_hook_types") == ["pre-commit", "pre-push"],
 )
-check(
-    "a gatehouse.yml that differs in more than comments is kept",
-    after[".github/workflows/gatehouse.yml"] == custom
-    and "kept: .github/workflows/gatehouse.yml" in done.stderr,
-)
-
-
-# constitution v1.46.0 wants the step's run to be exactly the launcher: no
-# `set -eu` left above it. gatehouse's ci.yml quoted the launcher's path, and an
-# earlier convert_repo.py left `set -eu` in the block; both float to the exact line.
-for label, text in (
-    (
-        "a quoted launcher path",
-        MIXED.replace("$RUNNER_TEMP/sdlc/bin/sdlc ci", '"$RUNNER_TEMP/sdlc/bin/sdlc" ci'),
-    ),
-    (
-        "the leftover `set -eu` block",
-        MIXED.replace(
-            PINNED_STEP.split("run: |\n", 1)[1], "          set -eu\n          .sdlc/bin/sdlc ci\n"
-        ),
-    ),
-):
-    repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/tests.yml": text})
-    done = convert(repo, apply=True)
-    steps = yaml.safe_load(snapshot(repo)[".github/workflows/tests.yml"])["jobs"]["sdlc"]["steps"]
-    check(
-        f"mixed: {label} floats to a run that is exactly `.sdlc/bin/sdlc ci`",
-        done.returncode == 0 and [s.get("run") for s in steps] == [".sdlc/bin/sdlc ci"],
-        f"{steps} {done.stderr}",
-    )
-    check(f"mixed: {label}: a second run finds nothing to do", convert(repo).stdout == "")
-
-# A mixed workflow whose `sdlc ci` step is not the exact pinned form, or has
-# two of them, is not rewritten by guesswork.
-for label, text in (
-    ("an edited pinned step", MIXED.replace("--depth 1", "--depth 2")),
-    ("two sdlc ci steps", MIXED + PINNED_STEP),
-    ("a line after the pinned body", MIXED + "          echo done\n"),
-    (
-        "mismatched quotes",
-        MIXED.replace("$RUNNER_TEMP/sdlc/bin/sdlc ci", '"$RUNNER_TEMP/sdlc/bin/sdlc ci'),
-    ),
-):
-    repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/tests.yml": text})
-    before = snapshot(repo)
-    refused = convert(repo, apply=True)
-    check(
-        f"mixed: {label} is refused (exit 2) and nothing is written",
-        refused.returncode == REFUSED and snapshot(repo) == before,
-        refused.stderr,
-    )
 
 # Standalone hooks sharing their `repo: local` item with a hook of the repo's
 # own: only the two standalone hooks go.
@@ -502,196 +1000,8 @@ check(
     f"{local} {done.stderr}",
 )
 
-# ---------------------------------------------- what the stub would drop
-
-# A job carrying more than examples/ci.yml has -- a step, an env, a service --
-# keeps its workflow; only its `sdlc ci` step is rewritten.
-richer = OLD_CI.replace(
-    "      - uses: actions/checkout@v7\n",
-    "      - uses: actions/checkout@v7\n      - run: make generated-files\n",
-)
-repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": richer})
-done = convert(repo, apply=True)
-after = snapshot(repo)
-check(
-    "a richer sdlc ci job keeps its extra step, floated in place",
-    done.returncode == 0
-    and "make generated-files" in after[".github/workflows/ci.yml"]
-    and "\n        run: .sdlc/bin/sdlc ci\n" in after[".github/workflows/ci.yml"],
-    done.stderr,
-)
-for extra in ("    env:\n      FOO: bar\n", "    services:\n      db:\n        image: x\n"):
-    job_level = OLD_CI.replace(
-        "    runs-on: ubuntu-latest\n", f"    runs-on: ubuntu-latest\n{extra}", 1
-    )
-    repo = make_repo(
-        {".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": job_level}
-    )
-    done = convert(repo, apply=True)
-    check(
-        f"a job with {extra.split(':')[0].strip()} is not replaced by the stub",
-        extra in snapshot(repo)[".github/workflows/ci.yml"],
-        done.stderr,
-    )
-
-# Events and permissions are part of what a workflow does. One that runs on
-# more than the stub does, or with other permissions, is not replaced.
-for label, old_text, new_text in (
-    (
-        "a schedule",
-        "on:\n  pull_request:\n",
-        "on:\n  pull_request:\n  schedule:\n    - cron: '0 6 * * 1'\n",
-    ),
-    (
-        "a release branch",
-        "on:\n  pull_request:\n",
-        "on:\n  pull_request:\n  push:\n    branches: [release]\n",
-    ),
-    ("a path filter", "on:\n  pull_request:\n", "on:\n  pull_request:\n    paths: ['src/**']\n"),
-    (
-        "workflow permissions",
-        "on:\n  pull_request:\n",
-        "on:\n  pull_request:\npermissions:\n  contents: write\n",
-    ),
-    (
-        "job permissions",
-        "    runs-on: ubuntu-latest\n",
-        "    runs-on: ubuntu-latest\n    permissions:\n      packages: write\n",
-    ),
-):
-    text = OLD_CI.replace(old_text, new_text, 1)
-    repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": text})
-    done = convert(repo, apply=True)
-    kept = snapshot(repo)[".github/workflows/ci.yml"]
-    check(
-        f"a ci.yml with {label} keeps it, its step floated in place",
-        done.returncode == 0
-        and new_text.strip() in kept
-        and "\n        run: .sdlc/bin/sdlc ci\n" in kept,
-        done.stderr,
-    )
-
-# The review's nits: what a replacement would silently change, or break.
-renamed = OLD_CI.replace("    name: Code Quality (Gourmand)\n", "    name: Gourmand\n")
-repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": renamed})
-done = convert(repo, apply=True)
-check(
-    "a Gourmand job under another name keeps its workflow (its required check name)",
-    done.returncode == 0 and "    name: Gourmand\n" in snapshot(repo)[".github/workflows/ci.yml"],
-    done.stderr,
-)
-with_env = OLD_CI.replace(
-    "      - name: sdlc ci\n", "      - name: sdlc ci\n        env:\n          FOO: bar\n"
-)
-repo = make_repo({".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/ci.yml": with_env})
-before = snapshot(repo)
-refused = convert(repo, apply=True)
-check(
-    "an sdlc ci step with its own env is not replaced; it is refused, nothing written",
-    refused.returncode == REFUSED and snapshot(repo) == before,
-    refused.stderr,
-)
-for event in ("pull_request_target", "workflow_run", "issue_comment", "pull_request_review"):
-    privileged = MIXED.replace("on:\n  pull_request:\n", f"on:\n  {event}:\n")
-    repo = make_repo(
-        {".pre-commit-config.yaml": PINNED_HOOKS, ".github/workflows/tests.yml": privileged}
-    )
-    before = snapshot(repo)
-    refused = convert(repo, apply=True)
-    check(
-        f"an sdlc ci step under {event} is refused, nothing written",
-        refused.returncode == REFUSED and snapshot(repo) == before,
-        refused.stderr,
-    )
-orphan = PUBLISH.replace(
-    "      - run: echo quay.io/crunchtools/python-sdlc-extras\n",
-    '      - run: git clone --branch "$rev" https://github.com/crunchtools/python-sdlc x\n',
-)
-repo = make_repo(
-    {
-        ".pre-commit-config.yaml": PINNED_HOOKS,
-        ".github/workflows/ci.yml": OLD_CI,
-        ".github/workflows/publish.yml": orphan,
-    }
-)
-before = snapshot(repo)
-refused = convert(repo, apply=True)
-check(
-    "a kept workflow still cloning python-sdlc by rev is refused, nothing written",
-    refused.returncode == REFUSED and snapshot(repo) == before and "publish.yml" in refused.stderr,
-    refused.stderr,
-)
-
-# ------------------------------------- the repo's new name: crunchtools/sdlc
 
 NEW_PINNED_HOOKS = PINNED_HOOKS.replace("crunchtools/python-sdlc", "crunchtools/sdlc")
-NEW_PINNED_STEP = (
-    PINNED_STEP.replace("crunchtools\\/python-sdlc", "crunchtools\\/sdlc")
-    .replace("no python-sdlc rev", "no sdlc rev")
-    .replace("crunchtools/python-sdlc", "crunchtools/sdlc")
-)
-RENAMED_PUBLISH = """\
-name: Publish
-on:
-  release:
-jobs:
-  build:
-    uses: crunchtools/python-sdlc/.github/workflows/build.yml@v1
-  extras:
-    uses: crunchtools/python-sdlc-extras/.github/workflows/x.yml@v1
-  publish:
-    runs-on: ubuntu-latest
-    steps:
-      - run: podman pull quay.io/crunchtools/python-sdlc:0.11.0
-      - run: echo quay.io/crunchtools/python-sdlc-extras
-"""
-
-# A repo that already floats still has the old name in a kept workflow.
-repo = make_repo(
-    {
-        ".pre-commit-config.yaml": HOOKS,
-        ".sdlc/bin/sdlc": BOOTSTRAP,
-        ".github/workflows/ci.yml": CI,
-        ".github/workflows/publish.yml": RENAMED_PUBLISH,
-    }
-)
-(repo / ".sdlc/bin/sdlc").chmod(0o755)
-done = convert(repo, apply=True)
-published = snapshot(repo)[".github/workflows/publish.yml"]
-check(
-    "floating: the old image and reusable workflow become crunchtools/sdlc's",
-    done.returncode == 0
-    and "quay.io/crunchtools/sdlc:0.11.0" in published
-    and "uses: crunchtools/sdlc/.github/workflows/build.yml@v1" in published
-    and "crunchtools/python-sdlc/" not in published
-    and "python-sdlc:" not in published,
-    done.stderr + published,
-)
-check(
-    "floating: a longer name (python-sdlc-extras) is left alone, as a workflow and as an image",
-    "uses: crunchtools/python-sdlc-extras/.github/workflows/x.yml@v1" in published
-    and "quay.io/crunchtools/python-sdlc-extras" in published,
-    published,
-)
-check(
-    "floating: a `renamed:` note names the file",
-    any(
-        line.startswith("convert_repo: ") and "renamed:" in line and "publish.yml" in line
-        for line in done.stderr.splitlines()
-    ),
-    done.stderr,
-)
-check(
-    "floating: only the kept workflow changed",
-    snapshot(repo)[".pre-commit-config.yaml"] == HOOKS
-    and snapshot(repo)[".github/workflows/ci.yml"] == CI,
-)
-again = convert(repo)
-check(
-    "floating: a second run finds nothing to do",
-    again.returncode == 0 and again.stdout == "",
-    again.stdout,
-)
 
 # A hooks file pinned to the new name converts exactly like the old-name pin.
 repo = make_repo({".pre-commit-config.yaml": NEW_PINNED_HOOKS})
@@ -704,57 +1014,6 @@ check(
     done.stderr,
 )
 
-# A mixed workflow whose pinned step names the new repo floats like the old one.
-repo = make_repo(
-    {
-        ".pre-commit-config.yaml": NEW_PINNED_HOOKS,
-        ".github/workflows/tests.yml": MIXED.replace(PINNED_STEP, NEW_PINNED_STEP),
-    }
-)
-done = convert(repo, apply=True)
-tests_yml = snapshot(repo)[".github/workflows/tests.yml"]
-check(
-    "new name: a pinned `sdlc ci` step naming crunchtools/sdlc floats in place",
-    NEW_PINNED_STEP != PINNED_STEP
-    and done.returncode == 0
-    and "\n        run: .sdlc/bin/sdlc ci\n" in tests_yml
-    and "git clone" not in tests_yml
-    and "make test" in tests_yml
-    and runs_sdlc_ci(tests_yml),
-    done.stderr + tests_yml,
-)
-check(
-    "new name: that floated workflow's second run finds nothing to do", convert(repo).stdout == ""
-)
-
-# A kept workflow cloning sdlc by rev is refused under either name, over https
-# or ssh, with or without `.git`.
-for url in (
-    "https://github.com/crunchtools/sdlc",
-    "https://github.com/crunchtools/sdlc.git",
-    "git@github.com:crunchtools/sdlc",
-    "git@github.com:crunchtools/python-sdlc.git",
-):
-    orphan = PUBLISH.replace(
-        "      - run: echo quay.io/crunchtools/python-sdlc-extras\n",
-        f'      - run: git clone --branch "$rev" {url} x\n',
-    )
-    repo = make_repo(
-        {
-            ".pre-commit-config.yaml": PINNED_HOOKS,
-            ".github/workflows/ci.yml": OLD_CI,
-            ".github/workflows/publish.yml": orphan,
-        }
-    )
-    before = snapshot(repo)
-    refused = convert(repo, apply=True)
-    check(
-        f"a kept workflow cloning {url} by rev is refused, nothing written",
-        refused.returncode == REFUSED
-        and snapshot(repo) == before
-        and "publish.yml" in refused.stderr,
-        refused.stderr,
-    )
 
 # ------------------------------------------------------------- symlinks
 
@@ -835,13 +1094,15 @@ repo = make_repo({})
 good = {
     repo / ".sdlc/bin/sdlc": BOOTSTRAP,
     repo / ".pre-commit-config.yaml": HOOKS,
-    repo / ".github/workflows/ci.yml": CI,
+    repo / WF / "ci.yml": CI,
 }
 for label, path, text in (
-    ("YAML that does not load", ".github/workflows/ci.yml", "jobs: [\n"),
+    ("YAML that does not load", WF + "ci.yml", "jobs: [\n"),
     ("hooks without pre-push", ".pre-commit-config.yaml", HOOKS.replace(", pre-push]", "]")),
     ("hooks still pinned", ".pre-commit-config.yaml", PINNED_HOOKS),
-    ("no sdlc ci job running the bootstrap", ".github/workflows/ci.yml", GOURMAND),
+    ("a ci.yml that is not the example", WF + "ci.yml", GOURMAND),
+    ("another workflow beside ci.yml", WF + "gourmand.yml", GOURMAND),
+    ("a `uses:` in a workflow", WF + "ci.yml", CI + "# x\n  - uses: actions/checkout@v7\n"),
 ):
     bad = {**good, repo / path: text}
     try:
@@ -857,15 +1118,16 @@ except C.RefusedError as exc:
     accepted = False
     print(exc)
 check("the guard accepts the floating wiring", accepted)
+canonical = yaml.safe_load(GATEHOUSE)
+for label, jobs in (("a list", [canonical["jobs"]["guard"]]), ("a string", "guard")):
+    try:
+        same = C.same_gatehouse({**canonical, "jobs": jobs}, canonical)
+    except AttributeError as exc:
+        same = exc
+    check(f"same_gatehouse: jobs as {label} is not the stub, and does not raise", same is False)
+
 
 # ------------------------------- config: a converted repo never exits 2 at once
-
-
-HOOKED = {".pre-commit-config.yaml": PINNED_HOOKS}
-
-
-def sdlc_cfg(repo: Path, name: str = "sdlc.toml") -> dict:
-    return tomllib.loads(snapshot(repo).get(name, "")).get("tool", {}).get("sdlc", {})
 
 
 for label, files in (
@@ -1035,294 +1297,6 @@ check(
     done.returncode == 0 and snapshot(repo)["pyproject.toml"] == COMPAT,
     done.stderr,
 )
-
-# ----------------------------- gatehouse: an older guard is brought up to date
-
-# The guard as the fleet copied it, before gatehouse#150 added .sdlc/.
-OLD_GUARD = (
-    GATEHOUSE.replace("^(\\.github/workflows|\\.sdlc)/", "^\\.github/workflows/")
-    .replace(
-        "a file out of .github/workflows/ or .sdlc/ unseen",
-        "a workflow out of .github/workflows/ unseen",
-    )
-    .replace("modifies .github/workflows/ or .sdlc/ —", "modifies .github/workflows/ —")
-)
-repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": OLD_GUARD})
-done = convert(repo, apply=True)
-check(
-    "an older gatehouse.yml guard is replaced by the example's, which covers .sdlc/",
-    OLD_GUARD != GATEHOUSE
-    and done.returncode == 0
-    and snapshot(repo)[".github/workflows/gatehouse.yml"] == GATEHOUSE,
-    done.stderr,
-)
-CUSTOM = GATEHOUSE.replace("review.yml@v0", "review.yml@v1")
-repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": CUSTOM})
-done = convert(repo, apply=True)
-check(
-    "a gatehouse.yml customized beyond the guard is kept",
-    CUSTOM != GATEHOUSE
-    and done.returncode == 0
-    and snapshot(repo)[".github/workflows/gatehouse.yml"] == CUSTOM,
-    done.stderr,
-)
-GUARD_CHANGED = OLD_GUARD.replace(
-    'echo "No workflow files changed."', 'echo "No workflow files changed."\n          make audit'
-)
-repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": GUARD_CHANGED})
-done = convert(repo, apply=True)
-check(
-    "a guard script changed beyond gatehouse#150's lines is kept, not overwritten",
-    GUARD_CHANGED != OLD_GUARD
-    and done.returncode == 0
-    and snapshot(repo)[".github/workflows/gatehouse.yml"] == GUARD_CHANGED,
-    done.stderr,
-)
-GUARD_ENV = OLD_GUARD.replace(
-    "          EVENT: ${{ github.event_name }}\n",
-    "          EVENT: ${{ github.event_name }}\n          EXTRA: kept\n",
-)
-repo = make_repo({**HOOKED, ".github/workflows/gatehouse.yml": GUARD_ENV})
-done = convert(repo, apply=True)
-check(
-    "an older guard whose step has its own env is kept, not overwritten",
-    GUARD_ENV != OLD_GUARD
-    and done.returncode == 0
-    and snapshot(repo)[".github/workflows/gatehouse.yml"] == GUARD_ENV,
-    done.stderr,
-)
-check("the gatehouse example's guard covers .sdlc/", "|\\.sdlc)/" in GATEHOUSE)
-
-
-# ------------------------------------------------- the fleet's own runner
-
-# The 54 fleet ci.yml files route the `sdlc ci` job between the cached and the
-# uncached self-hosted runners; replacing the job must not move it to GitHub's.
-FLEET_RUNNER = """\
-    # Same-repo PRs run on our cached runner, pushes and schedules on the uncached
-    # one; forks and Dependabot stay on GitHub's. An empty variable falls back to
-    # ubuntu-latest (crunchtools/trentina security.yml).
-    runs-on: >-
-      ${{ github.event_name == 'pull_request'
-          && github.event.pull_request.head.repo.full_name == github.repository
-          && github.event.pull_request.user.login != 'dependabot[bot]'
-          && (vars.CACHED_RUNNER_LABEL || 'ubuntu-latest')
-          || github.event_name != 'pull_request'
-          && (vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest')
-          || 'ubuntu-latest' }}
-"""
-FLEET_CI = CI.replace("    runs-on: ubuntu-latest\n", FLEET_RUNNER, 1)
-# Four spaces a level: the runner block moves left to the stub's job keys.
-WIDE_CI = (
-    """\
-name: CI
-on:
-    pull_request:
-jobs:
-    sdlc:
-        name: sdlc ci
-"""
-    + "".join("    " + x if x.strip() else x for x in FLEET_RUNNER.splitlines(keepends=True))
-    + """\
-        steps:
-            - uses: actions/checkout@v7
-            - name: sdlc ci
-              env:
-                  SDLC_IMAGE: ${{ vars.SDLC_IMAGE }}
-              run: .sdlc/bin/sdlc ci
-"""
-)
-check("runner: the fixture differs from the stub", FLEET_CI != CI)
-for label, old_ci in (
-    ("the stub's shape", FLEET_CI),
-    ("a pinned job", OLD_CI.replace("    runs-on: ubuntu-latest\n", FLEET_RUNNER, 1)),
-    ("four-space indents", WIDE_CI),
-    (
-        "the job after gourmand's",
-        FLEET_CI.split("jobs:\n", 1)[0]
-        + "jobs:\n"
-        + "  gourmand:\n"
-        + FLEET_CI.split("  gourmand:\n", 1)[1]
-        + "\n"
-        + FLEET_CI.split("jobs:\n", 1)[1].split("  gourmand:\n", 1)[0].rstrip("\n")
-        + "\n",
-    ),
-):
-    repo = make_repo(
-        {
-            ".pre-commit-config.yaml": PINNED_HOOKS,
-            ".github/workflows/ci.yml": old_ci,
-            ".specify/memory/constitution.md": CONSTITUTION,
-        }
-    )
-    done = convert(repo, apply=True)
-    ci = snapshot(repo).get(".github/workflows/ci.yml", "")
-    job = ((yaml.safe_load(ci) or {}).get("jobs") or {}).get("sdlc") or {}
-    want = (yaml.safe_load(old_ci) or {}).get("jobs", {})
-    want = next((j.get("runs-on") for j in want.values() if j.get("name") == "sdlc ci"), None)
-    check(f"runner: {label}: --apply exits 0", done.returncode == 0, done.stderr)
-    check(f"runner: {label}: the job keeps its runner", job.get("runs-on") == want, ci)
-    check(f"runner: {label}: and its comment", "Same-repo PRs run on our cached" in ci)
-    check(f"runner: {label}: it still runs sdlc ci", runs_sdlc_ci(ci))
-    check(f"runner: {label}: a second run finds nothing to do", convert(repo).stdout == "")
-
-# Two covered workflows that disagree, or a job with no runner of its own,
-# leave nothing to carry: the stub is written as it is.
-for label, files in (
-    (
-        "two covered workflows disagree",
-        {
-            ".github/workflows/ci.yml": FLEET_CI,
-            ".github/workflows/sdlc.yml": CI.split("  gourmand:\n", 1)[0].rstrip("\n") + "\n",
-        },
-    ),
-    (
-        "the job names no runner",
-        {".github/workflows/ci.yml": CI.replace("    runs-on: ubuntu-latest\n", "", 1)},
-    ),
-):
-    repo = make_repo(
-        {
-            ".pre-commit-config.yaml": PINNED_HOOKS,
-            ".specify/memory/constitution.md": CONSTITUTION,
-            **files,
-        }
-    )
-    done = convert(repo, apply=True)
-    after = snapshot(repo)
-    check(f"runner: {label}: --apply exits 0", done.returncode == 0, done.stderr)
-    check(
-        f"runner: {label}: ci.yml is the stub",
-        after.get(".github/workflows/ci.yml") == CI,
-        after.get(".github/workflows/ci.yml", ""),
-    )
-
-
-check(
-    "runner: two covered workflows disagree: the report says so",
-    "runner: ci.yml takes ubuntu-latest"
-    in convert(
-        make_repo(
-            {
-                ".pre-commit-config.yaml": PINNED_HOOKS,
-                ".specify/memory/constitution.md": CONSTITUTION,
-                ".github/workflows/ci.yml": FLEET_CI,
-                ".github/workflows/sdlc.yml": CI.split("  gourmand:\n", 1)[0].rstrip("\n") + "\n",
-            }
-        )
-    ).stderr,
-)
-
-# A runner read from a context the stub's job has none of would leave it with
-# nothing to run on: the stub keeps its own, and the report says so.
-for context, runner in (
-    # A job with a matrix has `strategy:`, so it floats in place; this one does not.
-    ("matrix", "    runs-on: ${{ matrix.on }}\n"),
-    ("inputs", "    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}\n"),
-    ("needs", "    runs-on: >-\n      ${{ fromJSON(needs.pick.outputs.runner)\n      }}\n"),
-    ("strategy", "    runs-on: [self-hosted, '${{ strategy.job-index }}']\n"),
-):
-    repo = make_repo(
-        {
-            ".pre-commit-config.yaml": PINNED_HOOKS,
-            ".specify/memory/constitution.md": CONSTITUTION,
-            ".github/workflows/ci.yml": CI.replace("    runs-on: ubuntu-latest\n", runner, 1),
-        }
-    )
-    done = convert(repo, apply=True)
-    after = snapshot(repo)
-    check(f"runner: {context}: --apply exits 0", done.returncode == 0, done.stderr)
-    check(
-        f"runner: {context}: ci.yml is the stub",
-        after.get(".github/workflows/ci.yml") == CI,
-        after.get(".github/workflows/ci.yml", ""),
-    )
-    check(
-        f"runner: {context}: the report names the context",
-        f"runner: ci.yml takes ubuntu-latest, the `sdlc ci` job's runs-on reads `{context}`"
-        in done.stderr,
-        done.stderr,
-    )
-
-
-# A runner the converter cannot lift out (a flow-style job) or that does not
-# load once lifted (an alias whose anchor stays behind) keeps the stub's own.
-for label, old_ci, why in (
-    (
-        "a flow-style job",
-        CI.replace(
-            CI[CI.index("  sdlc:\n") : CI.index("  gourmand:\n")],
-            "  sdlc: {name: sdlc ci, runs-on: self-hosted, steps: [{run: .sdlc/bin/sdlc ci}]}\n\n",
-            1,
-        ),
-        "could not be lifted out",
-    ),
-    (
-        "an alias",
-        CI.replace("name: sdlc ci\n", "name: &runner sdlc ci\n", 1).replace(
-            "runs-on: ubuntu-latest", "runs-on: *runner", 1
-        ),
-        "did not read back",
-    ),
-):
-    repo = make_repo(
-        {
-            ".pre-commit-config.yaml": PINNED_HOOKS,
-            ".specify/memory/constitution.md": CONSTITUTION,
-            ".github/workflows/ci.yml": old_ci,
-        }
-    )
-    done = convert(repo, apply=True)
-    after = snapshot(repo)
-    check(f"runner: {label}: --apply exits 0", done.returncode == 0, done.stderr)
-    check(
-        f"runner: {label}: ci.yml is the stub",
-        after.get(".github/workflows/ci.yml") == CI,
-        after.get(".github/workflows/ci.yml", ""),
-    )
-    check(f"runner: {label}: the report says why", why in done.stderr, done.stderr)
-
-# Two files on one runner, only one of them liftable: carried whatever the order.
-FLOW_FLEET = FLEET_CI.replace(
-    FLEET_CI[FLEET_CI.index("  sdlc:\n") : FLEET_CI.index("  gourmand:\n")],
-    "  sdlc: {name: sdlc ci, runs-on: "
-    + json.dumps(yaml.safe_load(FLEET_CI)["jobs"]["sdlc"]["runs-on"])
-    + ", steps: [{run: .sdlc/bin/sdlc ci}]}\n\n",
-    1,
-)
-for first, second in (("a.yml", "b.yml"), ("b.yml", "a.yml")):
-    repo = make_repo(
-        {
-            ".pre-commit-config.yaml": PINNED_HOOKS,
-            ".specify/memory/constitution.md": CONSTITUTION,
-            f".github/workflows/{first}": FLOW_FLEET,
-            f".github/workflows/{second}": FLEET_CI,
-        }
-    )
-    done = convert(repo, apply=True)
-    ci = snapshot(repo).get(".github/workflows/ci.yml", "")
-    check(
-        f"runner: one runner, the liftable file is {second}: it is carried",
-        "Same-repo PRs run on our cached" in ci and "runner:" not in done.stderr,
-        done.stderr + ci,
-    )
-
-# The stub's own runner, or none at all, is no move: nothing to report.
-for label, old_ci in (
-    ("ubuntu-latest", CI),
-    ("no runner", CI.replace("    runs-on: ubuntu-latest\n", "", 1)),
-    ("a plain label", CI.replace("ubuntu-latest", "self-hosted", 1)),
-):
-    done = convert(
-        make_repo(
-            {
-                ".pre-commit-config.yaml": PINNED_HOOKS,
-                ".specify/memory/constitution.md": CONSTITUTION,
-                ".github/workflows/ci.yml": old_ci,
-            }
-        )
-    )
-    check(f"runner: {label}: no runner note", "runner:" not in done.stderr, done.stderr)
 
 
 def main() -> int:
