@@ -59,7 +59,7 @@ case $1 in
                    _ref=$_a
                  done
                  _f=$W/signed/$(san "$_ref")__$(san "$_repo")
-                 [ -s "$_f" ] || exit 1
+                 [ -s "$_f" ] || { printf 'error: no matching signatures for %s\n' "$_ref" >&2; exit 1; }
                  _out=[ _s=
                  while read -r _v; do
                    _out="$_out$_s{\"optional\":{\"repo\":\"$_repo\",\"version\":\"$_v\"}}"; _s=,
@@ -453,6 +453,12 @@ rb_setup; rb DIGEST="$A@$D1"
 refused "a DIGEST that is not sha256:<64 hex> is refused" "is not sha256"
 rb_setup; rb DIGEST="$D2"; reg_label "$A@$D2" 0.13.0
 refused "a digest sdlc's key never signed is refused" "is not signed by sdlc's key as 0.13.0"
+# cosign's own words reach the log only when no key verifies: they are what
+# tells "unsigned" from "registry unreachable".
+if printf '%s' "$OUT" | grep -q "is not verified by sdlc's key as repo=crunchtools/sdlc; cosign said:" \
+   && printf '%s' "$OUT" | grep -q "self.sh:   error: no matching signatures for $A@$D2"; then
+  ok "an unverified digest logs cosign's stderr under the refusal"
+else bad "no cosign diagnostic for an unverified digest"; dump; fi
 rb_setup; mark_signed "$A@$D1" crunchtools/sdlc 0.12.5; rb
 refused "a digest signed as another version is refused" "is not signed by sdlc's key as 0.13.0 ('0.12.5')"
 rb_setup; reg_label "$A@$D1" 0.12.5; rb
@@ -462,6 +468,9 @@ if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0")" = "$D1" ] && [ -z "$(tag_of "$A:lates
    && [ "$(n_log '^skopeo copy')" -eq 1 ] && [ "$(n_log ' sign --yes ')" -eq 0 ]; then
   ok "happy path: moves :0 and nothing else, signs nothing (not even down from a newer :0)"
 else bad "rollback happy: exit $RC"; dump; fi
+if ! printf '%s' "$OUT" | grep -q "cosign said"; then
+  ok "a digest that verifies logs no cosign diagnostic"
+else bad "a verified digest still logged a cosign diagnostic"; dump; fi
 rb_setup; rb VERSION=0.12.0 DIGEST="$D2"; mark_signed "$A@$D2" crunchtools/sdlc 0.12.0; reg_label "$A@$D2" 0.12.0
 rb VERSION=0.12.0 DIGEST="$D2"
 check "a rollback to exactly sdlc-boot's minimum is allowed" rc_is 0

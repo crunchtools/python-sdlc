@@ -78,7 +78,11 @@ for probe in \
   "syft:syft --version" \
   "zizmor:zizmor --version" \
   "claude:claude --version" \
-  "apptoken-python:/opt/apptoken-venv/bin/python3 -c 'import cryptography; print(cryptography.__version__)'" \
+  "pyjwt:/opt/constitution-venv/bin/python3 -c 'import jwt; print(jwt.__version__)'" \
+  "gh:gh --version" \
+  "ashigaru:test -f /opt/ashigaru/scripts/common.py && ls /opt/ashigaru/prompts/review.md /opt/ashigaru/schemas/review.json" \
+  "constitution-scripts:test -f /opt/constitution/scripts/audit_alert.py && echo present" \
+  "sdlc_jobs-path:/opt/constitution-venv/bin/python3 -c 'import sys; assert \"/usr/local/lib/sdlc\" in sys.path; print(\"on path\")'" \
   "git:git --version" \
   "jq:jq --version" \
   "curl:curl --version" \
@@ -148,7 +152,11 @@ check_version zizmor    "$(inside sh -c 'printf %s "$SDLC_ZIZMOR_VERSION"')" \
 check_version claude    "$(inside sh -c 'printf %s "$SDLC_CLAUDE_CODE_VERSION"')" \
                         "$(inside sh -c 'claude --version' 2>&1)"
 check_version cryptography "$(inside sh -c 'printf %s "$SDLC_CRYPTOGRAPHY_VERSION"')" \
-                        "$(inside sh -c '/opt/apptoken-venv/bin/python3 -c "import cryptography; print(cryptography.__version__)"' 2>&1)"
+                        "$(inside sh -c '/opt/constitution-venv/bin/python3 -c "import cryptography; print(cryptography.__version__)"' 2>&1)"
+check_version pyjwt     "$(inside sh -c 'printf %s "$SDLC_PYJWT_VERSION"')" \
+                        "$(inside sh -c '/opt/constitution-venv/bin/python3 -c "import jwt; print(jwt.__version__)"' 2>&1)"
+check_version gh        "$(inside sh -c 'printf %s "$SDLC_GH_VERSION"')" \
+                        "$(inside sh -c 'gh --version' 2>&1)"
 # An image must not update itself.
 if [ "$(inside sh -c 'printf %s "$DISABLE_AUTOUPDATER"')" = 1 ]; then
   ok "claude's auto-updater is disabled"
@@ -624,7 +632,11 @@ for row in \
   "syft:SDLC_SYFT_VERSION" \
   "zizmor:SDLC_ZIZMOR_VERSION" \
   "claude-code:SDLC_CLAUDE_CODE_VERSION" \
-  "cryptography:SDLC_CRYPTOGRAPHY_VERSION"
+  "cryptography:SDLC_CRYPTOGRAPHY_VERSION" \
+  "pyjwt:SDLC_PYJWT_VERSION" \
+  "gh:SDLC_GH_VERSION" \
+  "ashigaru:SDLC_ASHIGARU_VERSION" \
+  "constitution:SDLC_CONSTITUTION_VERSION"
 do
   tool=${row%%:*}
   var=${row#*:}

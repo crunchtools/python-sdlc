@@ -79,6 +79,10 @@ BAKED = {
     "zizmor": os.environ.get("SDLC_ZIZMOR_VERSION", "unknown"),
     "claude-code": os.environ.get("SDLC_CLAUDE_CODE_VERSION", "unknown"),
     "cryptography": os.environ.get("SDLC_CRYPTOGRAPHY_VERSION", "unknown"),
+    "pyjwt": os.environ.get("SDLC_PYJWT_VERSION", "unknown"),
+    "gh": os.environ.get("SDLC_GH_VERSION", "unknown"),
+    "ashigaru": os.environ.get("SDLC_ASHIGARU_VERSION", "unknown"),
+    "constitution": os.environ.get("SDLC_CONSTITUTION_VERSION", "unknown"),
 }
 
 
@@ -100,10 +104,15 @@ VERSION_PROBE = {
     "zizmor": ["zizmor", "--version"],
     "claude-code": ["claude", "--version"],
     "cryptography": [
-        "/opt/apptoken-venv/bin/python3",
+        "/opt/constitution-venv/bin/python3",
         "-c",
         "import cryptography; print(cryptography.__version__)",
     ],
+    "pyjwt": ["/opt/constitution-venv/bin/python3", "-c", "import jwt; print(jwt.__version__)"],
+    "gh": ["gh", "--version"],
+    # Copies of a release tag's files, not programs with a version flag.
+    "ashigaru": None,
+    "constitution": None,
     # gatehouse has no --version flag; its usage line is all it offers.
     "gatehouse": None,
 }

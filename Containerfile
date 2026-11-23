@@ -72,6 +72,16 @@ ARG SYFT_VERSION=1.57.0
 ARG ZIZMOR_VERSION=1.32.0
 ARG CLAUDE_CODE_VERSION=2.1.323
 ARG CRYPTOGRAPHY_VERSION=50.0.2
+ARG PYJWT_VERSION=2.15.1
+# gh, because every Ashigaru script talks to GitHub through it (its
+# scripts/common.py `gh()`); there is no Hummingbird RPM, so the release tarball
+# by exact version and checksum, as CodeQL is fetched.
+ARG GH_VERSION=2.104.0
+ARG GH_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
+# What sdlc_jobs runs: Ashigaru's scripts, prompts and schemas, and the
+# constitution's scripts, each at a release tag.
+ARG ASHIGARU_VERSION=5.3.0
+ARG CONSTITUTION_VERSION=1.60.0
 
 # The base runs non-root; installing needs root. The image drops back at the end.
 USER root
@@ -103,6 +113,10 @@ LABEL com.crunchtools.sdlc.syft="${SYFT_VERSION}"
 LABEL com.crunchtools.sdlc.zizmor="${ZIZMOR_VERSION}"
 LABEL com.crunchtools.sdlc.claude-code="${CLAUDE_CODE_VERSION}"
 LABEL com.crunchtools.sdlc.cryptography="${CRYPTOGRAPHY_VERSION}"
+LABEL com.crunchtools.sdlc.pyjwt="${PYJWT_VERSION}"
+LABEL com.crunchtools.sdlc.gh="${GH_VERSION}"
+LABEL com.crunchtools.sdlc.ashigaru="${ASHIGARU_VERSION}"
+LABEL com.crunchtools.sdlc.constitution="${CONSTITUTION_VERSION}"
 
 # The commit and build time. NOT optional, and the reason is a trap trentina hit
 # in #689: its promote job refuses a release unless it can read
@@ -137,6 +151,10 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
     SDLC_ZIZMOR_VERSION=${ZIZMOR_VERSION} \
     SDLC_CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
     SDLC_CRYPTOGRAPHY_VERSION=${CRYPTOGRAPHY_VERSION} \
+    SDLC_PYJWT_VERSION=${PYJWT_VERSION} \
+    SDLC_GH_VERSION=${GH_VERSION} \
+    SDLC_ASHIGARU_VERSION=${ASHIGARU_VERSION} \
+    SDLC_CONSTITUTION_VERSION=${CONSTITUTION_VERSION} \
     DISABLE_AUTOUPDATER=1
 
 # git-core, not git: no perl, no tk, and nothing here runs `git send-email`.
@@ -206,19 +224,14 @@ RUN uv tool install "ruff==${RUFF_VERSION}" \
  && uv tool install "zizmor==${ZIZMOR_VERSION}" \
  && rm -rf /root/.cache/uv
 
-# The constitution validator is a standalone script run by path, not a package
-# (its own pyproject declares no dependencies). It needs exactly one third-party
-# import, PyYAML, so that gets an environment of its own rather than joining a
-# tool venv it has nothing to do with.
+# The interpreter `sdlc` and the constitution validator run under, kept apart
+# from the tool venvs it has nothing to do with. PyYAML for both; PyJWT with
+# cryptography because sdlc_jobs signs the Ashigaru App's RS256 JWT inside the
+# `sdlc` process, so it has to be importable here and cannot live in a venv of
+# its own. cryptography is pinned beside it so the extra cannot float it.
 RUN uv venv /opt/constitution-venv \
  && VIRTUAL_ENV=/opt/constitution-venv uv pip install --quiet "pyyaml==${PYYAML_VERSION}" \
- && rm -rf /root/.cache/uv
-
-# GitHub App tokens are an RS256-signed JWT, which needs `cryptography`. It is
-# isolated so the constitution venv above keeps exactly one third-party import;
-# the App-token code runs with /opt/apptoken-venv/bin/python3.
-RUN uv venv /opt/apptoken-venv \
- && VIRTUAL_ENV=/opt/apptoken-venv uv pip install --quiet "cryptography==${CRYPTOGRAPHY_VERSION}" \
+      "pyjwt[crypto]==${PYJWT_VERSION}" "cryptography==${CRYPTOGRAPHY_VERSION}" \
  && rm -rf /root/.cache/uv
 
 # Gourmand is a single Rust binary -- 25 MB, linking only libc, libm and libgcc,
@@ -312,6 +325,46 @@ RUN set -eu; \
     chmod -R a+rX /opt/codeql; \
     ln -s /opt/codeql/codeql /usr/local/bin/codeql; \
     codeql --version | head -1
+
+# gh, checksum-verified before it is unpacked. Unpacked by Python's tarfile
+# because the base has no gzip, and gzip would be one more toolbox member.
+RUN set -eu; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /tmp/gh.tgz \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz"; \
+    echo "${GH_SHA256}  /tmp/gh.tgz" | sha256sum -c -; \
+    python3 -I -c 'import sys, tarfile; t = tarfile.open(sys.argv[1]); f = t.extractfile(sys.argv[2]); open("/usr/local/bin/gh", "wb").write(f.read())' \
+      /tmp/gh.tgz "gh_${GH_VERSION}_linux_amd64/bin/gh"; \
+    chmod 0755 /usr/local/bin/gh; \
+    rm -f /tmp/gh.tgz; \
+    gh --version | head -1
+
+# Ashigaru's scripts, prompts and schemas, and the constitution's scripts, at
+# the release tags above: the paths sdlc_jobs/_tools.py names. Data the jobs
+# run, not packages, so a shallow clone of the tag and nothing of its history.
+RUN set -eu; \
+    git -c advice.detachedHead=false clone -q --depth 1 --branch "v${ASHIGARU_VERSION}" \
+      https://github.com/crunchtools/ashigaru /tmp/ashigaru; \
+    mkdir -p /opt/ashigaru; \
+    cp -r /tmp/ashigaru/scripts /tmp/ashigaru/prompts /tmp/ashigaru/schemas /opt/ashigaru/; \
+    git -c advice.detachedHead=false clone -q --depth 1 --branch "v${CONSTITUTION_VERSION}" \
+      https://github.com/crunchtools/constitution /tmp/constitution; \
+    mkdir -p /opt/constitution; \
+    cp -r /tmp/constitution/scripts /opt/constitution/; \
+    rm -rf /tmp/ashigaru /tmp/constitution
+
+# sdlc_jobs, the ai/write/gate handlers `sdlc event` imports, on the
+# interpreter's path through a .pth file. A COPY whose only source is a glob
+# that matches nothing fails, so the package is staged beside a file every
+# tree has: that lets this build on a tree that does not carry it yet. The
+# package is flat, so the glob's copy-the-contents rule loses nothing.
+COPY pyproject.toml sdlc_job[s] /tmp/sdlc-lib/
+RUN set -eu; \
+    rm /tmp/sdlc-lib/pyproject.toml; \
+    mkdir -p /usr/local/lib/sdlc; \
+    if [ -e /tmp/sdlc-lib/__init__.py ]; then mv /tmp/sdlc-lib /usr/local/lib/sdlc/sdlc_jobs; fi; \
+    rm -rf /tmp/sdlc-lib; \
+    site=$(/opt/constitution-venv/bin/python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))'); \
+    echo /usr/local/lib/sdlc > "$site/sdlc.pth"
 
 # Leave /tmp empty: podman's --tmpfs does a COPY-UP of the image's directory
 # contents into the fresh tmpfs, so anything a build step leaves here reappears

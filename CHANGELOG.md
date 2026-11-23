@@ -10,8 +10,11 @@ All notable changes to this project are documented here, following
 
 - The image half of the marketplace-free CI (a1088, docs/marketplace-free-ci.md).
   The image gains podman-remote, skopeo, the docker CLI, cosign 2.6.5, syft 1.57.0,
-  zizmor 1.32.0, the claude CLI 2.1.323 (auto-updater off) and cryptography 50.0.2
-  in `/opt/apptoken-venv`, each an ARG pin with a label and a contract test.
+  zizmor 1.32.0, the claude CLI 2.1.323 (auto-updater off), gh 2.104.0, and PyJWT
+  2.15.1 with cryptography 50.0.2 in the interpreter `sdlc` runs under, each an ARG
+  pin with a label and a contract test. For `sdlc event`'s handlers it also carries
+  Ashigaru v5.3.0's scripts, prompts and schemas at `/opt/ashigaru`, the constitution
+  v1.60.0's scripts at `/opt/constitution/scripts`, and `sdlc_jobs` on the path.
 - `sdlc-boot` (`boot/`): the fleet's trust root. It resolves
   `quay.io/crunchtools/sdlc:<major>`, verifies it against sdlc's own key and a baked
   minimum version, and runs it by digest beside the job container. Every refusal
