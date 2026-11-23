@@ -204,14 +204,6 @@ Api = cutover.Api
 ApiError = cutover.ApiError
 
 
-BOOT_PIN = re.compile(r"sdlc-boot@sha256:[0-9a-f]{64}\b")
-
-
-def unpinned(text: str) -> bool:
-    """The fleet file names sdlc-boot by anything but a real digest."""
-    return "sdlc-boot" in text and not BOOT_PIN.search(text)
-
-
 def org_repos(api: Api) -> dict[str, dict]:
     """Every non-archived repo the token can see: name -> its API record, whole.
 
@@ -370,54 +362,46 @@ def convert(wave: Wave, repo: str, checkout: Path) -> list[str]:
     """
     report = wave.reports.setdefault(repo, Report())
     code, diff, err = converter(checkout, *wave.converter_args)
-    floated = code != REFUSED
-    if not floated:
-        if wave.target is None:
-            raise LeftAloneError("refused", refusal(err))
-        # The cutover does not need the gates floated: the rest still ships.
-        report.hand.append(f"float: convert_repo.py refused: {refusal(err)}")
-    elif code:
+    if code == REFUSED:
+        # No fleet file, no conversion: cutover.py --merge would never merge it.
+        raise LeftAloneError("refused", refusal(err))
+    if code:
         raise RuntimeError(f"convert_repo.py exited {code}: {err.strip()[-300:]}")
-    elif diff:
+    if diff:
         # convert_repo.py's notes, `convert_repo: <repo>: <note>`.
-        notes = [
-            note
+        report.changes += [
+            f"float: {note}"
             for line in err.splitlines()
             if (note := line.removeprefix(f"convert_repo: {checkout.name}: ")) != line
             and not note.startswith("kept: ")  # what it left alone is not a change
         ]
-        # A job moved to GitHub's runners is the repo's to move back.
-        report.changes += [f"float: {n}" for n in notes if not n.startswith("runner: ")]
-        report.hand += [f"float: {n}" for n in notes if n.startswith("runner: ")]
     # The diff shows no modes: a bootstrap committed without +x is still work.
     if wave.target is None and not diff and bootstrap_mode(checkout) == "100755":
         raise LeftAloneError("noop", "already floating")
-    if floated:
-        code, _, err = converter(checkout, "--apply", *wave.converter_args)
-        if code:
-            raise RuntimeError(f"convert_repo.py --apply exited {code}: {err.strip()[-300:]}")
+    code, _, err = converter(checkout, "--apply", *wave.converter_args)
+    if code:
+        raise RuntimeError(f"convert_repo.py --apply exited {code}: {err.strip()[-300:]}")
     if wave.target is not None:
         result = cutover.cutover(checkout, wave.target)
         report.changes += result.changed
         report.hand += result.hand
         report.uses_left = result.uses_left
-    changed = verify(wave, repo, checkout, floated=floated)
+    changed = verify(wave, repo, checkout)
     if not changed:
         raise LeftAloneError("noop", "already cut over" if wave.target else "already floating")
     return changed
 
 
-def verify(wave: Wave, repo: str, checkout: Path, *, floated: bool = True) -> list[str]:
+def verify(wave: Wave, repo: str, checkout: Path) -> list[str]:
     """The paths the conversion changed, staged; or every way it is not fit to ship."""
     problems = []
     git(checkout, "add", "-A")  # the bootstrap's mode is read from the index
-    if floated:
-        code, diff, _ = converter(checkout, *wave.converter_args)
-        if code or diff:
-            problems.append(f"is not a fixed point: a second convert_repo.py run exits {code}")
-        mode = bootstrap_mode(checkout)
-        if mode != "100755":
-            problems.append(f"would commit .sdlc/bin/sdlc as mode {mode or 'absent'}")
+    code, diff, _ = converter(checkout, *wave.converter_args)
+    if code or diff:
+        problems.append(f"is not a fixed point: a second convert_repo.py run exits {code}")
+    mode = bootstrap_mode(checkout)
+    if mode != "100755":
+        problems.append(f"would commit .sdlc/bin/sdlc as mode {mode or 'absent'}")
     if wave.target is not None:
         again = cutover.cutover(checkout, wave.target)
         if again.changed:
@@ -762,7 +746,7 @@ def main() -> int:
     if args.apply and not token:
         print(f"fleet_wave: --apply needs {args.token_env} in the environment", file=sys.stderr)
         return 2
-    if args.apply and unpinned(cutover.FLEET_FILE.read_text()):
+    if args.apply and cutover.unpinned(cutover.FLEET_FILE.read_text()):
         # The fleet file names sdlc-boot by a placeholder until sdlc's trust root
         # records the real digest (cutover prerequisite 4): never pushed as is.
         print(

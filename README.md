@@ -106,8 +106,10 @@ token: it refuses while the repo has a person's open pull request or an old
 `ashigaru/release-*` one, a PyPI repo whose publisher swap the `--pypi-ledger`
 does not record, or org secrets not yet scoped to selected repositories; it
 reads both new checks green, merges, moves the rulesets (recomputed from which
-repos carry the fleet file, so a re-run is safe), drops the repo from each
-moved org secret, and brings bot pull requests up to date.
+repos carry the fleet file, counting the one just merged, so a re-run is
+safe; an active ruleset is never sent an empty list), drops the repo from each
+moved org secret, and brings bot pull requests up to date. Every mode exits 2
+while `examples/ci.yml` has no sdlc-boot digest.
 `cutover.py --move-rulesets` runs the move alone, and `cutover.py --check`
 fails while a converted repo can still read a moved secret, the rulesets are
 out of step, or no ruleset guards `ashigaru/release-*`.

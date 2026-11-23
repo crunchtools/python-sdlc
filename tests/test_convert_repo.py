@@ -1118,6 +1118,13 @@ except C.RefusedError as exc:
     accepted = False
     print(exc)
 check("the guard accepts the floating wiring", accepted)
+canonical = yaml.safe_load(GATEHOUSE)
+for label, jobs in (("a list", [canonical["jobs"]["guard"]]), ("a string", "guard")):
+    try:
+        same = C.same_gatehouse({**canonical, "jobs": jobs}, canonical)
+    except AttributeError as exc:
+        same = exc
+    check(f"same_gatehouse: jobs as {label} is not the stub, and does not raise", same is False)
 
 
 # ------------------------------- config: a converted repo never exits 2 at once

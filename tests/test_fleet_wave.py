@@ -639,25 +639,26 @@ check(
     "cutover: the diff is of the cutover, not of the converter alone",
     "Inherits:** crunchtools/constitution v1.60.0" in diff and ".sdlc/bin/sdlc" in diff,
 )
+# No fleet file, no pull request: cutover.py --merge would never merge it.
 check(
-    "cutover: a repo convert_repo.py refuses is hand work, and the rest still ships",
-    got["odd"][1] == "would-open"
-    and any(h.startswith("float: ") for h in wave.reports["odd"].hand)
-    and wave.reports["odd"].uses_left,
-    str((got["odd"], wave.reports["odd"])),
+    "cutover: a repo convert_repo.py refuses is refused, named, and opens nothing",
+    got["odd"][1] == "refused" and "pre-commit-config" in got["odd"][3],
+    str(got["odd"]),
 )
 check(
-    "cutover: a workflow the fleet file cannot cover is hand work, not a stop",
-    got["handy"][1] == "would-open"
-    and any("push.yml" in h for h in wave.reports["handy"].hand)
+    "cutover: a workflow the fleet file cannot cover refuses the repo, naming it",
+    got["handy"][1] == "refused"
+    and "push.yml" in got["handy"][3]
     and not wave.reports["clean"].hand,
-    str(wave.reports["handy"]),
+    str(got["handy"]),
 )
+# Hand work a converted repo can still carry: the cutover's own, here Dependabot's.
+wave.reports["handy"].hand.append("Dependabot: a hand-edited dependabot.yml; remove it by hand")
 fields = W.pr_fields(wave, "handy")
 check(
     "cutover: the PR body names the hand work and the target",
     "Left for a human" in fields["body"]
-    and "push.yml" in fields["body"]
+    and "dependabot.yml" in fields["body"]
     and "v1.60.0" in fields["body"]
     and "0.9.0" in fields["body"]
     and "{" not in fields["title"],
@@ -717,10 +718,7 @@ check(
 )
 check(
     "report: each repo's section has its changes and its hand work",
-    "## clean: would-open" in text
-    and "- constitution:" in text
-    and "- HAND float:" in text
-    and "- HAND workflows:" in text,
+    "## clean: would-open" in text and "- constitution:" in text and "- HAND Dependabot:" in text,
     text,
 )
 check("report: a skipped repo says why", "not a non-archived repo" in text)
@@ -875,11 +873,12 @@ check(
 
 PINNED_BOOT = "quay.io/crunchtools/sdlc-boot@sha256:" + "a" * 64
 check(
-    "boot: the placeholder digest is unpinned", W.unpinned('image: "x/sdlc-boot@sha256:<digest>"')
+    "boot: the placeholder digest is unpinned",
+    W.cutover.unpinned('image: "x/sdlc-boot@sha256:<digest>"'),
 )
-check("boot: a real digest is pinned", not W.unpinned(f'image: "{PINNED_BOOT}"'))
-check("boot: a tag is unpinned", W.unpinned('image: "quay.io/crunchtools/sdlc-boot:1"'))
-if W.unpinned(W.cutover.FLEET_FILE.read_text()):
+check("boot: a real digest is pinned", not W.cutover.unpinned(f'image: "{PINNED_BOOT}"'))
+check("boot: a tag is unpinned", W.cutover.unpinned('image: "quay.io/crunchtools/sdlc-boot:1"'))
+if W.cutover.unpinned(W.cutover.FLEET_FILE.read_text()):
     proc = subprocess.run(
         [
             sys.executable,

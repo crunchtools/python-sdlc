@@ -695,7 +695,10 @@ def same_gatehouse(current: dict, canonical: dict) -> bool:
     """
     if current == canonical:
         return True
-    guard = (current.get("jobs") or {}).get("guard")
+    jobs = current.get("jobs")
+    if not isinstance(jobs, dict):
+        return False
+    guard = jobs.get("guard")
     new = (canonical.get("jobs") or {}).get("guard") or {}
     if not isinstance(guard, dict):
         return False
@@ -713,7 +716,7 @@ def same_gatehouse(current: dict, canonical: dict) -> bool:
         else step
         for step, want in zip(steps, new["steps"], strict=True)
     ]
-    jobs = {**current["jobs"], "guard": {**guard, "steps": updated}}
+    jobs = {**jobs, "guard": {**guard, "steps": updated}}
     return {**current, "jobs": jobs} == canonical
 
 

@@ -339,6 +339,14 @@ check(
 
 # ======================================================================= the API
 
+# The fleet file names sdlc-boot by a placeholder until prerequisite 4, and
+# every mode refuses that (pinned below); the API tests run on a pinned copy.
+UNPINNED = cut.FLEET_FILE
+PINNED_DIR = Path(tempfile.mkdtemp())
+(PINNED_DIR / "ci.yml").write_text(
+    UNPINNED.read_text().replace("sdlc-boot@sha256:<digest>", "sdlc-boot@sha256:" + "a" * 64)
+)
+cut.FLEET_FILE = PINNED_DIR / "ci.yml"
 FLEET = cut.FLEET_FILE.read_bytes()
 NEW, OLD, SHA, TOKEN = cut.NEW_RULESET, cut.OLD_RULESET, "a" * 40, "ghp_SECRETTOKEN"
 O = "/repos/crunchtools"  # noqa: E741
@@ -360,8 +368,10 @@ class FakeApi(cut.Api):
         super().__init__(TOKEN)
         self.routes = routes
         self.writes: list[tuple[str, str, object]] = []
+        self.calls = 0
 
     def call(self, method: str, path: str, body: object = None) -> tuple[int, object]:
+        self.calls += 1
         if method != "GET":
             self.writes.append((method, path, body))
         for key in (path, path.split("?", maxsplit=1)[0]):
@@ -494,7 +504,8 @@ class World:
         )
 
     def merge(self, _body: object) -> tuple[int, object]:
-        self.converted.add("app")
+        # The contents API lags a squash merge: the default branch still reads
+        # as unconverted here, so the move must count the merge itself.
         self.pr.update(state="closed", merged=True)
         return 200, {"merged": True}
 
@@ -593,15 +604,42 @@ check(
 w = World()
 w.converted = {"app"}
 w.rs[1]["conditions"]["repository_name"]["include"] = []  # the first canary
+w.rs[2]["conditions"]["repository_name"]["include"] = ["app", "old1"]
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: an empty new list fills",
+    code == 0 and w.include(1) == ["app"] and w.include(2) == ["old1"],
+    f"{code} {w.include(1)} {w.include(2)} {err}",
+)
+
+w = World()
+w.converted = {"app"}
+w.rs[1]["conditions"]["repository_name"]["include"] = []
 w.rs[2]["conditions"]["repository_name"]["include"] = ["app"]  # the last repo of the wave
 code, api, out, err = cli(w, "--move-rulesets")
 check(
-    "move: an empty new list fills, and an old list may empty",
-    code == 0 and w.include(1) == ["app"] and w.include(2) == [],
+    "move: an active ruleset is never PUT an empty list; nothing is written",
+    code == 1 and not api.writes and "no repos" in err and "disabled" in err,
+    f"{code} {paths(api)} {err}",
+)
+w.rs[2]["enforcement"] = "disabled"  # what the refusal asks a person to do
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: a disabled old ruleset that would empty is left as it is",
+    code == 0 and paths(api) == ["PUT /orgs/crunchtools/rulesets/1"] and w.include(2) == ["app"],
+    f"{code} {paths(api)} {err}",
+)
+
+# An archived (or deleted) repo leaves both lists; it is not a revert.
+w = World()
+w.repos["old2"]["archived"] = True
+w.repos["done2"]["archived"] = True
+code, api, out, err = cli(w, "--move-rulesets")
+check(
+    "move: archived repos leave both lists, and are not read as reverted",
+    code == 0 and w.include(1) == ["done1"] and w.include(2) == ["app", "old1", "priv"],
     f"{code} {w.include(1)} {w.include(2)} {err}",
 )
-code, api, out, err = cli(w, "--move-rulesets")
-check("move: an emptied list reads back as in step", code == 0 and not api.writes, err)
 
 # sdlc's own ci.yml is the stated exception: its own jobs, the fleet's names and gate.
 fleet_jobs = cut.yaml.safe_load(FLEET)["jobs"]
@@ -749,8 +787,7 @@ check(
     f"{code2} {paths(api2)} {err2}",
 )
 w = World()
-w.pr.update(state="closed", merged=True)
-w.converted.add("app")  # the crash came after the merge, before the move
+w.pr.update(state="closed", merged=True)  # the crash came after the merge, before the move
 code, api, out, err = merge_cli(w)
 check(
     "merge: a crash between merge and move is finished by the re-run",
@@ -761,6 +798,28 @@ check(
     and "resuming" in out,
     f"{code} {paths(api)} {out} {err}",
 )
+
+w = World()
+w.pr.update(state="closed", merged=True)
+w.routes[HEAD_CI] = (200, b64(b"name: CI\n"))  # merged, but not the conversion
+code, api, out, err = merge_cli(w)
+check(
+    "merge: a merged PR without the fleet ci.yml does not resume; nothing written",
+    code == 1 and not api.writes and "does not carry the fleet ci.yml" in err,
+    f"{code} {paths(api)} {err}",
+)
+
+# Every mode refuses while the fleet file has no sdlc-boot digest.
+cut.FLEET_FILE = UNPINNED
+for argv in (["--check"], ["--move-rulesets"], ["--merge", "app", "--pr", "7"]):
+    w = World()
+    code, api, out, err = cli(w, *argv)
+    check(
+        f"unpinned: {argv[0]} exits 2 and touches nothing",
+        code == 2 and not api.calls and "no sdlc-boot digest" in err,
+        f"{code} {err}",
+    )
+cut.FLEET_FILE = PINNED_DIR / "ci.yml"
 
 
 def refused(label: str, mutate: object, *extra: str, needs: str = "") -> None:

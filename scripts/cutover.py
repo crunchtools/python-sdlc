@@ -391,6 +391,19 @@ def is_converted(repo: str, have: bytes | None) -> bool:
     ) == fleet_jobs["gate"]
 
 
+BOOT_PIN = re.compile(r"sdlc-boot@sha256:[0-9a-f]{64}\b")
+
+
+def unpinned(text: str) -> bool:
+    """The fleet file names sdlc-boot by anything but a real digest."""
+    return "sdlc-boot" in text and not BOOT_PIN.search(text)
+
+
+def live_names(api: Api) -> set[str]:
+    """Every non-archived repo of the org: a name on a ruleset list and not here is gone."""
+    return {r["name"] for r in fleet(api)}
+
+
 def converted_repos(api: Api, include_private: bool) -> set[str]:
     """The repos whose default branch carries the fleet file, byte for byte.
 
@@ -455,17 +468,25 @@ def by_name(rulesets: list[dict], name: str) -> dict:
 
 
 def plan_move(
-    rulesets: list[dict], converted: set[str], old_names: list[str], new_name: str
+    rulesets: list[dict],
+    converted: set[str],
+    old_names: list[str],
+    new_name: str,
+    live: set[str] | None = None,
 ) -> list[Put]:
     """The PUTs that make the new list the converted repos and each old list the rest.
 
     Refuses, before anything is written, when a ruleset cannot be edited safely,
-    when a repo on the new list is no longer converted (a revert), or when a repo
-    an old list would drop is not on the new one: a required check that never
-    reports blocks every merge silently.
+    when a repo on the new list is no longer converted (a revert), when a repo
+    an old list would drop is not on the new one (a required check that never
+    reports blocks every merge silently), or when a PUT would send an empty
+    list to an active ruleset: GitHub may read an empty include as every repo,
+    which would require checks nothing reports anywhere. A name not in `live`
+    (archived or deleted) leaves both lists and is never read as a revert.
     """
     new = by_name(rulesets, new_name)
     olds = [by_name(rulesets, n) for n in old_names]
+    gone = set() if live is None else {n for r in [new, *olds] for n in explicit_include(r)} - live
     new_have = explicit_include(new)
     old_have = [explicit_include(r) for r in olds]
     if not requires_checks(new):
@@ -473,7 +494,7 @@ def plan_move(
             f"ruleset {new_name!r} must require {' and '.join(REQUIRED_CHECKS)} "
             f"with GitHub Actions (integration {ACTIONS_APP}) as the source"
         )
-    reverted = sorted(set(new_have) - converted)
+    reverted = sorted(set(new_have) - converted - gone)
     if reverted:
         raise RefusedError(
             f"{', '.join(reverted)} on {new_name!r} but the default branch no longer "
@@ -482,8 +503,8 @@ def plan_move(
     new_want = sorted(converted)
     plan: list[tuple[dict, list[str], list[str]]] = [(new, new_have, new_want)]
     for ruleset, have in zip(olds, old_have, strict=True):
-        want = [n for n in have if n not in converted]
-        dropped = sorted(set(have) - set(want))
+        want = [n for n in have if n not in converted and n not in gone]
+        dropped = sorted(set(have) - set(want) - gone)
         if not set(dropped) <= set(new_want):
             raise RefusedError(
                 f"{', '.join(dropped)} would leave {ruleset['name']!r} but not join {new_name!r}"
@@ -493,6 +514,14 @@ def plan_move(
     for ruleset, have, want in plan:
         if have == want:
             continue
+        if not want:
+            if ruleset is not new and ruleset.get("enforcement") != "active":
+                continue  # emptied and disabled: never PUT an empty list, nothing enforces it
+            raise RefusedError(
+                f"ruleset {ruleset['name']!r} would be left with no repos, and GitHub may "
+                f"read an empty include as every repo; set its enforcement to disabled by "
+                f"hand, then re-run"
+            )
         conditions = json.loads(json.dumps(ruleset["conditions"]))
         conditions["repository_name"]["include"] = want
         added, removed = sorted(set(want) - set(have)), sorted(set(have) - set(want))
@@ -601,13 +630,13 @@ def verify_pr(run: Run) -> bool:
         raise RefusedError(f"PR #{number} is not from {BRANCH} in {ORG}/{run.repo}")
     if (pr.get("base") or {}).get("ref") != run.default:
         raise RefusedError(f"PR #{number} does not target {run.default}")
-    if pr.get("merged"):
-        run.say(f"2 PR #{number}: already merged; resuming at the merge step")
-        return True
-    if pr.get("state") != "open":
+    if not pr.get("merged") and pr.get("state") != "open":
         raise RefusedError(f"PR #{number} is {pr.get('state')}, not open")
     if read_file(run.api, run.repo, CI, run.sha) != FLEET_FILE.read_bytes():
         raise RefusedError(f"PR #{number} head {run.sha[:7]} does not carry the fleet ci.yml")
+    if pr.get("merged"):
+        run.say(f"2 PR #{number}: already merged, with the fleet ci.yml; resuming at the merge")
+        return True
     run.say(f"2 PR #{number}: open, from {BRANCH}, carries the fleet ci.yml")
     return False
 
@@ -627,11 +656,16 @@ def merge_pr(run: Run, already: bool) -> None:
 
 
 def move_rulesets(run: Run) -> None:
-    """Step 9: the idempotent ruleset move."""
+    """Step 9: the idempotent ruleset move.
+
+    The contents API lags a squash merge, so a fresh read can miss the repo
+    just merged, find both lists in step, and strand it on the old ruleset
+    whose checks never report again. The merge (or the resume, which read the
+    merged head's ci.yml) is the proof it is converted, so it is counted.
+    """
     opts = run.opts
-    puts = plan_move(
-        org_rulesets(run.api), converted_repos(run.api, opts.include_private), opts.old, opts.new
-    )
+    done = converted_repos(run.api, opts.include_private) | {run.repo}
+    puts = plan_move(org_rulesets(run.api), done, opts.old, opts.new, live_names(run.api))
     apply_move(run.api, puts, lambda line: run.say(f"9 {line}"))
     if not puts:
         run.say("9 rulesets: already in step")
@@ -751,7 +785,7 @@ def check_secret_scope(run: Run) -> None:
 def check_move_plans(run: Run) -> None:
     """Step 6: the ruleset move would go through, planned and not applied."""
     done = converted_repos(run.api, run.opts.include_private) | {run.repo}
-    plan_move(org_rulesets(run.api), done, run.opts.old, run.opts.new)
+    plan_move(org_rulesets(run.api), done, run.opts.old, run.opts.new, live_names(run.api))
     run.say("6 rulesets: the move would go through")
 
 
@@ -804,7 +838,7 @@ def check_fleet(api: Api, opts: Options) -> list[str]:
             ]
     rulesets = org_rulesets(api)
     try:
-        if plan_move(rulesets, done, opts.old, opts.new):
+        if plan_move(rulesets, done, opts.old, opts.new, live_names(api)):
             problems.append("rulesets out of step: run --move-rulesets")
     except RefusedError as exc:
         problems.append(f"rulesets out of step: {exc}")
@@ -846,9 +880,8 @@ def run_mode(args: argparse.Namespace, api: Api, opts: Options) -> list[str]:
     if args.merge:
         return merge(api, args.merge, args.pr, opts)
     if args.move_rulesets:
-        puts = plan_move(
-            org_rulesets(api), converted_repos(api, opts.include_private), opts.old, opts.new
-        )
+        done = converted_repos(api, opts.include_private)
+        puts = plan_move(org_rulesets(api), done, opts.old, opts.new, live_names(api))
         apply_move(api, puts, print)
         if not puts:
             print("rulesets: already in step")
@@ -863,6 +896,11 @@ def run_mode(args: argparse.Namespace, api: Api, opts: Options) -> list[str]:
 
 def main(argv: list[str] | None = None, api: Api | None = None) -> int:
     args = parser().parse_args(argv)
+    if unpinned(FLEET_FILE.read_text()):
+        # Until sdlc's trust root records the sdlc-boot digest (prerequisite 4),
+        # a merge would land a ci.yml no runner can pull, in any mode's wake.
+        print(f"cutover: {FLEET_FILE.name} has no sdlc-boot digest yet", file=sys.stderr)
+        return 2
     if args.merge and args.pr is None:
         print("cutover: --merge needs --pr", file=sys.stderr)
         return 2
