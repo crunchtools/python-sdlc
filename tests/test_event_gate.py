@@ -296,6 +296,12 @@ check(
     "reviewer replying to itself does not answer",
     gate_pr(pull_api(comments=[finding(1), reply(2, 1, f"fixed in {SHA}", APP)])) == 1,
 )
+for assoc in ("OWNER", "MEMBER", "COLLABORATOR"):
+    check(
+        f"an {assoc} author's reply answers (C3)",
+        gate_pr(pull_api(comments=[finding(1), reply(2, 1, f"fixed in {SHA}", "maint", assoc)]))
+        == 0,
+    )
 for assoc in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE", ""):
     check(
         f"a {assoc or 'missing'} author's reply answers nothing (C3)",
