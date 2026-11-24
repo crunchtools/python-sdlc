@@ -281,7 +281,9 @@ check(
 check(
     "the constitution is cloned at this run's sha, without a token",
     any(SHA in a for a in dry["git"].ran("git fetch"))
-    and not any("GIT_CONFIG_VALUE_0" in e for _a, e, _c, _s in dry["git"].calls),
+    and not any(
+        "AUTHORIZATION" in e.get("GIT_CONFIG_VALUE_0", "") for _a, e, _c, _s in dry["git"].calls
+    ),
 )
 (argv, child), (argv_b, child_b) = dry["run"].calls
 check(

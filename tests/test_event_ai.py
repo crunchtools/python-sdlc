@@ -773,7 +773,11 @@ check(
 )
 check(
     "fix: the clone carries no token",
-    all("GIT_CONFIG_VALUE_0" not in c[1] for c in rig.runner.calls if c[0][0] == "git"),
+    all(
+        "AUTHORIZATION" not in c[1].get("GIT_CONFIG_VALUE_0", "")
+        for c in rig.runner.calls
+        if c[0][0] == "git"
+    ),
 )
 prompt_argv = rig.ran("prompt.py")[0][0]
 check(

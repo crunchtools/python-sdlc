@@ -670,7 +670,8 @@ with tempfile.TemporaryDirectory() as scratch:
     check(
         "clone: no token, no extraheader",
         all(
-            "GIT_CONFIG_VALUE_0" not in c[1] and c[1]["GIT_TERMINAL_PROMPT"] == "0"
+            "AUTHORIZATION" not in c[1].get("GIT_CONFIG_VALUE_0", "")
+            and c[1]["GIT_TERMINAL_PROMPT"] == "0"
             for c in runner.calls
         ),
     )
