@@ -37,8 +37,9 @@ import json
 import re
 import secrets
 from collections.abc import Mapping
+from typing import Any
 
-from sdlc_jobs._core import DIGEST, Tools, api, cannot, step
+from sdlc_jobs._core import DIGEST, Response, Tools, api, cannot, step
 
 CANDIDATES = "quay.io/crunchtools/candidates"
 ROBOT = "crunchtools+candidates"
@@ -76,28 +77,29 @@ def tree_of(tools: Tools, env: Mapping[str, str], repo: str, sha: str) -> str:
     return tree
 
 
+def _field(resp: Response, name: str, refusal: str) -> str:
+    """The non-empty string `name` of a 200 JSON response; anything else cannot run."""
+    doc = resp.json() if resp.status == OK else None
+    value = doc.get(name) if isinstance(doc, dict) else None
+    if not isinstance(value, str) or not value:
+        cannot(f"{refusal} (HTTP {resp.status})")
+    return value
+
+
 def oidc_token(tools: Tools, env: Mapping[str, str]) -> str | None:
     """This job's GitHub OIDC token for Quay; None when the job may not have one (a fork)."""
     url, bearer = env.get("ACTIONS_ID_TOKEN_REQUEST_URL"), env.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
     if not url or not bearer:
         return None
     resp = tools.http("GET", f"{url}&audience={AUDIENCE}", {"Authorization": f"Bearer {bearer}"})
-    doc = resp.json() if resp.status == OK else None
-    value = doc.get("value") if isinstance(doc, dict) else None
-    if not isinstance(value, str) or not value:
-        cannot(f"GitHub issued no OIDC token (HTTP {resp.status})")
-    return value
+    return _field(resp, "value", "GitHub issued no OIDC token")
 
 
 def robot_token(tools: Tools, jwt: str) -> str:
     """Quay's robot token for this job's OIDC token: valid an hour, candidates only."""
     basic = base64.b64encode(f"{ROBOT}:{jwt}".encode()).decode()
     resp = tools.http("GET", EXCHANGE, {"Authorization": f"Basic {basic}"})
-    doc = resp.json() if resp.status == OK else None
-    token = doc.get("token") if isinstance(doc, dict) else None
-    if not isinstance(token, str) or not token:
-        cannot(f"Quay refused the OIDC exchange for {ROBOT} (HTTP {resp.status})")
-    return token
+    return _field(resp, "token", f"Quay refused the OIDC exchange for {ROBOT}")
 
 
 def stop_commands() -> str:
@@ -143,6 +145,19 @@ def pr_job(tools: Tools, env: Mapping[str, str], repo: str, head: str, name: str
     return None
 
 
+def _parsed(note: Mapping[str, Any]) -> dict[str, Any]:
+    """A candidate annotation's JSON object; {} (and a line saying why) for anything else."""
+    try:
+        doc = json.loads(str(note.get("message", "")))
+    except ValueError as exc:
+        print(f"a candidate annotation is not JSON ({exc}): ignoring it", flush=True)
+        return {}
+    if not isinstance(doc, dict):
+        print("a candidate annotation is not a JSON object: ignoring it", flush=True)
+        return {}
+    return doc
+
+
 def recorded(
     tools: Tools, env: Mapping[str, str], repo: str, tree: str, image: str = ""
 ) -> str | None:
@@ -158,13 +173,7 @@ def recorded(
     notes = api(tools, env, "GET", url.removeprefix(base) + "/annotations")
     mine = [n for n in notes if n.get("title") == TITLE] if isinstance(notes, list) else []
     key = tag(image or repo, tree)
-    docs = []
-    for note in mine:
-        try:
-            doc = json.loads(str(note.get("message", "")))
-        except ValueError:
-            doc = None
-        docs.append(doc if isinstance(doc, dict) else {})
+    docs = [_parsed(note) for note in mine]
     if not mine:
         print("0 candidate annotations on the pull request's image job: building")
         return None

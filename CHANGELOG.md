@@ -34,6 +34,10 @@ All notable changes to this project are documented here, following
   pinned as the Containerfile's default, not as rotv-base.
 - A parent another repo publishes as an extra image (rotv-base, say) is
   verified as signed by that repo, which is how promote signs it.
+- sdlc's next ci.yml (`examples/sdlc-ci.yml`) runs its `test` job on the
+  uncached runner class, as the live one does, never the cached class.
+- A candidate annotation that is not a JSON object is reported in the log
+  before it is ignored, rather than silently.
 
 ## [0.14.1] - 2026-11-24
 
