@@ -1,7 +1,10 @@
 """Build once: a pull request's `image` pushes a candidate, the merge promotes it.
 
 A candidate is the release image a same-repo pull request built and gated, pushed to
-`quay.io/crunchtools/candidates:<repo>-<tree>`. The key is the git tree, not a commit:
+`quay.io/crunchtools/candidates:<image>-<tree>`, where <image> is the name the image
+publishes as: the repo's own, or a `[[tool.sdlc.images]]` name, which EXTRA_IMAGES
+(sdlc_jobs/_core.py) gives one repo only. So the key is as unambiguous as the
+registry's own names. The key is the git tree, not a commit:
 a squash merge makes a new commit, but when the branch was up to date the merged tree
 is the one the pull request built (GitHub builds `refs/pull/N/merge`, whose tree is the
 merge result). On the default branch, `image` adopts the candidate for its tree by
@@ -54,11 +57,14 @@ MISSING = re.compile(
 )
 
 
-def tag(repo: str, tree: str) -> str:
-    """`candidates:<repo name>-<tree>`, the one place the key is spelled."""
+def tag(image: str, tree: str) -> str:
+    """`candidates:<image name>-<tree>`, the one place the key is spelled.
+
+    `image` is the name it publishes as; an `owner/repo` is read as its repo's own image.
+    """
     if not TREE.fullmatch(tree):
         cannot(f"{tree!r} is not a git tree id")
-    return f"{CANDIDATES}:{repo.rpartition('/')[2]}-{tree}"
+    return f"{CANDIDATES}:{image.rpartition('/')[2]}-{tree}"
 
 
 def tree_of(tools: Tools, env: Mapping[str, str], repo: str, sha: str) -> str:
@@ -105,9 +111,10 @@ def resume(token: str) -> None:
     print(f"::{token}::", flush=True)
 
 
-def annotate(repo: str, tree: str, digest: str) -> None:
-    """The binding a merge reads back: this job's one `sdlc candidate` annotation."""
-    doc = json.dumps({"candidate": tag(repo, tree), "digest": digest}, separators=(",", ":"))
+def annotate(repo: str, tree: str, digest: str, image: str = "") -> None:
+    """The binding a merge reads back: this job's one `sdlc candidate` annotation per image."""
+    key = tag(image or repo, tree)
+    doc = json.dumps({"candidate": key, "digest": digest}, separators=(",", ":"))
     print(f"::notice title={TITLE}::{doc}", flush=True)
 
 
@@ -136,9 +143,12 @@ def pr_job(tools: Tools, env: Mapping[str, str], repo: str, head: str, name: str
     return None
 
 
-def recorded(tools: Tools, env: Mapping[str, str], repo: str, sha: str, tree: str) -> str | None:
-    """The digest the merged pull request's image job recorded for `tree`; None, none."""
-    head = merged_head(tools, env, repo, sha)
+def recorded(
+    tools: Tools, env: Mapping[str, str], repo: str, tree: str, image: str = ""
+) -> str | None:
+    """The digest the merged pull request's image job recorded for `tree` and `image`
+    (default: the repo's own); None, none."""
+    head = merged_head(tools, env, repo, env.get("GITHUB_SHA", ""))
     job = pr_job(tools, env, repo, head, IMAGE_JOB) if head else None
     url = str((job or {}).get("check_run_url", ""))
     base = env.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
@@ -147,17 +157,26 @@ def recorded(tools: Tools, env: Mapping[str, str], repo: str, sha: str, tree: st
         return None
     notes = api(tools, env, "GET", url.removeprefix(base) + "/annotations")
     mine = [n for n in notes if n.get("title") == TITLE] if isinstance(notes, list) else []
-    if len(mine) != 1:
-        print(f"{len(mine)} candidate annotations on the pull request's image job: building")
+    key = tag(image or repo, tree)
+    docs = []
+    for note in mine:
+        try:
+            doc = json.loads(str(note.get("message", "")))
+        except ValueError:
+            doc = None
+        docs.append(doc if isinstance(doc, dict) else {})
+    if not mine:
+        print("0 candidate annotations on the pull request's image job: building")
         return None
-    try:
-        doc = json.loads(str(mine[0].get("message", "")))
-    except ValueError:
-        doc = None
-    digest = doc.get("digest") if isinstance(doc, dict) else None
-    if not isinstance(doc, dict) or doc.get("candidate") != tag(repo, tree):
-        print("the pull request's candidate is another tree: building", flush=True)
+    ours = [d for d in docs if d.get("candidate") == key]
+    if len(ours) > 1:
+        print(f"{len(ours)} candidate annotations for {key}: building", flush=True)
         return None
+    if not ours:
+        print(f"the pull request's candidates are another tree or image than {key}: building")
+        return None
+    doc = ours[0]
+    digest = doc.get("digest")
     if not (isinstance(digest, str) and DIGEST.fullmatch(digest)):
         cannot("the pull request's candidate annotation has no well-formed digest")
     return digest
@@ -167,16 +186,18 @@ def find(
     tools: Tools,
     env: Mapping[str, str],
     child_env: Mapping[str, str],
-    repo: str,
     tree: str,
+    image: str = "",
 ) -> tuple[str, dict[str, str]] | None:
-    """(digest, labels) of the candidate the merged pull request recorded for `tree`.
+    """(digest, labels) of the candidate the merged pull request recorded for `tree`
+    and `image` (default: the repo's own) of GITHUB_REPOSITORY.
 
     None when there is none to adopt, and the caller builds instead. `env` holds the
     token for the API; `child_env`, with no token, runs skopeo.
     """
-    step(f"candidate for tree {tree}")
-    digest = recorded(tools, env, repo, env.get("GITHUB_SHA", ""), tree)
+    repo = env.get("GITHUB_REPOSITORY", "")
+    step(f"candidate for {image or repo} at tree {tree}")
+    digest = recorded(tools, env, repo, tree, image)
     if digest is None:
         return None
     ref = f"{CANDIDATES}@{digest}"

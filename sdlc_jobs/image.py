@@ -29,8 +29,13 @@ Then the boot gate, `[tool.sdlc.image] boot`, as container-release ran it
 Container-release pushed before it gated; this job gates the local image and pushes only
 what passed, so no ungated digest exists in the registry.
 
-`result` is `{"ref", "digest", "sha", "tag", "parent"}`: all `promote` takes from here,
-and it re-validates every field.
+A repo publishes its root image unless `[tool.sdlc.image] publish = false`, and each
+`[[tool.sdlc.images]]` entry EXTRA_IMAGES allows it (sdlc_jobs/_core.py). They are built
+in dependency order; a FROM naming a sibling this run pushed builds on that digest.
+
+`result` is `{"ref", "digest", "sha", "tag", "parent"}` for a repo's one own image, and
+`{"images": [{..., "name"}], "sha"}` otherwise: all `promote` takes from here, and it
+re-validates every field.
 """
 
 from __future__ import annotations
@@ -55,14 +60,18 @@ from sdlc_jobs._core import (
     FROM_AS_WORDS,
     IMAGE_NOT_ENFORCED,
     PODMAN_CANNOT_CREATE,
+    Image,
     RunOptions,
     Tools,
+    build_arg_map,
+    build_args,
     cannot,
     expand_build_vars,
     fetch_tree,
     final_stage,
     host_mount,
-    image_settings,
+    image_owner,
+    images,
     must,
     podman,
     set_output,
@@ -80,7 +89,6 @@ RH_KEY = "/etc/pki/sigstore/SIGSTORE-redhat-release3"
 RH_REKOR = "/etc/pki/sigstore/REKOR-signing-key"
 US = "\x1f"  # the plan's argv separator
 SHA = re.compile(r"[0-9a-f]{40}")
-BUILD_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=[^\x00-\x1f]*")
 GATES = ("container-smoke", "container-scan", "bootc-lint")
 SECRETS = (
     "QUAY_USERNAME",
@@ -129,8 +137,12 @@ class Job:
     host_root: str = ""
     image_id: str = ""
     child_env: dict[str, str] = field(default_factory=dict)
-    settings: dict = field(default_factory=dict)  # [tool.sdlc.image], checked
+    settings: dict = field(default_factory=dict)  # the image being built's settings, checked
     boot: Boot | None = None  # its boot gate, checked; None is none asked for
+    images: list[Image] = field(default_factory=list)  # every image, in build order
+    built: dict[str, Parent] = field(default_factory=dict)  # name -> pushed this run
+    results: list[dict] = field(default_factory=list)  # what promote takes, per image
+    bootc: bool = False  # the plan has bootc-lint: build OCI
     tree: str = ""  # the git tree of `sha`: what a candidate is keyed by
     resume: str = ""  # a pull request's stop-commands token; workflow commands are off
     event: str = ""
@@ -187,11 +199,15 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         scratch / "auth.json",
         f"sdlc-cache-{env.get('GITHUB_RUN_ID', '0')}-{env.get('GITHUB_RUN_ATTEMPT', '0')}",
     )
-    job.settings = image_settings(root, repo)
-    job.boot = boot_settings(job.settings)
-    build_args(job.settings)
-    for key in sorted(IMAGE_NOT_ENFORCED & set(job.settings)):
-        print(f"image: [tool.sdlc.image] {key} is not enforced here (crunchtools/sdlc#118)")
+    job.images = images(root, repo)
+    if not job.images:
+        cannot("this repo publishes no image: no root Containerfile, or publish = false")
+    for img in job.images:  # every key is checked before anything logs in
+        boot_settings(img.settings)
+        build_args(img.settings)
+        for key in sorted(IMAGE_NOT_ENFORCED & set(img.settings)):
+            print(f"image: {img.name}: {key} is not enforced here (crunchtools/sdlc#118)")
+    job.images = build_order(root, job.images)
     job.child_env = {k: v for k, v in env.items() if k not in SECRETS}
     job.child_env["REGISTRY_AUTH_FILE"] = str(job.auth)
     job.event = event_name
@@ -208,42 +224,169 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
 
 
 def build_and_push(job: Job) -> int:
-    containerfile = next(
+    """Each image in build order: adopt its candidate or build, gate and push it.
+
+    An image built FROM a sibling this run pushed builds on that digest. A gate that
+    finds something stops the run there: nothing after it is built or pushed.
+    """
+    login(job)
+    plan: dict[str, tuple[str, str]] | None = None
+    found = False
+    for img in job.images:
+        job.settings, job.boot = img.settings, boot_settings(img.settings)
+        if job.event == "push" and adopt(job, img):
+            continue
+        if plan is None:
+            step("map the workspace and plan the gates")
+            job.host_root, job.image_id = host_mount(job.tools, job.env, job.root)
+            plan = gate_plan(job)
+            job.bootc = "bootc-lint" in plan
+            found = lint(job)
+        if build_one(job, img, plan, found) == FOUND:
+            return FOUND
+    hand_on(job)
+    return CLEAN
+
+
+def hand_on(job: Job) -> None:
+    """Record what was pushed: a pull request's annotations, then `result` for promote.
+
+    One image that is the repo's own keeps the shape promote has always read; more, or
+    another, is `{"images": [...]}`.
+    """
+    if job.event == "pull_request":
+        _candidate.resume(job.resume)  # repo code is done running: every image is built
+        for result in job.results:
+            repo = job.env["GITHUB_REPOSITORY"]
+            _candidate.annotate(repo, job.tree, result["digest"], result["name"])
+    if len(job.results) == 1 and job.images[0].root:
+        out: dict = {k: v for k, v in job.results[0].items() if k != "name"}
+    else:
+        out = {"images": job.results, "sha": job.sha}
+    set_output(job.env, "result", json.dumps(out, separators=(",", ":")))
+
+
+def stages_of(job: Job, img: Image) -> tuple[str, Parent | None, list[Parent]]:
+    """(Containerfile text, final parent, every registry stage), each pinned: a sibling
+    this job pushed by its digest, anything else verified."""
+    name = img.containerfile or next(
         (f for f in ("Containerfile", "Dockerfile") if (job.root / f).is_file()), None
     )
-    if containerfile is None:
+    if name is None:
         cannot("there is no Containerfile or Dockerfile at the repo root to build")
-    text = (job.root / containerfile).read_text(encoding="utf-8", errors="replace")
-    login(job)
-    if job.event == "push" and adopt(job):
-        return CLEAN
-    parent = parent_stage(text)
-    stages = [*([parent] if parent else []), *builder_stages(text, parent.index if parent else -1)]
+    text = (job.root / name).read_text(encoding="utf-8", errors="replace")
+    overrides = build_arg_map(img.settings)
+    parent = parent_stage(text, overrides)
+    stages = [
+        *([parent] if parent else []),
+        *builder_stages(text, parent.index if parent else -1, overrides),
+    ]
     for stage in stages:
-        verify_parent(job, stage)
-    step("map the workspace and plan the gates")
-    job.host_root, job.image_id = host_mount(job.tools, job.env, job.root)
-    plan = gate_plan(job)
-    if "container-build" not in plan:
-        cannot("`sdlc plan ci` plans no container-build for this repo")
-    found = lint(job)
-    tag = build(job, plan, text, parent, stages)
+        host, path = split_ref(stage.image)
+        sibling = job.built.get(path) if host == QUAY else None
+        if sibling is None:
+            verify_parent(job, stage)
+            continue
+        # Built and gated by this very job, a step ago: its bytes, by digest.
+        stage.pinned, stage.digest, stage.image = sibling.pinned, sibling.digest, sibling.image
+        print(f"parent built here: {stage.pinned}", flush=True)
+    return text, parent, stages
+
+
+def build_one(job: Job, img: Image, plan: dict[str, tuple[str, str]], linted: bool) -> int:
+    """Build, gate and push one image; FOUND when a gate (or the lint) found something."""
+    text, parent, stages = stages_of(job, img)
+    if img.containerfile is None or img.context is None:  # the root image: the plan's build
+        if "container-build" not in plan:
+            cannot("`sdlc plan ci` plans no container-build for this repo")
+        words, gates = plan["container-build"][1].split(US)[2:], plan
+    else:
+        tag = f"localhost/{img.name}:sdlc"
+        words = ["-f", img.containerfile, "-t", tag, img.context]
+        gates = extra_gates(job, plan, tag)
+    step(f"image {img.ref}")
+    tag = build(job, ["podman", "build", *words], text, parent, stages)
+    found = linted
     for name in GATES:
-        if name in plan and not run_gate(job, name, *plan[name]):
+        if name in gates and not run_gate(job, name, *gates[name]):
             found = True
     if job.boot is not None and not boot_gate(job, job.boot, tag):
         found = True
     if found:
-        print("\nimage: a gate found something; nothing is pushed", flush=True)
+        print(f"\nimage: a gate found something; {img.name} and what follows are not pushed")
         return FOUND
-    return push(job, tag, parent.pinned if parent else "")
+    return push(job, img, tag, parent)
+
+
+def extra_gates(job: Job, plan: dict[str, tuple[str, str]], tag: str) -> dict[str, tuple[str, str]]:
+    """container-scan (and bootc-lint) as planned for this repo, judging `tag` instead.
+
+    Only the image word changes, and check_words still holds the line. Smoke is the
+    root image's (its env and args are that image's): an extra image proves it starts
+    with its own boot gate.
+    """
+    if "container-scan" not in plan:
+        for line in job.must(["sdlc", "plan", "container-scan"]).splitlines():
+            parts = line.split("\t", PLAN_FIELDS - 1)
+            if len(parts) == PLAN_FIELDS and parts[0] == "container-scan":
+                plan = {**plan, "container-scan": (parts[2], parts[3])}
+    if "container-scan" not in plan:
+        cannot("`sdlc plan container-scan` planned no scan")
+    out: dict[str, tuple[str, str]] = {}
+    for name in ("container-scan", "bootc-lint"):
+        if name not in plan:
+            continue
+        mode, payload = plan[name]
+        words = payload.split(US)
+        if "--" not in words:
+            cannot(f"{name}: the plan has no `--` before its image")
+        if name == "bootc-lint":
+            words[words.index("--") + 1] = tag
+        else:
+            words = [
+                re.sub(r"(?<=^type=image,source=)[^,]*", tag, w)
+                if w.startswith("type=image,")
+                else w
+                for w in words
+            ]
+        out[name] = (mode, US.join(words))
+    print("container-smoke: the root image's; this image is judged by its boot gate", flush=True)
+    return out
+
+
+def build_order(root: Path, imgs: list[Image]) -> list[Image]:
+    """`imgs` with every image after the siblings it is built FROM; a cycle is a 2."""
+    names = {i.name for i in imgs}
+    needs: dict[str, set[str]] = {}
+    for img in imgs:
+        path = img.containerfile or next(
+            (f for f in ("Containerfile", "Dockerfile") if (root / f).is_file()), ""
+        )
+        text = (root / path).read_text(encoding="utf-8", errors="replace") if path else ""
+        overrides = build_arg_map(img.settings)
+        parent = parent_stage(text, overrides) if text else None
+        stages = [*([parent] if parent else [])]
+        if text:
+            stages += builder_stages(text, parent.index if parent else -1, overrides)
+        needs[img.name] = {
+            split_ref(st.image)[1].partition("/")[2]
+            for st in stages
+            if split_ref(st.image)[0] == QUAY and split_ref(st.image)[1].partition("/")[0] == ORG
+        } & (names - {img.name})
+    out: list[Image] = []
+    while len(out) < len(imgs):
+        ready = [i for i in imgs if i not in out and needs[i.name] <= {o.name for o in out}]
+        if not ready:
+            cannot(f"the images are built FROM each other in a cycle: {sorted(names)}")
+        out.append(ready[0])
+    return out
 
 
 def candidate_possible(job: Job) -> bool:
     """Can this pull request build a candidate? Said aloud when it cannot."""
     why = (
         "it builds with RHSM or registry.redhat.io, whose secrets a pull request lacks"
-        if job.settings.get("rhsm") or job.settings.get("redhat-registry")
+        if any(i.settings.get("rhsm") or i.settings.get("redhat-registry") for i in job.images)
         else "this job has no OIDC token (a fork's pull request)"
         if not job.env.get("ACTIONS_ID_TOKEN_REQUEST_URL")
         else ""
@@ -270,7 +413,7 @@ def login(job: Job) -> None:
         if not job.env.get(user):
             if host == QUAY:
                 cannot("QUAY_USERNAME is not set: nothing could be pushed")
-            if job.settings.get("redhat-registry"):
+            if any(i.settings.get("redhat-registry") for i in job.images):
                 cannot(f"[tool.sdlc.image] redhat-registry is true but {user} is not set")
             continue
         job.must(
@@ -301,19 +444,21 @@ class Parent:
     digest: str = ""
 
 
-def parent_stage(text: str) -> Parent | None:
+def parent_stage(text: str, overrides: Mapping[str, str] | None = None) -> Parent | None:
     """The FROM that names a registry image and that image; None for scratch.
 
-    An unset build variable is a 2: nothing to verify.
+    An unset build variable is a 2: nothing to verify. `overrides` are build-args.
     """
-    found = final_stage(text, strict=True)
+    found = final_stage(text, strict=True, overrides=overrides)
     if found is None:
         cannot("the Containerfile has no FROM to verify")
     index, image = found
     return None if image.lower() == "scratch" else Parent(index, image)
 
 
-def builder_stages(text: str, final: int) -> list[Parent]:
+def builder_stages(
+    text: str, final: int, overrides: Mapping[str, str] | None = None
+) -> list[Parent]:
     """Every other FROM that names a registry image: a builder stage ships bytes too.
 
     Not scratch, not a reference to an earlier stage's alias, not the `final` FROM
@@ -331,6 +476,8 @@ def builder_stages(text: str, final: int) -> list[Parent]:
                 {k: v.strip("\"'") for k, eq, v in (w.partition("=") for w in words[1:]) if eq}
             )
         elif op == "FROM" and (rest := [w for w in words[1:] if not w.startswith("--")]):
+            if index < 0:
+                args.update(overrides or {})
             index += 1
             image = expand_build_vars(rest[0], args, strict=True).strip("\"'")
             if index != final and image.lower() != "scratch" and image.lower() not in aliases:
@@ -370,7 +517,8 @@ def verify_parent(job: Job, parent: Parent) -> None:
         key = job.scratch / "fleet.pub"
         key.write_text(FLEET_PUBLIC_KEY)
         argv = ["cosign", "verify", "--insecure-ignore-tlog", "--key", str(key)]
-        job.must([*argv, "-a", f"repo={path}", pinned])
+        # Signed by the repo that publishes it: its own, or the one EXTRA_IMAGES names.
+        job.must([*argv, "-a", f"repo={image_owner(path)}", pinned])
     elif host in RED_HAT:
         red_hat_verify(job, parent, pinned)
     elif host == QUAY and path.startswith(f"{HUMMINGBIRD}/") and path.count("/") == 1:
@@ -510,14 +658,13 @@ def pin_args(job: Job, text: str, stages: list[Parent], argv: list[str]) -> list
 
 def build(
     job: Job,
-    plan: dict[str, tuple[str, str]],
+    words: list[str],
     text: str,
     parent: Parent | None,
     stages: list[Parent],
 ) -> str:
     """Build through the socket at the tag smoke and scan read; return that tag."""
     step("build")
-    words = plan["container-build"][1].split(US)
     if words[:2] != ["podman", "build"] or "-t" not in words:
         cannot("the container-build plan is not a `podman build` with a tag")
     tag = words[words.index("-t") + 1]
@@ -526,7 +673,7 @@ def build(
         "build",
         "--pull=always",
         "--format",
-        job.settings.get("format") or ("oci" if "bootc-lint" in plan else "docker"),
+        job.settings.get("format") or ("oci" if job.bootc else "docker"),
     ]
     argv += ["--authfile", str(job.auth)]
     for kv in build_args(job.settings):
@@ -562,18 +709,6 @@ def build(
         print("image: the build failed", flush=True)
         cannot(f"podman build exited {proc.returncode}")
     return tag
-
-
-def build_args(settings: dict) -> list[str]:
-    """`[tool.sdlc.image] build-args`, container-release's KEY=VALUE lines; or a 2."""
-    given = settings.get("build-args", "")
-    if not isinstance(given, str):
-        cannot("[tool.sdlc.image] build-args must be a string of KEY=VALUE lines")
-    out = [kv.strip() for kv in given.splitlines() if kv.strip()]
-    for kv in out:
-        if not BUILD_ARG.fullmatch(kv):
-            cannot(f"[tool.sdlc.image] build-args line {kv.split('=')[0]!r} is not KEY=VALUE")
-    return out
 
 
 def run_gate(job: Job, name: str, mode: str, payload: str) -> bool:
@@ -695,18 +830,17 @@ def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: in
 # ------------------------------------------------------------------ push
 
 
-def adopt(job: Job) -> bool:
+def adopt(job: Job, img: Image) -> bool:
     """Promote-ready without a build: the pull request's candidate for this tree, by digest.
 
     Copied to `<ref>:gated-<sha>` with its digest preserved, so `promote` finds what it
     always finds. False is "no candidate to adopt": build as before.
     """
-    repo = job.env["GITHUB_REPOSITORY"]
-    found = _candidate.find(job.tools, job.env, job.child_env, repo, job.tree)
+    found = _candidate.find(job.tools, job.env, job.child_env, job.tree, img.name)
     if found is None:
         return False
     digest, labels = found
-    ref = job.settings.get("image") or f"{QUAY}/{ORG}/{job.name}"
+    ref = img.ref
     gated = f"gated-{job.sha}"
     source = f"{_candidate.CANDIDATES}@{digest}"
     step(f"adopt {source} as {ref}:{gated}")
@@ -726,38 +860,49 @@ def adopt(job: Job) -> bool:
     if landed != digest:
         cannot(f"{ref}:{gated} is {landed!r} after the copy, not the candidate's {digest}")
     parent = labels.get("org.opencontainers.image.base.name", "")
-    result = {
-        "ref": ref,
-        "digest": digest,
-        "sha": job.sha,
-        "tag": gated,
-        "parent": f"{parent}@{labels.get('org.opencontainers.image.base.digest', '')}"
-        if parent
-        else "",
-        "candidate": source,
-    }
-    set_output(job.env, "result", json.dumps(result, separators=(",", ":")))
+    job.built[f"{ORG}/{img.name}"] = Parent(-1, ref, f"{ref}@{digest}", digest)
+    job.results.append(
+        {
+            "name": img.name,
+            "ref": ref,
+            "digest": digest,
+            "sha": job.sha,
+            "tag": gated,
+            "parent": f"{parent}@{labels.get('org.opencontainers.image.base.digest', '')}"
+            if parent
+            else "",
+            "candidate": source,
+        }
+    )
     print(f"built once, on the pull request: {ref}@{digest} ({gated})", flush=True)
     return True
 
 
-def push(job: Job, tag: str, pinned: str) -> int:
-    ref = job.settings.get("image") or f"{QUAY}/{ORG}/{job.name}"
+def push(job: Job, img: Image, tag: str, parent: Parent | None) -> int:
+    ref = img.ref
     gated = f"gated-{job.sha}"
     if job.event == "pull_request":
-        ref, _, gated = _candidate.tag(job.env["GITHUB_REPOSITORY"], job.tree).partition(":")
+        ref, _, gated = _candidate.tag(img.name, job.tree).partition(":")
     step(f"push {ref}:{gated}")
     # The digest podman reports for what it pushed, not whatever the tag names later.
-    digestfile = job.scratch / "pushed.digest"
+    digestfile = job.scratch / f"pushed-{img.name}.digest"
     argv = [*job.podman, "push", "--authfile", str(job.auth), "--digestfile", str(digestfile)]
     job.must([*argv, tag, f"docker://{ref}:{gated}"])
     digest = digestfile.read_text().strip() if digestfile.is_file() else ""
     if not DIGEST.fullmatch(digest):
         cannot(f"podman push of {ref}:{gated} reported {digest!r}, not a sha256 digest")
-    if job.event == "pull_request":
-        _candidate.resume(job.resume)
-        _candidate.annotate(job.env["GITHUB_REPOSITORY"], job.tree, digest)
-    result = {"ref": ref, "digest": digest, "sha": job.sha, "tag": gated, "parent": pinned}
-    set_output(job.env, "result", json.dumps(result, separators=(",", ":")))
+    # A sibling built FROM this one builds on these bytes; its label names the image.
+    job.built[f"{ORG}/{img.name}"] = Parent(-1, img.ref, f"{ref}@{digest}", digest)
+    pinned = parent.pinned if parent else ""
+    job.results.append(
+        {
+            "name": img.name,
+            "ref": ref,
+            "digest": digest,
+            "sha": job.sha,
+            "tag": gated,
+            "parent": pinned,
+        }
+    )
     print(f"built once: {ref}@{digest} ({gated})", flush=True)
     return CLEAN

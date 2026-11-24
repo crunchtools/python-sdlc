@@ -23,7 +23,7 @@ from typing import Unpack
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sdlc_jobs import _boot, _candidate, image
+from sdlc_jobs import _boot, _candidate, _core, image
 from sdlc_jobs._core import CannotRunError, Response, RunOptions, Tools
 
 REPO = "crunchtools/demo"
@@ -247,7 +247,7 @@ class FakeTools(Tools):
                 if self.candidate is None:
                     return cp(1, "", "manifest unknown")
                 out = json.dumps(self.candidate)
-            case "inspect" if f"{OWN}:gated-" in argv[-1]:
+            case "inspect" if f"{OWN}:gated-" in argv[-1] or f"{OWN}-base:gated-" in argv[-1]:
                 out = self.landed or (self.candidate or {}).get("Digest", "")
             case "inspect":
                 out = self.signed_tag if "registry.access.redhat.com/hi/" in argv[-1] else PARENT
@@ -1478,6 +1478,195 @@ def test_build_args_bad_line_refused() -> None:
         t = FakeTools()
         msg = refused(t, QUAY_PARENT, files=settings(body))
         assert "build-args" in msg and not t.argvs, (body, msg)
+
+
+# ------------------------------------------------------------------ publish, many images
+
+_core.EXTRA_IMAGES["crunchtools/demo"] = ("demo-base", "demo-dev")  # what sdlc would review
+BASE_FILE = "FROM quay.io/crunchtools/ubi10-core:latest\nRUN true\n"
+APP_FILE = "ARG BASE=quay.io/crunchtools/ubi10-core:latest\nFROM ${BASE}\nRUN true\n"
+BASE_ENTRY = '[[tool.sdlc.images]]\nname = "demo-base"\ncontainerfile = "Containerfile.base"\n'
+MANY = {
+    "pyproject.toml": (
+        '[tool.sdlc.image]\nbuild-args = "BASE=quay.io/crunchtools/demo-base:latest"\n' + BASE_ENTRY
+    ),
+    "Containerfile.base": BASE_FILE,
+}
+
+
+def test_publish_false_builds_nothing() -> None:
+    t = FakeTools()
+    msg = refused(t, QUAY_PARENT, files=settings("publish = false\n"))
+    assert "publishes no image" in msg and not t.built(), msg
+
+
+def test_publish_must_be_a_bool() -> None:
+    msg = refused(FakeTools(), QUAY_PARENT, files=settings('publish = "no"\n'))
+    assert "publish must be true or false" in msg, msg
+
+
+def test_many_images_build_the_base_first_and_the_app_on_its_pushed_digest() -> None:
+    t = FakeTools()
+    rc, result = go(t, APP_FILE, files=MANY)
+    assert rc == 0 and result is not None, t.log
+    assert [r["ref"] for r in result["images"]] == [f"{OWN}-base", OWN], result
+    assert result["sha"] == SHA and all(r["tag"] == f"gated-{SHA}" for r in result["images"])
+    pushes = [a[-1] for a in t.argvs if a[4:5] == ["push"]]
+    assert pushes == [f"docker://{OWN}-base:gated-{SHA}", f"docker://{OWN}:gated-{SHA}"], pushes
+    # The app is built FROM the digest this job pushed, never verified as a stranger's.
+    app = [a for a in t.argvs if a[4:5] == ["build"]][1]
+    assert app[app.index("--from") + 1] == f"{OWN}-base@{PUSHED}", app
+    verifies = [a for a in t.argvs if a[:2] == ["cosign", "verify"]]
+    assert all("demo-base" not in a[-1] for a in verifies), verifies
+    assert f"org.opencontainers.image.base.name={OWN}-base" in app, app
+    assert f"org.opencontainers.image.base.digest={PUSHED}" in app, app
+    base = next(a for a in t.argvs if a[4:5] == ["build"])
+    assert base[base.index("-f") + 1] == "Containerfile.base" and base[-1] == ".", base
+    assert "localhost/demo-base:sdlc" in base
+    scans = [a for a in t.argvs if any("type=image,source=" in w for w in a)]
+    sources = [next(w for w in a if w.startswith("type=image,")) for a in scans]
+    assert sources[0].startswith("type=image,source=localhost/demo-base:sdlc,"), sources
+    assert sources[1].startswith("type=image,source=localhost/demo:sdlc,"), sources
+
+
+def test_a_gate_finding_on_the_base_pushes_nothing_after_it() -> None:
+    t = FakeTools()
+    t.scan_rc = 1
+    rc, result = go(t, APP_FILE, files=MANY)
+    assert rc == 1 and result is None, t.log
+    assert not t.pushed() and len([a for a in t.argvs if a[4:5] == ["build"]]) == 1
+
+
+def test_publish_false_with_an_extra_image_publishes_only_the_extra() -> None:
+    files = {
+        "pyproject.toml": "[tool.sdlc.image]\npublish = false\n" + BASE_ENTRY,
+        "Containerfile.base": BASE_FILE,
+    }
+    t = FakeTools()
+    rc, result = go(t, QUAY_PARENT, files=files)
+    assert rc == 0 and result is not None, t.log
+    assert [r["ref"] for r in result["images"]] == [f"{OWN}-base"], result
+
+
+def test_many_images_on_a_pull_request_push_one_candidate_each_then_annotate() -> None:
+    t = FakeTools()
+    rc, result = go(
+        t,
+        APP_FILE,
+        event="pull_request",
+        extra={**OIDC, "QUAY_USERNAME": "", "QUAY_PASSWORD": ""},
+        files=MANY,
+    )
+    assert rc == 0 and result is not None, t.log
+    pushes = [a[-1] for a in t.argvs if a[4:5] == ["push"]]
+    assert pushes == [
+        f"docker://quay.io/crunchtools/candidates:demo-base-{TREE}",
+        f"docker://quay.io/crunchtools/candidates:demo-{TREE}",
+    ], pushes
+    app = [a for a in t.argvs if a[4:5] == ["build"]][1]
+    assert app[app.index("--from") + 1] == f"quay.io/crunchtools/candidates@{PUSHED}", app
+    stop = t.log.index("::stop-commands::")
+    token = t.log[stop:].split("::")[2].split()[0]
+    notes = [line for line in t.log.splitlines() if line.startswith("::notice title=sdlc")]
+    assert len(notes) == len(pushes) and t.log.index(f"::{token}::") < t.log.index(notes[0]), t.log
+    assert f"candidates:demo-base-{TREE}" in notes[0] and f"candidates:demo-{TREE}" in notes[1]
+    # Workflow commands stay off until the last image is built: one resume, after both.
+    assert t.log.count(f"::{token}::") == 1
+    assert t.log.index(f"::{token}::") > t.log.rindex(
+        f"push quay.io/crunchtools/candidates:demo-{TREE}"
+    )
+
+
+def test_many_images_adopt_each_candidate_by_its_own_key() -> None:
+    t = FakeTools()
+    t.candidate = candidate_labels()
+    other = "sha256:" + "d" * 64
+    t.annotations = [
+        {
+            "title": _candidate.TITLE,
+            "message": json.dumps(
+                {"candidate": f"{_candidate.CANDIDATES}:{n}-{TREE}", "digest": d}
+            ),
+        }
+        for n, d in (("demo", PUSHED), ("demo-base", other))
+    ]
+    t.landed = ""
+    t.candidate = candidate_labels()
+    # Only the app's candidate checks out (the fake's registry holds one digest): the
+    # base's recorded digest is not what candidates@<digest> inspects as, a refusal.
+    msg = refused(t, APP_FILE, files=MANY)
+    assert "does not check out" in msg and other in msg, msg
+    t = FakeTools()
+    t.candidate = candidate_labels()
+    t.annotations = [
+        {
+            "title": _candidate.TITLE,
+            "message": json.dumps(
+                {"candidate": f"{_candidate.CANDIDATES}:{n}-{TREE}", "digest": PUSHED}
+            ),
+        }
+        for n in ("demo", "demo-base")
+    ]
+    rc, result = go(t, APP_FILE, files=MANY)
+    assert rc == 0 and result is not None and not t.built(), t.log
+    copies = [a[-1] for a in t.argvs if a[:2] == ["skopeo", "copy"]]
+    assert copies == [f"docker://{OWN}-base:gated-{SHA}", f"docker://{OWN}:gated-{SHA}"], copies
+
+
+def test_an_image_the_allowlist_does_not_give_this_repo_is_refused() -> None:
+    for name in ("trentina-demo", "demo-evil", "demo"):
+        files = {
+            "pyproject.toml": f'[[tool.sdlc.images]]\nname = "{name}"\ncontainerfile = "C"\n',
+            "C": BASE_FILE,
+        }
+        msg = refused(FakeTools(), QUAY_PARENT, files=files)
+        assert "may publish only" in msg or "named twice" in msg, (name, msg)
+
+
+def test_an_image_entry_is_checked() -> None:
+    for body, files, want in (
+        ('name = "demo-base"\n', {}, "needs containerfile"),
+        ('name = "demo-base"\ncontainerfile = "../x"\n', {}, "leaves the checkout"),
+        ('name = "demo-base"\ncontainerfile = "/etc/passwd"\n', {}, "relative"),
+        ('name = "demo-base"\ncontainerfile = "nope"\n', {}, "not a file"),
+        ('name = "demo-base"\ncontainerfile = "C"\ncontext = "C"\n', {"C": "x"}, "directory"),
+        ('name = "demo-base"\ncontainerfile = "C"\nimage = "x"\n', {"C": "x"}, "no setting"),
+        ('name = "demo-base"\ncontainerfile = "L"\n', {"L": Link("/etc/passwd")}, "leaves"),
+    ):
+        tree = {"pyproject.toml": "[[tool.sdlc.images]]\n" + body, **files}
+        msg = refused(FakeTools(), QUAY_PARENT, files=tree)
+        assert want in msg, (body, msg)
+
+
+def test_images_built_from_each_other_in_a_cycle_are_refused() -> None:
+    files = {
+        "pyproject.toml": (
+            "[tool.sdlc.image]\npublish = false\n"
+            '[[tool.sdlc.images]]\nname = "demo-base"\ncontainerfile = "A"\n'
+            '[[tool.sdlc.images]]\nname = "demo-dev"\ncontainerfile = "B"\n'
+        ),
+        "A": "FROM quay.io/crunchtools/demo-dev:latest\n",
+        "B": "FROM quay.io/crunchtools/demo-base:latest\n",
+    }
+    msg = refused(FakeTools(), QUAY_PARENT, files=files)
+    assert "cycle" in msg, msg
+
+
+def test_build_args_choose_the_parent_that_is_verified() -> None:
+    t = FakeTools()
+    body = 'build-args = "BASE=registry.redhat.io/ubi10/ubi-minimal:10.1"\n'
+    rc, _ = go(t, APP_FILE, files=settings(body))
+    assert rc == 0, t.log
+    pinned = t.build_argv()[t.build_argv().index("--from") + 1]
+    assert t.policy is not None and pinned == f"registry.redhat.io/ubi10/ubi-minimal@{PARENT}"
+
+
+def test_a_parent_another_repo_publishes_is_verified_as_that_repo() -> None:
+    t = FakeTools()
+    rc, _ = go(t, "FROM quay.io/crunchtools/rotv-base:latest\n")
+    assert rc == 0, t.log
+    verify = next(a for a in t.argvs if a[:2] == ["cosign", "verify"])
+    assert verify[verify.index("-a") + 1] == "repo=crunchtools/rotv", verify
 
 
 def main() -> int:
