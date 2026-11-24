@@ -77,6 +77,7 @@ class FakeTools(Tools):
         self.trees: dict[str, str] = {}  # commit -> tree, for gated_on_pr
         self.jobs: list[dict] = []  # the jobs of the merged PR head's ci.yml run
         self.head_repo = ""  # a pull request's head repo, in the event
+        self.private = False  # the event's repository.private
 
     def run(
         self,
@@ -183,6 +184,7 @@ def go(
         event = dict(EVENT)
         if tools.head_repo:
             event["pull_request"] = {"head": {"repo": {"full_name": tools.head_repo}}}
+            event["repository"] = {**event.get("repository", {}), "private": tools.private}
         if cron:
             event["schedule"] = cron
         rc = check.run(event_name, event, env, tools)
@@ -232,6 +234,14 @@ def test_same_repo_pull_request_plans_a_candidate_and_leaves_the_container_gates
     assert rc == 0 and plan["candidate"] is True and gated(t)
     skip = t.launched[0][1].get("SDLC_SKIP", "").split(",")
     assert set(check.CONTAINER_GATES) <= set(skip), skip
+
+
+def test_no_candidate_for_a_private_repo() -> None:
+    t = FakeTools()
+    t.head_repo, t.private = REPO, True
+    rc, plan = go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
+    assert rc == 0 and plan["candidate"] is False
+    assert "SDLC_SKIP" not in t.launched[0][1]
 
 
 def test_no_candidate_for_a_fork_or_rhsm_or_no_image() -> None:

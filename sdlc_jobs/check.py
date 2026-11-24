@@ -100,8 +100,10 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     cron = event.get("schedule") if event_name == "schedule" else None
     head = ((event.get("pull_request") or {}).get("head") or {}).get("repo") or {}
     same_repo = event_name == "pull_request" and head.get("full_name") == repo
+    # candidates is a public repository: a private repo's build would leak there.
+    public = (event.get("repository") or {}).get("private") is False
     made = make_plan(tools, env, root, default_push, cron)
-    made["candidate"] = same_repo and candidate_repo(root, repo)
+    made["candidate"] = same_repo and public and candidate_repo(root, repo)
     set_output(env, "result", fit(made))
 
     if event_name == "schedule":
