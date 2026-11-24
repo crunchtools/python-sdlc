@@ -23,13 +23,17 @@ from typing import Unpack
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sdlc_jobs import _boot, image
-from sdlc_jobs._core import CannotRunError, RunOptions, Tools
+from sdlc_jobs import _boot, _candidate, image
+from sdlc_jobs._core import CannotRunError, Response, RunOptions, Tools
 
 REPO = "crunchtools/demo"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 PARENT = "sha256:" + "a" * 64
 PUSHED = "sha256:" + "b" * 64
+TREE = "c" * 40
+OWN = "quay.io/crunchtools/demo"
+CANDIDATE = f"quay.io/crunchtools/candidates:demo-{TREE}"
+OIDC = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/t?x=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "b"}
 US = "\x1f"
 HOST = "/host/ws"
 INSPECT_ME = 2  # `inspect <container id>`, not a state query
@@ -129,6 +133,9 @@ class FakeTools(Tools):
         self.rm_rc: dict[str, int] = {}  # container name -> what `podman rm -f -v` exits
         self.image_inspect_rc = 0  # what `podman image inspect` exits
         self.log = ""  # what the job printed, kept by go()
+        self.candidate: dict | None = None  # `skopeo inspect` of candidates:demo-<tree>
+        self.landed = ""  # what the adopted gated-<sha> resolves to; empty, the candidate
+        self.http_calls: list[str] = []
 
     def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
         done = self._answer(argv, **kw)
@@ -148,6 +155,8 @@ class FakeTools(Tools):
             return self.skopeo(argv)
         if argv[0] == "cosign":
             return cp(self.verify_rc)
+        if argv[:2] == ["git", "rev-parse"]:
+            return cp(0, TREE + "\n")
         if argv[:2] == ["sdlc", "plan"]:
             return cp(0, self.plan or plan_text(bootc=self.bootc))
         if argv[0] == "sdlc":
@@ -230,9 +239,25 @@ class FakeTools(Tools):
             case "--policy":
                 self.policy = json.loads(Path(argv[2]).read_text())
                 rc = self.verify_rc
+            case "inspect" if CANDIDATE in argv[-1]:
+                if self.candidate is None:
+                    return cp(1, "", "manifest unknown")
+                out = json.dumps(self.candidate)
+            case "inspect" if f"{OWN}:gated-" in argv[-1]:
+                out = self.landed or (self.candidate or {}).get("Digest", "")
             case "inspect":
                 out = self.signed_tag if "registry.access.redhat.com/hi/" in argv[-1] else PARENT
         return cp(rc, out)
+
+    def http(
+        self, method: str, url: str, headers: Mapping[str, str], payload: bytes | None = None
+    ) -> Response:
+        del method, headers, payload
+        self.http_calls.append(url)
+        if url.startswith("https://oidc.example/"):
+            return Response(200, b'{"value": "jwt"}')
+        assert url == _candidate.EXCHANGE, url
+        return Response(200, b'{"token": "robot-token"}')
 
     def pushed(self) -> bool:
         return any(a[4:5] == ["push"] for a in self.argvs)
@@ -318,11 +343,66 @@ def refused(
     raise AssertionError("expected a refusal (exit 2)")
 
 
-def test_pull_request_refused() -> None:
+def candidate_labels(**over: str) -> dict:
+    labels = {_candidate.TREE_LABEL: TREE, _candidate.SOURCE_LABEL: f"https://github.com/{REPO}"}
+    return {"Digest": PUSHED, "Labels": {**labels, **over}}
+
+
+def test_pull_request_pushes_a_candidate_by_oidc_with_no_secret() -> None:
     t = FakeTools()
-    msg = refused(t, QUAY_PARENT, event="pull_request")
-    assert "pull_request" in msg, msg
-    assert not t.argvs, "a pull request ran something"
+    rc, result = go(t, QUAY_PARENT, event="pull_request", extra={**OIDC, "QUAY_USERNAME": "", "QUAY_PASSWORD": ""})
+    assert rc == 0 and result is not None, t.log
+    assert result["ref"] == "quay.io/crunchtools/candidates" and result["tag"] == f"demo-{TREE}"
+    push = next(a for a in t.argvs if a[4:5] == ["push"])
+    assert push[-1] == f"docker://{CANDIDATE}", push
+    login = next(a for a in t.argvs if a[:2] == ["skopeo", "login"])
+    assert _candidate.ROBOT in login and t.stdin[t.argvs.index(login)] == "robot-token"
+    assert f"{_candidate.TREE_LABEL}={TREE}" in t.build_argv()
+    assert "::notice title=sdlc candidate::" in t.log
+    assert not any("ACTIONS_ID_TOKEN" in k for e in t.envs for k in e), "the OIDC bearer reached a tool"
+
+
+def test_pull_request_without_oidc_or_with_rhsm_builds_nothing() -> None:
+    for extra, files in (({}, None), (OIDC, settings("rhsm = true"))):
+        t = FakeTools()
+        rc, result = go(t, QUAY_PARENT, event="pull_request", extra=extra, files=files)
+        assert rc == 0 and result is None and not t.built() and not t.pushed(), t.log
+        assert "no candidate" in t.log
+
+
+def test_push_adopts_the_candidate_for_its_tree() -> None:
+    t = FakeTools()
+    t.candidate = candidate_labels()
+    rc, result = go(t, QUAY_PARENT)
+    assert rc == 0 and result is not None, t.log
+    assert not t.built() and not t.pushed(), "a candidate was rebuilt"
+    copy = next(a for a in t.argvs if a[:2] == ["skopeo", "copy"])
+    assert copy[-2:] == [f"docker://quay.io/crunchtools/candidates@{PUSHED}", f"docker://{OWN}:gated-{SHA}"]
+    assert "--preserve-digests" in copy
+    assert result["digest"] == PUSHED and result["sha"] == SHA and result["tag"] == f"gated-{SHA}"
+
+
+def test_push_builds_when_the_candidate_does_not_check_out() -> None:
+    for cand in (None, candidate_labels(**{_candidate.TREE_LABEL: "d" * 40}),
+                 candidate_labels(**{_candidate.SOURCE_LABEL: "https://github.com/evil/demo"})):
+        t = FakeTools()
+        t.candidate = cand
+        rc, _ = go(t, QUAY_PARENT)
+        assert rc == 0 and t.built() and t.pushed(), (cand, t.log)
+        assert not any(a[:2] == ["skopeo", "copy"] for a in t.argvs)
+
+
+def test_adopted_copy_must_land_at_the_candidate_digest() -> None:
+    t = FakeTools()
+    t.candidate = candidate_labels()
+    t.landed = "sha256:" + "e" * 64
+    assert "not the candidate's" in refused(t, QUAY_PARENT)
+
+
+def test_schedule_never_adopts() -> None:
+    t = FakeTools()
+    t.candidate = candidate_labels()
+    assert go(t, QUAY_PARENT, event="schedule")[0] == 0 and t.built()
 
 
 def test_only_the_workflow_events_run() -> None:
@@ -331,8 +411,8 @@ def test_only_the_workflow_events_run() -> None:
         assert "does not run on" in refused(t, QUAY_PARENT, event=event)
         assert not t.argvs, f"{event!r} ran something"
     for event in image.EVENTS:
-        assert go(FakeTools(), QUAY_PARENT, event=event)[0] == 0, event
-    assert image.EVENTS == ("push", "schedule", "workflow_dispatch")
+        assert go(FakeTools(), QUAY_PARENT, event=event, extra=OIDC)[0] == 0, event
+    assert image.EVENTS == ("pull_request", "push", "schedule", "workflow_dispatch")
 
 
 def test_crunchtools_parent_verified() -> None:

@@ -15,7 +15,7 @@ to review:
   - `write` outside the triage events, `image` and `pypi` act on `check`'s
     plan only when `check` succeeded: each `if:` says
     `needs.check.result == 'success'` itself
-  - `image`'s env maps REGISTRY_REDHAT_IO_USER and REGISTRY_REDHAT_IO_PASSWORD
+  - `image`'s env maps REGISTRY_REDHAT_IO_USER and REGISTRY_REDHAT_IO_PASSWORD, never on a PR
   - in sdlc's own file, `test` is the only job whose `if:` admits
     pull_request, with `permissions: { contents: read }`, no `environment` and
     no `container`; and sdlc's `check` does not admit pull_request and is
@@ -246,7 +246,8 @@ for job_id in ("image", "pypi"):
 
 image_env = fleet["image"]["env"]
 for name in ("REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"):
-    check(f"fleet: image's env maps {name}", image_env.get(name) == f"${{{{ secrets.{name} }}}}")
+    want = f"${{{{ github.event_name != 'pull_request' && secrets.{name} || '' }}}}"
+    check(f"fleet: image's env maps {name}, never on a PR", image_env.get(name) == want)
 
 check("fleet: no `uses:` anywhere", not re.search(r"^\s*-?\s*uses:", fleet_text, re.M))
 check("fleet: top-level permissions are {}", parsed.get("permissions") == {})

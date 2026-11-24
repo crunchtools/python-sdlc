@@ -51,12 +51,13 @@ from sdlc_jobs._core import (
     plan,
     step,
 )
+from sdlc_jobs._candidate import TREE_LABEL, tree_of
 from sdlc_jobs.image import ORG, QUAY
 
 VERSION_LABELS = ("org.opencontainers.image.version", "version")
 MISSING = re.compile(r"manifest unknown|not found|no such|name unknown", re.IGNORECASE)
 COMMIT = re.compile(r"[0-9a-f]{40}")
-RELEASED_REF = re.compile(r"refs/heads/.+")
+RELEASED_REF = re.compile(r"refs/heads/.+|refs/pull/\d+/merge")  # a candidate: the PR built it
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
 WORKFLOW = ".github/workflows/ci.yml@"
 OK = 200
@@ -196,13 +197,20 @@ def inspect_labels(job: Job) -> dict[str, str]:
 def verify_built(job: Job) -> None:
     """The image at the digest is this run's commit, and `image` pushed it as gated-<sha>.
 
-    Both are refusals, never skips: a digest that is not what this commit built does not
-    get signed or attested.
+    A candidate the pull request built carries that run's commit, not the merge's; it is
+    this commit when its tree label is this commit's tree. Both are refusals, never skips:
+    a digest that is not what this commit built does not get signed or attested.
     """
     sha = job.env.get("GITHUB_SHA", "")
-    for label in BUILT_LABELS:
-        if job.labels.get(label) != sha:
-            cannot(f"{job.at} carries {label}={job.labels.get(label)!r}, not this run's {sha}")
+    if any(job.labels.get(label) != sha for label in BUILT_LABELS):
+        tree = tree_of(job.tools, job.env, job.repo, sha)
+        if job.labels.get(TREE_LABEL) != tree:
+            label = next(k for k in BUILT_LABELS if job.labels.get(k) != sha)
+            cannot(
+                f"{job.at} carries {label}={job.labels.get(label)!r} and tree "
+                f"{job.labels.get(TREE_LABEL)!r}, neither this run's {sha} nor its tree {tree}"
+            )
+        print(f"{job.at} was built on the pull request, from this tree {tree}", flush=True)
     gated = digest_of(job, f"gated-{sha}")
     if gated != job.digest:
         cannot(f"{job.ref}:gated-{sha} is {gated or 'missing'}, not the digest {job.digest}")

@@ -74,6 +74,8 @@ class FakeTools(Tools):
         self.stdin: list[str | None] = []
         self.cwds: list[str | None] = []
         self.env: dict[str, str] = {}  # added to the job's environment
+        self.trees: dict[str, str] = {}  # commit -> tree, for gated_on_pr
+        self.check_runs: list[dict] = []  # on the merged PR's head
 
     def run(
         self,
@@ -128,6 +130,11 @@ class FakeTools(Tools):
         self.calls.append((method, path, payload))
         if method == "GET" and path.endswith("/pulls"):
             return Response(200, json.dumps(self.prs).encode())
+        if method == "GET" and "/git/commits/" in path:
+            tree = self.trees[path.rpartition("/")[2]]
+            return Response(200, json.dumps({"tree": {"sha": tree}}).encode())
+        if method == "GET" and "/check-runs" in path:
+            return Response(200, json.dumps({"check_runs": self.check_runs}).encode())
         return Response(204 if method == "PUT" else 201, b"")
 
 
@@ -147,6 +154,7 @@ def go(
     files: dict[str, str] | None = None,
     cron: str | None = None,
     ref: str = "refs/heads/main",
+    head_repo: str | None = None,
 ) -> tuple[int, dict]:
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
@@ -166,6 +174,8 @@ def go(
             **tools.env,
         }
         event = dict(EVENT)
+        if head_repo:
+            event["pull_request"] = {"head": {"repo": {"full_name": head_repo}}}
         if cron:
             event["schedule"] = cron
         rc = check.run(event_name, event, env, tools)
@@ -206,6 +216,44 @@ def test_pull_request() -> None:
     assert rc == 0 and plan["image"] is False and plan["release"] is None
     assert plan["write"] is False and gated(t)
     assert not t.calls
+
+
+def test_same_repo_pull_request_plans_a_candidate_and_leaves_the_container_gates_to_it() -> None:
+    t = FakeTools()
+    rc, plan = go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge", head_repo=REPO)
+    assert rc == 0 and plan["candidate"] is True and gated(t)
+    skip = t.launched[0][1].get("SDLC_SKIP", "").split(",")
+    assert set(check.CONTAINER_GATES) <= set(skip), skip
+
+
+def test_no_candidate_for_a_fork_or_rhsm_or_no_image() -> None:
+    rhsm = {**IMAGE, "pyproject.toml": "[tool.sdlc.image]\nrhsm = true\n"}
+    for files, head in ((IMAGE, "fork/demo"), (rhsm, REPO), ({}, REPO)):
+        t = FakeTools()
+        rc, plan = go("pull_request", t, files=files, ref="refs/pull/1/merge", head_repo=head)
+        assert rc == 0 and plan["candidate"] is False, (files, head)
+        assert "SDLC_SKIP" not in t.launched[0][1], (files, head)
+
+
+def merged(head_tree: str, conclusion: str = "success") -> FakeTools:
+    p = pr(ref="fix/x")
+    p["head"]["sha"] = "e" * 40
+    t = FakeTools(prs=[p])
+    t.trees = {SHA: "c" * 40, "e" * 40: head_tree}
+    t.check_runs = [{"name": check.REQUIRED_CHECK, "conclusion": conclusion}]
+    return t
+
+
+def test_push_of_a_tree_its_pr_passed_runs_no_gates() -> None:
+    t = merged("c" * 40)
+    rc, plan = go("push", t, files=IMAGE)
+    assert rc == 0 and plan["image"] is True and not gated(t)
+
+
+def test_push_gates_when_the_tree_or_the_check_differs() -> None:
+    for t in (merged("d" * 40), merged("c" * 40, "failure"), FakeTools()):
+        rc, _ = go("push", t, files=IMAGE)
+        assert rc == 0 and gated(t)
 
 
 def test_push_image_repo() -> None:

@@ -134,6 +134,8 @@ class FakeTools(Tools):
         if self.api_status is not None:
             return Response(self.api_status, b"{}")
         path = url.removeprefix("https://api.github.com")
+        if path.startswith(f"/repos/{REPO}/git/commits/"):  # verify_built reads the tree
+            return Response(200, json.dumps({"tree": {"sha": "c" * 40}}).encode())
         tag_object = f"/repos/{REPO}/git/tags/"
         if path.startswith(tag_object):  # the hop an annotated tag takes to its commit
             sha = path.removeprefix(tag_object)
@@ -347,6 +349,20 @@ def test_label_mismatch_is_refused_not_skipped() -> None:
             t.labels[NEW] = labels
             assert label in refused(t), (label, wrong)
             assert not t.attested, "attested a mismatched image"
+
+
+def test_a_candidate_of_this_tree_is_promoted() -> None:
+    t = FakeTools()
+    labels = {k: OTHER_SHA if k in promote.BUILT_LABELS else v for k, v in built_labels().items()}
+    t.labels[NEW] = {**labels, promote.TREE_LABEL: "c" * 40}
+    assert go(t) == 0 and t.signs()
+
+
+def test_a_candidate_of_another_tree_is_refused() -> None:
+    t = FakeTools()
+    labels = {k: OTHER_SHA if k in promote.BUILT_LABELS else v for k, v in built_labels().items()}
+    t.labels[NEW] = {**labels, promote.TREE_LABEL: "d" * 40}
+    assert "neither this run's" in refused(t) and not t.signs()
 
 
 def test_gated_tag_must_resolve_to_the_digest() -> None:
