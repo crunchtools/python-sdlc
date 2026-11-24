@@ -256,6 +256,7 @@ def go(
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
         ws.mkdir()
+        (ws / ".git").mkdir()  # a checked-out tree: fetch_tree leaves it alone
         (ws / "Containerfile").write_text(containerfile)
         for name, text in (files or {}).items():
             (ws / name).parent.mkdir(parents=True, exist_ok=True)
@@ -1138,6 +1139,7 @@ def test_boot_command_prints_not_enforced() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
         ws.mkdir()
+        (ws / ".git").mkdir()  # a checked-out tree: fetch_tree leaves it alone
         (ws / "Containerfile").write_text(QUAY_PARENT)
         (ws / "pyproject.toml").write_text(boot("command", boot_command="x")["pyproject.toml"])
         env = {

@@ -26,6 +26,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import IO, NoReturn, TypedDict, Unpack
 
+from sdlc_jobs._tools import git_auth
+
 CLEAN = 0
 FOUND = 1
 CANNOT_RUN = 2
@@ -294,6 +296,34 @@ def needed(name: str, result: str | None) -> None:
 
 def workspace(env: Mapping[str, str]) -> Path:
     return Path(env.get("GITHUB_WORKSPACE") or os.getcwd())
+
+
+def fetch_tree(tools: Tools, env: Mapping[str, str], root: Path, repo: str) -> None:
+    """The one commit this event names, into an empty workspace: no actions/checkout.
+
+    The fleet file has no checkout step, so every job that reads the tree
+    (check, image, pypi) fetches it here first.
+
+    Depth 1, authenticated with the job's token by a per-command extraheader, so
+    no credential is written to .git/config. A workspace that is already a git
+    tree (a laptop, a test) is left as it is.
+    """
+    if (root / ".git").exists():
+        return
+    sha = env.get("GITHUB_SHA", "")
+    if not sha or not repo:
+        cannot("GITHUB_SHA and GITHUB_REPOSITORY name the commit to check; one is unset")
+    server = env.get("GITHUB_SERVER_URL") or "https://github.com"
+    token = env.get("GITHUB_TOKEN", "")
+    genv = {**env, **(git_auth(token) if token else {"GIT_TERMINAL_PROMPT": "0"})}
+    root.mkdir(parents=True, exist_ok=True)
+    for argv in (
+        ["git", "init", "-q", "."],
+        ["git", "remote", "add", "origin", f"{server}/{repo}"],
+        ["git", "fetch", "-q", "--depth=1", "origin", sha],
+        ["git", "checkout", "-q", "FETCH_HEAD"],
+    ):
+        must(tools, argv, cwd=str(root), env=genv)
 
 
 def tool_sdlc(root: Path) -> dict:
