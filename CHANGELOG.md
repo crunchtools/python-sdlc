@@ -8,12 +8,13 @@ All notable changes to this project are documented here, following
 
 ### Changed
 
-- Every job in the fleet file and in sdlc's own `ci.yml` runs on Exedore's
-  runner VMs through `vars.UNCACHED_RUNNER_LABEL`, with no fallback. Forks,
-  strangers' issues, `gate`, and sdlc's own `test`, `check`, `image`,
-  `approve` and `sign` used to fall back to GitHub's `ubuntu-latest`; so did
-  any repo that couldn't see the variable, which included every public repo.
-  A repo that can't see it now gets a workflow error instead of a quiet move.
+- Public repos run on GitHub's machines again; private repos run on Exedore.
+  The runner variables are scoped to private repos, and every `runs-on` keeps
+  its `ubuntu-latest` fallback. Measured on the same sdlc check, GitHub's
+  runner took 14 minutes and an Exedore VM more than 17. GitHub's minutes are
+  free for public repos, and a fork's code stays off our network. sdlc's own
+  `image`, `approve` and `sign` follow the same rule instead of a hardcoded
+  `ubuntu-latest`.
 
 ### Fixed
 
