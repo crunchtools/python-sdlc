@@ -110,7 +110,9 @@ case $1 in
           fi ;;
         esac
         _f=$W/reg/tag/$(san "$_ref")
-        if [ -s "$_f" ]; then cat "$_f"; else echo 'Error: manifest unknown' >&2; exit 1; fi ;;
+        if [ -s "$_f" ]; then cat "$_f"
+        elif [ -e "$W/deleted-0" ]; then echo 'unknown: Tag 0 was deleted or has expired. To pull, revive via time machine' >&2; exit 1
+        else echo 'Error: manifest unknown' >&2; exit 1; fi ;;
       *image.revision*)
         [ ! -e "$W/rev-fails" ] || { echo 'Error: unauthorized: authentication required' >&2; exit 1; }
         cat "$W/reg/rev/$(san "$_ref")" 2> /dev/null || : ;;
@@ -168,7 +170,7 @@ git -C "$W/repo" -c user.name=t -c user.email=t@t commit -q -m init
 REV=$(git -C "$W/repo" rev-parse HEAD)
 
 reset() {
-  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/rev-fails" "$W/tags" \
+  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/rev-fails" "$W/deleted-0" "$W/tags" \
          "$W/ls-remote-fails" "$W/curl-stdin" "$W/login-stdin" "$W/repo/boot/keys/"*
   mkdir -p "$W/reg/tag" "$W/reg/label"
   write_tree
@@ -551,6 +553,8 @@ if [ "$RC" -eq 0 ] && grep -qxF "$WANT" "$W/out" \
    && ! in_log ' sign --yes ' && ! in_log '^skopeo copy'; then
   ok "bootstrap image: no :0, tag at HEAD: both candidates pushed gated, nothing signed or tagged"
 else bad "bootstrap image: exit $RC"; dump; fi
+bs_setup; : > "$W/deleted-0"; bimg
+check "bootstrap image: a :0 Quay reports deleted is absent" rc_is 0
 bs_setup; printf 'x\trefs/tags/v0.13.0\n%s\trefs/tags/v0.13.0^{}\n' "$REV" > "$W/tags"; bimg
 check "bootstrap image: an annotated tag is read at its peeled commit" rc_is 0
 bs_setup

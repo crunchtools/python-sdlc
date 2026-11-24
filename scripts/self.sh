@@ -274,7 +274,8 @@ revision_of() {
 tag_digest() {
   if _d=$(skopeo inspect --authfile "$AUTH" --format '{{.Digest}}' "docker://$1" 2> "$work/err"); then
     printf '%s' "$_d"
-  elif ! grep -qi 'manifest unknown' "$work/err"; then
+  # Quay answers a tag that once existed with "was deleted or has expired".
+  elif ! grep -qiE 'manifest unknown|was deleted or has expired' "$work/err"; then
     cat "$work/err" >&2
     die "cannot read $1"
   fi

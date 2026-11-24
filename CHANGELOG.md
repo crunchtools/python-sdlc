@@ -6,6 +6,28 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-11-24
+
+### Fixed
+
+- `self.sh` read Quay's answer for a deleted tag ("Tag 0 was deleted or has
+  expired") as a registry error, so the bootstrap refused to run after `:0`
+  was deleted. It is an absent tag, like `manifest unknown`.
+
+### Changed
+
+- sdlc releases only through its own `ci.yml`: a prepared
+  `chore/release-X.Y.Z` branch, a dispatch with `version`, the App's release
+  PR, then `image` and `sign`, which moves `:0`. `release.yml` is deleted;
+  `container.yml` stays until the constitution validator knows sdlc's own
+  release path, and still moves `X.Y.Z` and `latest`, which the fleet does
+  not read. 0.12.2 and 0.12.3 went out through them, so
+  they were signed with the fleet key and `:0`, which sdlc-bootstrap
+  resolves, stayed at 0.12.1. This is the first release the fleet receives
+  since 0.12.1, with every fix listed under 0.12.3. It goes out by the
+  one-time bootstrap dispatch, because 0.12.1's `write` refuses the App's
+  release merge.
+
 ## [0.12.3] - 2026-11-24
 
 ### Fixed
