@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-11-24
+
 ### Fixed
 
 - Only a public repo builds a candidate: `quay.io/crunchtools/candidates` is
