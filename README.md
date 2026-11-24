@@ -302,8 +302,10 @@ than the sum of everything in it.
 
 The image decides the lanes, by three rules:
 
-- An `image-build` check and every `pytest-in-image` check that runs the image
-  it tags are **one lane** — the build has to finish before the tests start.
+- An `image-build` check and every `pytest-in-image` or `command` check that
+  runs the image it tags are **one lane** — the build has to finish before the
+  tests start. The build is planned first whatever order `checks` lists them
+  in; every other check keeps its place.
 - Gatehouse is the `review` lane, always. It is the one check that does not
   read the worktree: its input is the `origin/<default-branch>...HEAD` diff,
   which `bin/sdlc` computes on the host and pipes in. So it can run beside
@@ -469,12 +471,101 @@ added to the image.
 | `image` | string | `"localhost/<repo>:sdlc"` |
 | `network` | boolean | `false` |
 
+**`command`** — runs one program in a nested container, with the repo mounted
+read-only at `/repo`, a tmpfs `/tmp`, no capabilities and no network. `argv` is
+a list of words, never a shell string: `argv[0]` is the entrypoint and the rest
+are its arguments, exactly as written. A repo's own script runs by naming it
+(`["bash", "tests/lint.sh"]`), so the code is a file a reviewer sees. The
+environment starts with `CI=true`, `HOME=/tmp`, `PYTHONPYCACHEPREFIX=/tmp/pycache`
+and git's `safe.directory=*`; `env` adds to it or replaces those. An `image` that
+an `image-build` check in the same command tags runs after that build, in its
+lane, which is how a test gets a runtime the gate image does not carry (another
+Python, a browser).
+
+| Setting | Type | Default |
+|---|---|---|
+| `argv` | list of strings | **required** |
+| `image` | string | the gate's own image (node, npm, bash, gawk, git, python 3.14) |
+| `workdir` | path in the repo | `"."` |
+| `env` | table | none |
+| `network` | boolean | `false` |
+
+```toml
+[tool.sdlc.ci]
+checks = ["migrations", "py311"]
+
+[tool.sdlc.ci.migrations]
+kind = "command"
+argv = ["node", "--test", "tests/migrations/*.test.mjs"]
+
+[tool.sdlc.ci.py311]
+kind = "command"
+image = "ghcr.io/astral-sh/uv:0.13.7-python3.11-trixie-slim"
+argv = ["uv", "run", "--locked", "--all-extras", "pytest", "-q", "-p", "no:cacheprovider"]
+env = { UV_PROJECT_ENVIRONMENT = "/tmp/venv", UV_PYTHON_DOWNLOADS = "never" }
+network = true
+```
+
+Any exit other than 0 fails the check; 1 is a finding and anything higher is
+reported as could-not-run, which fails it too.
+
+**`command` with `systemd = true`** — the same command against a running
+service, for a test that needs the image's units up (a database, the API). The
+launcher starts `image` detached with systemd as PID 1, execs `ready` every two
+seconds until it exits 0 or `timeout` is up, then execs each `setup` argv in
+order and `argv` last, in the one container, and removes it however that ended.
+The first step that does not exit 0 ends the check, judged as `argv` is; a
+service that never becomes ready is a finding, with systemd's failed units and
+the container log printed. Every step is an argv list as above, so a loop or a
+pipe is a script in the repo that a step names. The steps run in `workdir` with
+`env`; the repo is read-only at `/repo`, and there is no network but the
+container's loopback unless `network = true`.
+
+systemd gets back exactly the capabilities it needs to run units as their own
+users — `SETUID`, `SETGID`, `SETPCAP`, `CHOWN`, `FOWNER`, `DAC_OVERRIDE` and
+`KILL` — plus `NET_BIND_SERVICE` for a unit that listens below 1024, and keeps
+`no-new-privileges`. They are the launcher's to grant, not the config's. The
+`setup` steps and `argv` together get 30 minutes once the service is ready; a
+step still running then is a finding and the container is removed. On Actions,
+workflow commands are stopped from boot until the container is gone. A
+cancelled gate removes the container on its way out, and conmon kills a service
+still running after an hour, so a gate killed outright leaks nothing for long.
+
+| Setting | Type | Default |
+|---|---|---|
+| `systemd` | boolean | `false` |
+| `image` | string | **required** with `systemd`: the gate's own image does not boot systemd |
+| `setup` | list of argv lists | none |
+| `ready` | list of strings | `["systemctl", "is-system-running"]` |
+| `timeout` | seconds, 1-1800 | `180` |
+
+```toml
+[tool.sdlc.ci]
+checks = ["backend", "app-image"]   # the build is planned first either way
+
+[tool.sdlc.ci.app-image]
+kind = "image-build"
+tag = "localhost/app:test"
+
+[tool.sdlc.ci.backend]
+kind = "command"
+systemd = true
+image = "localhost/app:test"
+ready = ["curl", "-sf", "-o", "/dev/null", "http://localhost:8080/health"]
+setup = [
+  ["psql", "-U", "postgres", "-d", "app", "-f", "/repo/tests/fixtures/seed.sql"],
+  ["systemctl", "restart", "app"],
+]
+argv = ["npm", "--prefix", "/app", "test"]
+```
+
 Paths must stay inside the repository; `..` or an absolute path is refused.
 Values in `build_args`, `labels` and `env` may be `@project.version`,
 `@git.sha` or `@now`.
 
-There is no shell kind. A repo that needs something these cannot express gets a
-new kind here, so the config stays something a person can read.
+There is no shell kind. `command` takes an argv list and nothing parses it; a
+repo that needs something these cannot express gets a new kind here, so the
+config stays something a person can read.
 
 ## Running main before a release
 

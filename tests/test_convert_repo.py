@@ -33,9 +33,12 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+import sdlc_root
 import yaml
 
-ROOT = Path(__file__).resolve().parent.parent
+from sdlc_jobs import _core
+
+ROOT = sdlc_root.ROOT
 SCRIPT = ROOT / "scripts" / "convert_repo.py"
 HOOKS = (ROOT / "examples" / "pre-commit-floating.yaml").read_text()
 CI = (ROOT / "examples" / "ci.yml").read_text()
@@ -286,6 +289,7 @@ jobs:
       contents: read
     with:
       image: quay.io/crunchtools/mcp-example
+      default-branch: master
       boot: mcp
       boot-env: |
         EXAMPLE_API_KEY=gate-dummy
@@ -784,13 +788,20 @@ check(
     str(image),
 )
 check(
-    "container-release: sign, downstream and cascade are dropped, with a note",
-    "sign" not in image and "downstream" not in image and "cascade" not in image,
+    "container-release: sign, downstream, cascade and default-branch are dropped",
+    not {"sign", "downstream", "cascade", "default-branch"} & set(image),
+)
+# What the converter writes, the image job must accept: a key it refuses would
+# turn a converted repo's first image run into a 2.
+check(
+    "container-release: every key written is one the image job reads",
+    set(image) <= _core.IMAGE_ENFORCED | _core.IMAGE_NOT_ENFORCED,
+    str(sorted(set(image) - _core.IMAGE_ENFORCED - _core.IMAGE_NOT_ENFORCED)),
 )
 dry = convert(make_repo({**HOOKED, WF + "container.yml": CONTAINER_CALL}))
 check(
     "container-release: the note says what was dropped",
-    "dropped: cascade, downstream, sign" in dry.stderr,
+    "dropped: cascade, default-branch, downstream, sign" in dry.stderr,
     dry.stderr,
 )
 
