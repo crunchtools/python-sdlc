@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-24
+
 ### Added
 
 - `sdlc-constitution check` enforces R4 on the newest release in
@@ -13,16 +15,6 @@ All notable changes to this project are documented here, following
   before 1.0), and every `### Deprecated` entry says which later
   release removes it ("removed in 2.0.0"); a bare "since 1.2.0" does not count. Older releases are history and are not judged. Whether a removal names
   its replacement stays a review question.
-
-### Fixed
-
-- `sdlc / gate` counts an answer to a Gatehouse finding only from an owner,
-  member or collaborator (constitution C3). A PR author outside the org could
-  clear a finding by replying `not a bug: ...` to it.
-
-## [0.13.0] - 2026-11-24
-
-### Added
 
 - Constitution 2.0.0 (RT #1666). A repo without a
   `.specify/memory/constitution.md` is judged by `sdlc-constitution check`
@@ -33,17 +25,11 @@ All notable changes to this project are documented here, following
   here" section. `sdlc-constitution coverage` lists how each principle is
   checked: by rule, by review, or not yet.
 
-### Changed
-
-- Public repos run on GitHub's machines again; private repos run on Exedore.
-  The runner variables are scoped to private repos, and every `runs-on` keeps
-  its `ubuntu-latest` fallback. Measured on the same sdlc check, GitHub's
-  runner took 14 minutes and an Exedore VM more than 17. GitHub's minutes are
-  free for public repos, and a fork's code stays off our network. sdlc's own
-  `image`, `approve` and `sign` follow the same rule instead of a hardcoded
-  `ubuntu-latest`.
-
 ### Fixed
+
+- `sdlc / gate` counts an answer to a Gatehouse finding only from an owner,
+  member or collaborator (constitution C3). A PR author outside the org could
+  clear a finding by replying `not a bug: ...` to it.
 
 - `sdlc push`'s Gatehouse verdict is CI's. Gatehouse exits non-zero only on a
   finding every sample blocked on, but the fleet's `gate` holds a pull request
@@ -54,6 +40,16 @@ All notable changes to this project are documented here, following
   lives once, in `sdlc_jobs/_findings.py`: `ai` passes its agents to
   Gatehouse, `gate` judges posted findings by it, and `sdlc push` judges
   local ones by it, so the three cannot drift apart.
+
+### Changed
+
+- Public repos run on GitHub's machines again; private repos run on Exedore.
+  The runner variables are scoped to private repos, and every `runs-on` keeps
+  its `ubuntu-latest` fallback. Measured on the same sdlc check, GitHub's
+  runner took 14 minutes and an Exedore VM more than 17. GitHub's minutes are
+  free for public repos, and a fork's code stays off our network. sdlc's own
+  `image`, `approve` and `sign` follow the same rule instead of a hardcoded
+  `ubuntu-latest`.
 
 ## [0.12.4] - 2026-11-24
 
