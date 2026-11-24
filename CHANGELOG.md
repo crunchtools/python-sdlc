@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-11-24
+
+### Changed
+
+- sdlc-bootstrap base core-runtime:2-builder sha256:3f42474b6433 -> sha256:bc20d6d5c4a0.
+
 ## [0.14.0] - 2026-11-24
 
 ### Added
