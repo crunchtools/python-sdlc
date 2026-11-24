@@ -229,6 +229,12 @@ case " \$* " in
     printf 'sd-inject-opts${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}--privileged${US}-w${US}/repo${SS}ready-ok${SS}must-not-run\n' ;;
   *" plan sd-inject-user "*)
     printf 'sd-inject-user${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}-w${US}/repo${US}--user${US}0${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-dangle "*)
+    printf 'sd-inject-dangle${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}-w${US}/repo${US}-e${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-envname "*)
+    printf 'sd-inject-envname${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}-w${US}/repo${US}-e${US}A-B=1${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-relw "*)
+    printf 'sd-inject-relw${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}-w${US}repo${SS}ready-ok${SS}must-not-run\n' ;;
   *" plan sd-inject-run "*)
     printf 'sd-inject-run${TAB}main${TAB}host-systemd${TAB}5${US}podman${US}run${US}--privileged${US}--${US}localhost/svc:sdlc${SS}${SDOPTS}${SS}ready-ok${SS}must-not-run\n' ;;
   *" plan sd-inject-mount "*)
@@ -423,7 +429,8 @@ printf '\n== a command against a systemd service\n\n'
 # time. A plan line that asks for anything more is refused before podman runs.
 for case_ in sd-pass:0 sd-fail:1 sd-two:2 sd-notready:1 sd-died:1 sd-podman:2 \
              sd-inject-opts:2 sd-inject-user:2 sd-inject-run:2 sd-inject-mount:2 \
-             sd-inject-arg:2 sd-inject-cmd:2; do
+             sd-inject-arg:2 sd-inject-cmd:2 sd-inject-dangle:2 sd-inject-envname:2 \
+             sd-inject-relw:2; do
   name=${case_%:*}; want=${case_#*:}
   rm -f "$SHIM/must-not-run"
   log_mark
