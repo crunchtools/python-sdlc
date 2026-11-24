@@ -424,11 +424,12 @@ else:
         fork_pr = event(
             "pull_request", **{"github.event.pull_request.head.repo.full_name": "stranger/app"}
         )
-        cached = {"vars.CACHED_RUNNER_LABEL": "crunchtools-cached"}
+        label_set = {"vars.UNCACHED_RUNNER_LABEL": "crunchtools-uncached"}
+        no_label = {"vars.UNCACHED_RUNNER_LABEL": ""}
         for label, ctx, want in (
-            ("a same-repo PR, cached label set", {**same_repo_pr, **cached}, "crunchtools-cached"),
-            ("a same-repo PR, no cached label", same_repo_pr, "ubuntu-latest"),
-            ("a fork's PR, cached label set", {**fork_pr, **cached}, "ubuntu-latest"),
+            ("a same-repo PR, label set", {**same_repo_pr, **label_set}, "crunchtools-uncached"),
+            ("a same-repo PR, no label", {**same_repo_pr, **no_label}, "ubuntu-latest"),
+            ("a fork's PR, label set", {**fork_pr, **label_set}, "ubuntu-latest"),
         ):
             got = evaluate(str(test["runs-on"]), ctx)
             check(f"own: test runs {label} on {want}", got == want, str(got))
