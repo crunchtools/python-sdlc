@@ -319,3 +319,15 @@ justification = """
   so a converted repo is judged by the same handshake; moving it is a protocol \
   change to make on purpose, never a date to bump.
 """
+
+[[exceptions]]
+check = "CH001-absolute_paths"
+path = "sdlc_jobs/_core.py"
+classification = "by_design"
+justification = """
+own_container_id() reads this container's own /proc/self/mountinfo and matches
+the engine's bind mount of /etc/hostname, /etc/hosts or /etc/resolv.conf to
+find the container id (RT #1664). Those are fixed paths inside every job
+container, named by the kernel and the engine, not paths of the host or the
+repo, so there is nothing to make relative.
+"""
