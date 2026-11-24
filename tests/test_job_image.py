@@ -131,7 +131,14 @@ class FakeTools(Tools):
         self.log = ""  # what the job printed, kept by go()
 
     def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
-        # captured or streamed, the fake answers the same
+        done = self._answer(argv, **kw)
+        if kw.get("stream"):  # as the real Tools: a streamed run's output went to the log
+            return subprocess.CompletedProcess(argv, done.returncode, None, None)  # type: ignore[arg-type]
+        return done
+
+    def _answer(
+        self, argv: list[str], **kw: Unpack[RunOptions]
+    ) -> subprocess.CompletedProcess[str]:
         self.argvs.append(argv)
         self.timeouts.append(kw.get("timeout"))
         self.stdin.append(kw.get("input"))

@@ -60,8 +60,11 @@ def cannot(msg: str) -> NoReturn:
 
 
 def show(proc: subprocess.CompletedProcess[str]) -> None:
-    """Print what a tool said, stdout then stderr, into the job's log."""
-    print(proc.stdout + proc.stderr, end="", flush=True)
+    """Print what a tool said, stdout then stderr, into the job's log.
+
+    A streamed run already wrote to the log and captured nothing: both are None.
+    """
+    print((proc.stdout or "") + (proc.stderr or ""), end="", flush=True)
 
 
 def step(msg: str) -> None:
