@@ -132,6 +132,7 @@ class Job:
     settings: dict = field(default_factory=dict)  # [tool.sdlc.image], checked
     boot: Boot | None = None  # its boot gate, checked; None is none asked for
     tree: str = ""  # the git tree of `sha`: what a candidate is keyed by
+    resume: str = ""  # a pull request's stop-commands token; workflow commands are off
     event: str = ""
 
     def run(
@@ -196,8 +197,10 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     job.event = event_name
     try:
         job.tree = job.must(["git", "rev-parse", "HEAD^{tree}"]).strip()
-        if event_name == "pull_request" and not candidate_possible(job):
-            return CLEAN
+        if event_name == "pull_request":
+            if not candidate_possible(job):
+                return CLEAN
+            job.resume = _candidate.stop_commands()  # repo code runs from here on
         return build_and_push(job)
     finally:
         job.run([*job.podman, "volume", "rm", "-f", job.volume])
@@ -698,26 +701,41 @@ def adopt(job: Job) -> bool:
     Copied to `<ref>:gated-<sha>` with its digest preserved, so `promote` finds what it
     always finds. False is "no candidate to adopt": build as before.
     """
-    found = _candidate.find(job.tools, job.child_env, job.env["GITHUB_REPOSITORY"], job.tree)
+    repo = job.env["GITHUB_REPOSITORY"]
+    found = _candidate.find(job.tools, job.env, job.child_env, repo, job.tree)
     if found is None:
         return False
     digest, labels = found
     ref = job.settings.get("image") or f"{QUAY}/{ORG}/{job.name}"
     gated = f"gated-{job.sha}"
-    source = f"{_candidate.tag(job.env['GITHUB_REPOSITORY'], job.tree).partition(':')[0]}@{digest}"
+    source = f"{_candidate.CANDIDATES}@{digest}"
     step(f"adopt {source} as {ref}:{gated}")
     argv = ["skopeo", "copy", "--all", "--preserve-digests", "--authfile", str(job.auth)]
     job.must([*argv, f"docker://{source}", f"docker://{ref}:{gated}"])
     landed = job.must(
-        ["skopeo", "inspect", "--authfile", str(job.auth), "--format", "{{.Digest}}",
-         f"docker://{ref}:{gated}"]
+        [
+            "skopeo",
+            "inspect",
+            "--authfile",
+            str(job.auth),
+            "--format",
+            "{{.Digest}}",
+            f"docker://{ref}:{gated}",
+        ]
     ).strip()
     if landed != digest:
         cannot(f"{ref}:{gated} is {landed!r} after the copy, not the candidate's {digest}")
     parent = labels.get("org.opencontainers.image.base.name", "")
-    result = {"ref": ref, "digest": digest, "sha": job.sha, "tag": gated,
-              "parent": f"{parent}@{labels.get('org.opencontainers.image.base.digest', '')}"
-              if parent else "", "candidate": source}
+    result = {
+        "ref": ref,
+        "digest": digest,
+        "sha": job.sha,
+        "tag": gated,
+        "parent": f"{parent}@{labels.get('org.opencontainers.image.base.digest', '')}"
+        if parent
+        else "",
+        "candidate": source,
+    }
     set_output(job.env, "result", json.dumps(result, separators=(",", ":")))
     print(f"built once, on the pull request: {ref}@{digest} ({gated})", flush=True)
     return True
@@ -737,6 +755,7 @@ def push(job: Job, tag: str, pinned: str) -> int:
     if not DIGEST.fullmatch(digest):
         cannot(f"podman push of {ref}:{gated} reported {digest!r}, not a sha256 digest")
     if job.event == "pull_request":
+        _candidate.resume(job.resume)
         _candidate.annotate(job.env["GITHUB_REPOSITORY"], job.tree, digest)
     result = {"ref": ref, "digest": digest, "sha": job.sha, "tag": gated, "parent": pinned}
     set_output(job.env, "result", json.dumps(result, separators=(",", ":")))

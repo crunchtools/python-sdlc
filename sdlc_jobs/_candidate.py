@@ -15,8 +15,16 @@ write the candidates repository and nothing else (a federation per repo, subject
 `repo:crunchtools/<repo>:pull_request`). A fork's pull request gets no OIDC token, so
 it builds no candidate.
 
-Adopting re-checks what the candidate says about itself: the tree and source labels
-must be this commit's tree and this repo, and the copy must land at the same digest.
+The binding comes from GitHub, not the registry: a merge adopts only the digest the
+merged pull request's head recorded, as the one `sdlc candidate` annotation on its
+`sdlc / image (pull_request)` job, read through runs -> jobs -> that job's check run.
+A check run made through the API is never a job, and the PR job stops workflow commands
+while repo code runs, so only sdlc's own code can write that annotation. The candidate's
+labels are then checked as well, and the copy must land at the same digest.
+
+Load-bearing: the org ruleset "Workflows: admins only, every branch" (a push ruleset on
+`.github/workflows/**`). A pull_request run executes the branch's own ci.yml; without
+that ruleset a branch could rewrite the job and hold the candidates robot itself.
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import secrets
 from collections.abc import Mapping
 
 from sdlc_jobs._core import DIGEST, Tools, api, cannot, step
@@ -34,8 +43,15 @@ AUDIENCE = "quay"
 EXCHANGE = "https://quay.io/oauth2/federation/robot/token"
 TREE_LABEL = "com.crunchtools.build.tree"
 SOURCE_LABEL = "org.opencontainers.image.source"
+OK = 200
+WORKFLOW = ".github/workflows/ci.yml"
+IMAGE_JOB = "sdlc / image (pull_request)"
+CHECK_JOB = "sdlc / check (pull_request)"
+TITLE = "sdlc candidate"
 TREE = re.compile(r"[0-9a-f]{40}")
-MISSING = re.compile(r"manifest unknown|not found|no such|name unknown|deleted or has expired", re.I)
+MISSING = re.compile(
+    r"manifest unknown|not found|no such|name unknown|deleted or has expired", re.I
+)
 
 
 def tag(repo: str, tree: str) -> str:
@@ -60,7 +76,7 @@ def oidc_token(tools: Tools, env: Mapping[str, str]) -> str | None:
     if not url or not bearer:
         return None
     resp = tools.http("GET", f"{url}&audience={AUDIENCE}", {"Authorization": f"Bearer {bearer}"})
-    doc = resp.json() if resp.status == 200 else None
+    doc = resp.json() if resp.status == OK else None
     value = doc.get("value") if isinstance(doc, dict) else None
     if not isinstance(value, str) or not value:
         cannot(f"GitHub issued no OIDC token (HTTP {resp.status})")
@@ -71,48 +87,120 @@ def robot_token(tools: Tools, jwt: str) -> str:
     """Quay's robot token for this job's OIDC token: valid an hour, candidates only."""
     basic = base64.b64encode(f"{ROBOT}:{jwt}".encode()).decode()
     resp = tools.http("GET", EXCHANGE, {"Authorization": f"Basic {basic}"})
-    doc = resp.json() if resp.status == 200 else None
+    doc = resp.json() if resp.status == OK else None
     token = doc.get("token") if isinstance(doc, dict) else None
     if not isinstance(token, str) or not token:
         cannot(f"Quay refused the OIDC exchange for {ROBOT} (HTTP {resp.status})")
     return token
 
 
+def stop_commands() -> str:
+    """Stop workflow commands until `resume`: repo code's output cannot annotate."""
+    token = secrets.token_hex(16)
+    print(f"::stop-commands::{token}", flush=True)
+    return token
+
+
+def resume(token: str) -> None:
+    print(f"::{token}::", flush=True)
+
+
 def annotate(repo: str, tree: str, digest: str) -> None:
-    """The candidate on the run's summary, for a person: nothing reads it back."""
+    """The binding a merge reads back: this job's one `sdlc candidate` annotation."""
     doc = json.dumps({"candidate": tag(repo, tree), "digest": digest}, separators=(",", ":"))
-    print(f"::notice title=sdlc candidate::{doc}", flush=True)
+    print(f"::notice title={TITLE}::{doc}", flush=True)
+
+
+def merged_head(tools: Tools, env: Mapping[str, str], repo: str, sha: str) -> str | None:
+    """The head commit of the one pull request this push merged; None for a direct push."""
+    prs = api(tools, env, "GET", f"/repos/{repo}/commits/{sha}/pulls")
+    merged = [p for p in prs if p.get("merged_at")] if isinstance(prs, list) else []
+    head = str((merged[0].get("head") or {}).get("sha", "")) if len(merged) == 1 else ""
+    return head if TREE.fullmatch(head) else None
+
+
+def pr_job(tools: Tools, env: Mapping[str, str], repo: str, head: str, name: str) -> dict | None:
+    """The newest successful job `name` of this repo's ci.yml run on `head`, as GitHub ran it."""
+    q = f"/repos/{repo}/actions/runs?head_sha={head}&event=pull_request&per_page=50"
+    doc = api(tools, env, "GET", q)
+    runs = [
+        r
+        for r in (doc.get("workflow_runs") or [] if isinstance(doc, dict) else [])
+        if r.get("path") == WORKFLOW and (r.get("head_repository") or {}).get("full_name") == repo
+    ]
+    for run in sorted(runs, key=lambda r: int(r.get("id") or 0), reverse=True):
+        jobs = api(tools, env, "GET", f"/repos/{repo}/actions/runs/{run.get('id')}/jobs")
+        for job in jobs.get("jobs") or [] if isinstance(jobs, dict) else []:
+            if job.get("name") == name and job.get("conclusion") == "success":
+                return job
+    return None
+
+
+def recorded(tools: Tools, env: Mapping[str, str], repo: str, sha: str, tree: str) -> str | None:
+    """The digest the merged pull request's image job recorded for `tree`; None, none."""
+    head = merged_head(tools, env, repo, sha)
+    job = pr_job(tools, env, repo, head, IMAGE_JOB) if head else None
+    url = str((job or {}).get("check_run_url", ""))
+    base = env.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+    if not url.startswith(f"{base}/repos/{repo}/check-runs/"):
+        print("no image job on the merged pull request: building", flush=True)
+        return None
+    notes = api(tools, env, "GET", url.removeprefix(base) + "/annotations")
+    mine = [n for n in notes if n.get("title") == TITLE] if isinstance(notes, list) else []
+    if len(mine) != 1:
+        print(f"{len(mine)} candidate annotations on the pull request's image job: building")
+        return None
+    try:
+        doc = json.loads(str(mine[0].get("message", "")))
+    except ValueError:
+        doc = None
+    digest = doc.get("digest") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict) or doc.get("candidate") != tag(repo, tree):
+        print("the pull request's candidate is another tree: building", flush=True)
+        return None
+    if not (isinstance(digest, str) and DIGEST.fullmatch(digest)):
+        cannot("the pull request's candidate annotation has no well-formed digest")
+    return digest
 
 
 def find(
-    tools: Tools, env: Mapping[str, str], repo: str, tree: str
+    tools: Tools,
+    env: Mapping[str, str],
+    child_env: Mapping[str, str],
+    repo: str,
+    tree: str,
 ) -> tuple[str, dict[str, str]] | None:
-    """(digest, labels) of the candidate for `tree`, or None when there is none to adopt.
+    """(digest, labels) of the candidate the merged pull request recorded for `tree`.
 
-    A candidate whose labels are not this tree and this repo is reported and ignored:
-    the caller builds instead.
+    None when there is none to adopt, and the caller builds instead. `env` holds the
+    token for the API; `child_env`, with no token, runs skopeo.
     """
-    ref = tag(repo, tree)
-    step(f"candidate {ref}")
-    proc = tools.run(["skopeo", "inspect", f"docker://{ref}"], env=dict(env))
+    step(f"candidate for tree {tree}")
+    digest = recorded(tools, env, repo, env.get("GITHUB_SHA", ""), tree)
+    if digest is None:
+        return None
+    ref = f"{CANDIDATES}@{digest}"
+    proc = tools.run(["skopeo", "inspect", f"docker://{ref}"], env=dict(child_env))
     if proc.returncode != 0:
         if MISSING.search(proc.stderr or ""):
-            print("no candidate for this tree: building", flush=True)
+            print(f"{ref} is gone (pruned?): building", flush=True)
             return None
         cannot(f"cannot read {ref}: {(proc.stderr or '').strip()}")
     try:
         doc = json.loads(proc.stdout)
     except ValueError as exc:
         cannot(f"skopeo inspect of {ref} is not JSON: {exc}")
-    digest, labels = doc.get("Digest", ""), doc.get("Labels") or {}
+    labels = doc.get("Labels") or {}
     source = f"{env.get('GITHUB_SERVER_URL', 'https://github.com')}/{repo}"
     why = (
-        "its digest is malformed" if not DIGEST.fullmatch(str(digest))
-        else f"it is labelled tree {labels.get(TREE_LABEL)!r}" if labels.get(TREE_LABEL) != tree
-        else f"it is labelled source {labels.get(SOURCE_LABEL)!r}" if labels.get(SOURCE_LABEL) != source
+        f"its digest is {doc.get('Digest')!r}"
+        if doc.get("Digest") != digest
+        else f"it is labelled tree {labels.get(TREE_LABEL)!r}"
+        if labels.get(TREE_LABEL) != tree
+        else f"it is labelled source {labels.get(SOURCE_LABEL)!r}"
+        if labels.get(SOURCE_LABEL) != source
         else ""
     )
     if why:
-        print(f"candidate {ref} is not adopted: {why}; building", flush=True)
-        return None
-    return str(digest), labels
+        cannot(f"the recorded candidate {ref} does not check out: {why}")
+    return digest, labels

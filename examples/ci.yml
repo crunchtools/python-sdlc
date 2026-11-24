@@ -44,7 +44,7 @@ jobs:
       || github.event_name != 'pull_request' && fromJSON(needs.check.outputs.result || '{}').image)
     runs-on: *secret
     container: *boot
-    permissions: { contents: read, id-token: write }  # id-token: a PR's candidate, by Quay robot federation; no secret on a PR
+    permissions: { contents: read, actions: read, checks: read, id-token: write }  # id-token: a PR's candidate by Quay robot federation, no secret; actions, checks: a merge reads the PR's record of it
     outputs: { result: "${{ steps.e.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", QUAY_USERNAME: "${{ github.event_name != 'pull_request' && secrets.QUAY_USERNAME || '' }}", QUAY_PASSWORD: "${{ github.event_name != 'pull_request' && secrets.QUAY_PASSWORD || '' }}",
            RHSM_ACTIVATION_KEY: "${{ github.event_name != 'pull_request' && secrets.RHSM_ACTIVATION_KEY || '' }}", RHSM_ORG_ID: "${{ github.event_name != 'pull_request' && secrets.RHSM_ORG_ID || '' }}",

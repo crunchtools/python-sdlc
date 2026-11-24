@@ -75,7 +75,8 @@ class FakeTools(Tools):
         self.cwds: list[str | None] = []
         self.env: dict[str, str] = {}  # added to the job's environment
         self.trees: dict[str, str] = {}  # commit -> tree, for gated_on_pr
-        self.check_runs: list[dict] = []  # on the merged PR's head
+        self.jobs: list[dict] = []  # the jobs of the merged PR head's ci.yml run
+        self.head_repo = ""  # a pull request's head repo, in the event
 
     def run(
         self,
@@ -133,8 +134,15 @@ class FakeTools(Tools):
         if method == "GET" and "/git/commits/" in path:
             tree = self.trees[path.rpartition("/")[2]]
             return Response(200, json.dumps({"tree": {"sha": tree}}).encode())
-        if method == "GET" and "/check-runs" in path:
-            return Response(200, json.dumps({"check_runs": self.check_runs}).encode())
+        if method == "GET" and "/actions/runs?" in path:
+            run = {
+                "id": 9,
+                "path": ".github/workflows/ci.yml",
+                "head_repository": {"full_name": REPO},
+            }
+            return Response(200, json.dumps({"workflow_runs": [run]}).encode())
+        if method == "GET" and path.endswith("/actions/runs/9/jobs"):
+            return Response(200, json.dumps({"jobs": self.jobs}).encode())
         return Response(204 if method == "PUT" else 201, b"")
 
 
@@ -154,7 +162,6 @@ def go(
     files: dict[str, str] | None = None,
     cron: str | None = None,
     ref: str = "refs/heads/main",
-    head_repo: str | None = None,
 ) -> tuple[int, dict]:
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
@@ -174,8 +181,8 @@ def go(
             **tools.env,
         }
         event = dict(EVENT)
-        if head_repo:
-            event["pull_request"] = {"head": {"repo": {"full_name": head_repo}}}
+        if tools.head_repo:
+            event["pull_request"] = {"head": {"repo": {"full_name": tools.head_repo}}}
         if cron:
             event["schedule"] = cron
         rc = check.run(event_name, event, env, tools)
@@ -220,7 +227,8 @@ def test_pull_request() -> None:
 
 def test_same_repo_pull_request_plans_a_candidate_and_leaves_the_container_gates_to_it() -> None:
     t = FakeTools()
-    rc, plan = go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge", head_repo=REPO)
+    t.head_repo = REPO
+    rc, plan = go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
     assert rc == 0 and plan["candidate"] is True and gated(t)
     skip = t.launched[0][1].get("SDLC_SKIP", "").split(",")
     assert set(check.CONTAINER_GATES) <= set(skip), skip
@@ -230,7 +238,8 @@ def test_no_candidate_for_a_fork_or_rhsm_or_no_image() -> None:
     rhsm = {**IMAGE, "pyproject.toml": "[tool.sdlc.image]\nrhsm = true\n"}
     for files, head in ((IMAGE, "fork/demo"), (rhsm, REPO), ({}, REPO)):
         t = FakeTools()
-        rc, plan = go("pull_request", t, files=files, ref="refs/pull/1/merge", head_repo=head)
+        t.head_repo = head
+        rc, plan = go("pull_request", t, files=files, ref="refs/pull/1/merge")
         assert rc == 0 and plan["candidate"] is False, (files, head)
         assert "SDLC_SKIP" not in t.launched[0][1], (files, head)
 
@@ -240,7 +249,7 @@ def merged(head_tree: str, conclusion: str = "success") -> FakeTools:
     p["head"]["sha"] = "e" * 40
     t = FakeTools(prs=[p])
     t.trees = {SHA: "c" * 40, "e" * 40: head_tree}
-    t.check_runs = [{"name": check.REQUIRED_CHECK, "conclusion": conclusion}]
+    t.jobs = [{"name": check.REQUIRED_CHECK, "conclusion": conclusion}]
     return t
 
 

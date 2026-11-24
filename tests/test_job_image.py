@@ -33,7 +33,10 @@ PUSHED = "sha256:" + "b" * 64
 TREE = "c" * 40
 OWN = "quay.io/crunchtools/demo"
 CANDIDATE = f"quay.io/crunchtools/candidates:demo-{TREE}"
-OIDC = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/t?x=1", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "b"}
+OIDC = {
+    "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/t?x=1",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "b",
+}
 US = "\x1f"
 HOST = "/host/ws"
 INSPECT_ME = 2  # `inspect <container id>`, not a state query
@@ -136,6 +139,7 @@ class FakeTools(Tools):
         self.candidate: dict | None = None  # `skopeo inspect` of candidates:demo-<tree>
         self.landed = ""  # what the adopted gated-<sha> resolves to; empty, the candidate
         self.http_calls: list[str] = []
+        self.annotations: list[dict] | None = None  # on the PR's image job; None, no job
 
     def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
         done = self._answer(argv, **kw)
@@ -239,7 +243,7 @@ class FakeTools(Tools):
             case "--policy":
                 self.policy = json.loads(Path(argv[2]).read_text())
                 rc = self.verify_rc
-            case "inspect" if CANDIDATE in argv[-1]:
+            case "inspect" if "/candidates@" in argv[-1]:
                 if self.candidate is None:
                     return cp(1, "", "manifest unknown")
                 out = json.dumps(self.candidate)
@@ -256,6 +260,27 @@ class FakeTools(Tools):
         self.http_calls.append(url)
         if url.startswith("https://oidc.example/"):
             return Response(200, b'{"value": "jwt"}')
+        api = "https://api.github.com/repos/" + REPO
+        if url == f"{api}/commits/{SHA}/pulls":
+            head = {"sha": "e" * 40}
+            return Response(200, json.dumps([{"merged_at": "x", "head": head}]).encode())
+        if url.startswith(f"{api}/actions/runs?"):
+            run = {
+                "id": 9,
+                "path": ".github/workflows/ci.yml",
+                "head_repository": {"full_name": REPO},
+            }
+            return Response(200, json.dumps({"workflow_runs": [run]}).encode())
+        if url == f"{api}/actions/runs/9/jobs":
+            job = {
+                "name": _candidate.IMAGE_JOB,
+                "conclusion": "success",
+                "check_run_url": f"{api}/check-runs/5",
+            }
+            jobs = [job] if self.annotations is not None else []
+            return Response(200, json.dumps({"jobs": jobs}).encode())
+        if url == f"{api}/check-runs/5/annotations":
+            return Response(200, json.dumps(self.annotations).encode())
         assert url == _candidate.EXCHANGE, url
         return Response(200, b'{"token": "robot-token"}')
 
@@ -343,6 +368,11 @@ def refused(
     raise AssertionError("expected a refusal (exit 2)")
 
 
+def recorded(digest: str = PUSHED, tree: str = TREE) -> list[dict]:
+    doc = {"candidate": f"quay.io/crunchtools/candidates:demo-{tree}", "digest": digest}
+    return [{"title": _candidate.TITLE, "message": json.dumps(doc)}]
+
+
 def candidate_labels(**over: str) -> dict:
     labels = {_candidate.TREE_LABEL: TREE, _candidate.SOURCE_LABEL: f"https://github.com/{REPO}"}
     return {"Digest": PUSHED, "Labels": {**labels, **over}}
@@ -350,7 +380,12 @@ def candidate_labels(**over: str) -> dict:
 
 def test_pull_request_pushes_a_candidate_by_oidc_with_no_secret() -> None:
     t = FakeTools()
-    rc, result = go(t, QUAY_PARENT, event="pull_request", extra={**OIDC, "QUAY_USERNAME": "", "QUAY_PASSWORD": ""})
+    rc, result = go(
+        t,
+        QUAY_PARENT,
+        event="pull_request",
+        extra={**OIDC, "QUAY_USERNAME": "", "QUAY_PASSWORD": ""},
+    )
     assert rc == 0 and result is not None, t.log
     assert result["ref"] == "quay.io/crunchtools/candidates" and result["tag"] == f"demo-{TREE}"
     push = next(a for a in t.argvs if a[4:5] == ["push"])
@@ -359,7 +394,13 @@ def test_pull_request_pushes_a_candidate_by_oidc_with_no_secret() -> None:
     assert _candidate.ROBOT in login and t.stdin[t.argvs.index(login)] == "robot-token"
     assert f"{_candidate.TREE_LABEL}={TREE}" in t.build_argv()
     assert "::notice title=sdlc candidate::" in t.log
-    assert not any("ACTIONS_ID_TOKEN" in k for e in t.envs for k in e), "the OIDC bearer reached a tool"
+    stop = t.log.index("::stop-commands::")
+    token = t.log[stop:].split("::")[2].split()[0]
+    assert stop < t.log.index("containerfile-lint") < t.log.index(f"::{token}::")
+    assert t.log.index(f"::{token}::") < t.log.index("::notice title=sdlc candidate::")
+    assert not any("ACTIONS_ID_TOKEN" in k for e in t.envs for k in e), (
+        "the OIDC bearer reached a tool"
+    )
 
 
 def test_pull_request_without_oidc_or_with_rhsm_builds_nothing() -> None:
@@ -370,31 +411,47 @@ def test_pull_request_without_oidc_or_with_rhsm_builds_nothing() -> None:
         assert "no candidate" in t.log
 
 
-def test_push_adopts_the_candidate_for_its_tree() -> None:
+def test_push_adopts_the_candidate_its_pull_request_recorded() -> None:
     t = FakeTools()
     t.candidate = candidate_labels()
+    t.annotations = recorded()
     rc, result = go(t, QUAY_PARENT)
     assert rc == 0 and result is not None, t.log
     assert not t.built() and not t.pushed(), "a candidate was rebuilt"
     copy = next(a for a in t.argvs if a[:2] == ["skopeo", "copy"])
-    assert copy[-2:] == [f"docker://quay.io/crunchtools/candidates@{PUSHED}", f"docker://{OWN}:gated-{SHA}"]
+    assert copy[-2:] == [
+        f"docker://quay.io/crunchtools/candidates@{PUSHED}",
+        f"docker://{OWN}:gated-{SHA}",
+    ]
     assert "--preserve-digests" in copy
     assert result["digest"] == PUSHED and result["sha"] == SHA and result["tag"] == f"gated-{SHA}"
 
 
-def test_push_builds_when_the_candidate_does_not_check_out() -> None:
-    for cand in (None, candidate_labels(**{_candidate.TREE_LABEL: "d" * 40}),
-                 candidate_labels(**{_candidate.SOURCE_LABEL: "https://github.com/evil/demo"})):
+def test_push_builds_when_the_pull_request_recorded_no_candidate_for_this_tree() -> None:
+    for notes in (None, [], recorded(tree="d" * 40), recorded() * 2):
         t = FakeTools()
-        t.candidate = cand
+        t.candidate = candidate_labels()
+        t.annotations = notes
         rc, _ = go(t, QUAY_PARENT)
-        assert rc == 0 and t.built() and t.pushed(), (cand, t.log)
+        assert rc == 0 and t.built() and t.pushed(), (notes, t.log)
         assert not any(a[:2] == ["skopeo", "copy"] for a in t.argvs)
+
+
+def test_a_recorded_candidate_that_does_not_check_out_is_refused() -> None:
+    for labels in (
+        candidate_labels(**{_candidate.TREE_LABEL: "d" * 40}),
+        candidate_labels(**{_candidate.SOURCE_LABEL: "https://github.com/evil/demo"}),
+        {**candidate_labels(), "Digest": "sha256:" + "e" * 64},
+    ):
+        t = FakeTools()
+        t.candidate, t.annotations = labels, recorded()
+        assert "does not check out" in refused(t, QUAY_PARENT)
+        assert not t.pushed()
 
 
 def test_adopted_copy_must_land_at_the_candidate_digest() -> None:
     t = FakeTools()
-    t.candidate = candidate_labels()
+    t.candidate, t.annotations = candidate_labels(), recorded()
     t.landed = "sha256:" + "e" * 64
     assert "not the candidate's" in refused(t, QUAY_PARENT)
 

@@ -365,6 +365,17 @@ def test_a_candidate_of_another_tree_is_refused() -> None:
     assert "neither this run's" in refused(t) and not t.signs()
 
 
+def test_an_adopted_build_records_the_merged_commit_as_its_source() -> None:
+    labels = {
+        **built_labels(),
+        "com.crunchtools.build.builder": f"{REPO}/.github/workflows/ci.yml@refs/pull/4/merge",
+    }
+    labels["com.crunchtools.build.workflow"] = labels["com.crunchtools.build.builder"]
+    pred = promote.provenance(labels, REPO, OTHER_SHA)
+    assert pred is not None
+    assert pred["buildDefinition"]["resolvedDependencies"][0]["digest"]["gitCommit"] == OTHER_SHA
+
+
 def test_gated_tag_must_resolve_to_the_digest() -> None:
     for gated in (OLD, None):
         t = FakeTools()
