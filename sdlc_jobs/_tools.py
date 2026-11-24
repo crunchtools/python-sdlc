@@ -125,6 +125,24 @@ def git_auth(token: str) -> dict[str, str]:
     }
 
 
+def git_env(token: str = "") -> dict[str, str]:
+    """git_auth(token), plus safe.directory=* so a mounted workspace owned by another uid works.
+
+    The bootstrap container runs git as a different uid than the one that owns
+    the mounted workspace; git refuses it as "dubious ownership" otherwise.
+    """
+    env = git_auth(token) if token else {"GIT_TERMINAL_PROMPT": "0"}
+    n = int(env.get("GIT_CONFIG_COUNT", "0"))
+    env.update(
+        {
+            "GIT_CONFIG_COUNT": str(n + 1),
+            f"GIT_CONFIG_KEY_{n}": "safe.directory",
+            f"GIT_CONFIG_VALUE_{n}": "*",
+        }
+    )
+    return env
+
+
 def echo(done: Done) -> None:
     """Print a child's stdout into the job's log, ending on a newline."""
     if done.stdout:
@@ -156,7 +174,7 @@ def clone(site: Site, ref: str, into: Path, *, token: str = "", branch: str = ""
     that local branch, as actions/checkout leaves a PR branch.
     """
     url = f"https://github.com/{site.repo}.git"
-    genv = child_env(site.env, **(git_auth(token) if token else {"GIT_TERMINAL_PROMPT": "0"}))
+    genv = child_env(site.env, **git_env(token))
     into.mkdir(parents=True, exist_ok=True)
     steps: list[list[str]] = [
         ["git", "init", "-q", "."],

@@ -52,6 +52,9 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `sdlc event` no longer fails with git's "dubious ownership" error when the
+  bootstrap container's workspace is owned by another uid: the fetch and clone
+  git calls set `safe.directory=*` through the environment (#157).
 - `[tool.sdlc.image] build-args` now choose the parent that is verified and
   pinned, as they choose it in the build: rotv's `BASE_IMAGE` was verified and
   pinned as the Containerfile's default, not as rotv-base.
