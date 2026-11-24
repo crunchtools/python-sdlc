@@ -50,6 +50,7 @@ from sdlc_jobs._core import (
     tool_sdlc,
     workspace,
 )
+from sdlc_jobs._tools import git_auth
 
 SDLC = "sdlc"  # this image's own in-image half, found on PATH
 ACCEPTED = 202
@@ -83,6 +84,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         cannot(f"check runs on {', '.join(EVENTS)}, not {event_name!r}")
     root = workspace(env)
     repo = env.get("GITHUB_REPOSITORY", "")
+    fetch_tree(tools, env, root, repo)
     default_push = event_name == "push" and env.get("GITHUB_REF") == (
         f"refs/heads/{(event.get('repository') or {}).get('default_branch', '')}"
     )
@@ -96,6 +98,31 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     if default_push:
         upload_sarif(tools, env, repo)
     return rc
+
+
+def fetch_tree(tools: Tools, env: Mapping[str, str], root: Path, repo: str) -> None:
+    """The one commit this event names, into an empty workspace: no actions/checkout.
+
+    Depth 1, authenticated with the job's token by a per-command extraheader, so
+    no credential is written to .git/config. A workspace that is already a git
+    tree (a laptop, a test) is left as it is.
+    """
+    if (root / ".git").exists():
+        return
+    sha = env.get("GITHUB_SHA", "")
+    if not sha or not repo:
+        cannot("GITHUB_SHA and GITHUB_REPOSITORY name the commit to check; one is unset")
+    server = env.get("GITHUB_SERVER_URL") or "https://github.com"
+    token = env.get("GITHUB_TOKEN", "")
+    genv = {**env, **(git_auth(token) if token else {"GIT_TERMINAL_PROMPT": "0"})}
+    root.mkdir(parents=True, exist_ok=True)
+    for argv in (
+        ["git", "init", "-q", "."],
+        ["git", "remote", "add", "origin", f"{server}/{repo}"],
+        ["git", "fetch", "-q", "--depth=1", "origin", sha],
+        ["git", "checkout", "-q", "FETCH_HEAD"],
+    ):
+        must(tools, argv, cwd=str(root), env=genv)
 
 
 def make_plan(
@@ -177,6 +204,13 @@ def launch(
         "SDLC_HOST_REPO": host,
         "CONTAINER_HOST": env.get("CONTAINER_HOST") or SOCKET,
     }
+    # The launcher's cache is mounted into nested containers, so it lives on a
+    # path the runner's engine can see: the runner's temp, by its host path.
+    if env.get("RUNNER_TEMP"):
+        cache = Path(env["RUNNER_TEMP"]) / "sdlc-cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        child["XDG_CACHE_HOME"] = str(cache)
+        child["SDLC_HOST_CACHE"] = host_mount(tools, env, cache)[0]
     argv = [str(script), command, *(["--", *args] if args else [])]
     return tools.run(argv, cwd=str(root), env=child, stream=stream)
 

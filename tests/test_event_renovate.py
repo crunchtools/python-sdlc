@@ -590,7 +590,6 @@ class AnswerSocket:
 
 
 for label, sock, env in (
-    ("no HOSTNAME", AnswerSocket("[{}]"), {}),
     ("inspect exits non-zero", AnswerSocket("", 125), {"HOSTNAME": "x"}),
     ("inspect is not JSON", AnswerSocket("not json"), {"HOSTNAME": "x"}),
     ("inspect is an empty list", AnswerSocket("[]"), {"HOSTNAME": "x"}),
@@ -602,6 +601,23 @@ for label, sock, env in (
     except core.CannotRunError:
         raised = True
     check(f"inspect_self: {label} is a 2", raised)
+
+# The id the engine named /etc/hostname's file by wins over HOSTNAME, which a
+# runner's engine may set to the runner's own hostname.
+CID = "ab" * 32
+with tempfile.TemporaryDirectory() as tmp:
+    mi = Path(tmp) / "mountinfo"
+    mi.write_text(
+        "1 2 0:1 / / rw - overlay overlay rw\n"
+        f"3 1 253:0 /var/lib/containers/storage/overlay-containers/{CID}/userdata/hostname"
+        " /etc/hostname rw - xfs /dev/x rw\n"
+    )
+    check(
+        "own_container_id reads the engine's hostname mount", core.own_container_id(str(mi)) == CID
+    )
+    mi.write_text("1 2 0:1 / / rw - overlay overlay rw\n")
+    check("own_container_id is empty outside a container", core.own_container_id(str(mi)) == "")
+check("own_container_id is empty without mountinfo", core.own_container_id("/nonexistent") == "")
 
 check("the suite tests this checkout's job", Path(renovate.__file__).resolve() == JOB_FILE)
 

@@ -395,6 +395,11 @@ host_constitution() {
   # cache_home_t, the container is refused it, and on an SELinux host every
   # cold tag came back "missing validate-constitution.py" (RT#1552).
   _src=$(cd -P -- "$_dir" 2>/dev/null && pwd) || return 0
+  # Inside a CI job the engine is the runner's: it mounts host paths, so the
+  # cache is named by the host path the job was given (SDLC_HOST_CACHE).
+  if [ -n "${SDLC_HOST_CACHE:-}" ] && [ -n "${XDG_CACHE_HOME:-}" ]; then
+    case $_src in "$XDG_CACHE_HOME"/*) _src=$SDLC_HOST_CACHE${_src#"$XDG_CACHE_HOME"} ;; esac
+  fi
   CONSTITUTION_MOUNT="$_src:/cache/constitution/$_tag:ro,z"
 }
 host_constitution

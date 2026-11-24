@@ -6,6 +6,27 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `sdlc event`'s check job works against a runner's container socket
+  (RT #1664). Job containers drive the runner's engine through the mounted
+  socket, and four things broke on a real runner:
+  - The image had no `podman` that speaks to a socket. `podman` is now a shim
+    to `podman-remote --url $CONTAINER_HOST`; it drops the local-only
+    `--remote` and `--events-backend` flags.
+  - Host paths were wrong. The launcher's cache now lives under
+    `RUNNER_TEMP` and is passed to nested containers by its host path
+    (`SDLC_HOST_CACHE`), the same way the workspace is.
+  - The job container found itself by `HOSTNAME`, which `docker exec` does
+    not export and a runner may set to its own name. It now reads its id from
+    the engine's `/etc/hostname` mount in `/proc/self/mountinfo`.
+  - There was no git tree, because the fleet file has no `actions/checkout`.
+    The check job fetches the event's commit at depth 1 with the job token
+    passed as a per-command header, so nothing is written to `.git/config`.
+  - `gawk` is in the image for the launcher's scripts.
+
+  Proven on Exedore's gha-runner VMs with an sdlc-dev build.
+
 ## [0.12.2] - 2026-11-23
 
 ### Changed

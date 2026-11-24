@@ -23,8 +23,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sdlc_jobs import check
+from sdlc_jobs import _core, check
 from sdlc_jobs._core import CannotRunError, Response, Tools
+
+# The fake engine answers to HOSTNAME; a suite that itself runs in a container
+# must not find its own id in /proc/self/mountinfo first.
+_core.own_container_id = lambda *_: ""  # type: ignore[assignment]
 
 REPO = "crunchtools/demo"
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -63,6 +67,7 @@ class FakeTools(Tools):
         self.image = SDLC_REF  # what this container says it was run from
         self.stdin: list[str | None] = []
         self.cwds: list[str | None] = []
+        self.env: dict[str, str] = {}  # added to the job's environment
 
     def run(
         self,
@@ -90,9 +95,15 @@ class FakeTools(Tools):
                 return cp(self.gate_rc)
             assert argv[2:] == ["--", "--report"], argv
             return cp(self.audit_rc, self.report() if self.audit_out is None else self.audit_out)
-        if argv[:2] == ["skopeo", "inspect"] and "--format" in argv:
-            return cp(0, self.base) if self.base else cp(1)
+        return self.tool(argv)
+
+    def tool(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        """The image's other tools: git's fetch, and skopeo reading the parent."""
+        if argv[0] == "git":
+            return cp(0)
         if argv[:2] == ["skopeo", "inspect"]:
+            if "--format" in argv:
+                return cp(0, self.base) if self.base else cp(1)
             labels = {check.BASE_LABEL: self.built_on} if self.built_on else {}
             return cp(0, json.dumps({"Labels": labels}))
         raise AssertionError(f"unexpected argv {argv}")
@@ -146,6 +157,7 @@ def go(
             "GITHUB_SHA": SHA,
             "GITHUB_REF": ref,
             "SDLC_SARIF_DIR": str(ws / "sarif"),
+            **tools.env,
         }
         event = dict(EVENT)
         if cron:
@@ -358,7 +370,8 @@ def test_poll_unreadable() -> None:
 
 def test_poll_no_containerfile() -> None:
     t = FakeTools()
-    assert go("schedule", t, cron=check.POLL)[1]["image"] is False and not t.argvs
+    assert go("schedule", t, cron=check.POLL)[1]["image"] is False
+    assert not [a for a in t.argvs if a[0] != "git"], "polled with no Containerfile"
 
 
 def test_poll_final_stage() -> None:
@@ -417,6 +430,50 @@ def test_launcher_refuses_an_unpinned_image() -> None:
     except CannotRunError as exc:
         msg = str(exc)
     assert "pinned" in msg, "an unpinned image ran the gates"
+
+
+def test_fetch_tree_checks_out_the_event_commit() -> None:
+    t = FakeTools()
+    go("pull_request", t)
+    gits = [a for a in t.argvs if a[0] == "git"]
+    assert gits[0] == ["git", "init", "-q", "."], gits
+    assert gits[1] == ["git", "remote", "add", "origin", f"https://github.com/{REPO}"], gits
+    assert gits[2] == ["git", "fetch", "-q", "--depth=1", "origin", SHA], gits
+    assert gits[3] == ["git", "checkout", "-q", "FETCH_HEAD"], gits
+
+
+def test_fetch_tree_leaves_an_existing_tree() -> None:
+    t = FakeTools()
+    go("pull_request", t, files={".git/HEAD": "ref: refs/heads/main\n"})
+    assert not [a for a in t.argvs if a[0] == "git"], "fetched over an existing tree"
+
+
+def test_fetch_tree_needs_the_commit() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        msg = ""
+        try:
+            check.fetch_tree(FakeTools(), {}, Path(tmp), REPO)
+        except CannotRunError as exc:
+            msg = str(exc)
+    assert "GITHUB_SHA" in msg, "fetched with no commit named"
+
+
+def test_launcher_cache_without_runner_temp_is_unmapped() -> None:
+    t = FakeTools()
+    go("pull_request", t)
+    _command, child = t.launched[0]
+    assert "SDLC_HOST_CACHE" not in child, "a cache mapped without RUNNER_TEMP"
+
+
+def test_launcher_cache_is_named_by_its_host_path() -> None:
+    t = FakeTools()
+    with tempfile.TemporaryDirectory() as tmp:
+        t.env["RUNNER_TEMP"] = tmp
+        go("pull_request", t)
+    _command, child = t.launched[0]
+    assert child["XDG_CACHE_HOME"].endswith("/sdlc-cache"), child
+    assert child["SDLC_HOST_CACHE"].startswith("/host/tmp/"), child
+    assert child["SDLC_HOST_CACHE"].endswith("/sdlc-cache"), child
 
 
 def main() -> int:

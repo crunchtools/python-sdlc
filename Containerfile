@@ -206,7 +206,7 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
 # here. Without that line this list becomes a host-tools grab bag, one repo at
 # a time. tests/contract.sh asserts the toolbox, so it is a tested property
 # rather than an accident of the base image.
-RUN dnf install -y git-core tar zstd which jq podman-remote skopeo \
+RUN dnf install -y git-core tar zstd which jq gawk podman-remote skopeo \
  && dnf clean all \
  && rm -rf /var/cache/dnf
 
@@ -283,6 +283,7 @@ COPY --from=lychee /usr/local/bin/lychee /usr/local/bin/lychee
 # its digest-pinned image, as hadolint and grype are. Contract-tested for
 # running here rather than trusted.
 COPY --from=docker /usr/local/bin/docker /usr/local/bin/docker
+COPY bin/podman-shim /usr/local/bin/podman
 COPY --from=cosign /ko-app/cosign /usr/local/bin/cosign
 COPY --from=syft /syft /usr/local/bin/syft
 

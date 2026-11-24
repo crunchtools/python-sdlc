@@ -12,6 +12,7 @@ import os
 import queue
 import re
 import secrets
+import socket
 import subprocess
 import tempfile
 import threading
@@ -423,9 +424,28 @@ def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, s
     return best[1], image
 
 
+SELF_ID = re.compile(
+    r"containers/([0-9a-f]{64})/(?:userdata/)?(?:hostname|hosts|resolv\.conf) /etc/"
+)
+
+
+def own_container_id(mountinfo: str = "/proc/self/mountinfo") -> str:
+    """This container's id, from the engine's mount of /etc/hostname ("" if none).
+
+    A step runs by `docker exec`, which exports no HOSTNAME, and a runner's
+    engine may give the job container the runner's hostname; the id the engine
+    names the hostname file by is the one it answers `inspect` to.
+    """
+    try:
+        found = SELF_ID.search(Path(mountinfo).read_text(errors="replace"))
+    except OSError:
+        return ""
+    return found.group(1) if found else ""
+
+
 def inspect_self(tools: Tools, env: Mapping[str, str], cwd: str | None = None) -> dict:
-    """`podman inspect` of this container, through the socket (`HOSTNAME` is its id)."""
-    me = env.get("HOSTNAME")
+    """`podman inspect` of this container, through the socket, by `own_container_id`."""
+    me = own_container_id() or env.get("HOSTNAME") or socket.gethostname()
     if not me:
         cannot("HOSTNAME is not set: cannot find this container through the socket")
     try:

@@ -1,0 +1,15 @@
+#!/bin/sh
+# `podman` inside the sdlc image: there is no engine here, only the runner's
+# socket, so every call goes to podman-remote on CONTAINER_HOST. The flags a
+# local podman takes and the remote client refuses are dropped.
+set -eu
+url=${CONTAINER_HOST:-unix:///var/run/docker.sock}
+first=1
+for arg in "$@"; do
+  if [ "$first" = 1 ]; then set --; first=0; fi
+  case $arg in
+    --remote|--events-backend=*) ;;
+    *) set -- "$@" "$arg" ;;
+  esac
+done
+exec podman-remote --url "$url" "$@"
