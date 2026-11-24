@@ -1,0 +1,8 @@
+#!/opt/constitution-venv/bin/python3
+"""Constitution v2 checks, context and coverage: sdlc_jobs/constitution.py."""
+
+import sys
+
+from sdlc_jobs.constitution import main
+
+sys.exit(main())

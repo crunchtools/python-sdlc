@@ -7,6 +7,27 @@ Constitution XII (v1.30.0) requires it for every Python repo — any repo with a
 `pyproject.toml` — except `gourmand` and this one, which build what the image
 contains. `gatehouse` runs it too, as of gatehouse#134 (constitution#138).
 
+## What's different here
+
+- **This image enforces the constitution.** Its v2 checks
+  (`sdlc-constitution check`) and the text Gatehouse reviews against ship
+  inside it, so a rule change reaches every repo as one sdlc release. A repo
+  still carrying `.specify/memory/constitution.md` is judged by v1 until it
+  converts.
+- **Exit codes are a contract:** 0 found nothing, 1 found something, 2 could
+  not run. Anything that is not a tool's own verdict (a container that never
+  started, a missing cache, an absent lock entry) is 2, never 0, and a later 1
+  never masks an earlier 2.
+- **Tools are pinned here; policy is not.** Rulesets, thresholds and
+  exceptions stay in the repo being checked. mypy and pytest are the
+  deliberate exception: they come from the consumer's `uv.lock`, because they
+  load its plugins.
+- **The container runs as its own root** under rootless podman, so files it
+  writes belong to the developer. Mounts are `z`, not `Z`, because one tier
+  runs several containers over one tree.
+- **The contract test is the central test:** the pushed digest holds every
+  promised executable at its pinned version.
+
 ## Three commands, three config blocks
 
 | Command | Runs when | Config block in `pyproject.toml` |

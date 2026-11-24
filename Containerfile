@@ -88,13 +88,15 @@ ARG PYJWT_VERSION=2.15.1
 ARG GH_VERSION=2.104.0
 ARG GH_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
 # What sdlc_jobs runs: Ashigaru's scripts, prompts and schemas, and the
-# constitution's scripts, each at a release and fetched by its commit, never
-# by a tag that can move. Ashigaru is v5.4.0, tag pending: write depends on
+# constitution's scripts and text, each at a release and fetched by its commit,
+# never by a tag that can move. The text is what v2 repos are judged against:
+# `sdlc-constitution context` hands it to Gatehouse.
+# Ashigaru is v5.4.0, tag pending: write depends on
 # 5.4.0's staged_refusal patch filter.
 ARG ASHIGARU_VERSION=5.4.0
 ARG ASHIGARU_COMMIT=499e50cff233c7a40455f4304718247475e4a73d
-ARG CONSTITUTION_VERSION=1.60.0
-ARG CONSTITUTION_COMMIT=726518b50e38f11c1ceb010b44b5eac8c7b90a13
+ARG CONSTITUTION_VERSION=2.0.0
+ARG CONSTITUTION_COMMIT=03835d9933d3b656188279688ef486cb4ec62dd0
 
 # The base runs non-root; installing needs root. The image drops back at the end.
 USER root
@@ -402,7 +404,7 @@ RUN set -eu; \
     [ "$got" = "${CONSTITUTION_VERSION}" ] || { \
       echo "CONSTITUTION_COMMIT ${CONSTITUTION_COMMIT} is version '$got', not CONSTITUTION_VERSION ${CONSTITUTION_VERSION}" >&2; exit 1; }; \
     mkdir -p /opt/constitution; \
-    cp -r /tmp/constitution/scripts /opt/constitution/; \
+    cp -r /tmp/constitution/scripts /tmp/constitution/constitution.md /opt/constitution/; \
     rm -rf /tmp/ashigaru /tmp/constitution
 
 # sdlc_jobs, the ai/write/gate handlers `sdlc event` imports, on the
@@ -427,7 +429,8 @@ RUN rm -rf /tmp/* /tmp/.[!.]* 2>/dev/null || true
 
 COPY sdlc /usr/local/bin/sdlc
 COPY validate /usr/local/bin/sdlc-validate
-RUN chmod 0755 /usr/local/bin/sdlc /usr/local/bin/sdlc-validate
+COPY bin/sdlc-constitution /usr/local/bin/sdlc-constitution
+RUN chmod 0755 /usr/local/bin/sdlc /usr/local/bin/sdlc-validate /usr/local/bin/sdlc-constitution
 
 # The host launcher rides in the image it starts, so a repo with no `rev:` gets
 # it with `sdlc launcher <ref>` (bin/sdlc-bootstrap) and it floats with the tag.

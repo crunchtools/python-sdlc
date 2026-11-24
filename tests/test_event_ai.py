@@ -41,6 +41,7 @@ from fake_github import FakeGitHub, FakeRunner, check, finish
 
 from sdlc_jobs import _handoff, ai
 from sdlc_jobs import _tools as tools
+from sdlc_jobs import constitution as v2
 from sdlc_jobs._github import APP_LOGIN, APP_SLUG, ApiError, CannotRunError
 from sdlc_jobs._tools import Done, Site
 
@@ -129,6 +130,8 @@ class Rig:
         base_routes: dict[tuple[str, str], Any] = {
             ("GET", f"/repos/{REPO}/pulls/7/reviews"): [],
             ("GET", f"/repos/{REPO}/pulls/7"): "THE DIFF",
+            # A v1 repo by default: its manifest is at the base.
+            ("GET", f"/repos/{REPO}/contents/.specify/memory/constitution.md"): "# v1",
         }
         self.api = FakeGitHub(base_routes | (routes or {}))
         self.work = Path(tempfile.mkdtemp(dir=TMP))
@@ -555,6 +558,54 @@ check(
     "gatehouse: not incremental on reopened",
     "--incremental" not in rig.ran("_gatehouse_shim")[0][0],
 )
+
+# --- constitution v2: the image's text plus the base README section --------------
+
+check(
+    "constitution: a v1 repo keeps Gatehouse's own discovery",
+    "--constitution" not in rig.ran("_gatehouse_shim")[0][0],
+)
+
+v2_text = Path(tempfile.mkdtemp(dir=TMP)) / "constitution.md"
+v2_text.write_text("# Crunchtools Constitution\n\n**C1. One path.**\n")
+saved_text, v2.TEXT = v2.TEXT, v2_text
+no_manifest = ApiError("GET", "x", 404, "Not Found")
+rig = Rig(
+    {
+        ("GET", f"/repos/{REPO}/contents/.specify/memory/constitution.md"): no_manifest,
+        (
+            "GET",
+            f"/repos/{REPO}/contents/README.md",
+        ): "# R\n\n## What's different here\n\nNo cache.\n",
+    }
+)
+rig.go("pull_request_target", pr_event())
+argv = rig.ran("_gatehouse_shim")[0][0]
+context_file = Path(arg_after(argv, "--constitution")) if "--constitution" in argv else None
+check("constitution: a v2 repo is reviewed against a context file", context_file is not None)
+body = context_file.read_text() if context_file else ""
+check(
+    "constitution: the context is the image's text", body.startswith("# Crunchtools Constitution")
+)
+check("constitution: the context carries the README section", "No cache." in body)
+check(
+    "constitution: both reads are at the base, never the head",
+    all(c[1].endswith(f"?ref={BASE}") for c in rig.api.made("GET", "*/contents/*")),
+)
+
+rig = Rig(
+    {
+        ("GET", f"/repos/{REPO}/contents/.specify/memory/constitution.md"): ApiError(
+            "GET", "x", 500, "boom"
+        ),
+    }
+)
+_, result = rig.go("pull_request_target", pr_event())
+check(
+    "constitution: an unknown base is a failed review, not a v1 or v2 guess",
+    result["review"]["status"] == "failed" and rig.ran("_gatehouse_shim") == [],
+)
+v2.TEXT = saved_text
 
 rig = Rig(shim_exit=1)
 code, result = rig.go("pull_request_target", pr_event())

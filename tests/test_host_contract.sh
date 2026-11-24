@@ -1321,6 +1321,16 @@ fi
 # checkout, one link to it, and no loser's copy.
 CLONESHIM=$(mktemp -d)
 CLONECACHE=$(mktemp -d)
+# The v1 clone runs only for a repo that still carries its manifest. sdlc itself
+# is on constitution v2 and carries none, so this section lends the tree one
+# for its duration and takes it back after.
+_v1=.specify/memory/constitution.md
+_v1_lent=
+if [ ! -e "$_v1" ]; then
+  mkdir -p "${_v1%/*}"
+  printf '# x\n\n> **Inherits:** crunchtools/constitution v1.61.0\n' > "$_v1"
+  _v1_lent=1
+fi
 for prog in $POSIX_UTILS podman pre-commit gh; do
   [ -e "$SHIM/$prog" ] && ln -s "$(readlink -f "$SHIM/$prog")" "$CLONESHIM/$prog"
 done
@@ -1378,6 +1388,7 @@ else
   bad "the constitution mount source is '${_mnt:-absent}', not a resolved directory"
 fi
 rm -rf "$CLONESHIM" "$CLONECACHE"
+[ -z "$_v1_lent" ] || rm -rf .specify
 
 printf '\n== gatehouse: only a crunchtools GitHub push is reviewed\n\n'
 

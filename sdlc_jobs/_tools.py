@@ -23,6 +23,7 @@ from sdlc_jobs._github import Api, CannotRunError, GitHub
 # these paths; tests point the module attributes at fixtures.
 ASHIGARU_SCRIPTS = Path("/opt/ashigaru/scripts")
 CONSTITUTION_SCRIPTS = Path("/opt/constitution/scripts")
+CONSTITUTION_TEXT = Path("/opt/constitution/constitution.md")
 GATEHOUSE_PYTHON = "/app/venv/bin/python"
 SHIM = Path(__file__).resolve().parent / "_gatehouse_shim.py"
 

@@ -29,11 +29,12 @@ import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from http import HTTPStatus
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from sdlc_jobs import _findings
+from sdlc_jobs import _findings, constitution
 from sdlc_jobs import _tools as tools
 from sdlc_jobs._github import (
     APP_LOGIN,
@@ -54,6 +55,7 @@ from sdlc_jobs._github import (
 from sdlc_jobs._handoff import NAMES, TooLargeError, encode
 
 PATCH = "application/vnd.github.patch"
+RAW = "application/vnd.github.raw"
 REQUIRED_LOW_AGENTS = ",".join(_findings.REQUIRED_LOW_AGENTS)
 COMPLETE = "<!-- gatehouse review complete -->"
 FAILED = "<!-- gatehouse review failed -->"
@@ -270,6 +272,12 @@ class Job:
         args = ["--stdin", "--comment", "--required-low-agents", REQUIRED_LOW_AGENTS, "--advisory"]
         if action == "synchronize":
             args.append("--incremental")
+        try:
+            context = self.constitution_context(str(pr["base"]["sha"]))
+        except CannotRunError as err:
+            return self.failed(head, f"the constitution to review against is unknown: {err}")
+        if context is not None:
+            args += ["--constitution", str(context)]
         env = tools.child_env(
             self.env,
             OPENROUTER_API_KEY=self.env["OPENROUTER_API_KEY"],
@@ -301,6 +309,39 @@ class Job:
                 return self.failed(head, f"the reviewer exited {done.returncode}.")
             return CANNOT_RUN, {"status": "failed", "exit": done.returncode, "posts": posts}
         return OK, {"status": "reviewed", "exit": done.returncode, "posts": posts}
+
+    def constitution_context(self, base: str) -> Path | None:
+        """What a repo on constitution v2 is reviewed against; None for a v1 repo.
+
+        Both halves come from the trusted base, never the PR: the constitution's
+        text is the image's own, and the README section is read at the base SHA,
+        so a pull request cannot rewrite the rules it is judged by. A v1 repo
+        keeps Gatehouse's own discovery of its manifest at the same base.
+        """
+        manifest = f"/repos/{self.repo}/contents/{constitution.V1_MANIFEST}?ref={base}"
+        try:
+            self.api.request("GET", manifest, accept=RAW)
+        except ApiError as err:
+            if err.status != HTTPStatus.NOT_FOUND:
+                raise
+        else:
+            return None
+        try:
+            readme = str(
+                self.api.request(
+                    "GET", f"/repos/{self.repo}/contents/README.md?ref={base}", accept=RAW
+                )
+            )
+        except ApiError as err:
+            if err.status != HTTPStatus.NOT_FOUND:
+                raise
+            readme = ""
+        out = self.work / "constitution-context.md"
+        try:
+            out.write_text(constitution.context(readme, constitution.TEXT), encoding="utf-8")
+        except constitution.CannotRunError as err:
+            raise CannotRunError(str(err)) from err
+        return out
 
     # -- Ashigaru's fix round ----------------------------------------------------------------
 
