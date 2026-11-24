@@ -14,7 +14,7 @@ from pathlib import Path
 
 from sdlc_jobs._core import SEMVER, Tools, api, cannot, workspace
 
-APP_LOGIN = "ashigaru-crunchtools[bot]"  # ashigaru's scripts/review_publish.py default
+APP_LOGIN = "ashigaru-crunchtools-com[bot]"  # the App's login: its slug is ashigaru-crunchtools-com
 RELEASE_BRANCH = "ashigaru/release-"
 HEADING = re.compile(r"^## \[([^\]]+)\]", re.MULTILINE)
 

@@ -240,7 +240,7 @@ check(
 )
 check(
     "audit: AUTHOR override is the App's",
-    'audit_alert.AUTHOR = "app/ashigaru-crunchtools"' in argv[3],
+    'audit_alert.AUTHOR = "app/ashigaru-crunchtools-com"' in argv[3],
 )
 check(
     "audit: env is GH_TOKEN only",
@@ -326,7 +326,7 @@ with tempfile.TemporaryDirectory(prefix="launchers-") as scratch_dir:
         check(
             "launcher: audit sets AUTHOR to the App and passes the rest of argv",
             done.returncode == 0
-            and done.stdout.strip() == "audit app/ashigaru-crunchtools --json r.json --repo o/r",
+            and done.stdout.strip() == "audit app/ashigaru-crunchtools-com --json r.json --repo o/r",
             done.stdout + done.stderr,
         )
         argv[-1] = "o/crash"

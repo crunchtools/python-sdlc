@@ -29,7 +29,7 @@ from sdlc_jobs._core import CannotRunError, Response, Tools
 REPO = "crunchtools/mcp-example"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 VERSION = "1.2.3"
-BOT = "ashigaru-crunchtools[bot]"
+BOT = "ashigaru-crunchtools-com[bot]"
 
 PULL = {
     "number": 7,
