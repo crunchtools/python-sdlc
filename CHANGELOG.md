@@ -6,6 +6,14 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `sdlc-constitution check` enforces R4 on the newest release in
+  CHANGELOG.md: a `### Removed` entry needs a breaking bump (MAJOR, or MINOR
+  before 1.0), and every `### Deprecated` entry says which later
+  release removes it ("removed in 2.0.0"); a bare "since 1.2.0" does not count. Older releases are history and are not judged. Whether a removal names
+  its replacement stays a review question.
+
 ### Fixed
 
 - `sdlc / gate` counts an answer to a Gatehouse finding only from an owner,
