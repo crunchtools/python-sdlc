@@ -1066,12 +1066,11 @@ run_systemd() {        # timeout payload -> the step's verdict
     0) systemd_steps "$_sdname" "$_sdsecs" "$_sdopts" "$_sdready" "$_sdsteps" || _sdrc=$? ;;
     125) printf '%s: podman could not create the container (exit 125); nothing was judged\n' "$ME" >&2
          _sdrc=2 ;;
-    # 126/127: the entrypoint could not execute or was not found. systemd never
-    # came up, so no step ran: a 2, as the header's contract says, never a finding.
-    126|127) printf '%s: %s could not start systemd (exit %s); nothing was judged\n' "$ME" "$_sdimg" "$_sdrc" >&2
+    # Any other start status (126/127: the entrypoint could not execute or was
+    # not found): systemd never came up, so no step ran and nothing produced a
+    # verdict. A 2, as the header's contract says, never a finding.
+    *)   printf '%s: %s could not start systemd (exit %s); nothing was judged\n' "$ME" "$_sdimg" "$_sdrc" >&2
          _sdrc=2 ;;
-    *)   printf '%s: %s could not start systemd (exit %s)\n' "$ME" "$_sdimg" "$_sdrc" >&2
-         _sdrc=1 ;;
   esac
   step_cleanup
   return "$_sdrc"
