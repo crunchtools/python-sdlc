@@ -602,13 +602,13 @@ check(
 check("git_auth: never prompts", auth["GIT_TERMINAL_PROMPT"] == "0")
 
 for tok, count in (("tok-123", "2"), ("", "1")):
-    genv = _tools.git_env(tok)
+    genv = _tools.git_env(Path("/ws"), tok)
     last = int(count) - 1
     check(
         f"git_env: safe.directory=* is set (token={bool(tok)})",
         genv["GIT_CONFIG_COUNT"] == count
         and genv[f"GIT_CONFIG_KEY_{last}"] == "safe.directory"
-        and genv[f"GIT_CONFIG_VALUE_{last}"] == "*",
+        and genv[f"GIT_CONFIG_VALUE_{last}"] == str(Path("/ws").resolve()),
     )
 
 runner = FakeRunner()
