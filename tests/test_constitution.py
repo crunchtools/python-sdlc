@@ -35,7 +35,50 @@ def mcp_server(root: Path) -> None:
     (root / "uv.lock").write_text("version = 1\n")
     (root / "Containerfile").write_text('FROM quay.io/hummingbird/python\nLABEL version="1.2.0"\n')
     (root / "tests").mkdir()
-    (root / "tests" / "test_tools.py").write_text("READ_ONLY = 'readOnlyHint'\n")
+    (root / "tests" / "test_tools.py").write_text(TESTS)
+    write("src/x/client.py", CLIENT)(root)
+
+
+TESTS = "READ_ONLY = 'readOnlyHint'\n\n\ndef test_response_too_large(): ...\n"
+
+
+# K1: an HTTP client that reads in pieces and stops at a named ceiling.
+CLIENT = """import httpx
+
+MAX_RESPONSE_SIZE = 10
+
+
+async def fetch(client, url):
+    body = b""
+    async with client.stream("GET", url) as response:
+        async for chunk in response.aiter_bytes():
+            body += chunk
+            if len(body) > MAX_RESPONSE_SIZE:
+                raise ValueError("too large")
+    return body
+"""
+# The ceiling is read from the header only, in another function from the stream.
+HEADER_ONLY = """import httpx
+
+MAX_RESPONSE_SIZE = 10
+
+
+def too_big(response):
+    return int(response.headers["content-length"]) > MAX_RESPONSE_SIZE
+
+
+async def fetch(client, url):
+    async with client.stream("GET", url) as response:
+        return b"".join([c async for c in response.aiter_bytes()])
+"""
+# S1: the lock exported frozen, then both installs with --no-deps.
+LOCKED_INSTALL = """FROM quay.io/hummingbird/python
+LABEL version="1.2.0"
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-hashes -o req.txt \\
+ && pip install --no-deps -r req.txt \\
+ && pip install --no-deps .
+"""
 
 
 def findings(setup, *breaks) -> list[str]:
@@ -75,6 +118,57 @@ FAILS: list[tuple[str, tuple, str]] = [
     ("no lockfile", (drop("uv.lock"),), "S1"),
     ("no tests", (drop("tests/test_tools.py"),), "C7"),
     ("no read-only partition test", (write("tests/test_tools.py", "x = 1\n"),), "K1"),
+    (
+        "HTTP read with no bounded pieces",
+        (
+            write(
+                "src/x/client.py", "import httpx\n\ndef get(c, u):\n    return c.get(u).content\n"
+            ),
+        ),
+        "K1",
+    ),
+    ("ceiling from content-length only", (write("src/x/client.py", HEADER_ONLY),), "K1"),
+    (
+        "no oversized-body test",
+        (write("tests/test_tools.py", "READ_ONLY = 'readOnlyHint'\n"),),
+        "K1",
+    ),
+    (
+        "pip install . re-resolves",
+        (write("Containerfile", LOCKED_INSTALL.replace("--no-deps .", ".")),),
+        "S1",
+    ),
+    (
+        "lock named only in a comment",
+        (
+            write(
+                "Containerfile",
+                'FROM x\nLABEL version="1.2.0"\n# installs from uv.lock\n'
+                "RUN pip install --no-deps -r requirements.txt\n",
+            ),
+        ),
+        "S1",
+    ),
+    (
+        "renovate sets the cooldown",
+        (write("renovate.json", '{"minimumReleaseAge": "1 day"}'),),
+        "S2",
+    ),
+    (
+        "renovate cooldown inside a packageRule, JSON5",
+        (write(".github/renovate.json5", "{packageRules: [{stabilityDays: 0}]}"),),
+        "S2",
+    ),
+    (
+        "renovate extends a cooldown preset",
+        (write("renovate.json", '{"extends": ["config:best-practices"]}'),),
+        "S2",
+    ),
+    (
+        "package.json renovate key",
+        (write("package.json", '{"renovate": {"extends": ["security:minimumReleaseAgeNpm"]}}'),),
+        "S2",
+    ),
     ("no Containerfile", (drop("Containerfile"),), "K1"),
     ("no changelog", (drop("CHANGELOG.md"),), "R2"),
     ("no Unreleased", (write("CHANGELOG.md", "## [1.2.0] - 2026-11-24\n"),), "R2"),
@@ -150,6 +244,61 @@ def test_each_break_is_caught() -> None:
     for name, breaks, principle in FAILS:
         got = findings(mcp_server, *breaks)
         assert any(f.startswith(f"{principle}:") for f in got), (name, got)
+
+
+def test_new_checks_pass_compliant_variants() -> None:
+    # Each passes the compliant repo with the rule's subject present and done right.
+    ok = [
+        ("locked install", write("Containerfile", LOCKED_INSTALL)),
+        (
+            "a named pin resolves nothing",
+            write("Containerfile", LOCKED_INSTALL + "RUN pip install uv==0.9.0\n"),
+        ),
+        (
+            "renovate config without the cooldown",
+            write("renovate.json", '{"extends": ["config:recommended"], "labels": ["deps"]}'),
+        ),
+        (
+            "package.json without renovate",
+            write("package.json", '{"name": "x", "minimumReleaseAge": 1}'),
+        ),
+        ("no HTTP client at all", write("src/x/client.py", "import json\n")),
+    ]
+    for name, change in ok:
+        got = findings(mcp_server, change)
+        assert got == [], (name, got)
+    # K1 is the MCP server's: a forked server's unbounded client is not judged by it.
+    got = findings(
+        mcp_server,
+        kinds('["forked-mcp-server"]'),
+        write("src/x/client.py", "import httpx\n"),
+        write("tests/test_tools.py", "x = 1\n"),
+    )
+    assert got == [], got
+
+
+def skill(root: Path) -> None:
+    """A compliant claude-skill repo."""
+    (root / "LICENSE").write_text(AGPL)
+    (root / "CHANGELOG.md").write_text(CHANGELOG)
+    (root / "sdlc.toml").write_text('[tool.sdlc]\nrepo-kinds = ["claude-skill"]\n')
+    write(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: x\n---\n\n## Phase 1\n\n"
+        'GITHUB_TOKEN="$(gh auth token)" gh pr view\n',
+    )(root)
+    # A checker's broken fixture under tests/ is not a skill this repo ships.
+    write("tests/broken/SKILL.md", 'api_key = "not-a-real-key"\n')(root)
+
+
+def test_skill() -> None:
+    assert findings(skill) == [], findings(skill)
+    got = findings(
+        skill, write("skills/leak/SKILL.md", '---\nname: leak\n---\npassword = "hunter2"\n')
+    )
+    assert any(f.startswith("K11:") for f in got), got
+    # The credential rule is K11's: the same file in an mcp-server repo is P3's scan, not this.
+    assert findings(mcp_server, write("skills/leak/SKILL.md", 'password = "hunter2"\n')) == []
 
 
 def test_kinds_relax() -> None:
