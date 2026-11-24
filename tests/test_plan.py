@@ -1344,6 +1344,228 @@ scan_words = next(r[3] for r in rows if r[0] == "container-scan").split(S.UNIT_S
 check("scan puts the gate image after --", scan_words[-3:] == ["--", S.GATE_IMAGE, "scan-rootfs"])
 
 
+# ------------------------------------------------------------------ command kind
+#
+# A repo's own program, as an argv list run in a nested container: never shell.
+
+CMD_BASE = '[project]\nname = "fx"\nversion = "0"\n[tool.sdlc.ci]\nchecks = ["t"]\n'
+
+
+def command_words(table: str, **env) -> list[str]:
+    rows = [r for r in plan_of("ci", CMD_BASE + "[tool.sdlc.ci.t]\n" + table, **env) if r[0] == "t"]
+    assert len(rows) == 1 and rows[0][2] == "host", rows
+    return rows[0][3].split(S.UNIT_SEPARATOR)
+
+
+words = command_words('kind = "command"\nargv = ["node", "--test", "tests/*.test.mjs"]\n')
+check("command is a podman run", words[:2] == ["podman", "run"], str(words))
+check(
+    "command's argv[0] is the entrypoint and the rest follow the image",
+    words[words.index("--entrypoint") + 1] == "node"
+    and words[words.index("--") + 1 :] == [S.GATE_IMAGE, "--test", "tests/*.test.mjs"],
+    str(words),
+)
+check("command defaults to the gate image", words[words.index("--") + 1] == S.GATE_IMAGE)
+check("command has no network by default", words[words.index("--network") + 1] == "none")
+check(
+    "command mounts the repo read-only at /repo and works there",
+    any(w.endswith(":/repo:ro,z") for w in words) and words[words.index("-w") + 1] == "/repo",
+    str(words),
+)
+check("command tells test runners they are in CI", "CI=true" in words, str(words))
+check("command trusts the checkout for git", "GIT_CONFIG_VALUE_0=*" in words, str(words))
+
+words = command_words(
+    'kind = "command"\nargv = ["uv", "run", "pytest"]\nnetwork = true\n'
+    'image = "ghcr.io/astral-sh/uv:0.13.7-python3.11-bookworm-slim"\n'
+    'workdir = "tests"\nenv = { UV_PROJECT_ENVIRONMENT = "/tmp/venv", HOME = "/work" }\n'
+)
+check("command network = true drops --network none", "--network" not in words, str(words))
+check(
+    "command runs in its own image",
+    words[words.index("--") + 1] == "ghcr.io/astral-sh/uv:0.13.7-python3.11-bookworm-slim",
+)
+check("command workdir is under /repo", words[words.index("-w") + 1] == "/repo/tests")
+check(
+    "command env is passed, and a repo's HOME replaces the default",
+    "UV_PROJECT_ENVIRONMENT=/tmp/venv" in words
+    and "HOME=/work" in words
+    and "HOME=/tmp" not in words,
+    str(words),
+)
+check(
+    "command tokens resolve in env",
+    "V=0" in command_words('kind = "command"\nargv = ["true"]\nenv = { V = "@project.version" }\n'),
+)
+
+
+def command_refused(table: str) -> str | None:
+    return refused(lambda: plan_of("ci", CMD_BASE + "[tool.sdlc.ci.t]\n" + table))
+
+
+for table, why, says in (
+    ('kind = "command"\n', "argv is required", "argv"),
+    ('kind = "command"\nargv = []\n', "an empty argv", "argv"),
+    ('kind = "command"\nargv = "npm test"\n', "a shell string", "list"),
+    ('kind = "command"\nargv = ["--privileged"]\n', "an option as argv[0]", "program"),
+    ('kind = "command"\nargv = [\'["sh"]\']\n', "a JSON entrypoint", "program"),
+    ('kind = "command"\nargv = ["a\\tb"]\n', "a tab in argv", "tab"),
+    ('kind = "command"\nargv = ["true"]\nnetwork = "yes"\n', "a non-bool network", "network"),
+    ('kind = "command"\nargv = ["true"]\nworkdir = "../.."\n', "a workdir outside", "outside"),
+    ('kind = "command"\nargv = ["true"]\nenv = { "A=B" = "c" }\n', "a bad env name", "env"),
+    ('kind = "command"\nargv = ["true"]\nimage = "--privileged"\n', "an option image", "image"),
+):
+    msg = command_refused(table)
+    check(f"command refuses {why}", msg is not None and says in msg, str(msg))
+
+# A command in an image this ci builds waits for that build: one lane.
+lanes = S.lane_of(
+    {
+        "ci": {
+            "b": {"kind": "image-build", "tag": "localhost/py315:sdlc"},
+            "t": {"kind": "command", "argv": ["pytest"], "image": "localhost/py315:sdlc"},
+            "g": {"kind": "command", "argv": ["node", "x.js"]},
+        }
+    },
+    ["t", "b", "g"],
+)
+check(
+    "a command shares the lane of the build that tags its image",
+    lanes["t"] == lanes["b"] != S.MAIN_LANE and lanes["g"] == S.MAIN_LANE,
+    str(lanes),
+)
+check("command is a kind sdlc lists", "command" in S.KINDS)
+
+
+# ---------------------------------------------- command against a systemd service
+#
+# `systemd = true`: the image boots systemd as PID 1, a probe is polled, and
+# setup then argv are exec'd in order. Every group is still an argv list.
+
+SD = 'kind = "command"\nsystemd = true\nimage = "localhost/svc:sdlc"\n'
+
+
+def systemd_groups(table: str, **env) -> tuple[str, list[list[str]]]:
+    rows = [r for r in plan_of("ci", CMD_BASE + "[tool.sdlc.ci.t]\n" + table, **env) if r[0] == "t"]
+    assert len(rows) == 1 and rows[0][2] == "host-systemd", rows
+    seconds, _, payload = rows[0][3].partition(S.UNIT_SEPARATOR)
+    return seconds, [g.split(S.UNIT_SEPARATOR) for g in payload.split(S.STEP_SEPARATOR)]
+
+
+secs, groups = systemd_groups(
+    SD
+    + 'argv = ["npm", "--prefix", "/app", "test"]\n'
+    + 'setup = [["psql", "-f", "/repo/seed.sql"], ["systemctl", "restart", "app"]]\n'
+    + 'ready = ["curl", "-sf", "http://localhost:8080/"]\ntimeout = 240\n'
+    + 'env = { PGPASSWORD = "x" }\n'
+)
+run, opts, ready, *steps = groups
+check("systemd is its own host mode with the timeout first", secs == "240", secs)
+check(
+    "the step separator is no line break to splitlines, which the image job reads the plan with",
+    len(f"a{S.STEP_SEPARATOR}b".splitlines()) == 1 and S.STEP_SEPARATOR in S.FORBIDDEN_IN_PLAN,
+)
+check(
+    "systemd boots the image with the repo read-only and no network, and passes it nothing",
+    run[:2] == ["podman", "run"]
+    and any(w.endswith(":/repo:ro,z") for w in run)
+    and run[run.index("--network") + 1] == "none"
+    and run[-2:] == ["--", "localhost/svc:sdlc"],
+    str(run),
+)
+check(
+    "systemd's run grants nothing: the capabilities are the launcher's",
+    not any(w.startswith(("--cap", "--privileged", "--security-opt", "-e")) for w in run),
+    str(run),
+)
+check(
+    "systemd's exec options are -w and -e only, with command's defaults and the repo's env",
+    opts[:2] == ["-w", "/repo"]
+    and set(opts[2::2]) == {"-e"}
+    and {"CI=true", "PYTHONPYCACHEPREFIX=/tmp/pycache", "PGPASSWORD=x"} <= set(opts[3::2]),
+    str(opts),
+)
+check("systemd polls the repo's probe", ready == ["curl", "-sf", "http://localhost:8080/"])
+check(
+    "systemd runs setup in order, then argv last",
+    steps
+    == [
+        ["psql", "-f", "/repo/seed.sql"],
+        ["systemctl", "restart", "app"],
+        ["npm", "--prefix", "/app", "test"],
+    ],
+    str(steps),
+)
+
+secs, groups = systemd_groups(SD + 'argv = ["true"]\nnetwork = true\n')
+check("systemd's default probe is systemd running", groups[2] == S.SYSTEMD_READY, str(groups))
+check("systemd's default timeout", secs == str(S.SYSTEMD_TIMEOUT))
+check("systemd with network = true keeps the network", "--network" not in groups[0])
+check("systemd with no setup is the probe and argv", groups[3:] == [["true"]], str(groups))
+
+for table, why, says in (
+    ('kind = "command"\nsystemd = true\nargv = ["true"]\n', "no image", "image"),
+    ('kind = "command"\nsystemd = "yes"\nargv = ["true"]\n', "a non-bool systemd", "systemd"),
+    (SD + 'argv = ["true"]\nsetup = ["npm ci"]\n', "a shell string as a step", "list"),
+    (SD + 'argv = ["true"]\nsetup = "npm ci"\n', "setup as a string", "list"),
+    (SD + 'argv = ["true"]\nsetup = [[]]\n', "an empty step", "setup[0]"),
+    (SD + 'argv = ["true"]\nsetup = [["--privileged", "x"]]\n', "an option as a step", "program"),
+    (SD + 'argv = ["true"]\nready = "curl x"\n', "a shell string probe", "list"),
+    (SD + 'argv = ["true"]\nready = ["-it"]\n', "an option as the probe", "program"),
+    (SD + 'argv = ["true"]\ntimeout = 0\n', "a zero timeout", "timeout"),
+    (SD + 'argv = ["true"]\ntimeout = 99999\n', "a timeout past the cap", "timeout"),
+    (SD + 'argv = ["true"]\ntimeout = true\n', "a bool timeout", "timeout"),
+    (SD + 'argv = ["true"]\nsetup = [["a\\u001ab"]]\n', "a step separator", "control"),
+    (SD + 'argv = ["true"]\nenv = { A = "a\\u001ab" }\n', "a step separator in env", "control"),
+    ('kind = "command"\nargv = ["true"]\nsetup = [["x"]]\n', "setup without systemd", "systemd"),
+    ('kind = "command"\nargv = ["true"]\nready = ["x"]\n', "ready without systemd", "systemd"),
+    ('kind = "command"\nargv = ["true"]\ntimeout = 5\n', "timeout without systemd", "systemd"),
+):
+    msg = command_refused(table)
+    check(f"systemd command refuses {why}", msg is not None and says in msg, str(msg))
+
+# A service in an image this ci builds waits for that build, as a command does.
+lanes = S.lane_of(
+    {
+        "ci": {
+            "b": {"kind": "image-build", "tag": "localhost/svc:sdlc"},
+            "t": {"kind": "command", "systemd": True, "argv": ["x"], "image": "localhost/svc:sdlc"},
+        }
+    },
+    ["t", "b"],
+)
+check("a systemd command shares the lane of its image's build", lanes["t"] == lanes["b"])
+
+# A lane runs in plan order, so a build listed AFTER the check that runs its
+# image must still be planned first, or the consumer meets podman's 125.
+order = [
+    r[0]
+    for r in plan_of(
+        "ci",
+        '[project]\nname = "fx"\nversion = "0"\n[tool.sdlc.ci]\n'
+        'checks = ["g", "py311", "pit", "build-py311", "build-x"]\n'
+        '[tool.sdlc.ci.g]\nkind = "command"\nargv = ["true"]\n'
+        '[tool.sdlc.ci.py311]\nkind = "command"\nargv = ["pytest"]\n'
+        'image = "localhost/py311:sdlc"\n'
+        '[tool.sdlc.ci.pit]\nkind = "pytest-in-image"\ntests = ["tests"]\n'
+        'image = "localhost/x:sdlc"\n'
+        '[tool.sdlc.ci.build-py311]\nkind = "image-build"\ntag = "localhost/py311:sdlc"\n'
+        '[tool.sdlc.ci.build-x]\nkind = "image-build"\ntag = "localhost/x:sdlc"\n',
+    )
+    if r[0] in ("g", "py311", "pit", "build-py311", "build-x")
+]
+steps = list(dict.fromkeys(order))
+check(
+    "a build listed after its consumer is planned before it; the rest keep their place",
+    steps == ["g", "build-py311", "py311", "build-x", "pit"],
+    str(steps),
+)
+check(
+    "builds_first leaves a list with no image chain as it is",
+    S.builds_first({"ci": {}}, ["mypy", "pytest"]) == ["mypy", "pytest"],
+)
+
+
 # ------------------------------------------------------------------ bootc stack
 BOOTC_CF = "FROM quay.io/fedora/fedora-bootc:42\n"
 check(

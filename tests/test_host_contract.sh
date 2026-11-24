@@ -85,6 +85,10 @@ done
 DIG64=feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface
 TAB=$(printf '\t')
 US=$(printf '\037')
+SS=$(printf '\032')
+# A host-systemd plan line: the run, the exec options, the probe, then steps.
+SDRUN="podman${US}run${US}-v${US}$PWD:/repo:ro,z${US}--network${US}none${US}--${US}localhost/svc:sdlc"
+SDOPTS="-w${US}/repo${US}-e${US}CI=true${US}-e${US}PYTHONPYCACHEPREFIX=/tmp/pycache"
 cat > "$SHIM/podman" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$LOG"
@@ -121,7 +125,8 @@ case " \$* " in
     esac
     exit 0 ;;
   *" logs "*) printf 'CONTAINER LOG\n'; exit 0 ;;
-  *" rm -f "*) exit 0 ;;
+  # Removing the container ends an exec hung inside it.
+  *" rm -f "*) rm -f "$SHIM/hanging"; exit 0 ;;
 esac
 # sdlc launcher REF: print this repo's launcher with the ref written in, as
 # the image does -- or fail, or print nothing, as $SHIM/launchcase says.
@@ -208,6 +213,44 @@ case " \$* " in
     printf 'rc-four${TAB}main${TAB}image-ro${TAB}exit-four\n' ;;
   *" plan prune-race "*)
     printf 'prune-race${TAB}main${TAB}image-ro${TAB}prune-now\n' ;;
+  *" plan sd-pass "*)
+    printf 'sd-pass${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}${SDOPTS}${SS}ready-ok${SS}step-one${SS}npm${US}test${US}quiet-ok\n' ;;
+  *" plan sd-fail "*)
+    printf 'sd-fail${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}${SDOPTS}${SS}ready-ok${SS}step-one${SS}rc-one${SS}must-not-run\n' ;;
+  *" plan sd-two "*)
+    printf 'sd-two${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}${SDOPTS}${SS}ready-ok${SS}rc-two\n' ;;
+  *" plan sd-notready "*)
+    printf 'sd-notready${TAB}main${TAB}host-systemd${TAB}1${US}${SDRUN}${SS}${SDOPTS}${SS}probe-never${SS}must-not-run\n' ;;
+  *" plan sd-died "*)
+    printf 'sd-died${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}${SDOPTS}${SS}probe-dead${SS}must-not-run\n' ;;
+  *" plan sd-podman "*)
+    printf 'sd-podman${TAB}main${TAB}host-systemd${TAB}5${US}podman${US}run${US}--${US}go-up-podman${SS}${SDOPTS}${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-noinit "*)
+    printf 'sd-noinit${TAB}main${TAB}host-systemd${TAB}5${US}podman${US}run${US}--${US}go-up-127${SS}${SDOPTS}${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-opts "*)
+    printf 'sd-inject-opts${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}--privileged${US}-w${US}/repo${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-user "*)
+    printf 'sd-inject-user${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}-w${US}/repo${US}--user${US}0${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-dangle "*)
+    printf 'sd-inject-dangle${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}-w${US}/repo${US}-e${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-envname "*)
+    printf 'sd-inject-envname${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}-w${US}/repo${US}-e${US}A-B=1${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-relw "*)
+    printf 'sd-inject-relw${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}-w${US}repo${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-run "*)
+    printf 'sd-inject-run${TAB}main${TAB}host-systemd${TAB}5${US}podman${US}run${US}--privileged${US}--${US}localhost/svc:sdlc${SS}${SDOPTS}${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-mount "*)
+    printf 'sd-inject-mount${TAB}main${TAB}host-systemd${TAB}5${US}podman${US}run${US}-v${US}/:/repo:ro,z${US}--${US}localhost/svc:sdlc${SS}${SDOPTS}${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-inject-arg "*)
+    printf 'sd-inject-arg${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${US}/bin/sh${SS}${SDOPTS}${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-glob "*)
+    printf 'sd-glob${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}${SDOPTS}${SS}ready-ok${SS}cat${US}$SHIM/*\n' ;;
+  *" plan sd-hang "*)
+    printf 'sd-hang${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}${SDOPTS}${SS}ready-ok${SS}hang-step${SS}must-not-run\n' ;;
+  *" plan host-glob "*)
+    printf 'host-glob${TAB}main${TAB}host${TAB}podman${US}run${US}--rm${US}--${US}localhost/x:sdlc${US}cat${US}$SHIM/*\n' ;;
+  *" plan sd-inject-cmd "*)
+    printf 'sd-inject-cmd${TAB}main${TAB}host-systemd${TAB}5${US}sh${US}run${US}--${US}localhost/svc:sdlc${SS}${SDOPTS}${SS}ready-ok${SS}must-not-run\n' ;;
   *" plan up-"*)
     _secs=1; _what=\$_last
     case "\$_last" in up-build) _what=build ;; up-noseconds) _secs=soon ;; esac
@@ -248,6 +291,16 @@ case "\$_last" in
     if [ -f "$SHIM/review-fails" ]; then printf 'REVIEW FOUND SOMETHING\n'; exit 1; fi
     printf 'REVIEW CLEAN\n' ;;
   must-not-run) printf 'RAN must-not-run\n'; touch "$SHIM/must-not-run" ;;
+  # A step that never finishes on its own: it ends when its container is
+  # removed, as a real exec would, or after five seconds.
+  hang-step)
+    : > "$SHIM/hanging"; _i=0
+    while [ -f "$SHIM/hanging" ] && [ "\$_i" -lt 5 ]; do sleep 1; _i=\$((_i + 1)); done
+    exit 137 ;;
+  # host-systemd probes: one that never passes while the service runs, and
+  # one whose container has gone.
+  probe-never) printf 'go-up-stays\n' > "$SHIM/upcase"; exit 7 ;;
+  probe-dead)  rm -f "$SHIM/upcase"; exit 7 ;;
   # Another process cleaning the clone while the hook runs: it has no
   # GIT_INDEX_FILE, so it sees only refs and .git/index.
   prune-now) (unset GIT_INDEX_FILE; git gc --quiet --prune=now) ;;
@@ -363,11 +416,140 @@ done
 log_mark
 PATH="$SHIM" sh bin/sdlc up-stays >/dev/null 2>&1 || true
 log_since
-if grep -q -- 'run -d --name sdlc-smoke-[0-9-]* --log-driver=k8s-file --cap-drop=all --security-opt=no-new-privileges .* -- localhost/x:sdlc go-up-stays$' "$RUN/podman.log" \
+if grep -q -- 'run -d --name sdlc-smoke-[0-9a-f-]* --log-driver=k8s-file --cap-drop=all --security-opt=no-new-privileges .* -- localhost/x:sdlc go-up-stays$' "$RUN/podman.log" \
    && grep -q -- '^rm -f -v sdlc-smoke-' "$RUN/podman.log"; then
   ok "host-up runs detached and locked down, and removes the container and its volumes"
 else
   bad "host-up's run or cleanup is wrong: $(grep -E 'up-stays|rm -f' "$RUN/podman.log" | tail -2)"
+fi
+
+printf '\n== a command against a systemd service\n\n'
+
+# `command` with systemd = true: the service boots detached with systemd's
+# capabilities and nothing else, the probe is polled, the steps are exec'd in
+# order, the first failure ends the check, and the container is removed every
+# time. A plan line that asks for anything more is refused before podman runs.
+for case_ in sd-pass:0 sd-fail:1 sd-two:2 sd-notready:1 sd-died:1 sd-podman:2 sd-noinit:2 \
+             sd-inject-opts:2 sd-inject-user:2 sd-inject-run:2 sd-inject-mount:2 \
+             sd-inject-arg:2 sd-inject-cmd:2 sd-inject-dangle:2 sd-inject-envname:2 \
+             sd-inject-relw:2; do
+  name=${case_%:*}; want=${case_#*:}
+  rm -f "$SHIM/must-not-run"
+  log_mark
+  rc=0
+  PATH="$SHIM" sh bin/sdlc "$name" > "$RUN/out" 2>&1 || rc=$?
+  log_since
+  if [ "$rc" -eq "$want" ] && [ ! -e "$SHIM/must-not-run" ]; then
+    ok "host-systemd $name exits $want and runs nothing after the step that decided it"
+  else
+    bad "host-systemd $name exited $rc, want $want: $(tail -3 "$RUN/out")"
+  fi
+  # And for its own reason, not some other refusal on the way.
+  case "$name" in
+    sd-inject-*) why='GATE CANNOT RUN: a host-systemd' ;;
+    sd-notready) why='not ready after 1s: probe-never' ;;
+    sd-died)     why='the container stopped before it was ready' ;;
+    sd-two)      why='the step exited 2; nothing was judged' ;;
+    sd-podman)   why='podman could not create the container' ;;
+    sd-noinit)   why='could not start systemd (exit 127); nothing was judged' ;;
+    *)           why= ;;
+  esac
+  if [ -n "$why" ] && ! grep -q -- "$why" "$RUN/out"; then
+    bad "host-systemd $name did not say '$why': $(tail -2 "$RUN/out")"
+  fi
+  case "$name" in
+    sd-inject-*)
+      if grep -q ' run -d ' "$RUN/podman.log"; then
+        bad "host-systemd $name started a container"
+      fi ;;
+    sd-podman) ;;
+    *)
+      if ! grep -q -- '^rm -f -v -t 10 sdlc-systemd-' "$RUN/podman.log"; then
+        bad "host-systemd $name did not remove its container"
+      fi ;;
+  esac
+done
+log_mark
+PATH="$SHIM" sh bin/sdlc sd-pass > "$RUN/out" 2>&1 || true
+log_since
+if grep -q -- "run -d --rm --name sdlc-systemd-[0-9a-f-]* --log-driver=k8s-file --systemd=always --timeout 3600 --cap-drop=all --cap-add=CHOWN,DAC_OVERRIDE,FOWNER,KILL,NET_BIND_SERVICE,SETGID,SETPCAP,SETUID --security-opt=no-new-privileges .* -v $PWD:/repo:ro,z --network none -- localhost/svc:sdlc\$" "$RUN/podman.log" \
+   && [ "$(grep -c -- ' exec -w /repo -e CI=true -e PYTHONPYCACHEPREFIX=/tmp/pycache sdlc-systemd-' "$RUN/podman.log")" -eq 3 ] \
+   && grep -A1 -- 'exec .* sdlc-systemd-[0-9a-f-]* step-one$' "$RUN/podman.log" | grep -q -- 'exec .* sdlc-systemd-[0-9a-f-]* npm test quiet-ok$' \
+   && grep -q '== exec npm test quiet-ok' "$RUN/out" && grep -q '== sd-pass passed' "$RUN/out"; then
+  ok "host-systemd boots locked down, probes, and execs each step in order with the options"
+else
+  bad "host-systemd's run or execs are wrong: $(grep -E ' run -d | exec ' "$RUN/podman.log" | head -4)"
+fi
+rc=0
+GITHUB_ACTIONS=true PATH="$SHIM" sh bin/sdlc sd-pass > "$RUN/out" 2>&1 || rc=$?
+tok=$(sed -n 's/^::stop-commands::\([0-9a-f]\{32\}\)$/\1/p' "$RUN/out")
+if [ "$rc" -eq 0 ] && [ -n "$tok" ] \
+   && awk -v t="::$tok::" '/^::stop-commands::/{s=NR} /== exec npm test/{e=NR} $0==t{r=NR} END{exit !(s && s<e && e<r)}' "$RUN/out"; then
+  ok "on Actions, workflow commands are stopped from boot until the container is gone"
+else
+  bad "host-systemd on Actions exited $rc, token '$tok': $(grep -n '^::' "$RUN/out" | head -3)"
+fi
+
+# A plain host step's output is the repo's too: its podman run is wrapped the
+# same way.
+rc=0
+GITHUB_ACTIONS=true PATH="$SHIM" sh bin/sdlc gate-word > "$RUN/out" 2>&1 || rc=$?
+tok=$(sed -n 's/^::stop-commands::\([0-9a-f]\{32\}\)$/\1/p' "$RUN/out")
+if [ "$rc" -eq 0 ] && [ -n "$tok" ] && grep -qx "::$tok::" "$RUN/out"; then
+  ok "on Actions, a plain host step stops workflow commands and resumes them"
+else
+  bad "a plain host step on Actions exited $rc, token '$tok': $(grep -n '^::' "$RUN/out" | head -3)"
+fi
+
+# A word from the plan is the repo's argv, never a pattern for THIS machine:
+# `$SHIM/*` matches files here, and must reach podman as itself.
+for name in host-glob sd-glob; do
+  log_mark
+  rc=0
+  PATH="$SHIM" sh bin/sdlc "$name" > "$RUN/out" 2>&1 || rc=$?
+  log_since
+  if [ "$rc" -eq 0 ] && grep -q -- " cat $SHIM/\*\$" "$RUN/podman.log" \
+     && ! grep -q -- " cat $SHIM/[a-z]" "$RUN/podman.log"; then
+    ok "$name passes a * word to podman literally, not expanded on the host"
+  else
+    bad "$name expanded or lost a * word (exit $rc): $(grep ' cat ' "$RUN/podman.log" | head -2)"
+  fi
+done
+
+# A step that hangs is ended by the step budget, as a finding, and the
+# container is removed; it does not hold the runner for conmon's hour.
+log_mark
+rc=0
+rm -f "$SHIM/must-not-run"
+SDLC_SYSTEMD_STEPS=2 PATH="$SHIM" sh bin/sdlc sd-hang > "$RUN/out" 2>&1 || rc=$?
+log_since
+if [ "$rc" -eq 1 ] && [ ! -e "$SHIM/must-not-run" ] \
+   && grep -q 'the steps did not finish within 2s' "$RUN/out" \
+   && grep -q -- '^rm -f -v -t 0 sdlc-systemd-' "$RUN/podman.log"; then
+  ok "a hung host-systemd step is a finding at the step budget, and its container is removed"
+else
+  bad "a hung host-systemd step exited $rc: $(tail -2 "$RUN/out")"
+fi
+
+# Cancelled mid-step -- a TERM, as a cancelled job sends -- the gate stops, the
+# container is removed, and on Actions workflow commands come back.
+log_mark
+rm -f "$SHIM/must-not-run" "$SHIM/hanging"
+GITHUB_ACTIONS=true PATH="$SHIM" sh bin/sdlc sd-hang > "$RUN/out" 2>&1 &
+sdpid=$!
+_i=0
+while [ ! -f "$SHIM/hanging" ] && [ "$_i" -lt 50 ]; do sleep 0.1; _i=$((_i + 1)); done
+kill -TERM "$sdpid" 2>/dev/null || :
+rc=0
+wait "$sdpid" || rc=$?
+log_since
+tok=$(sed -n 's/^::stop-commands::\([0-9a-f]\{32\}\)$/\1/p' "$RUN/out")
+if [ "$rc" -eq 2 ] && [ ! -e "$SHIM/must-not-run" ] \
+   && grep -q -- '^rm -f -v -t 10 sdlc-systemd-' "$RUN/podman.log" \
+   && [ -n "$tok" ] && grep -qx "::$tok::" "$RUN/out"; then
+  ok "a host-systemd step cancelled by TERM removes its container and resumes workflow commands"
+else
+  bad "a cancelled host-systemd step exited $rc: $(grep -E '^rm|^::' "$RUN/podman.log" "$RUN/out" | head -3)"
 fi
 
 # A systemd PID 1 cannot boot under this run's lockdown, so container-smoke
@@ -1295,8 +1477,18 @@ printf '\n== what the containers are given\n\n'
 # compiled on the host decides a verdict in here -- four of the five pushes on
 # trentina#706. tests/test_pycache_prefix.py tests the property; this asserts
 # the env var reaches every such container.
-mounts=$(grep -c ':/repo:' "$LOG" 2>/dev/null || true)
-prefixed=$(grep ':/repo:' "$LOG" 2>/dev/null | grep -c 'PYTHONPYCACHEPREFIX=/tmp/pycache' || true)
+# A systemd service is the exception that proves it: PID 1 is the image's, and
+# what runs the repo's code is each `exec`, so the execs are what carry it.
+mounts=$(grep ':/repo:' "$LOG" 2>/dev/null | grep -vc -- '--systemd=always' || true)
+prefixed=$(grep ':/repo:' "$LOG" 2>/dev/null | grep -v -- '--systemd=always' \
+           | grep -c 'PYTHONPYCACHEPREFIX=/tmp/pycache' || true)
+execs=$(grep -c ' exec -w ' "$LOG" 2>/dev/null || true)
+if [ "${execs:-0}" -gt 0 ] \
+   && [ "$(grep ' exec -w ' "$LOG" | grep -c 'PYTHONPYCACHEPREFIX=/tmp/pycache')" = "$execs" ]; then
+  ok "all $execs exec(s) into a systemd service got their own bytecode cache"
+else
+  bad "an exec into a systemd service did not set PYTHONPYCACHEPREFIX"
+fi
 if [ "${mounts:-0}" -gt 0 ] && [ "$prefixed" = "$mounts" ]; then
   ok "all $mounts container(s) mounting the worktree got their own bytecode cache"
 else

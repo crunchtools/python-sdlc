@@ -30,6 +30,11 @@
 # deliberately differs from the script this replaces.
 
 set -eu
+# No pathname expansion, anywhere. Words split from a plan line are a repo's
+# argv, and `/home/*/.ssh/*` unquoted would be expanded against THIS machine's
+# filesystem before podman saw it. The one glob this file wants turns it back on
+# for itself (state_init).
+set -f
 
 ME=$(basename "$0")
 
@@ -695,6 +700,53 @@ t_gatehouse() {
 # both the serial and the lane path.
 now_s() { date +%s 2>/dev/null || printf 0; }
 
+# ------------------------------------------------------- what a step leaves up
+#
+# A step that is interrupted -- a cancelled job, ^C, a `die` -- must not leave a
+# service running or workflow commands stopped. What it has open is named here,
+# and every trap in this file cleans it up first, so a trap set for $OUT or the
+# record never has to be swapped out and back for the length of one step.
+
+SD_LIVE=               # the systemd container a host-systemd step has up
+CMD_TOKEN=             # the open ::stop-commands:: token, on Actions
+
+on_exit() {            # command -> run however this shell ends, a signal included
+  # A signal exits, so that the EXIT trap is the one place cleanup is written
+  # and nothing carries on after it. In a lane, which is a background job, INT
+  # is ignored and stays so; TERM and HUP still reach it.
+  # shellcheck disable=SC2064  # the command is expanded now, on purpose
+  trap "step_cleanup; $1" EXIT
+  trap 'exit 2' HUP INT TERM
+}
+
+step_cleanup() {       # -> nothing left up by the step that was running
+  if [ -n "$SD_LIVE" ]; then
+    podman rm -f -v -t 10 "$SD_LIVE" >/dev/null 2>&1 || :
+    SD_LIVE=
+  fi
+  commands_resume
+}
+
+commands_stop() {      # -> on Actions, workflow commands stopped until resumed
+  [ "${GITHUB_ACTIONS:-}" = true ] || return 0
+  CMD_TOKEN=$(tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c 32)
+  [ -n "$CMD_TOKEN" ] || die "could not make a token to stop workflow commands"
+  printf '::stop-commands::%s\n' "$CMD_TOKEN"
+}
+
+commands_resume() {    # -> workflow commands back, if they were stopped
+  [ -z "$CMD_TOKEN" ] || printf '::%s::\n' "$CMD_TOKEN"
+  CMD_TOKEN=
+}
+
+unique_name() {        # prefix -> a container name no other step can hold
+  # Not $$ and the second: $$ is the same in every lane, since lanes are
+  # subshells, and two lanes start a step in the same second. The loser's
+  # `rm -f` would remove the winner's container.
+  _un=$(tr -dc 'a-f0-9' </dev/urandom 2>/dev/null | head -c 12) || _un=
+  printf '%s-%s-%s-%s' "$1" "$$" "${_k:-0}" "${_un:-$(now_s)}"
+}
+
 STATE=                 # <git-dir>/sdlc, or empty when there is nowhere to write
 LOGS=                  # the log directory for the running command
 PART=                  # the per-check lines, rendered to JSON when the run ends
@@ -711,7 +763,9 @@ state_init() {         # command
   mkdir -p "$LOGS" 2>/dev/null || { STATE=; LOGS=; return 0; }
   # One run's worth. A history nobody prunes is a directory that grows until
   # someone notices it, and the question is always about the last run.
+  set +f
   rm -f "$LOGS"/*.log 2>/dev/null || true
+  set -f
   PART="$STATE/last-$1.json.part"
   : > "$PART" 2>/dev/null || { PART=; return 0; }
   RECORD_FOR=$1
@@ -766,6 +820,9 @@ record_finish() {      # worst status
 #   host                  a podman argv, words joined by the unit separator
 #   host-up               seconds, then a host argv: a run still going when
 #                         they are up passes (see run_host)
+#   host-systemd          seconds, then argv groups split by the step
+#                         separator (0x1a): a service booted with systemd as PID 1,
+#                         a readiness probe, steps exec'd in order (run_systemd)
 #
 # A host line that does not start with `podman build` or `podman run` is
 # refused: the host contract is held here, by the launcher, not trusted to
@@ -775,6 +832,7 @@ record_finish() {      # worst status
 
 TAB=$(printf '\t')
 US=$(printf '\037')
+SS=$(printf '\032')   # between a host-systemd step's argv groups
 
 check_image_word() {   # run-args -> dies unless the word after `--` is an image
   # The planner validates every image reference; this holds the same line on
@@ -841,7 +899,7 @@ run_up() {             # seconds run-args -> the smoke verdict
         "$ME" "$_pid1" >&2
       return 4 ;;
   esac
-  _cname=sdlc-smoke-$$-$(now_s)
+  _cname=$(unique_name sdlc-smoke)
   _uprc=0
   podman --events-backend=none run -d --name "$_cname" --log-driver=k8s-file \
     --cap-drop=all --security-opt=no-new-privileges \
@@ -882,6 +940,210 @@ run_up() {             # seconds run-args -> the smoke verdict
     *)             printf '%s: podman could not report the container state; nothing was judged\n' "$ME" >&2
                    return 2 ;;
   esac
+}
+
+# What systemd as PID 1 needs back, and nothing more. The run is otherwise as
+# locked down as any host step: no network unless the plan says, and
+# no-new-privileges, which systemd's own setuid()/setgid() into a unit's User=
+# does not need -- only a setuid binary would.
+#   SETUID SETGID   start a unit as its User=/Group= (postgres, a service user)
+#   SETPCAP         set each unit's capability bounding set as it starts it
+#   CHOWN FOWNER    create and hand over RuntimeDirectory=, tmpfiles.d and a
+#                   data directory to the user that owns it
+#   DAC_OVERRIDE    root reaching into those directories once they are owned
+#   KILL            stop and restart a unit that runs as another user
+#   NET_BIND_SERVICE  a unit that listens below 1024 (nginx on 80) fails to
+#                   start without it, even with no network to reach it from
+# Not podman's other defaults: FSETID, SETFCAP, SYS_CHROOT (a unit's
+# RootDirectory=, which needs mounts this run does not have anyway).
+SYSTEMD_CAPS=CHOWN,DAC_OVERRIDE,FOWNER,KILL,NET_BIND_SERVICE,SETGID,SETPCAP,SETUID
+# The longest a booted service may live, enforced by conmon rather than by this
+# script: a gate killed outright runs no cleanup, and --rm then removes it.
+SYSTEMD_LIFETIME=3600
+# How long the setup steps and the test may take together once the service is
+# ready. A hung step is a finding at this, not a container held for conmon's
+# hour. Settable so the test can reach it without waiting.
+SYSTEMD_STEPS=${SDLC_SYSTEMD_STEPS:-1800}
+case "$SYSTEMD_STEPS" in ''|*[!0-9]*) die "SDLC_SYSTEMD_STEPS must be a whole number" ;; esac
+
+systemd_watch() {      # container seconds -> _sdwd, a watchdog that removes it then
+  # Removing the container is what ends an exec hung inside it. One-second
+  # sleeps so that killing the watchdog leaves nothing behind for long.
+  ( _w=0
+    while [ "$_w" -lt "$2" ]; do sleep 1; _w=$((_w + 1)); done
+    podman rm -f -v -t 0 "$1" ) </dev/null >/dev/null 2>&1 &
+  _sdwd=$!
+}
+
+systemd_diag() {       # container -> what systemd says went wrong, best effort
+  printf '\n== systemd: failed units\n' >&2
+  podman exec "$1" systemctl --failed --no-legend --no-pager >&2 2>&1 </dev/null || :
+  printf '== container log (tail)\n' >&2
+  podman logs --tail 50 "$1" >&2 2>&1 || :
+}
+
+run_systemd() {        # timeout payload -> the step's verdict
+  # A `command` run against a service: the image boots systemd as PID 1,
+  # detached; the readiness probe is exec'd every two seconds until it exits 0
+  # or <timeout> is up; then each step is exec'd in order and the first that
+  # fails ends the check. The container is removed however that ended. The
+  # payload is argv groups split by SS, each one's words split by US, and
+  # nothing in any of them is read as shell:
+  #   1  podman run ... -- IMAGE      held to `podman run` and an image word
+  #   2  exec options                 only `-w DIR` and `-e NAME=VALUE`
+  #   3  the readiness probe
+  #   4+ the steps, the test last
+  _sdsecs=$1
+  _ifs=$IFS
+  IFS=$SS
+  # shellcheck disable=SC2086  # splitting on the separator is the point
+  set -- $2
+  IFS=$_ifs
+  [ "$#" -ge 4 ] || die "a host-systemd step needs a run, exec options, a probe and a step"
+  _sdrun=$1 _sdopts=$2 _sdready=$3
+  shift 3
+  _sdsteps=$(printf '%s\n' "$@")   # one group per line; US splits the words
+  _ifs=$IFS
+  IFS=$US
+  # shellcheck disable=SC2086
+  set -- $_sdrun
+  IFS=$_ifs
+  [ "${1:-}" = podman ] && [ "${2:-}" = run ] \
+    || die "a host-systemd step must start with podman run; refused: ${1:-<empty>} ${2:-}"
+  shift 2
+  case " $* " in *" -- "*) ;; *) die "a host-systemd run must name its image after '--'" ;; esac
+  check_image_word "$@"
+  # Before the image, only the two options the planner writes: the checkout
+  # read-only at /repo, and no network. After it, nothing: systemd is PID 1.
+  _sdimg=
+  _sdafter=
+  _sdprev=
+  for _w in "$@"; do
+    if [ "$_sdafter" = yes ]; then
+      [ -z "$_sdimg" ] || die "a host-systemd run passes nothing after its image: systemd is PID 1"
+      _sdimg=$_w
+      continue
+    fi
+    case "$_sdprev:$_w" in
+      :--) _sdafter=yes ;;
+      :-v|:--network) _sdprev=$_w ;;
+      "-v:$HOST_REPO:/repo:ro,z"|--network:none) _sdprev= ;;
+      *) die "a host-systemd run may only mount the checkout read-only and drop the network; refused: $_w" ;;
+    esac
+  done
+  # The exec options, checked word by word: a forged --privileged or --user
+  # stops here.
+  _ifs=$IFS
+  IFS=$US
+  # shellcheck disable=SC2086
+  set -- $_sdopts
+  IFS=$_ifs
+  while [ "$#" -gt 0 ]; do
+    case "$1:${2:-}" in
+      -w:/*) ;;
+      -e:[A-Za-z_]*=*) case "${2%%=*}" in *[!A-Za-z0-9_]*) die "a host-systemd exec option sets '${2%%=*}', which is not a variable name" ;; esac ;;
+      *) die "a host-systemd exec option may only be -w or -e; refused: $1" ;;
+    esac
+    shift 2
+  done
+  _sdname=$(unique_name sdlc-systemd)
+  _sdrc=0
+  _ifs=$IFS
+  IFS=$US
+  # shellcheck disable=SC2086
+  set -- $_sdrun
+  IFS=$_ifs
+  shift 2
+  # Named to the traps before it exists: a signal during the start still
+  # removes it.
+  SD_LIVE=$_sdname
+  podman --events-backend=none run -d --rm --name "$_sdname" --log-driver=k8s-file \
+    --systemd=always --timeout "$SYSTEMD_LIFETIME" \
+    --cap-drop=all --cap-add="$SYSTEMD_CAPS" --security-opt=no-new-privileges \
+    --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
+    "$@" </dev/null >/dev/null || _sdrc=$?
+  case "$_sdrc" in
+    0) systemd_steps "$_sdname" "$_sdsecs" "$_sdopts" "$_sdready" "$_sdsteps" || _sdrc=$? ;;
+    125) printf '%s: podman could not create the container (exit 125); nothing was judged\n' "$ME" >&2
+         _sdrc=2 ;;
+    # Any other start status. A detached run returns before the container's own
+    # process can exit, so its status is never the service's or a test's: it is
+    # podman failing to start PID 1 (126 not executable, 127 not found, or some
+    # other podman error). No step ran and nothing produced a verdict, so it is a
+    # 2, as the header's contract says. A service that starts and then dies or
+    # never becomes ready is judged below, by systemd_steps.
+    *)   printf '%s: %s could not start systemd (exit %s); nothing was judged\n' "$ME" "$_sdimg" "$_sdrc" >&2
+         _sdrc=2 ;;
+  esac
+  step_cleanup
+  return "$_sdrc"
+}
+
+systemd_exec() {       # container options-group argv-group -> the exec's status
+  _ifs=$IFS
+  IFS=$US
+  # shellcheck disable=SC2086  # the words were checked by run_systemd
+  set -- $2 "$1" $3
+  IFS=$_ifs
+  podman --events-backend=none exec "$@" </dev/null
+}
+
+systemd_steps() {      # container timeout options probe steps -> 0, 1 or 2
+  # The probe's own output is dropped: a hundred "connection refused" lines
+  # say less than the one line below.
+  # A probe that hangs rather than fails is ended by the watchdog, a little
+  # after the loop would have given up on it.
+  _sdt0=$(now_s)
+  _sdi=0
+  systemd_watch "$1" $(( $2 + 5 ))
+  until systemd_exec "$1" "$3" "$4" >/dev/null 2>&1; do
+    _sdi=$(( $(now_s) - _sdt0 ))
+    if [ "$_sdi" -ge "$2" ]; then
+      kill "$_sdwd" 2>/dev/null || :
+      printf '%s: not ready after %ss: %s\n' "$ME" "$2" "$(printf '%s' "$4" | tr "$US" ' ')" >&2
+      systemd_diag "$1"
+      return 1
+    fi
+    _sdup=$(podman inspect --format '{{.State.Running}}' "$1" 2>/dev/null) || _sdup=gone
+    if [ "$_sdup" != true ]; then
+      kill "$_sdwd" 2>/dev/null || :
+      printf '%s: the container stopped before it was ready\n' "$ME" >&2
+      podman logs --tail 50 "$1" >&2 2>&1 || :
+      return 1
+    fi
+    sleep 2
+  done
+  kill "$_sdwd" 2>/dev/null || :
+  _sdi=$(( $(now_s) - _sdt0 ))
+  printf 'ready after %ss\n' "$_sdi"
+  _sdt0=$(now_s)
+  systemd_watch "$1" "$SYSTEMD_STEPS"
+  _ifs=$IFS
+  IFS='
+'
+  for _sdstep in $5; do
+    IFS=$_ifs
+    printf '\n== exec %s\n' "$(printf '%s' "$_sdstep" | tr "$US" ' ')"
+    _sdx=0
+    systemd_exec "$1" "$3" "$_sdstep" || _sdx=$?
+    [ "$_sdx" -eq 0 ] && continue
+    IFS=$_ifs
+    kill "$_sdwd" 2>/dev/null || :
+    # The watchdog removed the container: the step hung, and that is a finding.
+    if [ "$(( $(now_s) - _sdt0 ))" -ge "$SYSTEMD_STEPS" ]; then
+      printf '%s: the steps did not finish within %ss; the container was removed\n' \
+        "$ME" "$SYSTEMD_STEPS" >&2
+      return 1
+    fi
+    case "$_sdx" in
+      1) systemd_diag "$1"; return 1 ;;
+      *) printf '%s: the step exited %s; nothing was judged\n' "$ME" "$_sdx" >&2
+         systemd_diag "$1"; return 2 ;;
+    esac
+  done
+  IFS=$_ifs
+  kill "$_sdwd" 2>/dev/null || :
+  return 0
 }
 
 run_host() {           # argv [seconds] -> the step's verdict
@@ -936,7 +1198,13 @@ run_host() {           # argv [seconds] -> the step's verdict
 
 run_step() {           # mode payload -> the step's exit status
   _rs=0
+  # A host step's output is the repo's code talking -- a build's RUN, a test, a
+  # service's log. On Actions it must not be able to issue a workflow command
+  # (set an output, add a path, mask nothing). The image's own steps stop them
+  # themselves.
+  case "$1" in host*) commands_stop ;; esac
   _run_step "$@" || _rs=$?
+  commands_resume
   # Only a push may defer to CI. Anything else that reports 3 could not run.
   if [ "$_rs" -eq 3 ] && [ "${SDLC_TIER:-}" != push ]; then return 2; fi
   # Two statuses mean "not gating", and each comes from one place only:
@@ -975,6 +1243,10 @@ _run_step() {
         *) die "the image asked for an unknown local check: $2" ;;
       esac ;;
     host) run_host "$2" ;;
+    host-systemd)
+      _secs=${2%%"$US"*}
+      case "$_secs" in ''|*[!0-9]*) die "a host-systemd step must start with a number of seconds" ;; esac
+      run_systemd "$_secs" "${2#*"$US"}" ;;
     host-up|host-up-advisory)
       _secs=${2%%"$US"*}
       case "$_secs" in ''|*[!0-9]*) die "a host-up step must start with a number of seconds" ;; esac
@@ -1002,7 +1274,6 @@ run_serial() {         # the plan -> its worst step status
   _scur_took=0
   _sidx=0
   _ifs=$IFS
-  set -f
   IFS='
 '
   for _line in $1; do
@@ -1044,7 +1315,6 @@ run_serial() {         # the plan -> its worst step status
     fi
   done
   IFS=$_ifs
-  set +f
   _close_serial
   return "$_worst"
 }
@@ -1135,7 +1405,8 @@ run_lane() {           # lane-index steps-file lane-cpus [lane-memory] -> the la
   # However this subshell ends -- a step's `die` exits it where it stands -- the
   # check it was on must get a verdict file and the lane must get its done
   # marker, or the printer waits for a block that is never coming.
-  trap 'printf "2\n" > "$OUT/rc.${_cur:-0}"; printf "2\n" > "$OUT/lane-done.$_k"' EXIT
+  # shellcheck disable=SC2016  # expanded when the trap runs
+  on_exit 'printf "2\n" > "$OUT/rc.${_cur:-0}"; printf "2\n" > "$OUT/lane-done.$_k"'
 
   # `index TAB check TAB mode TAB payload`: the lane is gone, this file is one,
   # and the index into the print order was resolved when the file was written
@@ -1203,7 +1474,8 @@ run_split() {          # the plan -> the worst status, one lane streaming
   # sequential path -- same output, live, as a repo with one lane has always had
   # -- and the others run beside it, buffered, and are printed whole after it.
   OUT=$(mktemp -d) || die "cannot create a scratch directory for the lane logs"
-  trap 'rm -rf "$OUT"; record_finish 2; unpin_hook_index' EXIT HUP INT TERM
+  # shellcheck disable=SC2016  # expanded when the trap runs
+  on_exit 'rm -rf "$OUT"; record_finish 2; unpin_hook_index'
 
   printf '%s\n' "$1" | cut -f1 | awk '!seen[$0]++' > "$OUT/order"
   printf '%s\n' "$1" | cut -f2 | awk '!seen[$0]++' > "$OUT/lanes"
@@ -1268,7 +1540,8 @@ run_split() {          # the plan -> the worst status, one lane streaming
 
 run_lanes() {          # the plan -> the worst status of every lane
   OUT=$(mktemp -d) || die "cannot create a scratch directory for the lane logs"
-  trap 'rm -rf "$OUT"; record_finish 2; unpin_hook_index' EXIT HUP INT TERM
+  # shellcheck disable=SC2016  # expanded when the trap runs
+  on_exit 'rm -rf "$OUT"; record_finish 2; unpin_hook_index'
 
   # The checks in plan order, first appearance: the order blocks are printed in.
   printf '%s\n' "$1" | cut -f1 | awk '!seen[$0]++' > "$OUT/order"
@@ -1422,7 +1695,7 @@ unpin_hook_index() {
 
 run_plan() {           # commit | push | ci | <check>
   pin_hook_index
-  trap 'unpin_hook_index' EXIT HUP INT TERM
+  on_exit 'unpin_hook_index'
   # The image asks this to decide whether CodeQL may defer to CI.
   SDLC_TIER=$1
   export SDLC_TIER
@@ -1434,7 +1707,7 @@ run_plan() {           # commit | push | ci | <check>
   # However this ends -- a step's `die`, a signal -- the record is rendered from
   # whatever was finished. 2 because the only way out through here is a gate
   # that could not run; every ordinary ending goes through the call below.
-  trap 'record_finish 2; unpin_hook_index' EXIT HUP INT TERM
+  on_exit 'record_finish 2; unpin_hook_index'
 
   _n=$(printf '%s\n' "$_plan" | awk -F"$TAB" '!seen[$2]++ {n++} END {print n + 0}')
   # How many of those lanes run a container, which decides which executor can

@@ -26,6 +26,29 @@ All notable changes to this project are documented here, following
   candidate was gone) is rebuilt on it too, never adopted on the old parent.
 - `containerfile-lint` lints every `[[tool.sdlc.images]]` Containerfile with
   the root one, and `sdlc` accepts the `images` key.
+- The `command` kind: a repo's own test as an argv list, run in a nested
+  container with the repo read-only at `/repo`, no capabilities and no network
+  unless `network = true`. It runs in the gate image by default, or in any
+  `image`, including one an `image-build` check in the same command tags, which
+  it then follows in that build's lane. It is how a repo's extra workflows
+  (node test files, a lint script, pytest on another Python, browser tests)
+  move into `[tool.sdlc.ci]` and run the same under `sdlc ci` locally and in CI.
+  Never a shell string: `argv[0]` is the entrypoint and the rest its arguments.
+- `command` with `systemd = true`: the test runs against the image booted with
+  systemd as PID 1. The launcher polls a `ready` argv for up to `timeout`
+  seconds, execs each `setup` argv and then `argv` in order, and removes the
+  container however that ended (conmon's `--timeout` and `--rm` catch a gate
+  killed outright). systemd gets back `SETUID`, `SETGID`, `SETPCAP`, `CHOWN`,
+  `FOWNER`, `DAC_OVERRIDE`, `KILL` and `NET_BIND_SERVICE`, keeps
+  `no-new-privileges`, and has no network unless asked; on Actions, workflow
+  commands stay stopped while it runs. A hung probe ends at `timeout`, and the
+  setup steps and the test share a 30-minute budget, past which the step is a
+  finding and the container is removed. A cancelled gate (INT, TERM, HUP)
+  removes the container before it exits. Each container's name carries its
+  lane and a random suffix, so two lanes starting in the same second cannot
+  share a name and remove each other's container. The plan carries it as a new `host-systemd` mode whose run and exec
+  options `bin/sdlc` checks word by word. This is what lets a repo whose
+  backend tests need its database and API up drop its own test workflow.
 
 ### Fixed
 
@@ -38,6 +61,23 @@ All notable changes to this project are documented here, following
   uncached runner class, as the live one does, never the cached class.
 - A candidate annotation that is not a JSON object is reported in the log
   before it is ignored, rather than silently.
+- `bin/sdlc` no longer expands glob patterns on the host. A plan's argv words
+  were split unquoted, so a repo's `"/home/*/.ssh/*"` was matched against the
+  runner's own filesystem before podman saw it. Pathname expansion is now off
+  for the whole script.
+- A plain `host` step (an image build, `command` without systemd, a smoke
+  run) now stops workflow commands on Actions while it runs, as a host-systemd
+  step already did. Repo code's output could set an output or add a path.
+- An INT, TERM or HUP now ends `bin/sdlc` with 2 after its cleanup, instead of
+  running the cleanup and carrying on with the next check.
+- A `pytest-in-image` or `command` listed before the `image-build` that tags
+  its image ran first, in the shared lane, against an image that did not exist
+  yet (podman exit 125). The plan now puts each build ahead of the checks that
+  run its image; every other check keeps the order `checks` gives it.
+- `scripts/convert_repo.py` no longer writes container-release's
+  `default-branch` into `[tool.sdlc.image]`, which the image job refuses. Every
+  job reads the default branch from the event; a converted repo that already
+  has the key should delete it.
 
 ## [0.14.1] - 2026-11-24
 

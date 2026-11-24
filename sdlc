@@ -771,6 +771,11 @@ def kind_of(cfg: dict, name: str) -> str | None:
 #     host-up-advisory      host-up whose finding is printed as ADVISORY and
 #                           does not fail the command (container-smoke without
 #                           `gate = true`)
+#     host-systemd          seconds, then argv GROUPS split by the step
+#                           separator 0x1a: a `podman run` of an image with
+#                           systemd as PID 1, the `podman exec` options, the
+#                           readiness probe polled for up to <seconds>, and the
+#                           steps exec'd in order (`command` with systemd)
 #
 # bin/sdlc refuses a host line that does not start with `podman`, so the host
 # contract is held by the launcher rather than trusted to the config. It splits
@@ -780,9 +785,14 @@ def kind_of(cfg: dict, name: str) -> str | None:
 # shell.
 
 UNIT_SEPARATOR = "\x1f"
+# Between the argv groups of one host-systemd step. Refused in any value, as the
+# unit separator is, so a config word cannot start a group of its own. Not the
+# ASCII record separator (0x1e): Python's splitlines() breaks a line there, and
+# the image job reads this plan with it.
+STEP_SEPARATOR = "\x1a"
 # Modes whose payload is a separator-joined argv, already checked word by word.
-HOST_MODES = ("host", "host-up", "host-up-advisory")
-FORBIDDEN_IN_PLAN = ("\t", "\n", "\r", UNIT_SEPARATOR)
+HOST_MODES = ("host", "host-up", "host-up-advisory", "host-systemd")
+FORBIDDEN_IN_PLAN = ("\t", "\n", "\r", UNIT_SEPARATOR, STEP_SEPARATOR)
 
 
 def plain(value: str, where: str) -> str:
@@ -902,9 +912,37 @@ def runs_image(cfg: dict, check: str) -> str | None:
     """The image this check runs or reads, or None when it uses none."""
     if check in ("container-smoke", "container-scan", "bootc-lint"):
         return container_image(cfg, check_settings(cfg, check))
-    if kind_of(cfg, check) == "pytest-in-image":
+    kind = kind_of(cfg, check)
+    if kind == "pytest-in-image":
         return str(check_settings(cfg, check).get("image", default_image_tag()))
+    if kind == "command" and "image" in check_settings(cfg, check):
+        return str(check_settings(cfg, check)["image"])
     return None
+
+
+def builds_first(cfg: dict, checks: list[str]) -> list[str]:
+    """`checks` in run order: a build before every check that runs what it tags.
+
+    lane_of puts a build and its consumers in one lane, and a lane runs in plan
+    order, so `checks = ["py311", "build-py311"]` would run py311 against an
+    image that does not exist yet (podman exit 125). Each consumer pulls the
+    not-yet-placed builds of its image in ahead of itself; every other check
+    keeps the place the repo gave it.
+    """
+    builders: dict[str, list[str]] = {}
+    for check in checks:
+        tag = builds_image(cfg, check)
+        if tag is not None:
+            builders.setdefault(tag, []).append(check)
+    out: list[str] = []
+    for check in checks:
+        image = runs_image(cfg, check)
+        for build in builders.get(image, []) if image is not None else []:
+            if build not in out:
+                out.append(build)
+        if check not in out:
+            out.append(check)
+    return out
 
 
 def t_plan(target: str) -> int:
@@ -919,7 +957,7 @@ def t_plan(target: str) -> int:
     if line:
         print(line, file=sys.stderr)
     lanes = lane_of(cfg, checks)
-    for check in checks:
+    for check in builds_first(cfg, checks):
         lane = plain(lanes[check], "a lane name")
         for name, mode, payload in plan_lines(cfg, check):
             plain(name, "a check name")
@@ -937,7 +975,7 @@ def t_tiers() -> int:
         lanes = lane_of(cfg, checks)
         parallel = len(set(lanes.values())) > 1
         print(f"sdlc {command}:")
-        for check in checks:
+        for check in builds_first(cfg, checks):
             kind = kind_of(cfg, check)
             note = f"  ({kind})" if kind else ""
             if parallel:
@@ -957,7 +995,9 @@ def t_tiers() -> int:
 #
 # A repo's own checks are named kinds with parameters, never shell. A repo that
 # needs something these cannot express gets a new kind HERE, so the config
-# stays something a person can read.
+# stays something a person can read. `command` is the one that runs a repo's
+# own program, and it takes an argv list: what reaches the process is exactly
+# the words in the config, with no shell to read them on the way.
 
 
 def project_name() -> str:
@@ -1127,9 +1167,166 @@ def kind_pytest_in_image(name: str, settings: dict) -> list[tuple[str, str, str]
     return [(name, "image-ro", "pytest-deps"), host_step(name, argv)]
 
 
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# systemd's readiness when a repo names none: `running` means every unit
+# started. A probe of the repo's own (an HTTP endpoint answering) replaces it.
+SYSTEMD_READY = ["systemctl", "is-system-running"]
+SYSTEMD_TIMEOUT = 180
+SYSTEMD_TIMEOUT_MAX = 1800
+# Keys that mean something only with `systemd = true`.
+SYSTEMD_ONLY = ("setup", "ready", "timeout")
+
+
+def command_argv(value: object, where: str) -> list[str]:
+    """One argv list: words, the first a program name and not a podman option."""
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        cannot(f'{where} must be a list of words, e.g. ["node", "--test"], never a shell string')
+    if not value:
+        cannot(f'{where} is required -- the command as a list, e.g. ["node", "--test"]')
+    # The entrypoint is a podman option's value, and an exec'd command follows a
+    # container name: one that podman would read as an option, or as the
+    # JSON-array form of --entrypoint, is refused.
+    if not value[0] or value[0].startswith(("-", "[")):
+        cannot(f"{where}: argv[0] {value[0]!r} is not a program name")
+    return list(value)
+
+
+def flag(name: str, settings: dict, key: str) -> bool:
+    value = settings.get(key, False)
+    if not isinstance(value, bool):
+        cannot(f"{name}: {key} must be true or false")
+    return value
+
+
+def command_context(name: str, settings: dict) -> tuple[str, str, dict[str, str], bool]:
+    """What every `command` shares: host repo, workdir in the container, env, network."""
+    network = flag(name, settings, "network")
+    host = os.environ.get("SDLC_HOST_REPO")
+    if not host:
+        cannot(f"{name}: run through bin/sdlc, which supplies the host paths")
+    workdir = in_repo(name, "workdir", settings.get("workdir", "."))
+    env = {
+        # Test runners that watch by default stop when they see CI.
+        "CI": "true",
+        "HOME": "/tmp",
+        "PYTHONPYCACHEPREFIX": "/tmp/pycache",
+        # The checkout belongs to the host's user, not the container's, and git
+        # refuses a repository it does not own.
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "*",
+    }
+    for key, value in table(settings, "env").items():
+        if not ENV_NAME.fullmatch(str(key)):
+            cannot(f"{name}: env {key!r} is not a variable name")
+        env[str(key)] = token(value)
+    return host, "/repo" if workdir == "." else f"/repo/{workdir}", env, network
+
+
+def kind_command(name: str, settings: dict) -> list[tuple[str, str, str]]:
+    """Run one argv in a nested container, with the repo mounted read-only at /repo.
+
+    For a repo's own test that no built-in runs: a node test file, a lint
+    script the repo keeps, the suite on a Python the gate image does not ship.
+    It is an ARGV LIST, never a shell string: argv[0] is the entrypoint, the
+    rest are its arguments, and nothing between this config and the process
+    parses them. A script the repo keeps is run by naming it, so the code that
+    runs is a file a reviewer sees, as `npm test` and pytest's are.
+
+    `image` defaults to this gate's own image (node, bash, git, gawk). Any
+    other is pulled, or built here first by an `image-build` check with that
+    tag, which shares its lane. No network unless `network = true`, and the
+    launcher drops every capability. The tree is read-only, so a tool that
+    writes is pointed at /tmp, which is a tmpfs.
+
+    `systemd = true` is the same command against a running service: see
+    `systemd_steps`.
+    """
+    argv = command_argv(settings.get("argv"), f"{name}.argv")
+    if flag(name, settings, "systemd"):
+        return systemd_steps(name, settings, argv)
+    for key in SYSTEMD_ONLY:
+        if key in settings:
+            cannot(f"{name}: {key} needs systemd = true")
+    host, workdir, env, network = command_context(name, settings)
+    image = GATE_IMAGE
+    if "image" in settings:
+        image = image_ref(name, "image", settings["image"])
+    out = [
+        "podman",
+        "run",
+        "--rm",
+        "-v",
+        f"{host}:/repo:ro,z",
+        "-w",
+        workdir,
+        "--tmpfs",
+        "/tmp:rw,exec,size=4g,mode=1777",
+    ]
+    if not network:
+        out += ["--network", "none"]
+    for key, value in env.items():
+        out += ["-e", f"{key}={value}"]
+    out += ["--entrypoint", argv[0], "--", image, *argv[1:]]
+    return [host_step(name, out)]
+
+
+def systemd_steps(name: str, settings: dict, argv: list[str]) -> list[tuple[str, str, str]]:
+    """`command` against a running service: the image boots systemd as PID 1.
+
+    For a test that needs the whole service up -- a database, the API, the
+    units the image ships. The launcher starts `image` detached with systemd
+    as PID 1, polls `ready` (an argv, exec'd until it exits 0) for up to
+    `timeout` seconds, then execs each `setup` argv in order and `argv` last,
+    and removes the container however that ended. Each is an exec into the one
+    container, so a step sees what the one before it left: rows a seed import
+    wrote, a unit a step restarted.
+
+    Every word is an argv, as for `command`: a step that needs a loop or a pipe
+    is a script in the repo, named by a step. The repo is read-only at /repo,
+    the steps run in `workdir` with `env`, and there is no network but the
+    container's own loopback unless `network = true`. The capabilities systemd
+    needs are the launcher's to grant (bin/sdlc's SYSTEMD_CAPS), never the
+    config's. The image is required: the gate's own does not boot systemd.
+    """
+    host, workdir, env, network = command_context(name, settings)
+    if "image" not in settings:
+        cannot(f"{name}: systemd = true needs image, the one that boots systemd")
+    image = image_ref(name, "image", settings["image"])
+    setup = settings.get("setup", [])
+    if not isinstance(setup, list):
+        cannot(f"{name}: setup must be a list of argv lists")
+    steps = [command_argv(step, f"{name}.setup[{i}]") for i, step in enumerate(setup)]
+    ready = SYSTEMD_READY
+    if "ready" in settings:
+        ready = command_argv(settings["ready"], f"{name}.ready")
+    timeout = settings.get("timeout", SYSTEMD_TIMEOUT)
+    if (
+        not isinstance(timeout, int)
+        or isinstance(timeout, bool)
+        or not 1 <= timeout <= SYSTEMD_TIMEOUT_MAX
+    ):
+        cannot(f"{name}: timeout must be a whole number of seconds from 1 to {SYSTEMD_TIMEOUT_MAX}")
+    run = ["podman", "run", "-v", f"{host}:/repo:ro,z"]
+    if not network:
+        run += ["--network", "none"]
+    run += ["--", image]
+    # The options every exec gets. `-w` and `-e` only: bin/sdlc refuses any
+    # other word here, so this group cannot carry a privilege.
+    options = ["-w", workdir]
+    for key, value in env.items():
+        options += ["-e", f"{key}={value}"]
+    groups = [run, options, ready, *steps, argv]
+    payload = STEP_SEPARATOR.join(
+        UNIT_SEPARATOR.join(plain(word, name) for word in group) for group in groups
+    )
+    return [(name, "host-systemd", f"{timeout}{UNIT_SEPARATOR}{payload}")]
+
+
 KINDS = {
     "image-build": kind_image_build,
     "pytest-in-image": kind_pytest_in_image,
+    "command": kind_command,
 }
 
 
