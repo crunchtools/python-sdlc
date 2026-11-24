@@ -209,21 +209,24 @@ def load_sdlc():
     return module
 
 
+CHECKER_EXIT = 7  # any code the checker returns is passed through unchanged
+
+
 def test_t_constitution_routes_by_manifest() -> None:
     sdlc = load_sdlc()
     ran: list[list[str]] = []
 
     def fake_run(cmd, **_kw):
         ran.append(cmd)
-        return (7, "")
+        return (CHECKER_EXIT, "")
 
     sdlc.run, sdlc.project_env = fake_run, dict
     with tempfile.TemporaryDirectory() as tmp:
         sdlc.REPO = Path(tmp)
-        assert sdlc.t_constitution({}) == 7, "the checker's exit code is the check's"
+        assert sdlc.t_constitution({}) == CHECKER_EXIT, "the checker's exit code is the check's"
         assert ran[-1] == ["sdlc-constitution", "check", tmp], ran
         write(".specify/memory/constitution.md", "# v1\n")(Path(tmp))
-        assert sdlc.t_constitution({}) == 7
+        assert sdlc.t_constitution({}) == CHECKER_EXIT
         assert ran[-1] == ["sdlc-validate", ".specify/memory/constitution.md"], ran
 
 
