@@ -26,6 +26,26 @@ All notable changes to this project are documented here, following
   - `gawk` is in the image for the launcher's scripts.
 
   Proven on Exedore's gha-runner VMs with an sdlc-dev build.
+- Every fleet job ran end to end in a sandbox repo (crunchtools/sdlc-dev):
+  pull request, finding reply, issue triage and auto-code, push, and release.
+  That surfaced four more bugs:
+  - `gate`, `release` and `verify_release` trusted `ashigaru-crunchtools[bot]`.
+    The App's slug is `ashigaru-crunchtools-com`, so `gate` refused every
+    Gatehouse review the App posted: "no review of it was posted".
+  - `image` and `pypi` never fetched the commit, so `image` found "no
+    Containerfile". `fetch_tree` moved to `_core` and runs first in `check`,
+    `image` and `pypi`.
+  - A streamed `podman build` returns no captured output, and `show()` raised
+    `TypeError` adding the two `None`s after a successful build.
+  - The converter copied container-release's `cascade` into
+    `[tool.sdlc.image]`, which `image` refuses. It's dropped now: every
+    default-branch push already moves `latest`.
+
+### Changed
+
+- The fleet file's `gate` job runs on `crunchtools-uncached` when the org's
+  runner label says so, like the other trusted jobs. It runs no repository
+  code, so a fork's PR is included.
 
 ## [0.12.2] - 2026-11-23
 
