@@ -28,7 +28,7 @@ jobs:
   test:  # the PR's own sdlc code, and nothing to steal: read-only contents, no secret, GitHub's machine
     name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
     if: github.event_name == 'pull_request'
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && vars.CACHED_RUNNER_LABEL || 'ubuntu-latest' }}  # a fork's PR on GitHub's machine
+    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}  # a fork's PR on GitHub's machine
     permissions: { contents: read }
     env: { MODE: test }
     steps:  # sdlc is public: the fetch needs no token and persists none; origin names the repo for the validator's exemptions

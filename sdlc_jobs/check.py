@@ -45,14 +45,16 @@ from sdlc_jobs._core import (
     FOUND,
     SEMVER,
     SOCKET,
+    Image,
     Tools,
     api,
+    build_arg_map,
     call,
     cannot,
     fetch_tree,
     final_stage,
     host_mount,
-    image_settings,
+    images,
     must,
     set_output,
     step,
@@ -110,7 +112,10 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         return CLEAN
     if default_push and gated_on_pr(tools, env, repo):
         return CLEAN
-    rc = gates(tools, env, root, skip=CONTAINER_GATES if made["candidate"] else ())
+    # The image job gates the root image only when it publishes it: `publish = false`
+    # keeps the container gates here, in `sdlc ci`.
+    root_in_image = made["candidate"] and any(i.root for i in images(root, repo))
+    rc = gates(tools, env, root, skip=CONTAINER_GATES if root_in_image else ())
     if default_push:
         upload_sarif(tools, env, repo)
     return rc
@@ -133,7 +138,7 @@ def make_plan(
         "weekly": cron == WEEKLY,
         "audit": None,
     }
-    has_image = containerfile(root) is not None
+    has_image = bool(images(root, repo))
     if default_push:
         out["image"] = has_image
         out["release"] = release_plan(tools, env, root, repo)
@@ -150,11 +155,12 @@ def make_plan(
 
 
 def candidate_repo(root: Path, repo: str) -> bool:
-    """An image a pull request can build: no RHSM or registry.redhat.io secret needed."""
-    if containerfile(root) is None:
-        return False
-    settings = image_settings(root, repo)
-    return not (settings.get("rhsm") or settings.get("redhat-registry"))
+    """Images a pull request can build: some, and none needs an RHSM or registry.redhat.io
+    secret (a sibling built FROM one could not be built either)."""
+    imgs = images(root, repo)
+    return bool(imgs) and not any(
+        i.settings.get("rhsm") or i.settings.get("redhat-registry") for i in imgs
+    )
 
 
 def fit(plan: dict[str, Any]) -> str:
@@ -298,28 +304,35 @@ def audit(tools: Tools, env: Mapping[str, str], root: Path) -> dict | None:
     return report
 
 
-def final_base(text: str) -> str | None:
+def final_base(text: str, overrides: Mapping[str, str] | None = None) -> str | None:
     """The image the last stage of a Containerfile is built on; None for scratch or unknown."""
-    found = final_stage(text, strict=False)
+    found = final_stage(text, strict=False, overrides=overrides)
     if found is None or not found[1] or found[1].lower() == "scratch":
         return None
     return found[1]
 
 
 def parent_moved(tools: Tools, root: Path, repo: str) -> bool:
-    """Has the final stage's FROM moved since the last published image was built on it?
+    """Has any image's final FROM moved since its published image was built on it?
 
-    Unreadable on either side is a 2: a poll that guessed "unchanged" would never rebuild.
+    One moved rebuilds them all: the image job builds every image, siblings in order,
+    so a moved base cascades into what is built FROM it. Unreadable on either side is
+    a 2: a poll that guessed "unchanged" would never rebuild.
     """
-    name = containerfile(root)
+    return any(moved(tools, root, img) for img in images(root, repo))
+
+
+def moved(tools: Tools, root: Path, img: Image) -> bool:
+    name = img.containerfile or containerfile(root)
     if name is None:
         return False
-    base = final_base((root / name).read_text(encoding="utf-8", errors="replace"))
+    text = (root / name).read_text(encoding="utf-8", errors="replace")
+    base = final_base(text, build_arg_map(img.settings))
     if base is None:
         return False
-    step(f"poll: {base}")
+    step(f"poll: {img.name} on {base}")
     now = must(tools, ["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{base}"]).strip()
-    published = f"{image_settings(root, repo)['image']}:latest"
+    published = f"{img.ref}:latest"
     raw = must(tools, ["skopeo", "inspect", f"docker://{published}"])
     try:
         built_on = json.loads(raw).get("Labels", {}).get(BASE_LABEL)

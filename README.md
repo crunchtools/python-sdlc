@@ -432,7 +432,7 @@ tests = ["tests/image/"]
 | `codeql` | `config` (default `.github/codeql/codeql-config.yml`), `baseline` (default `.sdlc/codeql-baseline.json`) |
 | `constitution` | `manifest` (default `.specify/memory/constitution.md`) |
 | `ruff-check`, `ruff-format`, `lint`, `mypy`, `gourmand`, `gatehouse`, `pip-audit`, `hooks-installed` | none |
-| `containerfile-lint` | `containerfiles` (default: the root Containerfile or Dockerfile), `threshold` |
+| `containerfile-lint` | `containerfiles` (default: the root Containerfile or Dockerfile and every `[[tool.sdlc.images]]` one), `threshold` |
 | `container-build` | the `image-build` kind's settings; `containerfile` defaults to the root one |
 | `container-smoke` | `gate` (default `false`: findings are advisory), `seconds` (default 10), `args`, `env`, `network` (default `false`), `image` |
 | `container-scan` | `fail_on` (default `critical`), `only_fixed` (default `true`), `image` |

@@ -48,6 +48,7 @@ nHVNg0KnBqqs/x+WThX8zEKaGmiZ2SM5336mPfJKZl68/lXBnoWlU0E9Tg==
 
 SEMVER = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
+BUILD_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=[^\x00-\x1f]*")
 BUILD_VAR = re.compile(r"\$(?:\{(?P<braced>\w+)(?::?-(?P<default>[^}]*))?\}|(?P<bare>\w+))")
 
 
@@ -355,6 +356,7 @@ def tool_sdlc(root: Path) -> dict:
 # repo is not refused, and printed as not enforced (crunchtools/sdlc#118).
 IMAGE_ENFORCED = {
     "image",
+    "publish",
     "containerfile",
     "context",
     "rhsm",
@@ -403,7 +405,139 @@ def image_settings(root: Path, repo: str) -> dict:
             "[tool.sdlc.image] containerfile and context are read from "
             "[tool.sdlc.ci.container-build]; move them there"
         )
+    if not isinstance(s.get("publish", True), bool):
+        cannot("[tool.sdlc.image] publish must be true or false")
     return s
+
+
+def build_args(settings: dict) -> list[str]:
+    """`build-args`, container-release's KEY=VALUE lines; or a 2."""
+    given = settings.get("build-args", "")
+    if not isinstance(given, str):
+        cannot("build-args must be a string of KEY=VALUE lines")
+    out = [kv.strip() for kv in given.splitlines() if kv.strip()]
+    for kv in out:
+        if not BUILD_ARG.fullmatch(kv):
+            cannot(f"build-args line {kv.split('=')[0]!r} is not KEY=VALUE")
+    return out
+
+
+def build_arg_map(settings: dict) -> dict[str, str]:
+    """build-args as the FROM lines read them: KEY -> VALUE."""
+    return dict(kv.split("=", 1) for kv in build_args(settings))
+
+
+# The images a repo publishes besides quay.io/crunchtools/<repo>, by repo. The
+# registry credentials are the org's, so this is the authority on who may push
+# where, and it lives HERE, reviewed in sdlc, never in the repo that benefits: a
+# repo's own config could otherwise name another repo's image. Not a prefix rule
+# either: `foo` claiming every `foo-*` would claim the image of a repo `foo-bar`.
+# images-rotv is a legacy name, kept because hosts pull it by that name.
+EXTRA_IMAGES: dict[str, tuple[str, ...]] = {
+    "crunchtools/acquacotta": ("acquacotta-base",),
+    "crunchtools/rotv": ("rotv-base", "rotv-dev", "images-rotv"),
+    "crunchtools/trentina": ("trentina-demo",),
+}
+# An extra image's entry: where it is built from, plus the image job's own settings.
+# `image` and `publish` are the root image's: an entry's name is its image.
+IMAGE_ENTRY_KEYS = (IMAGE_ENFORCED | IMAGE_NOT_ENFORCED | {"name"}) - {"image", "publish"}
+IMAGE_NAME = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
+
+
+def image_owner(path: str) -> str:
+    """The repo whose `promote` signs quay.io/<path> (`crunchtools/<name>`), as `owner/name`."""
+    name = path.rpartition("/")[2]
+    return next(
+        (repo for repo, names in EXTRA_IMAGES.items() if name in names), f"crunchtools/{name}"
+    )
+
+
+@dataclass
+class Image:
+    """One image a repo publishes: the root Containerfile's, or a `[[tool.sdlc.images]]` entry.
+
+    `containerfile` and `context` are repo-relative; the root image's are None, because
+    its build is container-build's plan, which names them.
+    """
+
+    name: str
+    settings: dict
+    containerfile: str | None = None
+    context: str | None = None
+
+    @property
+    def ref(self) -> str:
+        return f"quay.io/crunchtools/{self.name}"
+
+    @property
+    def root(self) -> bool:
+        return self.containerfile is None
+
+
+def in_checkout(root: Path, value: object, where: str, *, directory: bool) -> str:
+    """A repo-relative path that stays in the checkout after symlinks; or a 2."""
+    if not isinstance(value, str) or not value or value.startswith("/") or "\\" in value:
+        cannot(f"{where} must be a path relative to the repo root; got {value!r}")
+    real = (root / value).resolve()
+    if not real.is_relative_to(root.resolve()):
+        cannot(f"{where} {value!r} leaves the checkout")
+    if not (real.is_dir() if directory else real.is_file()):
+        cannot(f"{where} {value!r} is not a {'directory' if directory else 'file'} in the repo")
+    return value
+
+
+def images(root: Path, repo: str) -> list[Image]:
+    """Every image this repo publishes, checked: its root image unless `publish = false`,
+    then each `[[tool.sdlc.images]]` entry, in the order written.
+
+    An entry's `name` must be one EXTRA_IMAGES gives this repo. Its `containerfile`
+    (required) and `context` (default `.`) are read from the entry, and the rest of it
+    holds the same settings as `[tool.sdlc.image]`, for that image alone.
+    """
+    out: list[Image] = []
+    settings = image_settings(root, repo)
+    name = repo.rpartition("/")[2]
+    if settings.get("publish", True) and any(
+        (root / f).is_file() for f in ("Containerfile", "Dockerfile")
+    ):
+        out.append(Image(name, settings))
+    given = tool_sdlc(root).get("images", [])
+    if not isinstance(given, list) or not all(isinstance(e, dict) for e in given):
+        cannot("[tool.sdlc] images must be an array of tables, [[tool.sdlc.images]]")
+    for entry in given:
+        out.append(image_entry(root, repo, entry, [i.name for i in out]))
+    return out
+
+
+def image_entry(root: Path, repo: str, entry: dict, taken: list[str]) -> Image:
+    """One `[[tool.sdlc.images]]` entry, checked; `taken` are the names before it."""
+    extra = entry.get("name")
+    where = f"[[tool.sdlc.images]] {extra!r}"
+    allowed = EXTRA_IMAGES.get(repo, ())
+    if not isinstance(extra, str) or not IMAGE_NAME.fullmatch(extra):
+        cannot(f"[[tool.sdlc.images]] name must be an image name; got {extra!r}")
+    if extra not in allowed:
+        own = repo.rpartition("/")[2]
+        cannot(
+            f"{where}: {repo} may publish only {', '.join([own, *allowed])}; another "
+            "image is added to EXTRA_IMAGES in sdlc_jobs/_core.py, reviewed in sdlc"
+        )
+    if extra in taken:
+        cannot(f"{where} is named twice")
+    stray = sorted(set(entry) - IMAGE_ENTRY_KEYS)
+    if stray:
+        cannot(f"{where} has {', '.join(stray)}, which is no setting of an image")
+    if "containerfile" not in entry:
+        cannot(f"{where} needs containerfile")
+    cf = in_checkout(root, entry["containerfile"], f"{where} containerfile", directory=False)
+    ctx = in_checkout(root, entry.get("context", "."), f"{where} context", directory=True)
+    s = {k: v for k, v in entry.items() if k not in ("name", "containerfile", "context")}
+    for key in ("rhsm", "redhat-registry"):
+        if not isinstance(s.get(key, False), bool):
+            cannot(f"{where} {key} must be true or false")
+    if s.get("format", "docker") not in ("docker", "oci"):
+        cannot(f"{where} format must be docker or oci")
+    return Image(extra, s, cf, ctx)
 
 
 def plan(env: Mapping[str, str]) -> dict:
@@ -541,12 +675,15 @@ def expand_build_vars(image: str, args: Mapping[str, str], *, strict: bool) -> s
     return BUILD_VAR.sub(value, image)
 
 
-def final_stage(text: str, *, strict: bool) -> tuple[int, str] | None:
+def final_stage(
+    text: str, *, strict: bool, overrides: Mapping[str, str] | None = None
+) -> tuple[int, str] | None:
     """(index of the FROM the last stage is built on, its image), None without a FROM.
 
     Global ARG defaults are filled in, and a `FROM <earlier stage>` is followed back to
     the FROM that names a real image. Small on purpose: the root `sdlc` script's
     `final_base` is the thorough one. See `expand_build_vars` for `strict`.
+    `overrides` are the build's `--build-arg`s, which beat an ARG's default.
     """
     args: dict[str, str] = {}
     stages: list[tuple[str, str | None]] = []
@@ -558,6 +695,8 @@ def final_stage(text: str, *, strict: bool) -> tuple[int, str] | None:
                 {k: v.strip("\"'") for k, eq, v in (w.partition("=") for w in words[1:]) if eq}
             )
         elif op == "FROM":
+            if not stages:
+                args.update(overrides or {})
             rest = [w for w in words[1:] if not w.startswith("--")]
             if rest:
                 aliased = len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS"

@@ -6,6 +6,39 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `[tool.sdlc.image] publish = false`: a repo whose root Containerfile is a
+  reference image publishes nothing. `check` plans no image, no candidate and
+  no parent poll for it, and the container gates still run in `sdlc ci`.
+- More than one image per repo, with no change to ci.yml: each
+  `[[tool.sdlc.images]]` entry (`name`, `containerfile`, optional `context`,
+  and the `[tool.sdlc.image]` settings for that image) is built, gated, pushed
+  and promoted by the same `image` and `promote` jobs. An image built FROM a
+  sibling is built after it, on the digest this run pushed; the weekly and
+  parent-poll rebuilds rebuild every image, so a moved base cascades. A name
+  must be one `EXTRA_IMAGES` in `sdlc_jobs/_core.py` gives that repo
+  (rotv-base, rotv-dev, images-rotv; acquacotta-base; trentina-demo):
+  reviewed here, never by the repo that benefits.
+- A candidate is keyed by the image it publishes as,
+  `candidates:<image>-<tree>`, one annotation per image; a repo with one image
+  keeps the key it had. An image FROM a sibling the merge rebuilt (its
+  candidate was gone) is rebuilt on it too, never adopted on the old parent.
+- `containerfile-lint` lints every `[[tool.sdlc.images]]` Containerfile with
+  the root one, and `sdlc` accepts the `images` key.
+
+### Fixed
+
+- `[tool.sdlc.image] build-args` now choose the parent that is verified and
+  pinned, as they choose it in the build: rotv's `BASE_IMAGE` was verified and
+  pinned as the Containerfile's default, not as rotv-base.
+- A parent another repo publishes as an extra image (rotv-base, say) is
+  verified as signed by that repo, which is how promote signs it.
+- sdlc's next ci.yml (`examples/sdlc-ci.yml`) runs its `test` job on the
+  uncached runner class, as the live one does, never the cached class.
+- A candidate annotation that is not a JSON object is reported in the log
+  before it is ignored, rather than silently.
+
 ## [0.14.1] - 2026-11-24
 
 ### Fixed

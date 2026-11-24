@@ -1107,6 +1107,25 @@ Two things are new and go in spike #103:
    which holds no secret. The socket itself is never passed down to repo
    code.
 
+**No image, or several.** A repo whose root Containerfile is not a published
+image says `[tool.sdlc.image] publish = false`: no image job, no candidate, and
+the container gates stay in `check`. A repo with more images lists each one:
+
+```toml
+[[tool.sdlc.images]]
+name = "rotv-base"                 # quay.io/crunchtools/rotv-base
+containerfile = "Containerfile.base"
+# context = ".", and any [tool.sdlc.image] setting, for this image alone
+```
+
+The same `image` job builds them in dependency order, read from their FROM
+lines (build-args included), and an image FROM a sibling builds on the digest
+this run just pushed. Each is gated (build, scan, its own boot gate) and
+pushed only when it passed; `promote` re-validates and signs each. Which names
+a repo may publish is `EXTRA_IMAGES` in `sdlc_jobs/_core.py`, reviewed in sdlc:
+a prefix rule would let `foo` claim the image of a repo `foo-bar`, and the
+registry credentials are the org's.
+
 ## What stays as `uses:`
 
 Nothing, in any repo. The four kinds that exist today all go:

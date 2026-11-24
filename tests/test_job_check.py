@@ -549,6 +549,77 @@ def test_launcher_cache_is_named_by_its_host_path() -> None:
     assert child["SDLC_HOST_CACHE"].endswith("/sdlc-cache"), child
 
 
+# ------------------------------------------------------------------ publish, many images
+
+_core.EXTRA_IMAGES[REPO] = ("demo-base",)  # what sdlc would review
+OPT_OUT = {**IMAGE, "pyproject.toml": "[tool.sdlc.image]\npublish = false\n"}
+MANY = {
+    **IMAGE,
+    "Containerfile.base": "FROM quay.io/ubi/ubi10-minimal:latest\n",
+    "pyproject.toml": (
+        '[[tool.sdlc.images]]\nname = "demo-base"\ncontainerfile = "Containerfile.base"\n'
+    ),
+}
+
+
+def test_publish_false_plans_no_image_and_no_candidate_and_keeps_the_container_gates() -> None:
+    rc, plan = go("push", FakeTools(), files=OPT_OUT)
+    assert rc == 0 and plan["image"] is False
+    t = FakeTools()
+    t.head_repo = REPO
+    rc, plan = go("pull_request", t, files=OPT_OUT, ref="refs/pull/1/merge")
+    assert rc == 0 and plan["candidate"] is False and gated(t)
+    assert "SDLC_SKIP" not in t.launched[0][1]
+    t = FakeTools()
+    t.base = DIGEST_B
+    assert go("schedule", t, files=OPT_OUT, cron=check.POLL)[1]["image"] is False
+    assert not [a for a in t.argvs if a[0] == "skopeo"], "polled an image it does not publish"
+    rc, plan = go("schedule", FakeTools(), files=OPT_OUT, cron=check.WEEKLY)
+    assert plan["image"] is False
+
+
+def test_publish_false_with_an_extra_image_still_plans_it_but_gates_the_root_here() -> None:
+    files = {
+        **MANY,
+        "pyproject.toml": "[tool.sdlc.image]\npublish = false\n" + MANY["pyproject.toml"],
+    }
+    assert go("push", FakeTools(), files=files)[1]["image"] is True
+    t = FakeTools()
+    t.head_repo = REPO
+    rc, plan = go("pull_request", t, files=files, ref="refs/pull/1/merge")
+    assert rc == 0 and plan["candidate"] is True
+    assert "SDLC_SKIP" not in t.launched[0][1], "the root's gates must run here"
+
+
+def test_many_images_poll_each_parent() -> None:
+    t = FakeTools()
+    rc, plan = go("schedule", t, files=MANY, cron=check.POLL)
+    assert rc == 0 and plan["image"] is False
+    published = [a[-1] for a in t.argvs if a[:2] == ["skopeo", "inspect"] and "--format" not in a]
+    assert published == [
+        "docker://quay.io/crunchtools/demo:latest",
+        "docker://quay.io/crunchtools/demo-base:latest",
+    ], published
+    t = FakeTools()
+    t.base = DIGEST_B
+    assert go("schedule", t, files=MANY, cron=check.POLL)[1]["image"] is True
+
+
+def test_no_candidate_when_any_image_needs_rhsm() -> None:
+    files = {**MANY, "pyproject.toml": MANY["pyproject.toml"] + "rhsm = true\n"}
+    t = FakeTools()
+    t.head_repo = REPO
+    rc, plan = go("pull_request", t, files=files, ref="refs/pull/1/merge")
+    assert rc == 0 and plan["candidate"] is False
+
+
+def test_poll_reads_the_parent_build_args_choose() -> None:
+    text = "ARG B=reg/x:1\nFROM ${B}\n"
+    assert check.final_base(text, {"B": "quay.io/crunchtools/demo-base:latest"}) == (
+        "quay.io/crunchtools/demo-base:latest"
+    )
+
+
 def main() -> int:
     tests = {n: f for n, f in globals().items() if n.startswith("test_") and callable(f)}
     failed = 0

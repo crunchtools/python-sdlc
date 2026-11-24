@@ -3,8 +3,10 @@
 It holds the cosign key and the quay robot, and nothing that builds: it never runs
 the image and never calls the container socket. `image` built and gated the digest;
 this job trusts that output for one thing, WHICH digest, and re-validates the rest: a
-well-formed digest, the ref that is exactly `quay.io/crunchtools/<this repo>`, the sha
-that is this run's, and an image that exists at that digest.
+well-formed digest, the ref that is exactly `quay.io/crunchtools/<this repo>` or one
+EXTRA_IMAGES (sdlc_jobs/_core.py) gives this repo, the sha that is this run's, and an
+image that exists at that digest. A repo with more than one image hands on
+`{"images": [...]}`, and each is promoted in turn, by the same rules.
 
 A release is a plan until `write` agrees. When `check`'s plan has `release`, `write`
 must have succeeded, and the version comes ONLY from `write`'s output `SDLC_RELEASE`,
@@ -41,6 +43,7 @@ from sdlc_jobs._candidate import TREE_LABEL, tree_of
 from sdlc_jobs._core import (
     CLEAN,
     DIGEST,
+    EXTRA_IMAGES,
     FLEET_PUBLIC_KEY,
     SEMVER,
     Response,
@@ -110,18 +113,28 @@ def parse_json(raw: str | None, what: str) -> dict:
     return doc
 
 
-def validate_image(env: Mapping[str, str], repo: str) -> tuple[str, str]:
-    """(ref, digest) of what `image` built, after every check it does not get to skip."""
+def validate_image(env: Mapping[str, str], repo: str) -> list[tuple[str, str]]:
+    """(ref, digest) of each image `image` built, after every check it does not get to skip."""
     doc = parse_json(env.get("SDLC_IMAGE_RESULT"), "SDLC_IMAGE_RESULT")
-    ref = f"{QUAY}/{ORG}/{repo.rpartition('/')[2]}"
+    docs = doc.get("images") if "images" in doc else [doc]
+    if not isinstance(docs, list) or not docs or not all(isinstance(d, dict) for d in docs):
+        cannot("SDLC_IMAGE_RESULT images is not a list of images")
+    own = repo.rpartition("/")[2]
+    allowed = {f"{QUAY}/{ORG}/{n}" for n in (own, *EXTRA_IMAGES.get(repo, ()))}
     sha = env.get("GITHUB_SHA", "")
-    if not (isinstance(doc.get("digest"), str) and DIGEST.fullmatch(doc["digest"])):
-        cannot("image's digest is not a well-formed sha256 digest")
-    if doc.get("ref") != ref:
-        cannot(f"image's ref {doc.get('ref')!r} is not exactly {ref}")
-    if not COMMIT.fullmatch(sha) or doc.get("sha") != sha:
-        cannot(f"image built {doc.get('sha')!r}, not this run's commit {sha!r}")
-    return ref, doc["digest"]
+    out: list[tuple[str, str]] = []
+    for one in docs:
+        ref = one.get("ref")
+        if not (isinstance(one.get("digest"), str) and DIGEST.fullmatch(one["digest"])):
+            cannot("image's digest is not a well-formed sha256 digest")
+        if ref not in allowed:
+            cannot(f"image's ref {ref!r} is not exactly one of {', '.join(sorted(allowed))}")
+        if not COMMIT.fullmatch(sha) or one.get("sha") != sha:
+            cannot(f"image built {one.get('sha')!r}, not this run's commit {sha!r}")
+        if ref in (r for r, _ in out):
+            cannot(f"image's result names {ref} twice")
+        out.append((ref, one["digest"]))
+    return out
 
 
 def release_version(env: Mapping[str, str], planned: object) -> str | None:
@@ -157,22 +170,26 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         cannot("GITHUB_REPOSITORY is not owner/name")
     if not env.get("GITHUB_TOKEN"):
         cannot("GITHUB_TOKEN is required: a tag read without it fails open on a private repo")
-    ref, digest = validate_image(env, repo)
+    built = validate_image(env, repo)
     version = release_version(env, plan(env).get("release"))
     scratch = Path(tempfile.mkdtemp(prefix="sdlc-promote-", dir=env.get("RUNNER_TEMP") or None))
     scratch.chmod(0o700)
     (scratch / "docker").mkdir()
-    job = Job(tools, env, repo, ref, digest, scratch)
+    jobs = [Job(tools, env, repo, ref, digest, scratch) for ref, digest in built]
     try:
-        login(job)
-        job.labels = inspect_labels(job)
-        verify_built(job)
-        if version:
-            refuse_mislabelled(job, version)
-        moves = plan_tags(job, version)
-        sign(job, version)
-        attest(job)
-        move_tags(job, moves)
+        login(jobs[0])
+        # Every image is checked, and its tag moves decided, before anything is signed.
+        planned = []
+        for job in jobs:
+            job.labels = inspect_labels(job)
+            verify_built(job)
+            if version:
+                refuse_mislabelled(job, version)
+            planned.append((job, plan_tags(job, version)))
+        for job, moves in planned:
+            sign(job, version)
+            attest(job)
+            move_tags(job, moves)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     return CLEAN

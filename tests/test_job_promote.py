@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sdlc_jobs import promote
+from sdlc_jobs import _core, promote
 from sdlc_jobs._core import CannotRunError, Response, Tools
 from sdlc_jobs.image import FLEET_PUBLIC_KEY
 
@@ -66,6 +66,7 @@ class FakeTools(Tools):
         self.annotated: dict[str, str] = {}  # "1.2.3" -> the commit its tag object points at
         self.key = FLEET_PUBLIC_KEY
         self.gated: str | None = NEW  # what gated-<sha> resolves to; None: no such tag
+        self.gated_at: dict[str, str] = {}  # ref -> what its gated-<sha> resolves to, over gated
         self.api_status: int | None = None  # every GitHub answer, when set
         self.headers: list[Mapping[str, str]] = []
         self.image_missing = False  # the registry has no manifest at the digest
@@ -97,7 +98,8 @@ class FakeTools(Tools):
         if argv[1] == "inspect" and "--format" in argv:
             tag = target.rpartition(":")[2]
             if tag == f"gated-{SHA}":
-                return cp(0, self.gated) if self.gated else cp(1, "", "manifest unknown")
+                gated = self.gated_at.get(target.rpartition(":")[0], self.gated)
+                return cp(0, gated) if gated else cp(1, "", "manifest unknown")
             return cp(0, self.tags[tag]) if tag in self.tags else cp(1, "", "manifest unknown")
         if argv[1] == "inspect" and self.image_missing:
             return cp(1, "", "manifest unknown")
@@ -513,6 +515,54 @@ def test_provenance_refuses_malformed_or_mismatched_labels() -> None:
     for change in bad:
         assert promote.provenance({**built_labels(), **change}, REPO) is None, change
     assert promote.provenance({}, REPO) is None
+
+
+# ------------------------------------------------------------------ many images
+
+_core.EXTRA_IMAGES[REPO] = ("demo-base",)  # what sdlc would review
+
+
+def one(ref: str, digest: str = NEW) -> dict:
+    return {
+        "name": ref.rpartition("/")[2],
+        "ref": ref,
+        "digest": digest,
+        "sha": SHA,
+        "tag": f"gated-{SHA}",
+    }
+
+
+def test_many_images_are_each_signed_as_this_repo() -> None:
+    t = FakeTools()
+    t.labels[OLD] = built_labels()
+    t.gated_at[f"{REF}-base"] = OLD
+    rc = go(t, result={"images": [one(f"{REF}-base", OLD), one(REF)], "sha": SHA})
+    assert rc == 0
+    signed = [a[-1] for a in t.signs()]
+    assert signed == [f"{REF}-base@{OLD}", f"{REF}@{NEW}"], signed
+    assert all(f"repo={REPO}" in a for a in t.signs())
+
+
+def test_an_image_this_repo_may_not_publish_is_refused_before_anything() -> None:
+    for ref in (
+        "quay.io/crunchtools/rotv-base",
+        "quay.io/crunchtools/demo-evil",
+        f"{REF}-base:latest",
+    ):
+        t = FakeTools()
+        msg = refused(t, result={"images": [one(REF), one(ref)]})
+        assert "is not exactly one of" in msg and not t.argvs, (ref, msg)
+    for bad in ({"images": []}, {"images": "x"}, {"images": [one(REF), one(REF)]}):
+        t = FakeTools()
+        refused(t, result=bad)
+        assert not t.argvs, bad
+
+
+def test_one_image_that_does_not_check_out_signs_none() -> None:
+    t = FakeTools()
+    t.labels[OLD] = {}
+    msg = refused(t, result={"images": [one(REF), one(f"{REF}-base", OLD)]})
+    assert "neither this run's" in msg, msg
 
 
 def main() -> int:

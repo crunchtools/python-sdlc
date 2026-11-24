@@ -339,6 +339,14 @@ def containerfile() -> str | None:
     return next((f for f in CONTAINERFILES if (REPO / f).is_file()), None)
 
 
+def image_containerfiles() -> list[str]:
+    """Each `[[tool.sdlc.images]]` entry's `containerfile`, in the order written."""
+    given = config_document().get("tool", {}).get("sdlc", {}).get("images", [])
+    if not isinstance(given, list) or not all(isinstance(e, dict) for e in given):
+        cannot("[tool.sdlc] images must be an array of tables, [[tool.sdlc.images]]")
+    return [e["containerfile"] for e in given if "containerfile" in e]
+
+
 BUILD_VAR = re.compile(r"\$(?:\{(?P<braced>\w+)(?::?-(?P<default>[^}]*))?\}|(?P<bare>\w+))")
 FROM_AS_WORDS = 3  # image, AS, name
 
@@ -552,7 +560,8 @@ def sdlc_config() -> dict:
     stray = sorted(
         set(cfg)
         - set(COMMANDS)
-        - {"project", "stacks", "skip-stacks", "image", "publish", "repo-kinds"}
+        # `images` is the image job's [[tool.sdlc.images]]: sdlc_jobs checks it.
+        - {"project", "stacks", "skip-stacks", "image", "images", "publish", "repo-kinds"}
     )
     if stray:
         cannot(
@@ -1328,7 +1337,11 @@ HADOLINT_PARSE_FAILURE = re.compile(r"^\S+:\d+:\d+ ", re.M)
 
 
 def t_containerfile_lint(s: dict) -> int:
-    """hadolint over the Containerfile, with the repo's own `.hadolint.yaml`.
+    """hadolint over the Containerfiles, with the repo's own `.hadolint.yaml`.
+
+    By default that is the root Containerfile and every `[[tool.sdlc.images]]`
+    one, so each image the image job publishes is linted; `containerfiles` names
+    them instead.
 
     Without a config the threshold is `error` and the fleet's deliberate
     choices (HADOLINT_FLEET_IGNORES) are not reported: a warning such as
@@ -1339,10 +1352,9 @@ def t_containerfile_lint(s: dict) -> int:
     """
     files = names(s.get("containerfiles"), "containerfile-lint.containerfiles")
     if not files:
-        found = containerfile()
-        if found is None:
+        files = [*filter(None, [containerfile()]), *image_containerfiles()]
+        if not files:
             cannot("there is no Containerfile or Dockerfile at the repo root to lint")
-        files = [found]
     files = [in_repo("containerfile-lint", "containerfiles", f) for f in files]
     cmd = ["hadolint", "--no-color"]
     threshold = s.get("threshold")
