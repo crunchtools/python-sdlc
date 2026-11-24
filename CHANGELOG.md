@@ -22,7 +22,10 @@ All notable changes to this project are documented here, following
   reviewed here, never by the repo that benefits.
 - A candidate is keyed by the image it publishes as,
   `candidates:<image>-<tree>`, one annotation per image; a repo with one image
-  keeps the key it had.
+  keeps the key it had. An image FROM a sibling the merge rebuilt (its
+  candidate was gone) is rebuilt on it too, never adopted on the old parent.
+- `containerfile-lint` lints every `[[tool.sdlc.images]]` Containerfile with
+  the root one, and `sdlc` accepts the `images` key.
 
 ### Fixed
 

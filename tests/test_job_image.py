@@ -1613,6 +1613,28 @@ def test_many_images_adopt_each_candidate_by_its_own_key() -> None:
     assert copies == [f"docker://{OWN}-base:gated-{SHA}", f"docker://{OWN}:gated-{SHA}"], copies
 
 
+def test_an_image_from_a_sibling_rebuilt_here_is_rebuilt_not_adopted() -> None:
+    t = FakeTools()
+    t.candidate = candidate_labels()
+    # The base's candidate is gone; the app's, built on the old base, is still there.
+    t.annotations = [
+        {
+            "title": _candidate.TITLE,
+            "message": json.dumps(
+                {"candidate": f"{_candidate.CANDIDATES}:demo-{TREE}", "digest": PUSHED}
+            ),
+        }
+    ]
+    rc, result = go(t, APP_FILE, files=MANY)
+    assert rc == 0 and result is not None, t.log
+    assert not any(a[:2] == ["skopeo", "copy"] for a in t.argvs), "the app's candidate was adopted"
+    pushes = [a[-1] for a in t.argvs if a[4:5] == ["push"]]
+    assert pushes == [f"docker://{OWN}-base:gated-{SHA}", f"docker://{OWN}:gated-{SHA}"], pushes
+    app = [a for a in t.argvs if a[4:5] == ["build"]][1]
+    assert app[app.index("--from") + 1] == f"{OWN}-base@{PUSHED}", app
+    assert "candidate" not in result["images"][1], result
+
+
 def test_an_image_the_allowlist_does_not_give_this_repo_is_refused() -> None:
     for name in ("trentina-demo", "demo-evil", "demo"):
         files = {

@@ -140,6 +140,7 @@ class Job:
     settings: dict = field(default_factory=dict)  # the image being built's settings, checked
     boot: Boot | None = None  # its boot gate, checked; None is none asked for
     images: list[Image] = field(default_factory=list)  # every image, in build order
+    needs: dict[str, set[str]] = field(default_factory=dict)  # name -> siblings it is FROM
     built: dict[str, Parent] = field(default_factory=dict)  # name -> pushed this run
     results: list[dict] = field(default_factory=list)  # what promote takes, per image
     bootc: bool = False  # the plan has bootc-lint: build OCI
@@ -207,7 +208,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         build_args(img.settings)
         for key in sorted(IMAGE_NOT_ENFORCED & set(img.settings)):
             print(f"image: {img.name}: {key} is not enforced here (crunchtools/sdlc#118)")
-    job.images = build_order(root, job.images)
+    job.images, job.needs = build_order(root, job.images)
     job.child_env = {k: v for k, v in env.items() if k not in SECRETS}
     job.child_env["REGISTRY_AUTH_FILE"] = str(job.auth)
     job.event = event_name
@@ -226,15 +227,23 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
 def build_and_push(job: Job) -> int:
     """Each image in build order: adopt its candidate or build, gate and push it.
 
-    An image built FROM a sibling this run pushed builds on that digest. A gate that
-    finds something stops the run there: nothing after it is built or pushed.
+    An image built FROM a sibling this run pushed builds on that digest. One FROM a
+    sibling this run rebuilt is never adopted: its candidate's layers are the old
+    parent's. A gate that finds something stops the run there: nothing after it is
+    built or pushed.
     """
     login(job)
     plan: dict[str, tuple[str, str]] | None = None
     found = False
+    rebuilt: set[str] = set()  # built here, not adopted
     for img in job.images:
         job.settings, job.boot = img.settings, boot_settings(img.settings)
-        if job.event == "push" and adopt(job, img):
+        fresh = sorted(job.needs.get(img.name, set()) & rebuilt)
+        if fresh and job.event == "push":
+            print(
+                f"image: {img.name} is FROM {', '.join(fresh)}, rebuilt here: building", flush=True
+            )
+        elif job.event == "push" and adopt(job, img):
             continue
         if plan is None:
             step("map the workspace and plan the gates")
@@ -244,6 +253,7 @@ def build_and_push(job: Job) -> int:
             found = lint(job)
         if build_one(job, img, plan, found) == FOUND:
             return FOUND
+        rebuilt.add(img.name)
     hand_on(job)
     return CLEAN
 
@@ -354,8 +364,9 @@ def extra_gates(job: Job, plan: dict[str, tuple[str, str]], tag: str) -> dict[st
     return out
 
 
-def build_order(root: Path, imgs: list[Image]) -> list[Image]:
-    """`imgs` with every image after the siblings it is built FROM; a cycle is a 2."""
+def build_order(root: Path, imgs: list[Image]) -> tuple[list[Image], dict[str, set[str]]]:
+    """`imgs` with every image after the siblings it is built FROM, and each image's
+    siblings by name; a cycle is a 2."""
     names = {i.name for i in imgs}
     needs: dict[str, set[str]] = {}
     for img in imgs:
@@ -379,7 +390,7 @@ def build_order(root: Path, imgs: list[Image]) -> list[Image]:
         if not ready:
             cannot(f"the images are built FROM each other in a cycle: {sorted(names)}")
         out.append(ready[0])
-    return out
+    return out, needs
 
 
 def candidate_possible(job: Job) -> bool:

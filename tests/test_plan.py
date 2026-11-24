@@ -683,6 +683,55 @@ check(
 )
 
 
+def hadolinted(files: dict[str, str], settings: dict | None = None) -> list[str]:
+    """The files containerfile-lint hands hadolint over a tree of `files`."""
+    seen: list[list[str]] = []
+    saved = (S.REPO, S.run)
+    with tempfile.TemporaryDirectory() as root:
+        for rel, body in files.items():
+            Path(root, rel).write_text(body)
+        S.REPO = Path(root)
+        S.run = lambda cmd, **_: (seen.append(cmd), (0, ""))[1]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                S.sdlc_config()  # [[tool.sdlc.images]] is the image job's key, not a stray
+                S.t_containerfile_lint(settings or {})
+        finally:
+            S.REPO, S.run = saved
+    return [w for w in seen[0] if w in files]
+
+
+IMAGES_TOML = '[[tool.sdlc.images]]\nname = "x-base"\ncontainerfile = "Containerfile.base"\n'
+check(
+    "hadolint lints the root Containerfile and every [[tool.sdlc.images]] one",
+    hadolinted(
+        {
+            "pyproject.toml": IMAGES_TOML,
+            "Containerfile": "FROM a\n",
+            "Containerfile.base": "FROM b\n",
+        }
+    )
+    == ["Containerfile", "Containerfile.base"],
+)
+check(
+    "hadolint lints an extra image's Containerfile with no root one",
+    hadolinted({"pyproject.toml": IMAGES_TOML, "Containerfile.base": "FROM b\n"})
+    == ["Containerfile.base"],
+)
+check(
+    "containerfiles still names exactly what is linted",
+    hadolinted(
+        {
+            "pyproject.toml": IMAGES_TOML,
+            "Containerfile": "FROM a\n",
+            "Containerfile.base": "FROM b\n",
+        },
+        {"containerfiles": ["Containerfile"]},
+    )
+    == ["Containerfile"],
+)
+
+
 # The node stack. Its planned order is DEFAULTS' order, so lint is first of
 # the three, then test, and the audit sits beside the constitution at the end.
 check(
