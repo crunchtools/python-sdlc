@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-11-24
+
 ### Fixed
 
 - `sdlc event`'s check job works against a runner's container socket
