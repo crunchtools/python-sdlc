@@ -660,9 +660,11 @@ t_gatehouse() {
 
   step "gatehouse over $_base...HEAD"
   # The diff goes in on stdin so the container needs no git credentials and no
-  # network to origin.
+  # network to origin. `sdlc-constitution gatehouse` hands a repo on constitution
+  # v2 the image's text plus its README section; a v1 repo keeps Gatehouse's own
+  # discovery of its manifest.
   git diff "$_base...HEAD" | run_in_image ro stdin \
-    --env-file "$_env" ${_keymount:+-v "$_keymount"} -i "$IMAGE" gatehouse
+    --env-file "$_env" ${_keymount:+-v "$_keymount"} -i "$IMAGE" sdlc-constitution gatehouse
 }
 
 # ------------------------------------------------------------------- the record

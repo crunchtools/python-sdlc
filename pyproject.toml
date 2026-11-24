@@ -104,3 +104,6 @@ max-complexity = 10
 # fake credentials ("tok", a fake App key) so nothing real is ever near a test.
 "tests/test_event_*.py" = ["S101", "PLR2004", "S105", "S106"]
 "tests/fake_github.py" = ["S101", "PLR2004", "S105", "S106"]
+
+[tool.sdlc]
+repo-kinds = ["container-image"]
