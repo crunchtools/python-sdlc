@@ -6,6 +6,18 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `sdlc push`'s Gatehouse verdict is CI's. Gatehouse exits non-zero only on a
+  finding every sample blocked on, but the fleet's `gate` holds a pull request
+  for every CRITICAL, HIGH and MEDIUM finding it posts, and for Bug Hunter's
+  and Security Scan's LOWs. A push could pass locally and fail CI on the same
+  finding. `t_gatehouse` now reads `--consensus-json` and fails on those, so
+  each is fixed or judged in gatehouse-findings.toml before CI runs. The rule
+  lives once, in `sdlc_jobs/_findings.py`: `ai` passes its agents to
+  Gatehouse, `gate` judges posted findings by it, and `sdlc push` judges
+  local ones by it, so the three cannot drift apart.
+
 ## [0.12.4] - 2026-11-24
 
 ### Fixed

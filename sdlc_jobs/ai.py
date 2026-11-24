@@ -33,6 +33,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from sdlc_jobs import _findings
 from sdlc_jobs import _tools as tools
 from sdlc_jobs._github import (
     APP_LOGIN,
@@ -53,7 +54,7 @@ from sdlc_jobs._github import (
 from sdlc_jobs._handoff import NAMES, TooLargeError, encode
 
 PATCH = "application/vnd.github.patch"
-REQUIRED_LOW_AGENTS = "Bug Hunter,Security Scan"
+REQUIRED_LOW_AGENTS = ",".join(_findings.REQUIRED_LOW_AGENTS)
 COMPLETE = "<!-- gatehouse review complete -->"
 FAILED = "<!-- gatehouse review failed -->"
 RELEASE_BRANCH = "ashigaru/release-"

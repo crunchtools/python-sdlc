@@ -2565,23 +2565,63 @@ def t_gourmand(s: dict) -> int:
     return run(["gourmand", "check", "--full", "."])[0]
 
 
+def ci_required_findings(consensus: dict) -> list[dict]:
+    """The reported findings CI's gate would hold a pull request for.
+
+    `--consensus-json` lists only what Gatehouse reports, after dropping what
+    gatehouse-findings.toml has judged, so every record is one CI would post.
+    The rule is sdlc_jobs._findings', the one the `gate` job applies.
+    """
+    requires_answer = job_module("_findings").requires_answer
+    return [
+        f
+        for f in consensus.get("findings", [])
+        if requires_answer(str(f.get("severity", "")), str(f.get("agent", "")))
+    ]
+
+
 def t_gatehouse(s: dict) -> int:
     """Review the branch. The diff arrives on stdin, computed by the host.
 
     It is the host's job because the diff needs origin fetched, which needs the
     developer's git credentials and network -- neither of which belongs in this
-    container.
+    container. The verdict is CI's: a finding the fleet's gate would make the
+    pull request answer fails here too, so it is fixed, or judged in
+    gatehouse-findings.toml, before a CI cycle is spent finding it.
     """
     diff = sys.stdin.buffer.read()
     if not diff.strip():
         print("nothing to review: the diff is empty")
         return 0
     samples = os.environ.get("SDLC_GATEHOUSE_SAMPLES")
-    cmd = ["gatehouse", "--stdin"]
-    if samples:
-        cmd += ["--samples", samples]
-    step(f"gatehouse --stdin ({len(diff)} bytes)")
-    return run(cmd, stdin=diff)[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        consensus = Path(tmp) / "consensus.json"
+        required_low = job_module("_findings").REQUIRED_LOW_AGENTS
+        cmd = [
+            "gatehouse",
+            "--stdin",
+            "--required-low-agents",
+            ",".join(required_low),
+            "--consensus-json",
+            str(consensus),
+        ]
+        if samples:
+            cmd += ["--samples", samples]
+        step(f"gatehouse --stdin ({len(diff)} bytes)")
+        rc = run(cmd, stdin=diff)[0]
+        if rc != 0:
+            return rc
+        try:
+            required = ci_required_findings(json.loads(consensus.read_text()))
+        except (OSError, ValueError) as err:
+            cannot(f"gatehouse wrote no readable --consensus-json ({err})")
+    if required:
+        print(
+            f"{len(required)} finding(s) above are ones CI's gate would hold the pull "
+            f"request for: fix each, or judge it in gatehouse-findings.toml"
+        )
+        return 1
+    return 0
 
 
 def t_semgrep(s: dict) -> int:
