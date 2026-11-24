@@ -246,6 +246,70 @@ def test_each_break_is_caught() -> None:
         assert any(f.startswith(f"{principle}:") for f in got), (name, got)
 
 
+# S1: the lock exported in one stage, carried to another, installed relative to WORKDIR.
+MULTI_STAGE = """FROM quay.io/hummingbird/python AS lock
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-dev -o /requirements.txt
+FROM quay.io/hummingbird/python
+LABEL version="1.2.0"
+COPY --from=lock /requirements.txt /tmp/
+WORKDIR /tmp
+RUN pip install --no-deps -r requirements.txt
+"""
+
+
+def test_s1_the_install_itself_is_locked() -> None:
+    fails = [
+        # Copying the lock in is no proof: the install reads a file nobody exported.
+        (
+            "COPY uv.lock, install another file",
+            'FROM x\nLABEL version="1.2.0"\nCOPY uv.lock requirements.txt ./\n'
+            "RUN pip install --no-deps -r requirements.txt\n",
+        ),
+        (
+            "exported without --frozen",
+            'FROM x\nLABEL version="1.2.0"\nRUN uv export -o /r.txt\n'
+            "RUN pip install --no-deps -r /r.txt\n",
+        ),
+        ("uv sync re-locks", 'FROM x\nLABEL version="1.2.0"\nRUN uv sync --no-dev\n'),
+    ]
+    for name, containerfile in fails:
+        got = findings(mcp_server, write("Containerfile", containerfile))
+        assert any(f.startswith("S1:") for f in got), (name, got)
+    passes = [
+        ("exported in one stage, installed in the next", MULTI_STAGE),
+        ("uv sync --frozen", 'FROM x\nLABEL version="1.2.0"\nRUN uv sync --frozen --no-dev\n'),
+        (
+            "a hash-pinned requirements file is a lock",
+            'FROM x\nLABEL version="1.2.0"\nCOPY req.txt /r.txt\n'
+            "RUN pip install --require-hashes --no-deps -r /r.txt\n",
+        ),
+    ]
+    for name, containerfile in passes:
+        got = findings(mcp_server, write("Containerfile", containerfile))
+        assert got == [], (name, got)
+
+
+def test_s1_names_the_line_not_the_command() -> None:
+    # The command may carry an index credential; the finding must not repeat it.
+    got = findings(
+        mcp_server,
+        write(
+            "Containerfile",
+            'FROM x\nLABEL version="1.2.0"\n\n'
+            "RUN pip install --index-url https://u:s3cr3tvalue@pypi.example.test/simple .\n",
+        ),
+    )
+    s1 = [f for f in got if f.startswith("S1:")]
+    assert s1 and all("s3cr3tvalue" not in f for f in s1), s1
+    assert any("Containerfile:4 " in f for f in s1), s1
+
+
+def test_s2_unreadable_package_json() -> None:
+    got = findings(mcp_server, write("package.json", '{"renovate": {'))
+    assert any(f.startswith("S2:") and "package.json" in f for f in got), got
+
+
 def test_new_checks_pass_compliant_variants() -> None:
     # Each passes the compliant repo with the rule's subject present and done right.
     ok = [
@@ -293,10 +357,14 @@ def skill(root: Path) -> None:
 
 def test_skill() -> None:
     assert findings(skill) == [], findings(skill)
-    got = findings(
-        skill, write("skills/leak/SKILL.md", '---\nname: leak\n---\npassword = "hunter2"\n')
-    )
-    assert any(f.startswith("K11:") for f in got), got
+    for leak in ('password = "hunter2"', "TOKEN=ghp_abc123def456", "api_key: abc123"):
+        got = findings(skill, write("skills/leak/SKILL.md", f"---\nname: leak\n---\n{leak}\n"))
+        assert any(f.startswith("K11:") for f in got), (leak, got)
+    # Expansions, placeholders and prose name a credential without holding one.
+    fine = ("TOKEN=$GH_TOKEN", "api_key: <your key>", "token: {{ vault }}", "token: the one gh has")
+    for line in fine:
+        got = findings(skill, write("skills/fine/SKILL.md", f"---\nname: fine\n---\n{line}\n"))
+        assert got == [], (line, got)
     # The credential rule is K11's: the same file in an mcp-server repo is P3's scan, not this.
     assert findings(mcp_server, write("skills/leak/SKILL.md", 'password = "hunter2"\n')) == []
 

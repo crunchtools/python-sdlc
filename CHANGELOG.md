@@ -25,7 +25,8 @@ All notable changes to this project are documented here, following
 
 - `sdlc-constitution check` makes four more rule checks, ported from the v1
   validator (RT #1666). S1: a Containerfile that installs Python dependencies
-  installs from the committed `uv.lock` with `--no-deps`. S2: a repo's own
+  does so with `--no-deps`, from a file it exported from the committed
+  `uv.lock` (or a hash-pinned one), or by `uv sync --frozen`. S2: a repo's own
   Renovate config does not change the fleet's release-age cooldown. K1 (kind
   `mcp-server`): a server that makes HTTP requests reads the body in bounded
   pieces against a named ceiling, and a test rejects an oversized body. K11

@@ -14,13 +14,21 @@ from __future__ import annotations
 import ast
 import fnmatch
 import json
+import posixpath
 import re
 from pathlib import Path
 from typing import Protocol
 
 
 class Findings(Protocol):
-    def add(self, principle: str, message: str) -> None: ...
+    """Where a check reports. `constitution.Report` is the one `check()` uses."""
+
+    def add(self, principle: str, message: str) -> None:
+        """Record one finding: `principle` is the ID it serves (`S1`, `K11`) and
+        `message` says what is wrong and where, naming files and lines, never
+        a value that could be a secret. Recording must not raise or stop the
+        check; every finding a check makes is kept."""
+        ...
 
 
 # Never part of the repository's own source.
@@ -127,10 +135,14 @@ def check_http_bounds(root: Path, report: Findings) -> None:
 # installs a standalone tool, not the project's dependency set.
 _PIP_INSTALL = re.compile(r"\b(?:pip[0-9.]*|uv\s+pip|python[0-9.]*\s+-m\s+pip)\s+install\b")
 _NO_DEPS = re.compile(r"(?<![\w-])--no-deps(?![\w-])")
-# How a Containerfile may legitimately install the locked set.
-_LOCK_REFERENCE = re.compile(
-    r"uv\.lock|uv\s+export\b[^\n]*--frozen|uv\s+sync\b[^\n]*--(?:frozen|locked)"
-)
+_FROZEN = re.compile(r"(?<![\w-])--(?:frozen|locked)(?![\w-])")
+# `uv export` writes the lock out as a requirements file; `uv sync` installs it.
+_UV_EXPORT = re.compile(r"\buv\s+export\b")
+_UV_SYNC = re.compile(r"\buv\s+sync\b")
+# A requirements file installed with --require-hashes is a lockfile of its own:
+# every entry must be pinned and hashed, or the install refuses.
+_REQUIRE_HASHES = re.compile(r"(?<![\w-])--require-hashes(?![\w-])")
+_EXPORT_TO = re.compile(r"(?:(?<!\S)(?:-o|--output-file)(?:\s+|=)|>\s*)([^\s;&|]+)")
 # Flags that consume the next token as their value, so that value is not an
 # install target (`--python /app/.venv/bin/python` reads as a path otherwise).
 # `-e` is not here: its value is the target and must be judged.
@@ -147,8 +159,8 @@ _VALUE_FLAGS = frozenset(
 )
 
 
-def resolving_install(command: str) -> bool:
-    """A pip/uv-pip install that resolves a dependency graph, not a named pin.
+def _resolving_install(command: str) -> tuple[bool, list[str]]:
+    """Whether a pip/uv-pip install resolves a dependency graph, and its -r files.
 
     Resolving targets: the project (`.`, `-e .`, `.[extra]`, quoted or not), a
     local path, or a requirements file. A named package (`uv==0.13.7`) resolves
@@ -156,55 +168,137 @@ def resolving_install(command: str) -> bool:
     """
     match = _PIP_INSTALL.search(command)
     if not match:
-        return False
-    tokens = command[match.end() :].split()
+        return False, []
+    tokens = [t.strip("\"'") for t in command[match.end() :].split()]
+    resolving, requirements = False, []
     i = 0
     while i < len(tokens):
         token = tokens[i]
-        if token in ("-r", "--requirement") or token.startswith("--requirement="):
-            return True
-        if token in _VALUE_FLAGS:
+        if token in ("-r", "--requirement") and i + 1 < len(tokens):
+            requirements.append(tokens[i + 1])
             i += 2
             continue
-        if token.startswith("-"):
+        if token.startswith("--requirement="):
+            requirements.append(token.partition("=")[2])
+        elif token in _VALUE_FLAGS:
             i += 1
-            continue
-        base = token.strip("\"'").split("[", 1)[0]
-        if base in (".", "..") or base.startswith(("./", "../", "/")):
-            return True
+        elif not token.startswith("-"):
+            base = token.split("[", 1)[0]
+            resolving |= base in (".", "..") or base.startswith(("./", "../", "/"))
         i += 1
-    return False
+    return resolving or bool(requirements), requirements
 
 
-def containerfile_commands(text: str) -> list[str]:
-    """Logical shell commands: comments dropped, continuations joined, split on && and ;.
+def containerfile_commands(text: str) -> list[tuple[int, str]]:
+    """Logical shell commands and the line each starts on: comments dropped,
+    continuations joined, each split on && and ;.
 
     So a comment naming uv.lock is no compliance, and a `--no-deps` on a later
     clause cannot mask its absence on the install itself.
     """
-    kept = "\n".join(line for line in text.splitlines() if not re.match(r"\s*#", line))
-    joined = re.sub(r"\\\s*\n", " ", kept).splitlines()
-    return [part.strip() for line in joined for part in re.split(r"&&|;", line) if part.strip()]
+    commands: list[tuple[int, str]] = []
+    start, buf = 0, ""
+    for number, raw in enumerate(text.splitlines(), 1):
+        if re.match(r"\s*#", raw):
+            continue
+        line = raw.rstrip()
+        start = start or number
+        if line.endswith("\\"):
+            buf += line[:-1] + " "
+            continue
+        commands += [
+            (start, part.strip()) for part in re.split(r"&&|;", buf + line) if part.strip()
+        ]
+        start, buf = 0, ""
+    if buf.strip():
+        commands += [(start, part.strip()) for part in re.split(r"&&|;", buf) if part.strip()]
+    return commands
+
+
+def _locked_paths(commands: list[tuple[int, str]]) -> list[tuple[str, set[str]]]:
+    """For each command, its WORKDIR and the files exported from the lock before it.
+
+    A file is locked when `uv export --frozen|--locked` wrote it, or a COPY/ADD
+    carried such a file to a new path (the fleet exports in one stage and
+    installs in the next). Relative paths are taken against WORKDIR.
+    """
+    cwd, locked = "/", set()
+    seen: list[tuple[str, set[str]]] = []
+    for _, command in commands:
+        seen.append((cwd, set(locked)))
+        word, _, rest = command.partition(" ")
+        word = word.upper()
+        if word == "FROM":
+            cwd = "/"
+        elif word == "WORKDIR":
+            cwd = posixpath.join(cwd, rest.strip())
+        elif word in ("COPY", "ADD"):
+            args = [a for a in rest.split() if not a.startswith("--")]
+            sources, dest = args[:-1], (args[-1] if args else "")
+            for source in (posixpath.normpath(posixpath.join(cwd, x)) for x in sources):
+                if source in locked:
+                    into = posixpath.join(cwd, dest)
+                    if dest.endswith("/"):
+                        into = posixpath.join(into, posixpath.basename(source))
+                    locked.add(posixpath.normpath(into))
+        if _UV_EXPORT.search(command) and _FROZEN.search(command):
+            locked.update(
+                posixpath.normpath(posixpath.join(cwd, m)) for m in _EXPORT_TO.findall(command)
+            )
+    return seen
+
+
+def _judge_install(
+    command: str, cwd: str, locked: set[str], has_lock: bool
+) -> tuple[bool, bool, list[str]]:
+    """One command's S1 problems, and whether it resolves and whether it uses the lock."""
+    problems: list[str] = []
+    from_lock = False
+    if _UV_SYNC.search(command):
+        if _FROZEN.search(command):
+            from_lock = True
+        elif has_lock:
+            problems.append("runs `uv sync` without --frozen or --locked")
+    resolving, requirements = _resolving_install(command)
+    if resolving and not _NO_DEPS.search(command):
+        problems.append("installs without --no-deps, so pip re-resolves what the lock pinned")
+    for requirement in requirements:
+        exported = posixpath.normpath(posixpath.join(cwd, requirement)) in locked
+        if exported or _REQUIRE_HASHES.search(command):
+            from_lock = True
+        elif has_lock:
+            problems.append(
+                "installs a requirements file that is neither exported from uv.lock "
+                "(`uv export --frozen -o FILE`) nor hash-pinned (`--require-hashes`)"
+            )
+    return resolving, from_lock, problems
 
 
 def check_locked_install(root: Path, report: Findings) -> None:
-    """S1: an image installs its Python dependencies from the committed lock."""
+    """S1: an image installs its Python dependencies from the committed lock.
+
+    Every resolving install takes --no-deps. When uv.lock is committed, every
+    requirements file installed must have been exported from it, a `uv sync`
+    must be --frozen or --locked, and at least one install must use the lock.
+    Copying uv.lock in proves nothing on its own. A finding names the line,
+    never the command, which may carry an index credential.
+    """
     has_lock = (root / "uv.lock").is_file()
     for path in _files(root, "Containerfile*"):
         commands = containerfile_commands(path.read_text(errors="ignore"))
-        resolving = [c for c in commands if resolving_install(c)]
-        for command in resolving:
-            if not _NO_DEPS.search(command):
-                report.add(
-                    "S1",
-                    f"{path.name} installs without --no-deps (`{command[:70]}`), so pip "
-                    "re-resolves what the lock pinned",
-                )
-        if resolving and has_lock and not any(_LOCK_REFERENCE.search(c) for c in commands):
+        any_resolving = any_locked = False
+        states = _locked_paths(commands)
+        for (line, command), (cwd, locked) in zip(commands, states, strict=True):
+            resolving, from_lock, problems = _judge_install(command, cwd, locked, has_lock)
+            any_resolving |= resolving
+            any_locked |= from_lock
+            for problem in problems:
+                report.add("S1", f"{path.name}:{line} {problem}")
+        if has_lock and any_resolving and not any_locked:
             report.add(
                 "S1",
                 f"{path.name} resolves Python dependencies but never installs from uv.lock "
-                "(`COPY uv.lock`, `uv export --frozen` or `uv sync --frozen`)",
+                "(`uv export --frozen` to a file it installs, or `uv sync --frozen`)",
             )
 
 
@@ -236,13 +330,17 @@ _QUOTED = re.compile(r"[\"']([\w:./>@#-]+?)(?:\([^\"']*\))?[\"']")
 
 
 def _renovate_text(name: str, text: str) -> str:
-    """The Renovate config in a file; for package.json, only its `renovate` key."""
+    """The Renovate config in a file; for package.json, only its `renovate` key.
+
+    A package.json that does not parse raises ValueError: Renovate cannot read
+    it either, so whether it overrides the cooldown is unknown, not "no".
+    """
     if name != "package.json":
         return text
     try:
         doc = json.loads(text)
-    except json.JSONDecodeError:
-        return ""
+    except json.JSONDecodeError as err:
+        raise ValueError(f"{name} is not valid JSON ({err})") from err
     renovate = doc.get("renovate") if isinstance(doc, dict) else None
     return json.dumps(renovate) if renovate is not None else ""
 
@@ -257,7 +355,11 @@ def check_renovate_overrides(root: Path, report: Findings) -> None:
         path = root / name
         if not path.is_file():
             continue
-        text = _renovate_text(name, path.read_text(errors="ignore"))
+        try:
+            text = _renovate_text(name, path.read_text(errors="ignore"))
+        except ValueError as err:
+            report.add("S2", f"{err}, so its Renovate config cannot be judged")
+            continue
         for key in sorted(set(_RENOVATE_KEY.findall(text))):
             report.add(
                 "S2",
@@ -278,10 +380,16 @@ def check_renovate_overrides(root: Path, report: Findings) -> None:
 
 # -- K11: a skill carries no credentials ---------------------------------------------
 
-# A literal assigned to a credential name. A value that starts with `$`, `<` or
-# `{` is an expansion or a placeholder (`TOKEN="$(gh auth token)"`), not a secret.
+# A literal assigned to a credential name, as shell (`TOKEN=...`), code
+# (`api_key = "..."`) or YAML (`password: ...`). A value that starts with `$`,
+# `<` or `{` is an expansion or a placeholder (`TOKEN="$(gh auth token)"`), not
+# a secret. Unquoted, the value must look like a key (letters and digits, six
+# or more) so that prose such as "token: the one gh holds" stays out.
 _CREDENTIAL = re.compile(
-    r"(?:api_key|password|secret|token)\s*=\s*[\"'](?![$<{])[^\"'\n]+[\"']", re.IGNORECASE
+    r"(?:api_key|password|secret|token)\s*[=:]\s*"
+    r"(?:[\"'](?![$<{])[^\"'\n]+[\"']"
+    r"|(?![$<{])(?=[\w./+-]*\d)(?=[\w./+-]*[A-Za-z])[\w./+-]{6,}(?![\w./+-]))",
+    re.IGNORECASE,
 )
 
 
