@@ -398,8 +398,9 @@ LOCAL_CALL = re.compile(r"^\./\.github/workflows/(?P<file>[\w.-]+\.ya?ml)$")
 CALL_KEYS = {"name", "uses", "permissions", "secrets", "needs", "if", "concurrency"}
 IMAGE_CALL = ("constitution", "container-release.yml")
 # container-release's inputs that are not config: the promote job signs always,
-# and a child polls for its parent's digest instead of being dispatched.
-IMAGE_DROPPED = {"sign", "downstream"}
+# a child polls for its parent's digest instead of being dispatched, and every
+# default-branch push moves `latest`, which is all `cascade` asked for.
+IMAGE_DROPPED = {"sign", "downstream", "cascade"}
 
 
 def call_of(job: dict, local: set[str]) -> tuple[str, str] | None:
