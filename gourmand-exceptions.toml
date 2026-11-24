@@ -343,3 +343,16 @@ classification = "gourmand_bug"
 justification = """
   The R4 cases write CHANGELOG.md fixtures with a `### Deprecated` heading   and deprecation bullets, because check_release reads exactly that Keep a   Changelog section. The words are string data under test, not comments   marking removed code, and renaming them would test a heading no repo uses.
 """
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/_candidate.py"
+classification = "gourmand_bug"
+justification = """
+  recorded (reads the merged pull request's candidate annotation back from \
+  the API) is paired with write.Job.apply_fix (runs fix_publish.py on a PR \
+  branch): nine assign/if/return statements of similar length with no line, \
+  call or identifier in common. The real duplicates in this file were \
+  extracted (the OIDC and Quay token reads into _field, the annotation parse \
+  into _parsed); what is left is shape, not copied logic.
+"""
