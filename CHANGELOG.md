@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-24
+
 ### Added
 
 - `sdlc-constitution check` enforces R4 on the newest release in
