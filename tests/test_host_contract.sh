@@ -225,6 +225,8 @@ case " \$* " in
     printf 'sd-died${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}${SDOPTS}${SS}probe-dead${SS}must-not-run\n' ;;
   *" plan sd-podman "*)
     printf 'sd-podman${TAB}main${TAB}host-systemd${TAB}5${US}podman${US}run${US}--${US}go-up-podman${SS}${SDOPTS}${SS}ready-ok${SS}must-not-run\n' ;;
+  *" plan sd-noinit "*)
+    printf 'sd-noinit${TAB}main${TAB}host-systemd${TAB}5${US}podman${US}run${US}--${US}go-up-127${SS}${SDOPTS}${SS}ready-ok${SS}must-not-run\n' ;;
   *" plan sd-inject-opts "*)
     printf 'sd-inject-opts${TAB}main${TAB}host-systemd${TAB}5${US}${SDRUN}${SS}--privileged${US}-w${US}/repo${SS}ready-ok${SS}must-not-run\n' ;;
   *" plan sd-inject-user "*)
@@ -427,7 +429,7 @@ printf '\n== a command against a systemd service\n\n'
 # capabilities and nothing else, the probe is polled, the steps are exec'd in
 # order, the first failure ends the check, and the container is removed every
 # time. A plan line that asks for anything more is refused before podman runs.
-for case_ in sd-pass:0 sd-fail:1 sd-two:2 sd-notready:1 sd-died:1 sd-podman:2 \
+for case_ in sd-pass:0 sd-fail:1 sd-two:2 sd-notready:1 sd-died:1 sd-podman:2 sd-noinit:2 \
              sd-inject-opts:2 sd-inject-user:2 sd-inject-run:2 sd-inject-mount:2 \
              sd-inject-arg:2 sd-inject-cmd:2 sd-inject-dangle:2 sd-inject-envname:2 \
              sd-inject-relw:2; do
@@ -449,6 +451,7 @@ for case_ in sd-pass:0 sd-fail:1 sd-two:2 sd-notready:1 sd-died:1 sd-podman:2 \
     sd-died)     why='the container stopped before it was ready' ;;
     sd-two)      why='the step exited 2; nothing was judged' ;;
     sd-podman)   why='podman could not create the container' ;;
+    sd-noinit)   why='could not start systemd (exit 127); nothing was judged' ;;
     *)           why= ;;
   esac
   if [ -n "$why" ] && ! grep -q -- "$why" "$RUN/out"; then
