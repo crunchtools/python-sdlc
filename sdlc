@@ -893,8 +893,11 @@ def runs_image(cfg: dict, check: str) -> str | None:
     """The image this check runs or reads, or None when it uses none."""
     if check in ("container-smoke", "container-scan", "bootc-lint"):
         return container_image(cfg, check_settings(cfg, check))
-    if kind_of(cfg, check) == "pytest-in-image":
+    kind = kind_of(cfg, check)
+    if kind == "pytest-in-image":
         return str(check_settings(cfg, check).get("image", default_image_tag()))
+    if kind == "command" and "image" in check_settings(cfg, check):
+        return str(check_settings(cfg, check)["image"])
     return None
 
 
@@ -948,7 +951,9 @@ def t_tiers() -> int:
 #
 # A repo's own checks are named kinds with parameters, never shell. A repo that
 # needs something these cannot express gets a new kind HERE, so the config
-# stays something a person can read.
+# stays something a person can read. `command` is the one that runs a repo's
+# own program, and it takes an argv list: what reaches the process is exactly
+# the words in the config, with no shell to read them on the way.
 
 
 def project_name() -> str:
@@ -1118,9 +1123,80 @@ def kind_pytest_in_image(name: str, settings: dict) -> list[tuple[str, str, str]
     return [(name, "image-ro", "pytest-deps"), host_step(name, argv)]
 
 
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def kind_command(name: str, settings: dict) -> list[tuple[str, str, str]]:
+    """Run one argv in a nested container, with the repo mounted read-only at /repo.
+
+    For a repo's own test that no built-in runs: a node test file, a lint
+    script the repo keeps, the suite on a Python the gate image does not ship.
+    It is an ARGV LIST, never a shell string: argv[0] is the entrypoint, the
+    rest are its arguments, and nothing between this config and the process
+    parses them. A script the repo keeps is run by naming it, so the code that
+    runs is a file a reviewer sees, as `npm test` and pytest's are.
+
+    `image` defaults to this gate's own image (node, bash, git, gawk). Any
+    other is pulled, or built here first by an `image-build` check with that
+    tag, which shares its lane. No network unless `network = true`, and the
+    launcher drops every capability. The tree is read-only, so a tool that
+    writes is pointed at /tmp, which is a tmpfs.
+    """
+    argv = names(settings.get("argv"), f"{name}.argv")
+    if not argv:
+        cannot(f'{name}: argv is required -- the command as a list, e.g. ["node", "--test"]')
+    # The entrypoint is a podman option's value: one that podman would read as
+    # an option, or as the JSON-array form of --entrypoint, is refused.
+    if not argv[0] or argv[0].startswith(("-", "[")):
+        cannot(f"{name}: argv[0] {argv[0]!r} is not a program name")
+    network = settings.get("network", False)
+    if not isinstance(network, bool):
+        cannot(f"{name}: network must be true or false")
+    host = os.environ.get("SDLC_HOST_REPO")
+    if not host:
+        cannot(f"{name}: run through bin/sdlc, which supplies the host paths")
+    workdir = in_repo(name, "workdir", settings.get("workdir", "."))
+    env = {
+        # Test runners that watch by default stop when they see CI.
+        "CI": "true",
+        "HOME": "/tmp",
+        "PYTHONPYCACHEPREFIX": "/tmp/pycache",
+        # The checkout belongs to the host's user, not the container's, and git
+        # refuses a repository it does not own.
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "*",
+    }
+    for key, value in table(settings, "env").items():
+        if not ENV_NAME.fullmatch(str(key)):
+            cannot(f"{name}: env {key!r} is not a variable name")
+        env[str(key)] = token(value)
+    image = GATE_IMAGE
+    if "image" in settings:
+        image = image_ref(name, "image", settings["image"])
+    out = [
+        "podman",
+        "run",
+        "--rm",
+        "-v",
+        f"{host}:/repo:ro,z",
+        "-w",
+        "/repo" if workdir == "." else f"/repo/{workdir}",
+        "--tmpfs",
+        "/tmp:rw,exec,size=4g,mode=1777",
+    ]
+    if not network:
+        out += ["--network", "none"]
+    for key, value in env.items():
+        out += ["-e", f"{key}={value}"]
+    out += ["--entrypoint", argv[0], "--", image, *argv[1:]]
+    return [host_step(name, out)]
+
+
 KINDS = {
     "image-build": kind_image_build,
     "pytest-in-image": kind_pytest_in_image,
+    "command": kind_command,
 }
 
 

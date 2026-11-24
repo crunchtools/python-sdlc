@@ -6,6 +6,24 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- The `command` kind: a repo's own test as an argv list, run in a nested
+  container with the repo read-only at `/repo`, no capabilities and no network
+  unless `network = true`. It runs in the gate image by default, or in any
+  `image`, including one an `image-build` check in the same command tags, which
+  it then follows in that build's lane. It is how a repo's extra workflows
+  (node test files, a lint script, pytest on another Python, browser tests)
+  move into `[tool.sdlc.ci]` and run the same under `sdlc ci` locally and in CI.
+  Never a shell string: `argv[0]` is the entrypoint and the rest its arguments.
+
+### Fixed
+
+- `scripts/convert_repo.py` no longer writes container-release's
+  `default-branch` into `[tool.sdlc.image]`, which the image job refuses. Every
+  job reads the default branch from the event; a converted repo that already
+  has the key should delete it.
+
 ## [0.14.1] - 2026-11-24
 
 ### Fixed

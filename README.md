@@ -469,12 +469,51 @@ added to the image.
 | `image` | string | `"localhost/<repo>:sdlc"` |
 | `network` | boolean | `false` |
 
+**`command`** — runs one program in a nested container, with the repo mounted
+read-only at `/repo`, a tmpfs `/tmp`, no capabilities and no network. `argv` is
+a list of words, never a shell string: `argv[0]` is the entrypoint and the rest
+are its arguments, exactly as written. A repo's own script runs by naming it
+(`["bash", "tests/lint.sh"]`), so the code is a file a reviewer sees. The
+environment starts with `CI=true`, `HOME=/tmp`, `PYTHONPYCACHEPREFIX=/tmp/pycache`
+and git's `safe.directory=*`; `env` adds to it or replaces those. An `image` that
+an `image-build` check in the same command tags runs after that build, in its
+lane, which is how a test gets a runtime the gate image does not carry (another
+Python, a browser).
+
+| Setting | Type | Default |
+|---|---|---|
+| `argv` | list of strings | **required** |
+| `image` | string | the gate's own image (node, npm, bash, gawk, git, python 3.14) |
+| `workdir` | path in the repo | `"."` |
+| `env` | table | none |
+| `network` | boolean | `false` |
+
+```toml
+[tool.sdlc.ci]
+checks = ["migrations", "py311"]
+
+[tool.sdlc.ci.migrations]
+kind = "command"
+argv = ["node", "--test", "tests/migrations/*.test.mjs"]
+
+[tool.sdlc.ci.py311]
+kind = "command"
+image = "ghcr.io/astral-sh/uv:0.13.7-python3.11-trixie-slim"
+argv = ["uv", "run", "--locked", "--all-extras", "pytest", "-q", "-p", "no:cacheprovider"]
+env = { UV_PROJECT_ENVIRONMENT = "/tmp/venv", UV_PYTHON_DOWNLOADS = "never" }
+network = true
+```
+
+Any exit other than 0 fails the check; 1 is a finding and anything higher is
+reported as could-not-run, which fails it too.
+
 Paths must stay inside the repository; `..` or an absolute path is refused.
 Values in `build_args`, `labels` and `env` may be `@project.version`,
 `@git.sha` or `@now`.
 
-There is no shell kind. A repo that needs something these cannot express gets a
-new kind here, so the config stays something a person can read.
+There is no shell kind. `command` takes an argv list and nothing parses it; a
+repo that needs something these cannot express gets a new kind here, so the
+config stays something a person can read.
 
 ## Running main before a release
 

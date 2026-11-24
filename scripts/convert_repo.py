@@ -27,7 +27,8 @@ applies this the last one: what the gates run changes when the image does.
                            [tool.sdlc.commands] (`sdlc run <name>`), by hand
   [tool.sdlc]              what a deleted workflow said per repo: `publish = "pypi"`
                            for a PyPI publish job, a container-release call's inputs
-                           (but `sign` and `downstream`) as [tool.sdlc.image]. A
+                           (but `sign`, `downstream`, `cascade` and `default-branch`)
+                           as [tool.sdlc.image]. A
                            value already there that differs is refused, never replaced
   the old name             the repo was crunchtools/python-sdlc: its image
                            (quay.io/crunchtools/python-sdlc) and a reusable
@@ -398,9 +399,11 @@ LOCAL_CALL = re.compile(r"^\./\.github/workflows/(?P<file>[\w.-]+\.ya?ml)$")
 CALL_KEYS = {"name", "uses", "permissions", "secrets", "needs", "if", "concurrency"}
 IMAGE_CALL = ("constitution", "container-release.yml")
 # container-release's inputs that are not config: the promote job signs always,
-# a child polls for its parent's digest instead of being dispatched, and every
-# default-branch push moves `latest`, which is all `cascade` asked for.
-IMAGE_DROPPED = {"sign", "downstream", "cascade"}
+# a child polls for its parent's digest instead of being dispatched, every
+# default-branch push moves `latest`, which is all `cascade` asked for, and
+# every job reads the default branch from the event, so a `default-branch`
+# written down could only disagree with it (and the image job refuses it).
+IMAGE_DROPPED = {"sign", "downstream", "cascade", "default-branch"}
 
 
 def call_of(job: dict, local: set[str]) -> tuple[str, str] | None:
@@ -1033,8 +1036,8 @@ def move_config(
     """What the deleted workflows said per repo, as [tool.sdlc]: publish, and the image's inputs.
 
     The spec says only that it "moves into [tool.sdlc]": `publish = "pypi"` for a
-    deleted PyPI publish, and a container-release call's inputs (but `sign` and
-    `downstream`) as `[tool.sdlc.image]`. A key already there with another value
+    deleted PyPI publish, and a container-release call's inputs (but those in
+    IMAGE_DROPPED) as `[tool.sdlc.image]`. A key already there with another value
     is refused, never overwritten; the same value is nothing to do.
     """
     image = held.images[0][1] if held.images else {}
