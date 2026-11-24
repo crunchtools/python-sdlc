@@ -287,7 +287,11 @@ def check_changelog(root: Path, report: Report) -> None:
 
 RELEASE_HEAD = re.compile(r"^##\s*\[?v?(\d+)\.(\d+)\.(\d+)\]?", re.MULTILINE)
 SUBHEAD = re.compile(r"^###\s*(\w+)", re.MULTILINE)
-NAMES_RELEASE = re.compile(r"\d+\.\d+(?:\.\d+)?")
+ENDS_IN = re.compile(
+    r"\b(?:removed|dropped|ends?|ending|deleted|goes away|until)\b"
+    r"[^.;]*?\bv?(\d+)\.(\d+)(?:\.(\d+))?",
+    re.IGNORECASE,
+)
 
 
 def _subsections(body: str) -> dict[str, str]:
@@ -333,8 +337,14 @@ def check_release(root: Path, report: Report) -> None:
             "R4", f"{shown[0]} removes something but is not a breaking release after {shown[1]}"
         )
     for bullet in _bullets(parts.get("deprecated", "")):
-        if not NAMES_RELEASE.search(bullet):
-            report.add("R4", f"deprecation names no release that ends it: {bullet[:80]}")
+        if not _ends_after(bullet, newest):
+            report.add("R4", f"deprecation names no later release that ends it: {bullet[:80]}")
+
+
+def _ends_after(bullet: str, newest: tuple[int, ...]) -> bool:
+    """The bullet says which release removes the thing, and that release is after this one."""
+    end = ENDS_IN.search(bullet)
+    return end is not None and tuple(int(n or 0) for n in end.groups()) > newest
 
 
 def declared_versions(root: Path) -> list[tuple[str, str]]:
