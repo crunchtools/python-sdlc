@@ -40,7 +40,7 @@ jobs:
     if: >-
       contains(fromJSON('["pull_request","schedule"]'), github.event_name)
       || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b7968ff9f14e0fa363ea3c25e0df4f6159abf43549653fff74eb674de060", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, security-events: write, actions: write }  # actions: the 60-day schedule keepalive
     outputs: { result: "${{ steps.e.outputs.result }}" }
@@ -48,7 +48,7 @@ jobs:
     steps: &event [{ id: e, run: sdlc event }]
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
-    runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
+    runs-on: &secret ${{ vars.UNCACHED_RUNNER_LABEL }}
     container: *boot
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
@@ -105,7 +105,7 @@ jobs:
       always() && (github.event_name == 'pull_request_target'
       || github.event_name == 'pull_request_review_comment' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     concurrency: { group: "gate-${{ github.event.pull_request.number }}-${{ github.event_name }}" }
-    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}  # no repo code runs here, a fork's PR included
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     container: *boot
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
@@ -266,10 +266,10 @@ on:
 permissions: {}
 env: { COSIGN_IMAGE: "ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca" }  # v2.6.5
 jobs:
-  test:  # the PR's own sdlc code, and nothing to steal: read-only contents, no secret, GitHub's machine
+  test:  # the PR's own sdlc code, and nothing to steal: read-only contents, no secret, a throwaway VM
     name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     permissions: { contents: read }
     env: { MODE: test }
     steps:  # sdlc is public: the fetch needs no token and persists none; origin names the repo for the validator's exemptions
@@ -280,14 +280,14 @@ jobs:
     if: >-
       github.event_name == 'schedule'
       || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     permissions: { contents: read, security-events: write, actions: write }
     outputs: { result: "${{ steps.s.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", MODE: check }
     steps: [*fetch, { id: s, run: scripts/self.sh }]
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
-    runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
+    runs-on: &secret ${{ vars.UNCACHED_RUNNER_LABEL }}
     container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b7968ff9f14e0fa363ea3c25e0df4f6159abf43549653fff74eb674de060", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
@@ -314,7 +314,7 @@ jobs:
       always() && (github.event_name == 'pull_request_target'
       || github.event_name == 'pull_request_review_comment' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     concurrency: { group: "gate-${{ github.event.pull_request.number }}-${{ github.event_name }}" }
-    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}  # no repo code runs here, a fork's PR included
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     container: *boot
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
@@ -322,7 +322,7 @@ jobs:
   image:  # a release build only: a verified release merge, or the version :<major> carries, weekly
     needs: [check, write]
     if: always() && !cancelled() && needs.check.result == 'success' && (fromJSON(needs.check.outputs.result || '{}').release || github.event_name == 'schedule')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     permissions: { contents: read }
     outputs: { result: "${{ steps.s.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", MODE: "${{ github.event_name == 'schedule' && 'weekly' || 'release' }}", SDLC_WRITE: "${{ needs.write.result }}",
@@ -330,7 +330,7 @@ jobs:
     steps: [*fetch, { id: s, run: scripts/self.sh }]
   approve:  # no secret; sdlc-approval's reviewers (Josui Prime, Scott; prevent_self_review) are the approval
     if: github.event_name == 'workflow_dispatch' && inputs.digest != '' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     environment: sdlc-approval
     permissions: {}
     steps: [{ run: "true" }]
@@ -338,7 +338,7 @@ jobs:
     needs: [image, approve]
     if: always() && !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (needs.image.result == 'success' || needs.approve.result == 'success')
     concurrency: { group: sdlc-sign, queue: max }
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     environment: sdlc-signing
     permissions: { contents: read }
     env: { MODE: "${{ github.event_name == 'workflow_dispatch' && 'rollback' || github.event_name == 'schedule' && 'weekly' || 'release' }}", EVENT: "${{ github.event_name }}",
@@ -360,7 +360,7 @@ fleet that holds because PR code only ever runs nested, under the reviewed
 orchestrator. In sdlc the PR's code *is* the orchestrator, so sdlc runs it in
 a job that has nothing to take:
 - **`test`** is the required `sdlc / check (pull_request)`. It runs only on
-  `pull_request`, on GitHub's `ubuntu-latest`, with `permissions: { contents:
+  `pull_request`, on Exedore's runner VMs, with `permissions: { contents:
   read }`, no `environment`, no secret and no `container:` socket mount. It
   fetches the PR's merge commit with `git` (sdlc is public: no token, nothing
   persisted), builds that commit's image with podman, and runs `sdlc ci` and
@@ -518,13 +518,13 @@ request. The App-only tag ruleset stays as it is today.
 
 | Job | Check name | Secrets (org secrets) | Runs on | Never holds |
 |---|---|---|---|---|
-| `check` | `sdlc / check (pull_request)` (required) | none; read token, `security-events`, the socket | pull_request (forks on `ubuntu-latest`), default-branch push, schedule, dispatch; our **uncached** runners otherwise | any secret |
-| `ai` | | Claude and OpenRouter keys | issues, `pull_request_target`; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | an App key, a write token |
+| `check` | `sdlc / check (pull_request)` (required) | none; read token, `security-events`, the socket | pull_request, default-branch push, schedule, dispatch; our **uncached** runners | any secret |
+| `ai` | | Claude and OpenRouter keys | issues, `pull_request_target`; our **uncached** runners | an App key, a write token |
 | `image` | | quay, RHSM, registry.redhat.io | when `check` plans an image; our **uncached** runners | the cosign key |
-| `write` | | Ashigaru App key; queued | `pull_request_target`, issues, a `version` dispatch; otherwise only when a successful `check` plans `write` (a release merge, the weekly audit); never a rollback dispatch; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | a model |
+| `write` | | Ashigaru App key; queued | `pull_request_target`, issues, a `version` dispatch; otherwise only when a successful `check` plans `write` (a release merge, the weekly audit); never a rollback dispatch; our **uncached** runners | a model |
 | `promote` | | cosign key, quay; queued | after `image`, and after `write` on a release; our **uncached** runners | an App key, a build |
 | `pypi` | | none: OIDC, environment `pypi` for the publisher | a release merge that publishes to PyPI; our **uncached** runners | anything else |
-| `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; `ubuntu-latest` | any secret |
+| `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; our **uncached** runners | any secret |
 | `renovate` | | `renovate`: Renovate App key; no `GITHUB_TOKEN`; queued | crunchtools/constitution only: the weekly schedule, a bare dispatch from the default branch; our **uncached** runners | a token of this repo's, a build |
 
 This table is the fleet file. In crunchtools/sdlc alone, the required
@@ -543,30 +543,18 @@ still checks what it runs: `sdlc-bootstrap` by its literal digest, sdlc against
 sdlc's key, and `image`'s parent against the fleet key or Red Hat's. So the
 store saves pulls and is trusted for nothing. A secret job
 therefore starts from the same state as a GitHub VM, on a machine we run.
-- **The label is a literal, and the variable is only a switch.** The six
-  jobs share one `runs-on` (`&secret`) that yields `crunchtools-uncached` only
-  when `vars.UNCACHED_RUNNER_LABEL` is exactly that, and `ubuntu-latest`
-  otherwise. Clearing the org variable sends them back to GitHub with no
-  commit. A repo variable can only do the same: it cannot name
-  `crunchtools-cached`, or any other label, for a job that holds a secret.
-- **A fork's `pull_request_target` stays on `ubuntu-latest`.** `ai` reads the
-  fork's diff and `write` acts on it, so both route a fork, or a deleted one
-  (no head repo), to GitHub. A same-repo pull request and every
-  default-branch event go to Exedore.
-- **A stranger's issue stays on `ubuntu-latest`** (Josui Prime, a1100). An
-  `issues` event goes to Exedore only when the issue's `author_association`
-  is `OWNER`, `MEMBER` or `COLLABORATOR`; anyone else's runs on GitHub.
-- **Today the barrier is the route, not a hook.** The gha-runner fork-reject
-  hook is prerequisite 5 and does not exist yet. Until it does, what keeps a
-  fork off Exedore is this `runs-on` and the org's "Require approval for all
-  external contributors" setting (prerequisite 11).
-- **`check`**, which holds nothing, keeps its own rule: our uncached runners,
-  a fork's PR on `ubuntu-latest`. **`gate`** stays on `ubuntu-latest`.
-- **Never the cached class.** Its persistent layer storage lets one same-repo
-  PR's build poison a later job (gha-runner `deploy/exedore/README.md`), so
-  no job here uses `CACHED_RUNNER_LABEL`.
-- **sdlc's own** `image`, `approve` and `sign` stay on `ubuntu-latest`: they
-  run on the host, without `sdlc-bootstrap`, and `sign` holds the trust root.
+- **Every job runs on Exedore, with no fallback.** Every `runs-on` is
+  `${{ vars.UNCACHED_RUNNER_LABEL }}`, the org variable naming Exedore's
+  runner VMs, visible to every repo. There is no `ubuntu-latest` branch: a
+  repo that cannot see the variable gets a workflow error, not a quiet move to
+  GitHub's machines. That covers sdlc's own `image`, `approve` and `sign`
+  too.
+- **A fork's or a stranger's job runs on Exedore too.** Each job gets a
+  fresh VM that is destroyed after it, reads the image store read-only, and
+  is held by the egress fence. The org's "Require approval for all external
+  contributors" setting (prerequisite 11) holds a fork's runs until a
+  maintainer approves them, and the gha-runner fork-reject hook
+  (prerequisite 5) will be the backstop.
 
 `renovate` (a1099) shares that runner. It walks every repo in the org once a
 week, within 55 minutes. Its key is read once, used only to mint tokens, and
@@ -776,10 +764,8 @@ Each must hold before the first canary converts, unless it says otherwise.
 5. **gha-runner rejects fork jobs** (separate gha-runner work). A job-started
    hook (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) exits non-zero when the payload's
    `pull_request.head.repo.full_name` differs from `repository.full_name`.
-   Future work: gha-runner has no such hook today. The secret jobs' `runs-on`
-   already sends a fork's `pull_request_target` to `ubuntu-latest`, and the
-   org's fork-approval setting holds fork runs, so the hook will be the
-   backstop, not the route.
+   Future work: gha-runner has no such hook today. The org's fork-approval
+   setting holds fork runs until then.
 6. **Ashigaru: the wider patch filter** (ashigaru#254, which applies today),
    with the files listed under "What `write` will not push".
 7. **Gatehouse: triage ignores App-authored answers** (a separate gatehouse
@@ -919,10 +905,8 @@ stays in sdlc.
 **8. No variable chooses code.** A repo variable can be written by anyone
 with write access to the repo, and it overrides the org's. So the image is a
 literal digest in the file, never `vars.*`. `check`, which holds nothing,
-takes its runner label from a variable (`UNCACHED_RUNNER_LABEL`). The secret
-jobs read the same variable only as a switch: they run on the literal
-`crunchtools-uncached` when it equals that, and on `ubuntu-latest` otherwise,
-so it can turn Exedore off for them and never point them anywhere else.
+and every other job take their runner label from one org variable
+(`UNCACHED_RUNNER_LABEL`), with no fallback.
 
 **9. Check names.** A required check is matched by name, and a plain job's
 check takes the job's `name:`. The constitution records that a reusable

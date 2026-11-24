@@ -6,6 +6,15 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- Every job in the fleet file and in sdlc's own `ci.yml` runs on Exedore's
+  runner VMs through `vars.UNCACHED_RUNNER_LABEL`, with no fallback. Forks,
+  strangers' issues, `gate`, and sdlc's own `test`, `check`, `image`,
+  `approve` and `sign` used to fall back to GitHub's `ubuntu-latest`; so did
+  any repo that couldn't see the variable, which included every public repo.
+  A repo that can't see it now gets a workflow error instead of a quiet move.
+
 ### Fixed
 
 - `sdlc push`'s Gatehouse verdict is CI's. Gatehouse exits non-zero only on a
