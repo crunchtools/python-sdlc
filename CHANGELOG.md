@@ -6,6 +6,14 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-24
+
+### Fixed
+
+- `sdlc push` no longer dies with "sdlc-constitution is not a check this image
+  runs itself": the image's entrypoint is `sdlc`, so the gatehouse step now
+  runs `sdlc-constitution` as the entrypoint instead of as an argument to it.
+
 ### Added
 
 - `[tool.sdlc.image] publish = false`: a repo whose root Containerfile is a
