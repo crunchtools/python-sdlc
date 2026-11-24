@@ -21,6 +21,7 @@ from sdlc_jobs._core import (
     CLEAN,
     Tools,
     cannot,
+    fetch_tree,
     host_mount,
     must,
     needed,
@@ -122,6 +123,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     release = parse_release(env.get("SDLC_RELEASE"))
     sha = env.get("GITHUB_SHA", "")
     root = workspace(env)
+    fetch_tree(tools, env, root, env.get("GITHUB_REPOSITORY", ""))
 
     if tool_sdlc(root).get("publish") != "pypi":
         cannot('the tree does not say [tool.sdlc] publish = "pypi"; the plan is not an authority')

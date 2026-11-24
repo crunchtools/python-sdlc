@@ -41,6 +41,7 @@ from sdlc_jobs._core import (
     api,
     call,
     cannot,
+    fetch_tree,
     final_stage,
     host_mount,
     image_settings,
@@ -83,6 +84,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         cannot(f"check runs on {', '.join(EVENTS)}, not {event_name!r}")
     root = workspace(env)
     repo = env.get("GITHUB_REPOSITORY", "")
+    fetch_tree(tools, env, root, repo)
     default_push = event_name == "push" and env.get("GITHUB_REF") == (
         f"refs/heads/{(event.get('repository') or {}).get('default_branch', '')}"
     )
@@ -177,6 +179,13 @@ def launch(
         "SDLC_HOST_REPO": host,
         "CONTAINER_HOST": env.get("CONTAINER_HOST") or SOCKET,
     }
+    # The launcher's cache is mounted into nested containers, so it lives on a
+    # path the runner's engine can see: the runner's temp, by its host path.
+    if env.get("RUNNER_TEMP"):
+        cache = Path(env["RUNNER_TEMP"]) / "sdlc-cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        child["XDG_CACHE_HOME"] = str(cache)
+        child["SDLC_HOST_CACHE"] = host_mount(tools, env, cache)[0]
     argv = [str(script), command, *(["--", *args] if args else [])]
     return tools.run(argv, cwd=str(root), env=child, stream=stream)
 

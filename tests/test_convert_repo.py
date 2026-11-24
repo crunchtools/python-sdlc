@@ -293,6 +293,7 @@ jobs:
       rhsm: true
       sign: true
       downstream: mcp-a mcp-b
+      cascade: true
     secrets:
       QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
 """
@@ -783,13 +784,13 @@ check(
     str(image),
 )
 check(
-    "container-release: sign and downstream are dropped, with a note",
-    "sign" not in image and "downstream" not in image,
+    "container-release: sign, downstream and cascade are dropped, with a note",
+    "sign" not in image and "downstream" not in image and "cascade" not in image,
 )
 dry = convert(make_repo({**HOOKED, WF + "container.yml": CONTAINER_CALL}))
 check(
     "container-release: the note says what was dropped",
-    "dropped: downstream, sign" in dry.stderr,
+    "dropped: cascade, downstream, sign" in dry.stderr,
     dry.stderr,
 )
 

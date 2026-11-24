@@ -131,7 +131,14 @@ class FakeTools(Tools):
         self.log = ""  # what the job printed, kept by go()
 
     def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
-        # captured or streamed, the fake answers the same
+        done = self._answer(argv, **kw)
+        if kw.get("stream"):  # as the real Tools: a streamed run's output went to the log
+            return subprocess.CompletedProcess[str](argv, done.returncode)  # stdout, stderr: None
+        return done
+
+    def _answer(
+        self, argv: list[str], **kw: Unpack[RunOptions]
+    ) -> subprocess.CompletedProcess[str]:
         self.argvs.append(argv)
         self.timeouts.append(kw.get("timeout"))
         self.stdin.append(kw.get("input"))
@@ -256,6 +263,7 @@ def go(
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
         ws.mkdir()
+        (ws / ".git").mkdir()  # a checked-out tree: fetch_tree leaves it alone
         (ws / "Containerfile").write_text(containerfile)
         for name, text in (files or {}).items():
             (ws / name).parent.mkdir(parents=True, exist_ok=True)
@@ -1138,6 +1146,7 @@ def test_boot_command_prints_not_enforced() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
         ws.mkdir()
+        (ws / ".git").mkdir()  # a checked-out tree: fetch_tree leaves it alone
         (ws / "Containerfile").write_text(QUAY_PARENT)
         (ws / "pyproject.toml").write_text(boot("command", boot_command="x")["pyproject.toml"])
         env = {

@@ -32,8 +32,8 @@ OK, FOUND, CANNOT_RUN = 0, 1, 2
 # review by any other account, github-actions[bot] included, is not a review.
 # A pull request's own `pull_request` run holds a GITHUB_TOKEN that can post
 # as github-actions[bot]; it cannot post as the App.
-APP_LOGIN = "ashigaru-crunchtools[bot]"
-APP_SLUG = "ashigaru-crunchtools"
+APP_LOGIN = "ashigaru-crunchtools-com[bot]"
+APP_SLUG = "ashigaru-crunchtools-com"
 
 _NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
 

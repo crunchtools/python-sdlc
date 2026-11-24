@@ -55,6 +55,7 @@ from sdlc_jobs._core import (
     Tools,
     cannot,
     expand_build_vars,
+    fetch_tree,
     final_stage,
     host_mount,
     image_settings,
@@ -162,6 +163,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     if repo.count("/") != 1 or not SHA.fullmatch(sha):
         cannot("GITHUB_REPOSITORY and GITHUB_SHA are required, and the SHA is 40 hex digits")
     root = workspace(env)
+    fetch_tree(tools, env, root, repo)
     name = repo.rpartition("/")[2]
     scratch = Path(tempfile.mkdtemp(prefix="sdlc-image-", dir=env.get("RUNNER_TEMP") or None))
     scratch.chmod(0o700)

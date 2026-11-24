@@ -12,6 +12,7 @@ import os
 import queue
 import re
 import secrets
+import socket
 import subprocess
 import tempfile
 import threading
@@ -24,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import IO, NoReturn, TypedDict, Unpack
+
+from sdlc_jobs._tools import git_auth
 
 CLEAN = 0
 FOUND = 1
@@ -57,8 +60,11 @@ def cannot(msg: str) -> NoReturn:
 
 
 def show(proc: subprocess.CompletedProcess[str]) -> None:
-    """Print what a tool said, stdout then stderr, into the job's log."""
-    print(proc.stdout + proc.stderr, end="", flush=True)
+    """Print what a tool said, stdout then stderr, into the job's log.
+
+    A streamed run already wrote to the log and captured nothing: both are None.
+    """
+    print((proc.stdout or "") + (proc.stderr or ""), end="", flush=True)
 
 
 def step(msg: str) -> None:
@@ -295,6 +301,34 @@ def workspace(env: Mapping[str, str]) -> Path:
     return Path(env.get("GITHUB_WORKSPACE") or os.getcwd())
 
 
+def fetch_tree(tools: Tools, env: Mapping[str, str], root: Path, repo: str) -> None:
+    """The one commit this event names, into an empty workspace: no actions/checkout.
+
+    The fleet file has no checkout step, so every job that reads the tree
+    (check, image, pypi) fetches it here first.
+
+    Depth 1, authenticated with the job's token by a per-command extraheader, so
+    no credential is written to .git/config. A workspace that is already a git
+    tree (a laptop, a test) is left as it is.
+    """
+    if (root / ".git").exists():
+        return
+    sha = env.get("GITHUB_SHA", "")
+    if not sha or not repo:
+        cannot("GITHUB_SHA and GITHUB_REPOSITORY name the commit to check; one is unset")
+    server = env.get("GITHUB_SERVER_URL") or "https://github.com"
+    token = env.get("GITHUB_TOKEN", "")
+    genv = {**env, **(git_auth(token) if token else {"GIT_TERMINAL_PROMPT": "0"})}
+    root.mkdir(parents=True, exist_ok=True)
+    for argv in (
+        ["git", "init", "-q", "."],
+        ["git", "remote", "add", "origin", f"{server}/{repo}"],
+        ["git", "fetch", "-q", "--depth=1", "origin", sha],
+        ["git", "checkout", "-q", "FETCH_HEAD"],
+    ):
+        must(tools, argv, cwd=str(root), env=genv)
+
+
 def tool_sdlc(root: Path) -> dict:
     """The repo's [tool.sdlc]: pyproject.toml, or sdlc.toml without one; {} for neither."""
     # sdlc.toml holds the same [tool.sdlc] tables as pyproject.toml, as `sdlc` reads it.
@@ -423,9 +457,28 @@ def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, s
     return best[1], image
 
 
+SELF_ID = re.compile(
+    r"containers/([0-9a-f]{64})/(?:userdata/)?(?:hostname|hosts|resolv\.conf) /etc/"
+)
+
+
+def own_container_id(mountinfo: str = "/proc/self/mountinfo") -> str:
+    """This container's id, from the engine's mount of /etc/hostname ("" if none).
+
+    A step runs by `docker exec`, which exports no HOSTNAME, and a runner's
+    engine may give the job container the runner's hostname; the id the engine
+    names the hostname file by is the one it answers `inspect` to.
+    """
+    try:
+        found = SELF_ID.search(Path(mountinfo).read_text(errors="replace"))
+    except OSError:
+        return ""
+    return found.group(1) if found else ""
+
+
 def inspect_self(tools: Tools, env: Mapping[str, str], cwd: str | None = None) -> dict:
-    """`podman inspect` of this container, through the socket (`HOSTNAME` is its id)."""
-    me = env.get("HOSTNAME")
+    """`podman inspect` of this container, through the socket, by `own_container_id`."""
+    me = own_container_id() or env.get("HOSTNAME") or socket.gethostname()
     if not me:
         cannot("HOSTNAME is not set: cannot find this container through the socket")
     try:
