@@ -36,6 +36,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from sdlc_jobs._findings import requires_answer
 from sdlc_jobs._github import APP_LOGIN, FOUND, OK, Api, ApiError, GitHub, contract, repo_of
 
 GATE_JOB = "sdlc / gate (pull_request_target)"
@@ -47,7 +48,6 @@ GUARD_COMMENT = (
     "Please open an issue and a maintainer will make the change."
 )
 TRUSTED_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
-REQUIRED_LOW_AGENTS = ("Bug Hunter", "Security Scan")
 
 # The Ashigaru App posts Gatehouse's review, so it is the reviewer, and it is
 # also the account whose replies never answer a finding (a1073): both are the
@@ -255,11 +255,16 @@ def _answers(body: str, commits: list[str], open_urls: set[str]) -> bool:
     return bool(deferred and deferred["u"].lower().rstrip("/") in open_urls)
 
 
+_HEAD = re.compile(r"\*\*(?P<severity>[A-Z]+)\*\* \((?P<agent>[^)]*)\):")
+
+
 def _required(first_line: str) -> bool:
-    """CRITICAL, HIGH, MEDIUM always; LOW only from the agents that must be answered."""
-    if not first_line.startswith("**LOW** ("):
-        return True
-    return any(first_line.startswith(f"**LOW** ({a}):") for a in REQUIRED_LOW_AGENTS)
+    """A comment's first line, `**SEVERITY** (Agent): ...`, judged by requires_answer.
+
+    A line in no known shape is required: it cannot be shown to be a LOW.
+    """
+    head = _HEAD.match(first_line)
+    return head is None or requires_answer(head["severity"], head["agent"])
 
 
 def _unanswered(
