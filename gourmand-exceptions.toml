@@ -332,3 +332,14 @@ to find the container id (RT #1664). Those are fixed paths inside every job
 container, named by the kernel and the engine, not paths of the host or the
 repo, so there is nothing to make relative.
 """
+
+# CQ002 reads the Keep a Changelog section names in the R4 fixtures as
+# tombstone comments. They are test data: the check under test reads those
+# headings, so the fixtures must spell them.
+[[exceptions]]
+check = "CQ002-dead_code_markers"
+path = "tests/test_constitution.py"
+classification = "gourmand_bug"
+justification = """
+  The R4 cases write CHANGELOG.md fixtures with a `### Deprecated` heading   and deprecation bullets, because check_release reads exactly that Keep a   Changelog section. The words are string data under test, not comments   marking removed code, and renaming them would test a heading no repo uses.
+"""

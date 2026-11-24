@@ -88,6 +88,51 @@ FAILS: list[tuple[str, tuple, str]] = [
 ]
 
 
+def changelog(*releases: str) -> str:
+    return "# Changelog\n\n## [Unreleased]\n\n" + "\n".join(releases)
+
+
+REMOVED = "### Removed\n\n- `--old`; use `--new` instead.\n"
+R4_FAILS = {
+    "removal in a MINOR after 1.0": changelog(
+        "## [1.3.0] - 2026-11-24\n\n" + REMOVED, "## [1.2.0] - 2026-11-01\n"
+    ),
+    "removal in a PATCH before 1.0": changelog(
+        "## [0.4.1] - 2026-11-24\n\n" + REMOVED, "## [0.4.0] - 2026-11-01\n"
+    ),
+    "deprecation with no end": changelog(
+        "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old` is deprecated.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
+}
+R4_PASSES = {
+    "removal in a MAJOR": changelog(
+        "## [2.0.0] - 2026-11-24\n\n" + REMOVED, "## [1.2.0] - 2026-11-01\n"
+    ),
+    "removal in a MINOR before 1.0": changelog(
+        "## [0.5.0] - 2026-11-24\n\n" + REMOVED, "## [0.4.0] - 2026-11-01\n"
+    ),
+    "deprecation naming its end": changelog(
+        "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old`; removed in 2.0.0.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
+    "an old unannounced removal is history": changelog(
+        "## [1.3.0] - 2026-11-24\n\n### Added\n\n- x\n",
+        "## [1.2.1] - 2026-11-01\n\n" + REMOVED,
+        "## [1.2.0] - 2026-10-01\n",
+    ),
+}
+
+
+def test_r4_release() -> None:
+    for name, text in R4_FAILS.items():
+        got = findings(mcp_server, write("CHANGELOG.md", text))
+        assert any(f.startswith("R4:") for f in got), (name, got)
+    for name, text in R4_PASSES.items():
+        got = [f for f in findings(mcp_server, write("CHANGELOG.md", text)) if f.startswith("R4:")]
+        assert got == [], (name, got)
+
+
 def test_compliant_is_clean() -> None:
     assert findings(mcp_server) == [], findings(mcp_server)
 

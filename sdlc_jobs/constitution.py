@@ -114,7 +114,7 @@ COVERAGE: dict[str, str] = {
     "R1": "review",
     "R2": "rule",
     "R3": "rule",  # build once, promote by digest (image/promote jobs)
-    "R4": "review",
+    "R4": "rule",
     "R5": "review",
     "S1": "rule",
     "S2": "review",
@@ -285,6 +285,58 @@ def check_changelog(root: Path, report: Report) -> None:
         report.add("R2", "CHANGELOG.md has no `[Unreleased]` section")
 
 
+RELEASE_HEAD = re.compile(r"^##\s*\[?v?(\d+)\.(\d+)\.(\d+)\]?", re.MULTILINE)
+SUBHEAD = re.compile(r"^###\s*(\w+)", re.MULTILINE)
+NAMES_RELEASE = re.compile(r"\d+\.\d+(?:\.\d+)?")
+
+
+def _subsections(body: str) -> dict[str, str]:
+    """`### Name` subsections of one release, as {lowercased name: text}."""
+    heads = list(SUBHEAD.finditer(body))
+    return {
+        h.group(1).lower(): body[h.end() : heads[i + 1].start() if i + 1 < len(heads) else None]
+        for i, h in enumerate(heads)
+    }
+
+
+def _bullets(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.lstrip().startswith(("-", "*"))]
+
+
+def _newest_two(text: str) -> tuple[tuple[int, ...] | None, tuple[int, ...] | None, str]:
+    """The newest release's version, the one before it, and the newest release's body."""
+    heads = list(RELEASE_HEAD.finditer(text))
+    versions = [tuple(int(n) for n in h.groups()) for h in heads[:2]]
+    if not versions:
+        return None, None, ""
+    end = heads[1].start() if len(heads) > 1 else None
+    return versions[0], versions[1] if len(versions) > 1 else None, text[heads[0].end() : end]
+
+
+def _breaking(newest: tuple[int, ...], before: tuple[int, ...]) -> bool:
+    """R1: MAJOR breaks; before 1.0, MINOR does."""
+    return newest[0] > before[0] or (before[0] == 0 and newest[1] > before[1])
+
+
+def check_release(root: Path, report: Report) -> None:
+    """R4 on the newest release only, so history a repo already shipped cannot fail it."""
+    changelog = root / "CHANGELOG.md"
+    newest, before, body = (
+        _newest_two(changelog.read_text()) if changelog.is_file() else (None, None, "")
+    )
+    if newest is None:
+        return
+    parts = _subsections(body)
+    if before and _bullets(parts.get("removed", "")) and not _breaking(newest, before):
+        shown = ".".join(map(str, newest)), ".".join(map(str, before))
+        report.add(
+            "R4", f"{shown[0]} removes something but is not a breaking release after {shown[1]}"
+        )
+    for bullet in _bullets(parts.get("deprecated", "")):
+        if not NAMES_RELEASE.search(bullet):
+            report.add("R4", f"deprecation names no release that ends it: {bullet[:80]}")
+
+
 def declared_versions(root: Path) -> list[tuple[str, str]]:
     found = []
     for glob, pattern in VERSION_FILES:
@@ -323,6 +375,7 @@ def check(root: Path) -> Report:
     check_license(root, kinds, report)
     check_files(root, kinds, report)
     check_changelog(root, report)
+    check_release(root, report)
     check_version_sync(root, kinds, report)
     return report
 
