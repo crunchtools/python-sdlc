@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `sdlc / gate` counts an answer to a Gatehouse finding only from an owner,
+  member or collaborator (constitution C3). A PR author outside the org could
+  clear a finding by replying `not a bug: ...` to it.
+
 ## [0.13.0] - 2026-11-24
 
 ### Added

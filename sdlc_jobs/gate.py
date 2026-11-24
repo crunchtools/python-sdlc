@@ -277,6 +277,7 @@ def _unanswered(
         for c in comments
         if c.get("in_reply_to_id") is not None
         and _login(c) != REVIEWER
+        and c.get("author_association") in TRUSTED_ASSOCIATIONS
         and _answers(c.get("body") or "", commits, open_urls)
     }
     out = []
