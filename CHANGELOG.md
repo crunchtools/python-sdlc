@@ -6,6 +6,19 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-24
+
+### Added
+
+- Constitution 2.0.0 (RT #1666). A repo without a
+  `.specify/memory/constitution.md` is judged by `sdlc-constitution check`
+  against the 2.0.0 text baked into the image; it names what it is with
+  `[tool.sdlc] repo-kinds`, and every finding cites a principle ID. A repo
+  that keeps its manifest gets the v1 validator, unchanged. Gatehouse reviews
+  a v2 repo against the image's text plus the README's "What's different
+  here" section. `sdlc-constitution coverage` lists how each principle is
+  checked: by rule, by review, or not yet.
+
 ### Changed
 
 - Public repos run on GitHub's machines again; private repos run on Exedore.
