@@ -6,6 +6,11 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- Only a public repo builds a candidate: `quay.io/crunchtools/candidates` is
+  public, so a private repo's pull request builds at merge, as before.
+
 ## [0.14.0] - 2026-11-24
 
 ### Added
