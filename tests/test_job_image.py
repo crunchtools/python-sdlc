@@ -133,7 +133,7 @@ class FakeTools(Tools):
     def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
         done = self._answer(argv, **kw)
         if kw.get("stream"):  # as the real Tools: a streamed run's output went to the log
-            return subprocess.CompletedProcess(argv, done.returncode, None, None)  # type: ignore[arg-type]
+            return subprocess.CompletedProcess[str](argv, done.returncode)  # stdout, stderr: None
         return done
 
     def _answer(

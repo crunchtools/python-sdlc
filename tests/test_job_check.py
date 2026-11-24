@@ -26,9 +26,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sdlc_jobs import _core, check
 from sdlc_jobs._core import CannotRunError, Response, Tools
 
-# The fake engine answers to HOSTNAME; a suite that itself runs in a container
-# must not find its own id in /proc/self/mountinfo first.
-_core.own_container_id = lambda *_: ""  # type: ignore[assignment]
+
+def no_container_id(mountinfo: str = "") -> str:
+    """The fake engine answers to HOSTNAME; a suite that itself runs in a
+    container must not find its own id in mountinfo first."""
+    del mountinfo
+    return ""
+
+
+_core.own_container_id = no_container_id
 
 REPO = "crunchtools/demo"
 SHA = "0123456789abcdef0123456789abcdef01234567"
