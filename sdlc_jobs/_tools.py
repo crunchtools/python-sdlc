@@ -125,21 +125,26 @@ def git_auth(token: str) -> dict[str, str]:
     }
 
 
-def git_env(token: str = "") -> dict[str, str]:
-    """git_auth(token), plus safe.directory=* so a mounted workspace owned by another uid works.
+def safe_directory(env: Mapping[str, str], path: Path) -> dict[str, str]:
+    """GIT_CONFIG_* that mark `path`, and only it, safe, after the entries `env` carries.
 
-    The bootstrap container runs git as a different uid than the one that owns
-    the mounted workspace; git refuses it as "dubious ownership" otherwise.
+    sdlc's container runs git as a different uid than the one that owns the
+    runner's mounted workspace; git refuses that as "dubious ownership" (#157).
+    The exception names the one tree sdlc fetched itself, never `*`: any other
+    repository's own config stays untrusted.
     """
+    n = int(env.get("GIT_CONFIG_COUNT") or "0")
+    return {
+        "GIT_CONFIG_COUNT": str(n + 1),
+        f"GIT_CONFIG_KEY_{n}": "safe.directory",
+        f"GIT_CONFIG_VALUE_{n}": str(path.resolve()),
+    }
+
+
+def git_env(path: Path, token: str = "") -> dict[str, str]:
+    """git_auth(token), or no prompt without one, plus safe_directory(path)."""
     env = git_auth(token) if token else {"GIT_TERMINAL_PROMPT": "0"}
-    n = int(env.get("GIT_CONFIG_COUNT", "0"))
-    env.update(
-        {
-            "GIT_CONFIG_COUNT": str(n + 1),
-            f"GIT_CONFIG_KEY_{n}": "safe.directory",
-            f"GIT_CONFIG_VALUE_{n}": "*",
-        }
-    )
+    env.update(safe_directory(env, path))
     return env
 
 
@@ -174,8 +179,8 @@ def clone(site: Site, ref: str, into: Path, *, token: str = "", branch: str = ""
     that local branch, as actions/checkout leaves a PR branch.
     """
     url = f"https://github.com/{site.repo}.git"
-    genv = child_env(site.env, **git_env(token))
     into.mkdir(parents=True, exist_ok=True)
+    genv = child_env(site.env, **git_env(into, token))
     steps: list[list[str]] = [
         ["git", "init", "-q", "."],
         ["git", "remote", "add", "origin", url],

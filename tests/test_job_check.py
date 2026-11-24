@@ -637,3 +637,15 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_launcher_trusts_the_mounted_workspace() -> None:
+    """bin/sdlc runs git in the runner's workspace, owned by another uid (#157)."""
+    t = FakeTools()
+    t.env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.x", "GIT_CONFIG_VALUE_0": "y"}
+    go("pull_request", t)
+    _, child = t.launched[0]
+    assert child["GIT_CONFIG_COUNT"] == "2"
+    assert (child["GIT_CONFIG_KEY_0"], child["GIT_CONFIG_VALUE_0"]) == ("core.x", "y")
+    assert child["GIT_CONFIG_KEY_1"] == "safe.directory"
+    assert Path(child["GIT_CONFIG_VALUE_1"]).name == "ws"  # the workspace, never `*`

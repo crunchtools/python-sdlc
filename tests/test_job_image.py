@@ -1706,3 +1706,20 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_git_and_sdlc_trust_the_mounted_workspace() -> None:
+    """git rev-parse and `sdlc plan` run in the runner's workspace, owned by another uid (#157)."""
+    t = FakeTools()
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0, t.log
+    seen = [
+        e
+        for a, e in zip(t.argvs, t.envs, strict=True)
+        if a[:2] in (["git", "rev-parse"], ["sdlc", "plan"])
+    ]
+    assert [len(seen)] == [2], t.argvs  # rev-parse and `sdlc plan`
+    for env in seen:
+        n = int(env["GIT_CONFIG_COUNT"]) - 1
+        assert env[f"GIT_CONFIG_KEY_{n}"] == "safe.directory"
+        assert Path(env[f"GIT_CONFIG_VALUE_{n}"]).name == "ws"  # the workspace, never `*`

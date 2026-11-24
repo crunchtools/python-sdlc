@@ -37,7 +37,7 @@ from typing import Any
 from unittest import mock
 
 import sdlc_root
-from fake_github import FakeGitHub, FakeRunner, check, finish
+from fake_github import FakeGitHub, FakeRunner, carries_credential, check, finish
 
 from sdlc_jobs import _handoff, ai
 from sdlc_jobs import _tools as tools
@@ -773,11 +773,7 @@ check(
 )
 check(
     "fix: the clone carries no token",
-    all(
-        "AUTHORIZATION" not in c[1].get("GIT_CONFIG_VALUE_0", "")
-        for c in rig.runner.calls
-        if c[0][0] == "git"
-    ),
+    all(not carries_credential(c[1]) for c in rig.runner.calls if c[0][0] == "git"),
 )
 prompt_argv = rig.ran("prompt.py")[0][0]
 check(

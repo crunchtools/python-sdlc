@@ -6,6 +6,14 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `sdlc event`, `check`, `image` and `pypi` no longer fail with git's "dubious
+  ownership" error when the runner's mounted workspace is owned by another uid:
+  every git call sdlc makes there (fetch, clone, `rev-parse`, and the launcher's
+  git) marks that one tree as a `safe.directory` through the environment, never
+  `*` (#157).
+
 ## [0.15.0] - 2026-11-24
 
 ### Fixed
@@ -60,9 +68,6 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
-- `sdlc event` no longer fails with git's "dubious ownership" error when the
-  bootstrap container's workspace is owned by another uid: the fetch and clone
-  git calls set `safe.directory=*` through the environment (#157).
 - `[tool.sdlc.image] build-args` now choose the parent that is verified and
   pinned, as they choose it in the build: rotv's `BASE_IMAGE` was verified and
   pinned as the Containerfile's default, not as rotv-base.

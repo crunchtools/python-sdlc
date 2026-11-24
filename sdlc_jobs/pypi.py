@@ -30,6 +30,7 @@ from sdlc_jobs._core import (
     tool_sdlc,
     workspace,
 )
+from sdlc_jobs._tools import safe_directory
 from sdlc_jobs._verify_release import verify_release
 
 INDEX_CHECK = "https://pypi.org/simple/"
@@ -129,7 +130,8 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         cannot('the tree does not say [tool.sdlc] publish = "pypi"; the plan is not an authority')
     if not sha or release["sha"] != sha:
         cannot(f"write released {release['sha']}, this push is {sha or 'unknown'}")
-    head = must(tools, ["git", "rev-parse", "HEAD"], cwd=str(root)).strip()
+    genv = {**env, **safe_directory(env, root)}  # the mounted workspace: #157
+    head = must(tools, ["git", "rev-parse", "HEAD"], cwd=str(root), env=genv).strip()
     if head != sha:
         cannot(f"the checkout is at {head}, not {sha}")
 
