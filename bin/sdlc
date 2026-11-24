@@ -669,7 +669,7 @@ t_gatehouse() {
   # v2 the image's text plus its README section; a v1 repo keeps Gatehouse's own
   # discovery of its manifest.
   git diff "$_base...HEAD" | run_in_image ro stdin \
-    --env-file "$_env" ${_keymount:+-v "$_keymount"} -i "$IMAGE" sdlc-constitution gatehouse
+    --env-file "$_env" ${_keymount:+-v "$_keymount"} -i --entrypoint sdlc-constitution "$IMAGE" gatehouse
 }
 
 # ------------------------------------------------------------------- the record
