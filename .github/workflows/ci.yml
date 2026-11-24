@@ -21,10 +21,10 @@ on:
 permissions: {}
 env: { COSIGN_IMAGE: "ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca" }  # v2.6.5
 jobs:
-  test:  # the PR's own sdlc code, and nothing to steal: read-only contents, no secret, GitHub's machine
+  test:  # the PR's own sdlc code, and nothing to steal: read-only contents, no secret, a throwaway VM
     name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
     if: github.event_name == 'pull_request'
-    runs-on: ${{ github.event.pull_request.head.repo.full_name == github.repository && vars.CACHED_RUNNER_LABEL || 'ubuntu-latest' }}  # a fork's PR on GitHub's machine
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     permissions: { contents: read }
     env: { MODE: test }
     steps:  # sdlc is public: the fetch needs no token and persists none; origin names the repo for the validator's exemptions
@@ -35,14 +35,14 @@ jobs:
     if: >-
       github.event_name == 'schedule'
       || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     permissions: { contents: read, security-events: write, actions: write }
     outputs: { result: "${{ steps.s.outputs.result }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", MODE: check }
     steps: [*fetch, { id: s, run: scripts/self.sh }]
   ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
     if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
-    runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
+    runs-on: &secret ${{ vars.UNCACHED_RUNNER_LABEL }}
     container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:5f25b7968ff9f14e0fa363ea3c25e0df4f6159abf43549653fff74eb674de060", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
@@ -69,7 +69,7 @@ jobs:
       always() && (github.event_name == 'pull_request_target'
       || github.event_name == 'pull_request_review_comment' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     concurrency: { group: "gate-${{ github.event.pull_request.number }}-${{ github.event_name }}" }
-    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}  # no repo code runs here, a fork's PR included
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     container: *boot
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
@@ -79,7 +79,7 @@ jobs:
     if: >-
       always() && !cancelled() && needs.check.result == 'success'
       && (fromJSON(needs.check.outputs.result || '{}').release || github.event_name == 'schedule' || inputs.bootstrap && needs.approve.result == 'success')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     environment: registry
     permissions: { contents: read }
     outputs: { result: "${{ steps.s.outputs.result }}" }
@@ -89,7 +89,7 @@ jobs:
     steps: [*fetch, { id: s, run: scripts/self.sh }]
   approve:  # no secret; sdlc-approval's reviewers (Josui Prime, Scott; prevent_self_review) are the approval
     if: github.event_name == 'workflow_dispatch' && (inputs.digest != '' || inputs.bootstrap) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     environment: sdlc-approval
     permissions: {}
     steps: [{ run: "true" }]
@@ -97,7 +97,7 @@ jobs:
     needs: [image, approve]
     if: always() && !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (needs.image.result == 'success' || needs.approve.result == 'success' && !inputs.bootstrap)
     concurrency: { group: sdlc-sign, queue: max }
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL }}
     environment: sdlc-signing
     permissions: { contents: read }
     env: { MODE: "${{ inputs.bootstrap && 'bootstrap' || github.event_name == 'workflow_dispatch' && 'rollback' || github.event_name == 'schedule' && 'weekly' || 'release' }}", EVENT: "${{ github.event_name }}",
