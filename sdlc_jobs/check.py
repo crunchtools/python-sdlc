@@ -16,6 +16,12 @@ It does four things, in this order, because a failed check still prints its plan
 3. Upload SARIF on a default-branch push.
 4. The weekly run also audits dependencies and keeps the schedule alive.
 
+Build once (sdlc_jobs/_candidate.py): on a same-repo pull request of an image repo the
+plan says `candidate`, `image` builds, gates and pushes the release image, and the
+container gates are skipped here so the pull request builds it once. A default-branch
+push whose tree is the tree its merged pull request passed `check` on runs no gates: they
+already judged these exact bytes, and `image` adopts the candidate.
+
 An exit that is not a verdict (the launcher's 2 or 3, an unreadable digest, an API
 that refused) is a 2. A 3 is "CI will judge it", and here we are CI.
 """
@@ -31,6 +37,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from sdlc_jobs._candidate import CHECK_JOB as REQUIRED_CHECK
+from sdlc_jobs._candidate import merged_head, pr_job, tree_of
 from sdlc_jobs._core import (
     CANNOT_RUN,
     CLEAN,
@@ -61,6 +69,7 @@ EVENTS = ("pull_request", "push", "schedule", "workflow_dispatch")
 # A job's outputs are capped at 1 MiB; the plan stays well under it.
 PLAN_LIMIT = 900_000
 RELEASE_REF = "ashigaru/release-"
+CONTAINER_GATES = ("container-build", "container-smoke", "container-scan", "bootc-lint")
 # The line `sdlc pip-audit -- --report` prints its JSON report on; the same in `sdlc`.
 AUDIT_REPORT = "SDLC-AUDIT-REPORT "
 BASE_LABEL = "org.opencontainers.image.base.digest"  # what the image job stamps on a build
@@ -89,24 +98,34 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         f"refs/heads/{(event.get('repository') or {}).get('default_branch', '')}"
     )
     cron = event.get("schedule") if event_name == "schedule" else None
-    plan = fit(make_plan(tools, env, root, default_push, cron))
-    set_output(env, "result", plan)
+    head = ((event.get("pull_request") or {}).get("head") or {}).get("repo") or {}
+    same_repo = event_name == "pull_request" and head.get("full_name") == repo
+    made = make_plan(tools, env, root, default_push, cron)
+    made["candidate"] = same_repo and candidate_repo(root, repo)
+    set_output(env, "result", fit(made))
 
     if event_name == "schedule":
         return CLEAN
-    rc = gates(tools, env, root)
+    if default_push and gated_on_pr(tools, env, repo):
+        return CLEAN
+    rc = gates(tools, env, root, skip=CONTAINER_GATES if made["candidate"] else ())
     if default_push:
         upload_sarif(tools, env, repo)
     return rc
 
 
 def make_plan(
-    tools: Tools, env: Mapping[str, str], root: Path, default_push: bool, cron: object
+    tools: Tools,
+    env: Mapping[str, str],
+    root: Path,
+    default_push: bool,
+    cron: object,
 ) -> dict[str, Any]:
     """The plan for this event, in the shape `_core.plan` documents."""
     repo = env.get("GITHUB_REPOSITORY", "")
     out: dict[str, Any] = {
         "image": False,
+        "candidate": False,
         "release": None,
         "write": False,
         "weekly": cron == WEEKLY,
@@ -126,6 +145,14 @@ def make_plan(
     # A clean report goes to `write` too: it is what closes the alert issue.
     out["write"] = bool(out["release"]) or out["audit"] is not None
     return out
+
+
+def candidate_repo(root: Path, repo: str) -> bool:
+    """An image a pull request can build: no RHSM or registry.redhat.io secret needed."""
+    if containerfile(root) is None:
+        return False
+    settings = image_settings(root, repo)
+    return not (settings.get("rhsm") or settings.get("redhat-registry"))
 
 
 def fit(plan: dict[str, Any]) -> str:
@@ -190,11 +217,39 @@ def launch(
     return tools.run(argv, cwd=str(root), env=child, stream=stream)
 
 
-def gates(tools: Tools, env: Mapping[str, str], root: Path) -> int:
-    """`sdlc ci` for this tree, through the launcher so repo code runs only nested."""
+def gates(tools: Tools, env: Mapping[str, str], root: Path, skip: tuple[str, ...] = ()) -> int:
+    """`sdlc ci` for this tree, through the launcher so repo code runs only nested.
+
+    `skip` is the container gates when `image` runs them on this pull request instead.
+    """
     step("gates: sdlc ci")
+    if skip:
+        print(f"the container gates run in `image`, on the release build: {', '.join(skip)}")
+        given = [s for s in env.get("SDLC_SKIP", "").split(",") if s.strip()]
+        env = {**env, "SDLC_SKIP": ",".join([*given, *skip])}
     proc = launch(tools, env, root, "ci", stream=True)
     return proc.returncode if proc.returncode in (CLEAN, FOUND) else CANNOT_RUN
+
+
+def gated_on_pr(tools: Tools, env: Mapping[str, str], repo: str) -> bool:
+    """Did the pull request this push merges pass `check` on this very tree?
+
+    Its head's tree must be this commit's tree, so the gates judged these exact files,
+    and the pass must be a job GitHub ran from ci.yml (sdlc_jobs/_candidate.pr_job), not
+    a check run anything could post. Anything less and the push runs the gates itself.
+    Main's code scanning is then the pull request's: no SARIF is uploaded from here.
+    """
+    sha = env.get("GITHUB_SHA", "")
+    head = merged_head(tools, env, repo, sha)
+    if head is None:
+        return False
+    if tree_of(tools, env, repo, head) != tree_of(tools, env, repo, sha):
+        print("the merged pull request was checked on another tree: gating")
+        return False
+    if pr_job(tools, env, repo, head, REQUIRED_CHECK) is None:
+        return False
+    print(f"gates: passed on the pull request at {head}, the same tree; not rerun")
+    return True
 
 
 def release_plan(tools: Tools, env: Mapping[str, str], root: Path, repo: str) -> dict | None:

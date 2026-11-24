@@ -14,6 +14,16 @@ All notable changes to this project are documented here, following
   release removes it ("removed in 2.0.0"); a bare "since 1.2.0" does not count. Older releases are history and are not judged. Whether a removal names
   its replacement stays a review question.
 
+- Build once, promote on merge (RT #1668). A same-repo pull request's `image`
+  job builds, gates and pushes the release image to
+  `quay.io/crunchtools/candidates:<repo>-<tree>` with a GitHub OIDC token
+  exchanged for the `crunchtools+candidates` Quay robot; it gets no secret.
+  The pull request's `check` leaves the container gates to it. On the merge,
+  `check` skips gates its pull request already passed on the same tree, and
+  `image` copies the digest GitHub recorded for the pull request's image
+  job instead of building; `promote` accepts it by its tree label. No candidate, a fork, or an RHSM build: the
+  merge builds as before.
+
 ### Fixed
 
 - `sdlc / gate` counts an answer to a Gatehouse finding only from an owner,

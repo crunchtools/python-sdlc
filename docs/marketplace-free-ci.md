@@ -54,16 +54,19 @@ jobs:
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
     env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", OPENROUTER_API_KEY: "${{ secrets.OPENROUTER_API_KEY }}" }
     steps: *event
-  image:  # verifies the parent itself, builds FROM @digest through the socket, gates, pushes gated-<sha>
+  image:  # verifies the parent itself, builds FROM @digest through the socket, gates, pushes; a PR's to candidates by OIDC, a merge adopts it
+    name: sdlc / image (${{ github.event_name }})
     needs: check
-    if: needs.check.result == 'success' && fromJSON(needs.check.outputs.result || '{}').image && github.event_name != 'pull_request'
+    if: >-
+      needs.check.result == 'success' && (github.event_name == 'pull_request' && fromJSON(needs.check.outputs.result || '{}').candidate
+      || github.event_name != 'pull_request' && fromJSON(needs.check.outputs.result || '{}').image)
     runs-on: *secret
     container: *boot
-    permissions: { contents: read }
+    permissions: { contents: read, actions: read, checks: read, id-token: write }  # id-token: a PR's candidate by Quay robot federation, no secret; actions, checks: a merge reads the PR's record of it
     outputs: { result: "${{ steps.e.outputs.result }}" }
-    env: { GITHUB_TOKEN: "${{ github.token }}", QUAY_USERNAME: "${{ secrets.QUAY_USERNAME }}", QUAY_PASSWORD: "${{ secrets.QUAY_PASSWORD }}",
-           RHSM_ACTIVATION_KEY: "${{ secrets.RHSM_ACTIVATION_KEY }}", RHSM_ORG_ID: "${{ secrets.RHSM_ORG_ID }}",
-           REGISTRY_REDHAT_IO_USER: "${{ secrets.REGISTRY_REDHAT_IO_USER }}", REGISTRY_REDHAT_IO_PASSWORD: "${{ secrets.REGISTRY_REDHAT_IO_PASSWORD }}" }
+    env: { GITHUB_TOKEN: "${{ github.token }}", QUAY_USERNAME: "${{ github.event_name != 'pull_request' && secrets.QUAY_USERNAME || '' }}", QUAY_PASSWORD: "${{ github.event_name != 'pull_request' && secrets.QUAY_PASSWORD || '' }}",
+           RHSM_ACTIVATION_KEY: "${{ github.event_name != 'pull_request' && secrets.RHSM_ACTIVATION_KEY || '' }}", RHSM_ORG_ID: "${{ github.event_name != 'pull_request' && secrets.RHSM_ORG_ID || '' }}",
+           REGISTRY_REDHAT_IO_USER: "${{ github.event_name != 'pull_request' && secrets.REGISTRY_REDHAT_IO_USER || '' }}", REGISTRY_REDHAT_IO_PASSWORD: "${{ github.event_name != 'pull_request' && secrets.REGISTRY_REDHAT_IO_PASSWORD || '' }}" }
     steps: *event
   write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
     needs: [check, ai]
@@ -81,7 +84,7 @@ jobs:
     steps: *event
   promote:  # the cosign key: signs, attests and moves tags on a digest it did not build; idempotent; version only from write
     needs: [check, image, write]
-    if: always() && !cancelled() && needs.image.result == 'success'
+    if: always() && !cancelled() && needs.image.result == 'success' && github.event_name != 'pull_request'
     concurrency: { group: "promote-${{ github.repository }}", queue: max }
     runs-on: *secret
     container: *boot

@@ -37,6 +37,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sdlc_jobs._candidate import TREE_LABEL, tree_of
 from sdlc_jobs._core import (
     CLEAN,
     DIGEST,
@@ -56,7 +57,7 @@ from sdlc_jobs.image import ORG, QUAY
 VERSION_LABELS = ("org.opencontainers.image.version", "version")
 MISSING = re.compile(r"manifest unknown|not found|no such|name unknown", re.IGNORECASE)
 COMMIT = re.compile(r"[0-9a-f]{40}")
-RELEASED_REF = re.compile(r"refs/heads/.+")
+RELEASED_REF = re.compile(r"refs/heads/.+|refs/pull/\d+/merge")  # a candidate: the PR built it
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
 WORKFLOW = ".github/workflows/ci.yml@"
 OK = 200
@@ -75,6 +76,7 @@ class Job:
     digest: str
     scratch: Path
     labels: dict[str, str] = field(default_factory=dict)
+    adopted: bool = False  # built on the pull request, from this commit's tree
 
     @property
     def at(self) -> str:
@@ -196,13 +198,21 @@ def inspect_labels(job: Job) -> dict[str, str]:
 def verify_built(job: Job) -> None:
     """The image at the digest is this run's commit, and `image` pushed it as gated-<sha>.
 
-    Both are refusals, never skips: a digest that is not what this commit built does not
-    get signed or attested.
+    A candidate the pull request built carries that run's commit, not the merge's; it is
+    this commit when its tree label is this commit's tree. Both are refusals, never skips:
+    a digest that is not what this commit built does not get signed or attested.
     """
     sha = job.env.get("GITHUB_SHA", "")
-    for label in BUILT_LABELS:
-        if job.labels.get(label) != sha:
-            cannot(f"{job.at} carries {label}={job.labels.get(label)!r}, not this run's {sha}")
+    if any(job.labels.get(label) != sha for label in BUILT_LABELS):
+        tree = tree_of(job.tools, job.env, job.repo, sha)
+        if job.labels.get(TREE_LABEL) != tree:
+            label = next(k for k in BUILT_LABELS if job.labels.get(k) != sha)
+            cannot(
+                f"{job.at} carries {label}={job.labels.get(label)!r} and tree "
+                f"{job.labels.get(TREE_LABEL)!r}, neither this run's {sha} nor its tree {tree}"
+            )
+        print(f"{job.at} was built on the pull request, from this tree {tree}", flush=True)
+        job.adopted = True
     gated = digest_of(job, f"gated-{sha}")
     if gated != job.digest:
         cannot(f"{job.ref}:gated-{sha} is {gated or 'missing'}, not the digest {job.digest}")
@@ -276,7 +286,10 @@ def attest(job: Job) -> None:
     if verifies(job, "--type", "slsaprovenance1", kind="verify-attestation"):
         print("provenance is already attested", flush=True)
         return
-    predicate = provenance(job.labels, job.repo)
+    # An adopted build's own commit is refs/pull/N/merge, gone after the merge: the
+    # source it records is the merged commit, the same tree.
+    merged = job.env.get("GITHUB_SHA", "") if job.adopted else None
+    predicate = provenance(job.labels, job.repo, merged)
     if predicate is None:
         print("the image records no run of this repo's ci.yml: no provenance attested", flush=True)
         return
@@ -295,7 +308,7 @@ def attest_one(job: Job, kind: str, predicate: Path) -> None:
         cannot(f"the {kind} attestation does not verify on {job.at}")
 
 
-def provenance(labels: Mapping[str, str], repo: str) -> dict | None:
+def provenance(labels: Mapping[str, str], repo: str, merged: str | None = None) -> dict | None:
     """The SLSA v1 predicate for the run the image's labels record, None without one.
 
     Read off the image, never this run: promote is usually a later run than the build.
@@ -327,7 +340,9 @@ def provenance(labels: Mapping[str, str], repo: str) -> dict | None:
         "buildDefinition": {
             "buildType": BUILD_TYPE,
             "externalParameters": {"workflow": {"ref": ref, "repository": source, "path": path}},
-            "resolvedDependencies": [{"uri": f"git+{source}", "digest": {"gitCommit": commit}}],
+            "resolvedDependencies": [
+                {"uri": f"git+{source}", "digest": {"gitCommit": merged or commit}}
+            ],
         },
         "runDetails": {
             "builder": {"id": f"https://github.com/{builder}"},

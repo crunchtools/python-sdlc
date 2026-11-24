@@ -2,9 +2,12 @@
 
 It holds the registry secrets (quay, RHSM, registry.redhat.io) and the runner's
 container socket, never the cosign key. It runs on a default-branch push, the
-schedule or a dispatch, so the Containerfile it builds is reviewed, merged code; a
-pull request's is built only by `check`, which holds no secret. Any other event is a 2
-here, the second guard behind the workflow's own `if:`.
+schedule or a dispatch. On a same-repo pull request it holds no secret at all: it
+builds and gates the same way and pushes a candidate to `quay.io/crunchtools/candidates`
+with an OIDC-federated robot (sdlc_jobs/_candidate.py), and a default-branch push whose
+tree has a candidate adopts that digest instead of building again. A repo that builds
+with RHSM or registry.redhat.io has no candidate yet: those need secrets a pull request
+does not get. Any other event is a 2 here, the second guard behind the workflow's `if:`.
 
 `check`'s plan only says this job runs. Every registry FROM, a builder stage's as much
 as the final one's, is resolved and verified here:
@@ -42,6 +45,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sdlc_jobs import _candidate
 from sdlc_jobs._boot import Boot, boot_gate, boot_settings
 from sdlc_jobs._core import (
     CLEAN,
@@ -86,6 +90,8 @@ SECRETS = (
     "REGISTRY_REDHAT_IO_USER",
     "REGISTRY_REDHAT_IO_PASSWORD",
     "GITHUB_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_URL",
 )
 FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE)
 # The `podman run` options the planner emits for a host step (container-smoke,
@@ -102,7 +108,7 @@ RUN_VALUED = (
     "--entrypoint",
     "--tmpfs",
 )
-EVENTS = ("push", "schedule", "workflow_dispatch")  # what the workflow's `if:` lets in
+EVENTS = ("pull_request", "push", "schedule", "workflow_dispatch")  # the workflow's `if:`
 PLAN_FIELDS = 4  # name, stage, mode, argv
 STATE_FIELDS = 3  # running, exit code, OOM-killed
 HADOLINT_UNPARSED = 4  # containerfile-lint: hadolint could not parse the file
@@ -125,6 +131,9 @@ class Job:
     child_env: dict[str, str] = field(default_factory=dict)
     settings: dict = field(default_factory=dict)  # [tool.sdlc.image], checked
     boot: Boot | None = None  # its boot gate, checked; None is none asked for
+    tree: str = ""  # the git tree of `sha`: what a candidate is keyed by
+    resume: str = ""  # a pull request's stop-commands token; workflow commands are off
+    event: str = ""
 
     def run(
         self,
@@ -185,7 +194,13 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         print(f"image: [tool.sdlc.image] {key} is not enforced here (crunchtools/sdlc#118)")
     job.child_env = {k: v for k, v in env.items() if k not in SECRETS}
     job.child_env["REGISTRY_AUTH_FILE"] = str(job.auth)
+    job.event = event_name
     try:
+        job.tree = job.must(["git", "rev-parse", "HEAD^{tree}"]).strip()
+        if event_name == "pull_request":
+            if not candidate_possible(job):
+                return CLEAN
+            job.resume = _candidate.stop_commands()  # repo code runs from here on
         return build_and_push(job)
     finally:
         job.run([*job.podman, "volume", "rm", "-f", job.volume])
@@ -200,6 +215,8 @@ def build_and_push(job: Job) -> int:
         cannot("there is no Containerfile or Dockerfile at the repo root to build")
     text = (job.root / containerfile).read_text(encoding="utf-8", errors="replace")
     login(job)
+    if job.event == "push" and adopt(job):
+        return CLEAN
     parent = parent_stage(text)
     stages = [*([parent] if parent else []), *builder_stages(text, parent.index if parent else -1)]
     for stage in stages:
@@ -222,8 +239,30 @@ def build_and_push(job: Job) -> int:
     return push(job, tag, parent.pinned if parent else "")
 
 
+def candidate_possible(job: Job) -> bool:
+    """Can this pull request build a candidate? Said aloud when it cannot."""
+    why = (
+        "it builds with RHSM or registry.redhat.io, whose secrets a pull request lacks"
+        if job.settings.get("rhsm") or job.settings.get("redhat-registry")
+        else "this job has no OIDC token (a fork's pull request)"
+        if not job.env.get("ACTIONS_ID_TOKEN_REQUEST_URL")
+        else ""
+    )
+    if why:
+        print(f"image: no candidate: {why}; the merge builds", flush=True)
+    return not why
+
+
 def login(job: Job) -> None:
     """One auth file for skopeo and the remote podman, in this job's temp directory."""
+    if job.event == "pull_request":
+        jwt = _candidate.oidc_token(job.tools, job.env)
+        if jwt is None:
+            cannot("this pull request has no OIDC token to push a candidate with")
+        token = _candidate.robot_token(job.tools, jwt)
+        argv = ["skopeo", "login", "--authfile", str(job.auth), "-u", _candidate.ROBOT]
+        job.must([*argv, "--password-stdin", QUAY], input=token)
+        return
     for host, user, password in (
         (QUAY, "QUAY_USERNAME", "QUAY_PASSWORD"),
         ("registry.redhat.io", "REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"),
@@ -401,6 +440,7 @@ def labels(job: Job, parent: Parent | None) -> dict[str, str]:
         "com.crunchtools.build.builder": workflow,
         "com.crunchtools.build.workflow": workflow,
         "com.crunchtools.build.commit": job.sha,
+        _candidate.TREE_LABEL: job.tree,
     }
 
 
@@ -655,9 +695,57 @@ def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: in
 # ------------------------------------------------------------------ push
 
 
+def adopt(job: Job) -> bool:
+    """Promote-ready without a build: the pull request's candidate for this tree, by digest.
+
+    Copied to `<ref>:gated-<sha>` with its digest preserved, so `promote` finds what it
+    always finds. False is "no candidate to adopt": build as before.
+    """
+    repo = job.env["GITHUB_REPOSITORY"]
+    found = _candidate.find(job.tools, job.env, job.child_env, repo, job.tree)
+    if found is None:
+        return False
+    digest, labels = found
+    ref = job.settings.get("image") or f"{QUAY}/{ORG}/{job.name}"
+    gated = f"gated-{job.sha}"
+    source = f"{_candidate.CANDIDATES}@{digest}"
+    step(f"adopt {source} as {ref}:{gated}")
+    argv = ["skopeo", "copy", "--all", "--preserve-digests", "--authfile", str(job.auth)]
+    job.must([*argv, f"docker://{source}", f"docker://{ref}:{gated}"])
+    landed = job.must(
+        [
+            "skopeo",
+            "inspect",
+            "--authfile",
+            str(job.auth),
+            "--format",
+            "{{.Digest}}",
+            f"docker://{ref}:{gated}",
+        ]
+    ).strip()
+    if landed != digest:
+        cannot(f"{ref}:{gated} is {landed!r} after the copy, not the candidate's {digest}")
+    parent = labels.get("org.opencontainers.image.base.name", "")
+    result = {
+        "ref": ref,
+        "digest": digest,
+        "sha": job.sha,
+        "tag": gated,
+        "parent": f"{parent}@{labels.get('org.opencontainers.image.base.digest', '')}"
+        if parent
+        else "",
+        "candidate": source,
+    }
+    set_output(job.env, "result", json.dumps(result, separators=(",", ":")))
+    print(f"built once, on the pull request: {ref}@{digest} ({gated})", flush=True)
+    return True
+
+
 def push(job: Job, tag: str, pinned: str) -> int:
     ref = job.settings.get("image") or f"{QUAY}/{ORG}/{job.name}"
     gated = f"gated-{job.sha}"
+    if job.event == "pull_request":
+        ref, _, gated = _candidate.tag(job.env["GITHUB_REPOSITORY"], job.tree).partition(":")
     step(f"push {ref}:{gated}")
     # The digest podman reports for what it pushed, not whatever the tag names later.
     digestfile = job.scratch / "pushed.digest"
@@ -666,6 +754,9 @@ def push(job: Job, tag: str, pinned: str) -> int:
     digest = digestfile.read_text().strip() if digestfile.is_file() else ""
     if not DIGEST.fullmatch(digest):
         cannot(f"podman push of {ref}:{gated} reported {digest!r}, not a sha256 digest")
+    if job.event == "pull_request":
+        _candidate.resume(job.resume)
+        _candidate.annotate(job.env["GITHUB_REPOSITORY"], job.tree, digest)
     result = {"ref": ref, "digest": digest, "sha": job.sha, "tag": gated, "parent": pinned}
     set_output(job.env, "result", json.dumps(result, separators=(",", ":")))
     print(f"built once: {ref}@{digest} ({gated})", flush=True)

@@ -23,6 +23,8 @@ license = "AGPL-3.0-or-later"
 dev = [
     "mypy>=1.18",
     "pytest>=8.4",
+    # `sdlc pytest` runs `-n` when the lock has it: the suites run side by side.
+    "pytest-xdist>=3.8",
     "pyyaml>=6.0",
     # sdlc_jobs/_app_token.py signs the Ashigaru App's JWT with it; the image
     # carries the same pin for `write`. The tests sign with a fake.
