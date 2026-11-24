@@ -141,9 +141,23 @@ def safe_directory(env: Mapping[str, str], path: Path) -> dict[str, str]:
     }
 
 
-def git_env(path: Path, token: str = "") -> dict[str, str]:
-    """git_auth(token), or no prompt without one, plus safe_directory(path)."""
-    env = git_auth(token) if token else {"GIT_TERMINAL_PROMPT": "0"}
+def git_env(path: Path, token: str = "", base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """git_auth(token), or no prompt without one, plus safe_directory(path).
+
+    Numbered after the GIT_CONFIG_* entries `base` already carries, so merging
+    the result over `base` keeps them.
+    """
+    n = int((base or {}).get("GIT_CONFIG_COUNT") or "0")
+    env = {"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": str(n)}
+    if token:
+        auth = git_auth(token)
+        env.update(
+            {
+                "GIT_CONFIG_COUNT": str(n + 1),
+                f"GIT_CONFIG_KEY_{n}": auth["GIT_CONFIG_KEY_0"],
+                f"GIT_CONFIG_VALUE_{n}": auth["GIT_CONFIG_VALUE_0"],
+            }
+        )
     env.update(safe_directory(env, path))
     return env
 

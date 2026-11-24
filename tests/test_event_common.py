@@ -612,6 +612,15 @@ with tempfile.TemporaryDirectory() as tree:
             and genv[f"GIT_CONFIG_VALUE_{last}"] == str(Path(tree).resolve()),
         )
     check("git_env: never safe.directory=*", "*" not in _tools.git_env(Path(tree)).values())
+    base = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.x", "GIT_CONFIG_VALUE_0": "y"}
+    merged = {**base, **_tools.git_env(Path(tree), "tok-123", base)}
+    check(
+        "git_env: numbered after the base's entries, which survive the merge",
+        merged["GIT_CONFIG_COUNT"] == "3"
+        and (merged["GIT_CONFIG_KEY_0"], merged["GIT_CONFIG_VALUE_0"]) == ("core.x", "y")
+        and merged["GIT_CONFIG_KEY_1"].endswith(".extraheader")
+        and merged["GIT_CONFIG_KEY_2"] == "safe.directory",
+    )
     check(
         "carries_credential: header names match in any case",
         carries_credential({"GIT_CONFIG_KEY_0": "x", "GIT_CONFIG_VALUE_0": "authorization: b"})
