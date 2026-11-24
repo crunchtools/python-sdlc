@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-24
+
 ### Fixed
 
 - `sdlc push` no longer dies with "sdlc-constitution is not a check this image
