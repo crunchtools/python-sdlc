@@ -9,6 +9,8 @@ Run: tests/test_constitution.py   (needs python3 >= 3.11)
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import io
 import sys
 import tempfile
@@ -193,6 +195,36 @@ def test_gatehouse_command() -> None:
             assert c.gatehouse(["--stdin"], root, out) == ["gatehouse", "--stdin"]
         finally:
             c.TEXT = saved
+
+
+def load_sdlc():
+    """The `sdlc` script, loaded by path (no .py extension); nothing runs on import."""
+    path = Path(__file__).resolve().parent.parent / "sdlc"
+    spec = importlib.util.spec_from_loader(
+        "sdlc_routes", importlib.machinery.SourceFileLoader("sdlc_routes", str(path))
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_t_constitution_routes_by_manifest() -> None:
+    sdlc = load_sdlc()
+    ran: list[list[str]] = []
+
+    def fake_run(cmd, **_kw):
+        ran.append(cmd)
+        return (7, "")
+
+    sdlc.run, sdlc.project_env = fake_run, dict
+    with tempfile.TemporaryDirectory() as tmp:
+        sdlc.REPO = Path(tmp)
+        assert sdlc.t_constitution({}) == 7, "the checker's exit code is the check's"
+        assert ran[-1] == ["sdlc-constitution", "check", tmp], ran
+        write(".specify/memory/constitution.md", "# v1\n")(Path(tmp))
+        assert sdlc.t_constitution({}) == 7
+        assert ran[-1] == ["sdlc-validate", ".specify/memory/constitution.md"], ran
 
 
 def test_coverage_lists_every_principle() -> None:
