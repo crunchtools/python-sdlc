@@ -75,11 +75,6 @@ SHELL_FILES='bin/sdlc bin/sdlc-bootstrap boot/sdlc scripts/self.sh scripts/relea
   tests/test_bootstrap.sh tests/test_sign_digest.sh tests/test_attest_digest.sh
   tests/test_boot.sh tests/test_self.sh .semgrep/run-tests.sh'
 SHELLCHECK=docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
-IMAGE_SUITES='tests/test_plan.py tests/test_codeql_globs.py tests/test_pycache_prefix.py
-  tests/test_gourmand_sidecar.py tests/test_codeql_resilience.py tests/test_convert_repo.py
-  tests/test_cutover.py tests/test_fleet_wave.py tests/test_pip_audit_resilience.py
-  tests/test_mypy_traceback.py tests/test_update_tools.py tests/test_workflows.py
-  tests/test_gatehouse_verdict.py'
 
 # Builds the tree in $1 as sdlc and sdlc-bootstrap, tagged $2 and $3. A run no
 # commit triggered must not reuse a cached `dnf install`, or it ships no errata.
@@ -116,13 +111,22 @@ test_all() {
     "$t"
   done
   tests/contract.sh "$1"
-  for t in $IMAGE_SUITES; do
-    podman run --rm -v "$here:/src:ro,z" -w /src \
-      --entrypoint /opt/constitution-venv/bin/python3 "$1" "$t"
-  done
+  # The four stacks are independent, so they run side by side; each one's output
+  # is printed whole when all have finished. The image's own suites are not run
+  # here: `sdlc ci` below runs every tests/test_*.py under pytest.
+  _logs=$(mktemp -d)
   for s in container node bootc docs; do
-    "tests/test_${s}_stack.sh" "$1"
+    "tests/test_${s}_stack.sh" "$1" > "$_logs/$s" 2>&1 &
+    echo $! > "$_logs/$s.pid"
   done
+  _failed=
+  for s in container node bootc docs; do
+    wait "$(cat "$_logs/$s.pid")" || _failed="$_failed $s"
+    printf '== %s stack\n' "$s"
+    cat "$_logs/$s"
+  done
+  rm -rf "$_logs"
+  [ -z "$_failed" ] || die "stack test(s) failed:$_failed"
   # sdlc-bootstrap runs nothing without a signed release, so its smoke test is
   # that every tool it needs is there and that it refuses on its own.
   podman run --rm --entrypoint sh "$2" -c 'cosign version && docker --version && jq --version'
