@@ -14,6 +14,15 @@ All notable changes to this project are documented here, following
 
 - `bin/sdlc-bootstrap`: `main` tries the fleet key before sdlc's, each key's verification errors are labelled with the key, and the report no longer needs host `sed`.
 
+## [0.15.9] - 2026-11-25
+
+### Fixed
+
+- `gourmand` keeps its cache outside a tree it cannot write. 0.15.8 runs
+  Gourmand in the `check` job (#182) as the image's non-root user on a
+  checkout it cannot write, so every check failed with "Permission denied"
+  before a single rule ran.
+
 ## [0.15.8] - 2026-11-25
 
 ### Fixed
