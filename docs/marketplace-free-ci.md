@@ -1110,6 +1110,21 @@ Two things are new and go in spike #103:
    which holds no secret. The socket itself is never passed down to repo
    code.
 
+**What a pull request test-builds for.** `check` test-builds a pull request's
+image only when it changes one of the image's inputs: a Containerfile or
+Dockerfile, a `.containerignore`, or a lockfile (`IMAGE_INPUTS` in
+`sdlc_jobs/check.py`). An image that also copies other files in names them,
+as globs from the repo root, and they add to that default:
+
+```toml
+[tool.sdlc.image]
+pr-build-paths = ["deps/**", "rootfs/**", "scripts/*.sh"]
+```
+
+`**` crosses directories and `*` does not. An absolute path, `..`, or more
+than 50 patterns is a 2. It belongs to the root table only, since it is about
+the repo's pull requests, not one image's.
+
 **No image, or several.** A repo whose root Containerfile is not a published
 image says `[tool.sdlc.image] publish = false`: no image job, no candidate, and
 the container gates stay in `check`. A repo with more images lists each one:

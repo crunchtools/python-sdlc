@@ -12,6 +12,12 @@ All notable changes to this project are documented here, following
   and in sdlc's own (or the file it is given): the socket's mode and owner,
   `--user 0` and `label=disable`, the mounts, the exact `--env` list, no other
   option, and the bootstrap by digest with `event` (#178)
+- `[tool.sdlc.image] pr-build-paths`: globs of repo paths that make a pull
+  request's `check` test-build the image, added to the default inputs (a
+  Containerfile, an ignore file, a lockfile). An image that copies `deps/` or
+  `rootfs/` in now gets its container gates on a pull request that changes only
+  those (#186). Patterns are anchored at the repo root (`**` crosses
+  directories); an absolute path, `..`, or more than 50 is refused with exit 2.
 
 ### Fixed
 

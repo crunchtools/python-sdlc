@@ -7,6 +7,7 @@ can hand a job a fake one: no test runs podman, cosign or the GitHub API.
 from __future__ import annotations
 
 import contextlib
+import glob
 import json
 import os
 import queue
@@ -372,6 +373,7 @@ IMAGE_ENFORCED = {
     "boot-path",
     "boot-timeout",
     "boot-none-reason",
+    "pr-build-paths",
 }
 IMAGE_NOT_ENFORCED = {"boot-command", "contract-test", "free-disk"}
 
@@ -407,7 +409,33 @@ def image_settings(root: Path, repo: str) -> dict:
         )
     if not isinstance(s.get("publish", True), bool):
         cannot("[tool.sdlc.image] publish must be true or false")
+    pr_build_paths(s)
     return s
+
+
+PR_BUILD_PATHS_MAX = 50
+
+
+def pr_build_paths(settings: dict) -> list[re.Pattern[str]]:
+    """`pr-build-paths`: globs of repo paths a pull request test-builds the image for.
+
+    They add to check.IMAGE_INPUTS (a Containerfile, an ignore file, a lockfile)
+    for an image that also copies other files in, such as deps/ or rootfs/.
+    Matched against the paths GitHub lists, from the repo root: `**` crosses
+    directories, `*` does not. A path that leaves the repo, or is absolute, is a 2.
+    """
+    given = settings.get("pr-build-paths", [])
+    where = "[tool.sdlc.image] pr-build-paths"
+    if not isinstance(given, list) or not all(isinstance(g, str) for g in given):
+        cannot(f"{where} must be a list of glob patterns")
+    if len(given) > PR_BUILD_PATHS_MAX:
+        cannot(f"{where} holds {len(given)} patterns; at most {PR_BUILD_PATHS_MAX}")
+    for g in given:
+        if not g.strip() or g.startswith("/") or "\\" in g or ".." in g.split("/"):
+            cannot(f"{where}: {g!r} is not a glob of paths inside the repo")
+    return [
+        re.compile(glob.translate(g, recursive=True, include_hidden=True, seps="/")) for g in given
+    ]
 
 
 def build_args(settings: dict) -> list[str]:
@@ -440,7 +468,11 @@ EXTRA_IMAGES: dict[str, tuple[str, ...]] = {
 }
 # An extra image's entry: where it is built from, plus the image job's own settings.
 # `image` and `publish` are the root image's: an entry's name is its image.
-IMAGE_ENTRY_KEYS = (IMAGE_ENFORCED | IMAGE_NOT_ENFORCED | {"name"}) - {"image", "publish"}
+IMAGE_ENTRY_KEYS = (IMAGE_ENFORCED | IMAGE_NOT_ENFORCED | {"name"}) - {
+    "image",
+    "publish",
+    "pr-build-paths",  # the repo's pull requests, not an image's
+}
 IMAGE_NAME = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
 
 

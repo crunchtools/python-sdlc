@@ -1494,6 +1494,12 @@ def test_an_image_entry_is_checked() -> None:
         ('name = "demo-base"\ncontainerfile = "nope"\n', {}, "not a file"),
         ('name = "demo-base"\ncontainerfile = "C"\ncontext = "C"\n', {"C": "x"}, "directory"),
         ('name = "demo-base"\ncontainerfile = "C"\nimage = "x"\n', {"C": "x"}, "no setting"),
+        # The repo's pull requests, not an image's: the root table carries it.
+        (
+            'name = "demo-base"\ncontainerfile = "C"\npr-build-paths = ["deps/**"]\n',
+            {"C": "x"},
+            "no setting",
+        ),
         ('name = "demo-base"\ncontainerfile = "L"\n', {"L": Link("/etc/passwd")}, "leaves"),
     ):
         tree = {"pyproject.toml": "[[tool.sdlc.images]]\n" + body, **files}
