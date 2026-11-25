@@ -153,10 +153,12 @@ def bump_lock(text: str, version: str) -> str | None:
 
     The root is the package uv locks from the checkout, `source = { editable = "." }`
     or `{ virtual = "." }`, found by that and never by name: gatehouse's distribution
-    is gatehouse-crunchtools. Raises ValueError for a lock that cannot be edited safely.
+    is gatehouse-crunchtools. A root with `dynamic = ["version"]` is locked with no
+    version line (ashigaru), so it has nothing to move. Raises ValueError for a lock
+    that cannot be edited safely.
     """
     root = _lock_root(text)
-    if root is None or root.get("version") == version:
+    if root is None or root.get("version") in {None, version}:
         return None
     name, old = (re.escape(str(root.get(key))) for key in ("name", "version"))
     entry = re.compile(

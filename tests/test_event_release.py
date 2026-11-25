@@ -268,6 +268,9 @@ check(
     'version = "1.2.3"\nsource = { virtual = "." }' in (bump_lock(virtual, "1.2.3") or ""),
 )
 check("lock: already at the version is no change", bump_lock(bumped, "1.2.3") is None)
+# ashigaru's shape: `dynamic = ["version"]`, so uv locks the root with no version line.
+dynamic = GATEHOUSE_LOCK.replace('version = "1.2.2"\nsource = { editable', "source = { editable", 1)
+check("lock: a dynamic-version root is no change", bump_lock(dynamic, "1.2.3") is None)
 check(
     "lock: no root is no change",
     bump_lock(GATEHOUSE_LOCK.replace('{ editable = "." }', '{ editable = "pkg" }'), "1.2.3")
@@ -280,7 +283,10 @@ for label, text in (
     ),
     (
         "an unusual layout",
-        GATEHOUSE_LOCK.replace('version = "1.2.2"\nsource = { editable', "source = { editable", 1),
+        GATEHOUSE_LOCK.replace(
+            'version = "1.2.2"\nsource = { editable = "." }',
+            'source = { editable = "." }\nversion = "1.2.2"',
+        ),
     ),
 ):
     try:
@@ -323,6 +329,11 @@ check(
 )
 api = lock_api(bumped)
 check("open: a current lock commits nothing", opened(api) == 0 and not api.made("PUT"))
+api = lock_api(dynamic)
+check(
+    "open: a dynamic-version root opens the PR and commits nothing",
+    opened(api) == 0 and not api.made("PUT") and api.made("POST", "*/pulls"),
+)
 api = opener(False, [])
 check(
     "open: no uv.lock (404) opens the PR and commits nothing",
