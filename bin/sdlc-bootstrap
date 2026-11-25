@@ -80,6 +80,16 @@ nHVNg0KnBqqs/x+WThX8zEKaGmiZ2SM5336mPfJKZl68/lXBnoWlU0E9Tg==
 -----END PUBLIC KEY-----
 KEY
 
+# sdlc's own key (boot/keys/sdlc.pub), which signs sdlc releases since 0.15.3;
+# earlier releases carry the fleet signature. Either verifies. Tab-indented so
+# the fleet key stays the only block that starts a line.
+cat > "$dir/sdlc.pub" <<-'KEY'
+	-----BEGIN PUBLIC KEY-----
+	MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEIGts5za2uZSNyzQshbiqzKvyj0m0
+	aZrLhD5a78Iqn3JzcWT/Oqz0QDLHy40QgB9J4tn9Nj5LlTPBxng0j4NL+w==
+	-----END PUBLIC KEY-----
+KEY
+
 # A tag is pulled every time: :latest moves, and a stale local copy is how a
 # two-week-old reviewer once judged trentina. Offline, the copy it has stands,
 # and is verified like any other. A digest is pulled only when it is missing.
@@ -115,6 +125,11 @@ elif [ -n "${HOME:-}" ]; then verified_dir=$HOME/.cache/sdlc/verified/$KEY_ID
 fi
 if [ -z "$verified_dir" ] || [ ! -e "$verified_dir/$hex" ]; then
   if ! podman --events-backend=none run --rm --log-driver=none --pull=missing \
+         --cap-drop=all --security-opt=no-new-privileges --read-only \
+         -v "$dir/sdlc.pub:/sdlc.pub:ro,Z" \
+         -- "$COSIGN" verify --key /sdlc.pub --insecure-ignore-tlog=true "$pinned" \
+         > /dev/null 2> "$dir/verify" \
+     && ! podman --events-backend=none run --rm --log-driver=none --pull=missing \
          --cap-drop=all --security-opt=no-new-privileges --read-only \
          -v "$dir/fleet.pub:/fleet.pub:ro,Z" \
          -- "$COSIGN" verify --key /fleet.pub --insecure-ignore-tlog=true "$pinned" \

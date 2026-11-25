@@ -59,7 +59,7 @@ if [ "$RC" -eq 0 ] && [ "$(cat "$W/ran" 2>/dev/null)" = "$FLEET@$D|$FLEET:latest
 else
   bad "signed :latest: exit $RC, ran '$(cat "$W/ran" 2>/dev/null)'"; printf '%s\n' "$OUT"
 fi
-if grep -q -- "verify --key /fleet.pub --insecure-ignore-tlog=true $FLEET@$D\$" "$W/log" \
+if grep -q -- "verify --key /sdlc.pub --insecure-ignore-tlog=true $FLEET@$D\$" "$W/log" \
    && grep -q -- "--pull=never -- $FLEET@$D launcher $FLEET@$D\$" "$W/log"; then
   ok "cosign verifies the digest, and the launcher comes from that digest, never pulled"
 else

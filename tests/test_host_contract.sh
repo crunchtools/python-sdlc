@@ -1353,7 +1353,7 @@ PINNED=quay.io/crunchtools/sdlc@sha256:$DIG64
 log_mark
 boot tiers > "$RUN/out" 2>&1 || true
 log_since
-if grep -q -- " verify --key /fleet.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
+if grep -q -- " verify --key /sdlc.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
    && grep -q -- "--security-opt=no-new-privileges --pull=never -- $PINNED launcher $PINNED\$" "$RUN/podman.log" \
    && last_run | grep -q -- " $PINNED tiers\$" && ! last_run | grep -q -- '--pull' \
    && ! grep -q 'NOT THE PINNED RELEASE' "$RUN/out"; then

@@ -8,6 +8,9 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `bin/sdlc-bootstrap` trusts sdlc's own key (`boot/keys/sdlc.pub`) as well as the
+  fleet key, so releases since 0.15.3 verify. Roll the new bootstrap to repos'
+  `.sdlc/bin/sdlc` with the validator's `sdlc_bootstrap_sha256`.
 - `bin/sdlc-bootstrap` reports a failed `podman image inspect` with podman's own
   error, instead of "has no sha256 digest to verify". It still fails closed.
 
