@@ -59,20 +59,22 @@ justification = """
   place, so there is no shared helper to extract.
 """
 
-# The same shape match, across #91 and #93. CH012 pairs cutover.py's job_span
-# (finds a job's lines under `jobs:`) with provenance.py's provenance (builds
-# an SLSA predicate from image labels): three statements, assign then
-# `if x is None: return None`, and nothing else in common.
+# The same shape match, moving as the functions it pairs are reshaped. CH012
+# pairs cutover.py's plan_move (ruleset PUTs) with its commit_runs (a GraphQL
+# read of check runs), and its verify_pr (is this the conversion PR) with
+# fleet_wave.py's convert and renovate.py's Job.discover. Earlier it paired
+# job_span, since removed, with provenance.py's provenance.
 [[exceptions]]
 check = "CH012-copy_paste_detection"
 path = "scripts/cutover.py"
 classification = "gourmand_bug"
 justification = """
-  job_span and scripts/provenance.py's provenance share no line, call or \
-  identifier: one scans workflow text by indent for a job's span, the other \
-  maps image labels to an SLSA predicate dict. The match is three statements, \
-  an assignment and an early `return None`, the opening of most lookups in \
-  Python, not duplicated logic, so there is no shared helper to extract.
+  plan_move builds ruleset PUTs and commit_runs reads check runs over \
+  GraphQL; verify_pr checks a pull request's head, base and state, while \
+  fleet_wave's convert runs the converter and renovate's Job.discover lists \
+  repositories. No pair shares a line, call or identifier: the match is a \
+  run of assignments, guards and a raise or return, the shape of most \
+  validating functions, so there is no shared helper to extract.
 """
 
 # The image layout, not a guess. sdlc_jobs runs only inside the sdlc image,
@@ -136,20 +138,22 @@ justification = """
   Python functions, so there is no shared helper to extract.
 """
 
-# The same shape match again: CH012 pairs fleet_wave.py's ashigaru_caller
-# (reads Ashigaru's tagged caller workflow) with whichever sdlc_jobs function
-# has a similar run of assign/if/raise statements, and moves to another one
-# each time that one is reshaped -- write.apply_fix, then ai.Job.issue.
+# The same shape match again: CH012 pairs fleet_wave.py's verify (checks a
+# conversion is a fixed point and owns only its paths) with whichever
+# sdlc_jobs function has a similar run of assign/if/raise statements, and
+# moves each time that one is reshaped: ashigaru_caller's partners before,
+# _boot.boot_settings and write.Job.route now.
 [[exceptions]]
 check = "CH012-copy_paste_detection"
 path = "scripts/fleet_wave.py"
 classification = "gourmand_bug"
 justification = """
-  ashigaru_caller resolves a tag to a commit and reads examples/ashigaru.yml \
-  at it; the sdlc_jobs functions it is paired with route an issue event or \
-  apply a fix round. They share no line, call or identifier. Reshaping the \
-  sdlc_jobs side twice moved the match to a different function each time, \
-  which is what a shape match does and duplicated logic does not.
+  verify re-runs the converter and cutover on a checkout and refuses what \
+  is not a fixed point; boot_settings parses [tool.sdlc.image]'s boot keys \
+  and Job.route dispatches an event to write's handlers. They share no \
+  line, call or identifier. Reshaping the other side has moved the match \
+  to a different function each time, which is what a shape match does and \
+  duplicated logic does not.
 """
 
 # Three statements: run one of Ashigaru's scripts, check it, return what it
@@ -352,19 +356,6 @@ path = "tests/test_constitution.py"
 classification = "gourmand_bug"
 justification = """
   The R4 cases write CHANGELOG.md fixtures with a `### Deprecated` heading   and deprecation bullets, because check_release reads exactly that Keep a   Changelog section. The words are string data under test, not comments   marking removed code, and renaming them would test a heading no repo uses.
-"""
-
-[[exceptions]]
-check = "CH012-copy_paste_detection"
-path = "sdlc_jobs/_candidate.py"
-classification = "gourmand_bug"
-justification = """
-  recorded (reads the merged pull request's candidate annotation back from \
-  the API) is paired with write.Job.apply_fix (runs fix_publish.py on a PR \
-  branch): nine assign/if/return statements of similar length with no line, \
-  call or identifier in common. The real duplicates in this file were \
-  extracted (the OIDC and Quay token reads into _field, the annotation parse \
-  into _parsed); what is left is shape, not copied logic.
 """
 
 [[exceptions]]

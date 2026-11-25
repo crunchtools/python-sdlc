@@ -11,7 +11,9 @@ review, label, comment, pull request and push it decides on is handed to
                        Ashigaru's fix round follows in the same job, over the
                        findings left open and the ones this review just made.
   issues               Ashigaru triages a new issue (or one labelled
-                       ready-for-triage) and, when triage says it starts now
+                       ready-for-triage; one written by an account without
+                       write access, only once a maintainer has labelled it
+                       so) and, when triage says it starts now
                        or a maintainer labels it ready-to-code, writes the
                        change as a patch.
 
@@ -104,6 +106,11 @@ MODEL_SECONDS = 3600  # one agent or one review, as the workflows' job timeouts 
 # sibling is removed by name whatever the run's outcome.
 MODEL_GRACE = 60
 AUTO_CATEGORIES = {"bug", "documentation", "performance"}
+# guard.py's trust for an issue no maintainer wrote or acted on, and the label
+# that is a maintainer's act on it; common.py's write permissions.
+OUTSIDE = "outside"
+READY_FOR_TRIAGE = "ready-for-triage"
+WRITE_PERMISSIONS = {"admin", "write"}
 MIN_CONFIDENCE = 0.7
 
 
@@ -441,6 +448,11 @@ class Job:
         result["trust"] = trust
         if not allowed:
             return OK, result | {"skip": f"guard refused {stage}"}
+        if trust == OUTSIDE and not self.queued_by_maintainer(number):
+            print(
+                f"ai: issue #{number}: written outside; waits for a maintainer's {READY_FOR_TRIAGE}"
+            )
+            return OK, result | {"skip": f"outside issue waits for {READY_FOR_TRIAGE}"}
         checkout = tools.clone(self.site, default_branch(event), self.work / "repo")
         if stage == "triage":
             queue = "fresh" if event.get("action") == "opened" else "backlog"
@@ -468,6 +480,38 @@ class Job:
         )
         tools.checked(done, "guard.py")
         return outputs.get("allowed") == "true", outputs.get("trust", "none")
+
+    def queued_by_maintainer(self, number: int) -> bool:
+        """Whether a person with write access ever put ready-for-triage on issue `number`.
+
+        guard.py lets an outside issue reach triage as soon as it is opened.
+        The workflow-automation profile (K10, III) lets content from an account
+        without write access reach an agent only after a maintainer acted on
+        the item, so that act is checked here, deterministically, before any
+        model runs. A lookup that fails is a refusal, not a pass.
+        """
+        try:
+            events = self.api.pages(f"/repos/{self.repo}/issues/{number}/events")
+        except ApiError as err:
+            print(f"::warning::ai: could not read #{number}'s label history ({err}); not triaging.")
+            return False
+        return any(
+            entry.get("event") == "labeled"
+            and (entry.get("label") or {}).get("name") == READY_FOR_TRIAGE
+            and (entry.get("actor") or {}).get("type") == "User"
+            and self.can_write(str(entry["actor"].get("login", "")))
+            for entry in events
+        )
+
+    def can_write(self, login: str) -> bool:
+        """common.can_write's answer: the account's effective permission is write or admin."""
+        try:
+            found = self.api.request("GET", f"/repos/{self.repo}/collaborators/{login}/permission")
+        except ApiError as err:
+            if err.status != HTTPStatus.NOT_FOUND:
+                print(f"::warning::ai: permission lookup for {login} failed ({err}).")
+            return False
+        return isinstance(found, dict) and found.get("permission") in WRITE_PERMISSIONS
 
     def on_issue(self, agent: Agent, number: int, checkout: Path) -> dict[str, Any]:
         """One of the issue agents (triage or code) on issue `number`: its structured answer.
