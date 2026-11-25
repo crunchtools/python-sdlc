@@ -53,9 +53,9 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 pub=$work/fleet.pub
-sed -n '/^-----BEGIN PUBLIC KEY-----$/,/^-----END PUBLIC KEY-----$/p' \
-  "$here/bin/sdlc-bootstrap" > "$pub"
-[ -s "$pub" ] || { echo "bin/sdlc-bootstrap carries no public key" >&2; exit 1; }
+# The fleet key by name: bin/sdlc-bootstrap also carries sdlc's own key.
+sed -n "/<<'FLEET_KEY'\$/,/^FLEET_KEY\$/p" "$here/bin/sdlc-bootstrap" | sed '1d;$d' > "$pub"
+[ -s "$pub" ] || { echo "bin/sdlc-bootstrap carries no fleet key" >&2; exit 1; }
 
 first=$1
 sbom=$dir/sbom.spdx.json

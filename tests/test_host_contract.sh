@@ -92,6 +92,11 @@ SDOPTS="-w${US}/repo${US}-e${US}CI=true${US}-e${US}PYTHONPYCACHEPREFIX=/tmp/pyca
 cat > "$SHIM/podman" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$LOG"
+# A release's signature check: refused by sdlc's key while unsigned-sdlc exists.
+case " \$* " in
+  *" verify --key /sdlc.pub "*)
+    [ ! -e "$SHIM/unsigned-sdlc" ] || { echo 'Error: no signatures found' >&2; exit 10; } ;;
+esac
 for _last in "\$@"; do :; done
 # container-smoke: a detached run records which case it is, and inspect
 # answers that case's state as: Running ExitCode OOMKilled.
@@ -1353,11 +1358,12 @@ PINNED=quay.io/crunchtools/sdlc@sha256:$DIG64
 log_mark
 boot tiers > "$RUN/out" 2>&1 || true
 log_since
-if grep -q -- " verify --key /fleet.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
+if grep -q -- " verify --key /sdlc.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
+   && ! grep -q -- ' verify --key /fleet.pub ' "$RUN/podman.log" \
    && grep -q -- "--security-opt=no-new-privileges --pull=never -- $PINNED launcher $PINNED\$" "$RUN/podman.log" \
    && last_run | grep -q -- " $PINNED tiers\$" && ! last_run | grep -q -- '--pull' \
    && ! grep -q 'NOT THE PINNED RELEASE' "$RUN/out"; then
-  ok "no SDLC_IMAGE: :latest is verified and runs by its digest, no banner"
+  ok "no SDLC_IMAGE: :latest is verified by sdlc's key and runs by its digest, no banner"
 else
   bad "bootstrap on :latest: $(last_run) / $(head -3 "$RUN/out")"
 fi
@@ -1373,6 +1379,35 @@ if grep -q -- "-- $PINNED launcher $PINNED\$" "$RUN/podman.log" \
 else
   bad "bootstrap on main: $(last_run) / $(head -3 "$RUN/out")"
 fi
+
+# main is still signed by the fleet key alone (container.yml): under the same
+# PATH, the launcher asks sdlc's key, then the fleet key, and runs it. A
+# release such as :latest never asks the fleet key, and refusing it is a 2.
+: > "$SHIM/unsigned-sdlc"
+log_mark
+rm -rf "$RUN/cache"
+SDLC_IMAGE=main boot tiers > "$RUN/out" 2>&1 || true
+log_since
+if grep -q -- " verify --key /sdlc.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
+   && grep -q -- " verify --key /fleet.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
+   && last_run | grep -q -- " $PINNED tiers\$"; then
+  ok "SDLC_IMAGE=main signed by the fleet key alone verifies with podman and POSIX sh"
+else
+  bad "fleet-signed main: $(last_run) / $(head -3 "$RUN/out")"
+fi
+log_mark
+rm -rf "$RUN/cache"
+rc=0
+boot tiers > "$RUN/out" 2>&1 || rc=$?
+log_since
+if [ "$rc" -eq 2 ] && ! grep -q -- ' verify --key /fleet.pub ' "$RUN/podman.log" \
+   && grep -q "could not be verified as signed by sdlc's key\$" "$RUN/out"; then
+  ok ":latest signed by the fleet key alone is a 2"
+else
+  bad "fleet-signed :latest exited $rc: $(tail -1 "$RUN/out")"
+fi
+rm -f "$SHIM/unsigned-sdlc"
+rm -rf "$RUN/cache"
 
 # What the bootstrap runs is what it pulls, so it pulls from one repository:
 # quay.io/crunchtools/sdlc at main, latest, a release or a digest.
