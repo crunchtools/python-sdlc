@@ -130,6 +130,8 @@ def lock_beside(
         done = run(argv, capture_output=True, text=True, timeout=SECONDS + GRACE, check=False)
     except subprocess.TimeoutExpired:
         return refuse(f"the lock ran past {SECONDS}s")
+    except OSError as err:
+        return refuse(f"podman could not be run: {err}")
     finally:
         remove(env, name, run)
     sys.stderr.write(done.stdout + done.stderr)
@@ -144,7 +146,11 @@ def lock_beside(
 def remove(env: Mapping[str, str], name: str, run: Run) -> None:
     """`podman rm -f` of the sibling, as ai removes its model's; gone already is fine."""
     argv = [*core.podman(env), "rm", "-f", "--ignore", name]
-    done = run(argv, capture_output=True, text=True, timeout=SECONDS, check=False)
+    try:
+        done = run(argv, capture_output=True, text=True, timeout=SECONDS, check=False)
+    except (OSError, subprocess.TimeoutExpired) as err:
+        print(f"::warning::could not remove {name}: {err}")
+        return
     if done.returncode != 0:
         print(f"::warning::could not remove {name}: {(done.stderr or done.stdout).strip()}")
 

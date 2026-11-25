@@ -314,6 +314,18 @@ check(
     "/host/work/pr:/src:ro" in seen[0],
 )
 
+
+def missing(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+    """An engine whose client is not installed."""
+    raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+
+check(
+    "no podman: a client that cannot be run is 2, and its removal does not raise",
+    _relock.lock_beside({}, IMAGE, (timeout_work, "/host/work"), timeout_work / "pr", missing)
+    == _relock.REFUSED,
+)
+
 runner_temp = TMP / "runner-temp"
 runner_temp.mkdir()
 works: list[Path] = []
