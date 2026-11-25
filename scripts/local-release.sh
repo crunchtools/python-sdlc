@@ -77,6 +77,14 @@ work=$(mktemp -d /var/tmp/sdlc-local.XXXXXX)
 # own, and the tree, the event and the outputs hold no secret.
 chmod 0755 "$work"
 GITHUB_TOKEN='' service=''
+# The jobs' images live in a podman storage of their own on Exedore's big onsite
+# disk, not root's graphroot on /var: a release build is tens of GB. One storage
+# and one runroot for every run, so overlapping runs share them under podman's
+# own locks. Root's own podman is left as it is.
+store=/var/mnt/onsite/sdlc-release
+[ -d "${store%/*}" ] || die "${store%/*} is not mounted: the release storage lives there"
+mkdir -p "$store/storage" "$store/tmp" /run/sdlc-release/runroot
+pod() { podman --root "$store/storage" --runroot /run/sdlc-release/runroot "$@"; }
 cleanup() {
   [ -z "$service" ] || kill "$service" 2> /dev/null || :
   [ -z "$GITHUB_TOKEN" ] || ghapi "$GITHUB_TOKEN" DELETE /installation/token > /dev/null 2>&1 \
@@ -85,10 +93,10 @@ cleanup() {
   rm -rf "$work"
   # The images this run built, which a runner VM would take with it; not
   # forced, so one a run beside this one still uses stays.
-  podman images -q --filter "label=org.opencontainers.image.revision=$sha" 2> /dev/null \
-    | sort -u | xargs -r podman rmi > /dev/null 2>&1 || :
-  podman images --format '{{.Repository}}:{{.Tag}}' 2> /dev/null | grep "^localhost/${project}[:-]" \
-    | xargs -r podman rmi > /dev/null 2>&1 || :
+  for _id in $(pod images -q --filter "label=org.opencontainers.image.revision=$sha" 2> /dev/null | sort -u) \
+    $(pod images --format '{{.Repository}}:{{.Tag}}' 2> /dev/null | grep "^localhost/${project}[:-]"); do
+    pod rmi "$_id" > /dev/null 2>&1 || :
+  done
 }
 trap cleanup EXIT
 trap 'exit 2' HUP INT TERM
@@ -136,7 +144,9 @@ case $status in identical|ahead) ;; *) die "$sha is not on $repo's $default ($st
 # podman.socket and its configuration are left as they are.
 sock=$work/podman.sock
 printf '[containers]\nlabel = false\n' > "$work/containers.conf"
-CONTAINERS_CONF_OVERRIDE=$work/containers.conf podman system service --time=0 "unix://$sock" &
+# podman itself, not the pod function: $! must be the service, for cleanup to stop it.
+CONTAINERS_CONF_OVERRIDE=$work/containers.conf TMPDIR=$store/tmp \
+  podman --root "$store/storage" --runroot /run/sdlc-release/runroot system service --time=0 "unix://$sock" &
 service=$!
 tries=0
 until [ -S "$sock" ]; do
@@ -161,13 +171,25 @@ attempt=$(date +%s)$$
 # verifies what it gets.
 current=$(skopeo inspect --format '{{.Digest}}' docker://quay.io/crunchtools/sdlc:0) \
   || die "quay.io/crunchtools/sdlc:0 could not be inspected"
-held=$(podman image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' quay.io/crunchtools/sdlc:0 2> /dev/null \
-  | grep '^quay\.io/crunchtools/sdlc@' || :)
-if [ "$held" != "quay.io/crunchtools/sdlc@$current" ]; then
-  [ -z "$held" ] || podman rmi quay.io/crunchtools/sdlc:0 > /dev/null \
-    || die "the host's sdlc:0 names a stale digest and is in use; rerun when the other run ends"
-  podman pull -q quay.io/crunchtools/sdlc:0 > /dev/null || die "quay.io/crunchtools/sdlc:0 could not be pulled"
+held() {
+  pod image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' quay.io/crunchtools/sdlc:0 2> /dev/null \
+    | grep '^quay\.io/crunchtools/sdlc@' || :
+}
+# One run at a time: two runs untagging and pulling at once undo each other.
+exec 9> /run/lock/sdlc-local-release-sdlc0.lock
+flock 9
+if [ "$(held)" != "quay.io/crunchtools/sdlc@$current" ]; then
+  # A new image: untagging the old one (which a container may still hold) is enough.
+  pod untag quay.io/crunchtools/sdlc:0 2> /dev/null || :
+  pod pull -q quay.io/crunchtools/sdlc:0 > /dev/null || die "quay.io/crunchtools/sdlc:0 could not be pulled"
+  # The same image under a new manifest still lists the old digest: only removing it clears that.
+  if [ "$(held)" != "quay.io/crunchtools/sdlc@$current" ]; then
+    pod rmi quay.io/crunchtools/sdlc:0 > /dev/null \
+      || die "the host's sdlc:0 names a stale digest and is in use; rerun when the other run ends"
+    pod pull -q quay.io/crunchtools/sdlc:0 > /dev/null || die "quay.io/crunchtools/sdlc:0 could not be pulled"
+  fi
 fi
+flock -u 9
 # One ci.yml job: the fleet file's launch line, with that job's secrets by name.
 # Its log has the runner's ::add-mask:: lines removed: no runner reads them here.
 job() {
@@ -244,7 +266,7 @@ sed -n "/<<'FLEET_KEY'\$/,/^FLEET_KEY\$/p" "$here/bin/sdlc-bootstrap" | sed '1d;
 [ -s "$work/fleet.pub" ] || die "bin/sdlc-bootstrap carries no fleet key"
 printf '%s' "$built" | jq -r 'if .images then .images[] else . end | "\(.ref)@\(.digest)"' \
   | while read -r pinned; do
-      podman run --rm --log-driver=none --pull=missing --security-opt label=disable \
+      pod run --rm --log-driver=none --pull=missing --security-opt label=disable \
         -v "$work/fleet.pub:/fleet.pub:ro" -- "$COSIGN_IMAGE" \
         verify --key /fleet.pub --insecure-ignore-tlog=true "$pinned" > /dev/null 2>&1 \
         || die "$pinned does not verify against the fleet key"
