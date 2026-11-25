@@ -657,8 +657,12 @@ def test_fetch_tree_trusts_only_the_workspace_and_keeps_git_config() -> None:
     """fetch_tree's git calls name the workspace as safe.directory after the job's own
     GIT_CONFIG_* entries, which survive (#157)."""
     t = FakeTools()
-    t.env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.x", "GIT_CONFIG_VALUE_0": "y"}
-    t.env["GITHUB_TOKEN"] = "tok-123"  # noqa: S105 - a fake
+    t.env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.x",
+        "GIT_CONFIG_VALUE_0": "y",
+        "GITHUB_TOKEN": "tok",
+    }
     go("pull_request", t)
     fetched = [e for a, e in zip(t.argvs, t.envs, strict=True) if a[:1] == ["git"]]
     assert [a[:2] for a in t.argvs if a[:1] == ["git"]] == [
