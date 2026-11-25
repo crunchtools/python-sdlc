@@ -870,6 +870,21 @@ check(
     and result["review"]["status"] == "reviewed",
 )
 
+rig = Rig(claude_exit=tools.TIMED_OUT)
+code, result = rig.go("pull_request_target", pr_event(**FIX_PR), WITH_CLAUDE)
+sib = rig.ran("claude")[0][0]
+removed = rig.ran(" rm -f ")
+check(
+    "fix: the sibling is named, stopped by podman at MODEL_SECONDS, and removed by name "
+    "when the client times out",
+    code == 2
+    and arg_after(sib, "--timeout") == str(ai.MODEL_SECONDS)
+    and len(removed) == 1
+    and removed[0][0][-1] == arg_after(sib, "--name")
+    and "--ignore" in removed[0][0]
+    and not {k for k in removed[0][1] if "TOKEN" in k or "KEY" in k},
+)
+
 for label, kw, env_for in (
     ("a fork PR", {"ref": "ashigaru/issue-7", "head_repo": "evil/r"}, WITH_CLAUDE),
     (

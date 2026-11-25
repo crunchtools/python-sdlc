@@ -18,14 +18,14 @@ container started without the socket and without the job's env).
 | check | PR head: gates, linters, uv/npm/go, plan, review | yes | read token (`actions: write`, `security-events: write`) | nested: `run_in_image`, no socket, only `SDLC_*`/`HOME`/`GIT_CONFIG_*` (bin/sdlc:474-492). In-process it only parses TOML and the Containerfile as text | mitigated |
 | ai | PR diff and head, issue text and comments, model output | yes | CLAUDE_CODE_OAUTH_TOKEN, OPENROUTER_API_KEY, read token | **was in-process** ⚠: `claude -p` a child of the job, root, with a bare `Write` that reaches any path (docs: a bare tool name pre-approves writes outside the working directory). A model steered by the diff or a comment could rewrite `git` or `/opt/ashigaru/scripts/*.py`, which this job runs next with the socket. **Now nested**, see Fixes | fixed |
 | image | the default branch's Containerfile and tree | yes | quay, RHSM, registry.redhat.io | `podman build` through the socket (a sibling: no socket, no volume, no host network); gates and boot nested with `--network none` (image.py:743-770, _boot.py:75-91); in-process only hadolint, `sdlc plan`, skopeo on text | mitigated ⚠ see below |
-| write | PR head clone, the `ai` patch and result | yes | ASHIGARU_APP_KEY; children get a minted token | in-process, but nothing from the repo executes: fresh `git init` (no repo `.git/config`), `git apply`, `uv lock --no-build` (ashigaru relock.py), pinned `uvx ruff==` (tidy.py); `SDLC_AI_*` is `json.loads`ed and passed as argv, never to a shell | mitigated |
+| write | PR head clone, the `ai` patch and result | yes | ASHIGARU_APP_KEY; children get a minted token | **in-process** ⚠: a fresh `git init` (no repo `.git/config`), `git apply` and a pinned `uvx ruff==` (tidy.py) run nothing of the repo's, and `SDLC_AI_*` is `json.loads`ed and passed as argv, never to a shell. But ashigaru relock.py's `uv lock --no-build` still runs the interpreter the branch's `.python-version` names, inside the job with the socket and the App key | exposed: [#195](https://github.com/crunchtools/sdlc/issues/195) |
 | promote | none: registry bytes only (skopeo, cosign, syft) | yes, unused | quay, cosign key (handed only to `cosign sign`/`attest`) | in-process, on an image `image` built and gated | mitigated |
 | pypi | the default branch's tree | yes | OIDC request vars, read token | build nested (pypi.py:64-96); `uv publish` in-process in the tree the build wrote | mitigated ⚠ see below |
 | gate | none: changed-file list and reviews by API, a fork's PR included | yes | read token (`pull-requests: write`) | reads no repo content | none |
 | renovate | every repo, its package managers and their dependency code | yes (parent) | RENOVATE_APP_KEY, popped before anything runs (renovate.py:138-141) | nested: no socket, read-only root, only a per-repo minted RENOVATE_TOKEN (renovate.py:363-396) | mitigated |
 
 ⚠ marks a cell where untrusted content and the socket or a secret coexist.
-The remaining two are bounded rather than open:
+Besides `ai` (fixed here) and `write` (#195), two are bounded rather than open:
 
 - **image** passes the RHSM activation key and org to every build as
   `--secret` files, whether or not `[tool.sdlc.image] rhsm` is set
@@ -73,5 +73,10 @@ on 2026-11-18.
   `.git` read-only, so nothing the model writes can change what the job's
   later `git add`/`git diff` run. The scratch dir moves under RUNNER_TEMP so
   that the sibling can mount it.
+- **ai: a timed-out model cannot outlive the job.** The sibling is named and
+  run with `podman run --timeout`, the client waits a minute longer, and the
+  sibling is removed by name whatever the outcome, so killing only the
+  `--remote` client cannot leave it running with the token.
+- **write: open in #195**, fixed separately.
 - **No change needed to the frozen files.** The `ai` job already forwards
   RUNNER_* and already holds the socket, which is all the sibling needs.

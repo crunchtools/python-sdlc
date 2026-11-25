@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import secrets
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -98,6 +99,10 @@ SHA_LEN = 40
 # bare list, which Gourmand's parser cannot read.
 UNREADABLE_CAPTURE = (OSError, ValueError, KeyError, TypeError)
 MODEL_SECONDS = 3600  # one agent or one review, as the workflows' job timeouts allowed
+# The client's own limit: past MODEL_SECONDS podman stops the sibling itself.
+# Killing only the client would leave it running with the token, so the
+# sibling is removed by name whatever the run's outcome.
+MODEL_GRACE = 60
 AUTO_CATEGORIES = {"bug", "documentation", "performance"}
 MIN_CONFIDENCE = 0.7
 
@@ -510,8 +515,9 @@ class Job:
         shape = json.loads(
             (tools.ASHIGARU_SCRIPTS.parent / "schemas" / f"{agent.schema}.json").read_text()
         )
+        name = f"sdlc-ai-model-{secrets.token_hex(8)}"
         argv = [
-            *self.sibling(cwd),
+            *self.sibling(cwd, name),
             "-p",
             "--model",
             agent.model,
@@ -527,14 +533,26 @@ class Job:
             "json",
         ]
         env = tools.child_env(self.env, CLAUDE_CODE_OAUTH_TOKEN=self.env["CLAUDE_CODE_OAUTH_TOKEN"])
-        done = self.runner(argv, env=env, cwd=cwd, stdin=prompt, timeout=MODEL_SECONDS)
+        try:
+            done = self.runner(
+                argv, env=env, cwd=cwd, stdin=prompt, timeout=MODEL_SECONDS + MODEL_GRACE
+            )
+        finally:
+            self.remove(name)
         if done.returncode != 0:
             raise CannotRunError(
                 f"claude ({agent.schema}) exited {done.returncode}: {done.stderr[-400:]}"
             )
         return structured(done.stdout, agent.schema)
 
-    def sibling(self, cwd: Path) -> list[str]:
+    def remove(self, name: str) -> None:
+        """`podman rm -f` of the model's sibling; gone already is fine, a failure is said."""
+        argv = [*core.podman(self.env), "rm", "-f", "--ignore", name]
+        done = self.runner(argv, env=tools.child_env(self.env), timeout=tools.GIT_SECONDS)
+        if done.returncode != 0:
+            print(f"::warning::could not remove {name}: {(done.stderr or done.stdout).strip()}")
+
+    def sibling(self, cwd: Path, name: str) -> list[str]:
         """podman's argv up to claude's own: the model's container (see MODEL_TMP)."""
         if self.mounted is None:
             self.mounted = self.mount()
@@ -550,6 +568,10 @@ class Job:
             *core.podman(self.env),
             "run",
             "--rm",
+            "--name",
+            name,
+            "--timeout",
+            str(MODEL_SECONDS),
             "-i",
             "--pull=never",
             "--user",
