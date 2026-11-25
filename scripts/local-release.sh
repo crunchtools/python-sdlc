@@ -19,12 +19,16 @@
 # scripts/local-release-secrets.sh writes exactly that from OpenBao on Gloval.
 #
 # The jobs' GITHUB_TOKEN is an Ashigaru App token minted here for this one
-# repository with contents and metadata read, what ci.yml's github.token holds,
-# and revoked on exit. The commit must be on the default branch, as it must be
-# for ci.yml's image and promote. The event is workflow_dispatch: check gates
-# the commit rather than trusting a pull request's run, and plans no release,
-# so no tag or GitHub release is made here; promote moves X.Y.Z only for a
-# commit that already carries its tag. The image records no Actions run, so it
+# repository with contents, metadata and pull requests read, what ci.yml's
+# github.token holds, and revoked on exit. The commit must be on the default
+# branch, as it must be for ci.yml's image and promote. The event is the push
+# of that commit, as CI saw it: when it merges an App-authored release pull
+# request, check plans the release, and ci.yml's `write` job runs here too,
+# with the App key, to verify the merge, tag vX.Y.Z and publish the GitHub
+# Release (only the App may create v* tags); promote then moves X.Y.Z with
+# `latest`. Any other commit moves `latest` alone. Like CI, check runs no
+# gates when the merged pull request's check passed on the same tree; image's
+# container gates always run. The image records no Actions run, so it
 # gets an SBOM and no SLSA provenance rather than a provenance that lies.
 #
 # Usage: <secrets.json scripts/local-release.sh <owner/repo> <40-hex commit>
@@ -39,7 +43,7 @@ case $repo in */*/*|/*|*/|*[!A-Za-z0-9._/-]*) die "$repo is not owner/name" ;; *
 case $sha in *[!0-9a-f]*) die "$sha is not a 40-hex commit" ;; esac
 [ "${#sha}" -eq 40 ] || die "$sha is not a 40-hex commit"
 [ "$(id -u)" -eq 0 ] || die "run as root: the jobs drive the host's podman socket"
-for tool in podman jq curl openssl; do
+for tool in podman skopeo jq curl openssl; do
   command -v "$tool" > /dev/null || die "$tool is not on PATH"
 done
 
@@ -100,10 +104,9 @@ printf '%s.%s' "$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)" \
   > "$work/jwt"
 jwt=$(cat "$work/jwt").$(printf '%s\n' "$ASHIGARU_APP_KEY" \
   | openssl dgst -sha256 -binary -sign /dev/stdin "$work/jwt" | b64url)
-unset ASHIGARU_APP_KEY
 installation=$(ghapi "$jwt" GET "/repos/$repo/installation" | jq -er .id) \
   || die "the Ashigaru App is not installed on $repo"
-jq -n --arg r "${repo#*/}" '{repositories: [$r], permissions: {contents: "read", metadata: "read"}}' \
+jq -n --arg r "${repo#*/}" '{repositories: [$r], permissions: {contents: "read", metadata: "read", pull_requests: "read"}}' \
   > "$work/token.json"
 GITHUB_TOKEN=$(ghapi "$jwt" POST "/app/installations/$installation/access_tokens" \
   --data-binary "@$work/token.json" | jq -er .token) || die "the App would not mint a read token"
@@ -134,10 +137,30 @@ until [ -S "$sock" ]; do
   [ "$tries" -le 50 ] || die "the podman service did not start"
   sleep 0.2
 done
-jq -n --arg r "$repo" --arg d "$default" \
-  '{repository: {full_name: $r, default_branch: $d}, ref: ("refs/heads/" + $d), inputs: {}}' \
+jq -n --arg r "$repo" --arg d "$default" --arg s "$sha" \
+  '{repository: {full_name: $r, default_branch: $d}, ref: ("refs/heads/" + $d), after: $s, head_commit: {id: $s}}' \
   > "$work/event.json"
 
+# No Actions run exists, so none is named (and no provenance follows); the
+# attempt alone is set, unique, because image names its cache volume by it and
+# runs here can overlap.
+attempt=$(date +%s)$$
+# The bootstrap verifies the FIRST of sdlc:<major>'s RepoDigests. An image
+# re-pushed under a new manifest (a hotfix's unsigned push, then its signed
+# one) keeps every digest it was pulled by, the old, unsigned one first, so
+# the bootstrap refuses it after every pull. When the host's copy names more
+# than the digest the tag has now, it is removed and pulled fresh; not
+# forced, so a run beside this one keeps its image. The bootstrap still
+# verifies what it gets.
+current=$(skopeo inspect --format '{{.Digest}}' docker://quay.io/crunchtools/sdlc:0) \
+  || die "quay.io/crunchtools/sdlc:0 could not be inspected"
+held=$(podman image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' quay.io/crunchtools/sdlc:0 2> /dev/null \
+  | grep '^quay\.io/crunchtools/sdlc@' || :)
+if [ "$held" != "quay.io/crunchtools/sdlc@$current" ]; then
+  [ -z "$held" ] || podman rmi quay.io/crunchtools/sdlc:0 > /dev/null \
+    || die "the host's sdlc:0 names a stale digest and is in use; rerun when the other run ends"
+  podman pull -q quay.io/crunchtools/sdlc:0 > /dev/null || die "quay.io/crunchtools/sdlc:0 could not be pulled"
+fi
 # One ci.yml job: the fleet file's launch line, with that job's secrets by name.
 # Its log has the runner's ::add-mask:: lines removed: no runner reads them here.
 job() {
@@ -151,12 +174,12 @@ job() {
       -v "$sock:/var/run/docker.sock" -v "$work:$work" -w "$work/$_job/ws" \
       -e CI=true -e GITHUB_ACTIONS=true -e RUNNER_OS=Linux -e RUNNER_ARCH=X64 \
       -e RUNNER_ENVIRONMENT=self-hosted -e "RUNNER_TEMP=$work/$_job/tmp" \
-      -e "GITHUB_JOB=$_job" -e GITHUB_EVENT_NAME=workflow_dispatch \
+      -e "GITHUB_JOB=$_job" -e GITHUB_EVENT_NAME=push \
       -e "GITHUB_EVENT_PATH=$work/event.json" -e "GITHUB_OUTPUT=$work/$_job/output" \
       -e "GITHUB_WORKSPACE=$work/$_job/ws" -e "GITHUB_REPOSITORY=$repo" \
       -e "GITHUB_REPOSITORY_OWNER=${repo%%/*}" -e "GITHUB_SHA=$sha" \
       -e "GITHUB_REF=refs/heads/$default" -e "GITHUB_REF_NAME=$default" -e GITHUB_REF_TYPE=branch \
-      -e GITHUB_SERVER_URL=https://github.com -e "GITHUB_API_URL=$API" \
+      -e "GITHUB_RUN_ATTEMPT=$attempt" -e GITHUB_SERVER_URL=https://github.com -e "GITHUB_API_URL=$API" \
       -e GITHUB_TOKEN "$@" -- "$bootstrap" event 2>&1
     echo "rc=$?" > "$work/$_job/rc" ) | { grep -v '^::add-mask::' || :; }
   set -e
@@ -176,6 +199,17 @@ job check
 plan=$(output check result)
 printf '%s' "$plan" | jq -e 'type == "object"' > /dev/null || die "check wrote no plan"
 
+# write, on a release merge: the App key and nothing else, as in ci.yml.
+release='' write=skipped
+if printf '%s' "$plan" | jq -e '.release' > /dev/null; then
+  ASHIGARU_CLIENT_ID=$ASHIGARU_CLIENT_ID SDLC_CHECK=$plan \
+    job write -e ASHIGARU_CLIENT_ID -e ASHIGARU_APP_KEY -e SDLC_CHECK
+  release=$(output write release) write=success
+  printf '%s' "$release" | jq -e '.version' > /dev/null || die "write released nothing"
+  say "tagged v$(printf '%s' "$release" | jq -r .version) and published its GitHub Release"
+fi
+unset ASHIGARU_APP_KEY
+
 registry='-e QUAY_USERNAME -e QUAY_PASSWORD'
 for name in RHSM_ACTIVATION_KEY RHSM_ORG_ID REGISTRY_REDHAT_IO_USER REGISTRY_REDHAT_IO_PASSWORD; do
   eval "[ -z \"\${$name:-}\" ]" || registry="$registry -e $name"
@@ -191,7 +225,7 @@ if printf '%s' "$plan" | jq -e '.boot' > /dev/null; then
   boot=success
 fi
 
-SDLC_CHECK=$plan SDLC_IMAGE_RESULT=$built SDLC_BOOT=$boot SDLC_WRITE=skipped SDLC_RELEASE='' \
+SDLC_CHECK=$plan SDLC_IMAGE_RESULT=$built SDLC_BOOT=$boot SDLC_WRITE=$write SDLC_RELEASE=$release \
   job promote -e SDLC_CHECK -e SDLC_IMAGE_RESULT -e SDLC_BOOT -e SDLC_WRITE -e SDLC_RELEASE \
     -e QUAY_USERNAME -e QUAY_PASSWORD -e COSIGN_PRIVATE_KEY -e COSIGN_PASSWORD
 
