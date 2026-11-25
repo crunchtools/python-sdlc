@@ -64,6 +64,7 @@ class FakeTools(Tools):
         self.shell = shell or (lambda _sh: 0)
         self.workspace = ""  # the job's workspace, which the engine reports as mounted at HOST
         self.socket = True  # whether the job container has the runner's socket mounted
+        self.inherited = False  # the socket comes by --volumes-from, as podman lists it
         self.image = SELF  # the job's own image, as inspect reports it
         self.log = io.StringIO()  # what the job printed, in order with the argvs
         self.marks: list[tuple[int, str]] = []  # (argv count, printed text) at each shell
@@ -79,12 +80,17 @@ class FakeTools(Tools):
             self.marks.append((len(self.argvs), cast(io.StringIO, sys.stdout).getvalue()))
             assert stream, "repo shell must stream to the job log"
             return cp(self.shell(argv[-1]))
+        sock = {"Source": SOCKET, "Destination": boot.SOCKET_PATH}
         if argv[-2:] == ["inspect", "job-ctr"]:
             mounts = [{"Source": HOST, "Destination": self.workspace}]
-            if self.socket:
-                mounts.append({"Source": SOCKET, "Destination": boot.SOCKET_PATH})
+            if self.socket and not self.inherited:
+                mounts.append(sock)
             doc = {"ImageName": self.image, "Image": "", "Mounts": mounts}
+            if self.inherited:
+                doc["HostConfig"] = {"VolumesFrom": ["launcher-ctr:rw"]}
             return cp(0, json.dumps([doc]))
+        if argv[-2:] == ["inspect", "launcher-ctr"]:
+            return cp(0, json.dumps([{"Mounts": [sock] if self.socket else []}]))
         assert argv[0] == "podman", f"unexpected argv {argv}"
         if "{{.Host.Security.AppArmorEnabled}}" in argv:
             return cp(0, self.apparmor + "\n")
@@ -351,6 +357,17 @@ def test_a_socket_that_is_not_mounted_is_a_2() -> None:
     t.socket = False
     msg = refused(t, CONTRACT)
     assert "socket is not mounted at /var/run/docker.sock" in msg, msg
+
+
+def test_a_socket_taken_by_volumes_from_is_found() -> None:
+    """podman lists a --volumes-from container's mounts under the source container only."""
+    t = FakeTools()
+    t.inherited = True
+    assert go(t, CONTRACT)[0] == 0
+    assert t.runs and f"{SOCKET}:/var/run/docker.sock" in " ".join(t.runs[0]["argv"])
+    t = FakeTools()
+    t.inherited, t.socket = True, False
+    assert "socket is not mounted at /var/run/docker.sock" in refused(t, CONTRACT)
 
 
 def test_each_shell_is_followed_by_a_forced_removal_of_its_container() -> None:

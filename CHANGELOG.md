@@ -16,6 +16,10 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- boot finds the runner's socket when its container took it by `--volumes-from`,
+  as the bootstrap starts it: podman lists those mounts only under the source
+  container, so every boot job on podman refused with "the runner's socket is
+  not mounted" (ashigaru 6.0.1, a1416)
 - `scripts/local-release.sh` holds a per-project lock for the whole run, so two
   runs of one repo no longer remove each other's images in cleanup (a1649)
 
