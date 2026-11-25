@@ -122,6 +122,11 @@ EVENTS = ("push", "schedule", "workflow_dispatch")  # the workflow's `if:`
 PLAN_FIELDS = 4  # name, stage, mode, argv
 STATE_FIELDS = 3  # running, exit code, OOM-killed
 HADOLINT_UNPARSED = 4  # containerfile-lint: hadolint could not parse the file
+# bin/sdlc's rule, crunchtools/sdlc#181: on an AppArmor engine no-new-privileges
+# stacks the container's profile onto crun's (`containers-default//&crun`), and a
+# process cannot signal its own child (EPERM). There every gate container keeps
+# --cap-drop=all and AppArmor and goes without it; anywhere else it is passed.
+NNP = "--security-opt=no-new-privileges"
 SYSTEMD = ("/sbin/init", "/usr/sbin/init", "/lib/systemd/systemd", "/usr/lib/systemd/systemd")
 
 
@@ -148,6 +153,7 @@ class Job:
     bootc: bool = False  # the plan has bootc-lint: build OCI
     tree: str = ""  # the git tree of `sha`, stamped as a label
     event: str = ""
+    nnp: list[str] = field(default_factory=lambda: [NNP])  # [] on an AppArmor engine
 
     def run(
         self,
@@ -253,6 +259,7 @@ def build_and_push(job: Job) -> int:
         if plan is None:
             step("map the workspace and plan the gates")
             job.host_root, job.image_id = host_mount(job.tools, job.env, job.root)
+            job.nnp = no_new_privileges(job)
             plan = gate_plan(job)
             job.bootc = "bootc-lint" in plan
             found = lint(job)
@@ -730,7 +737,7 @@ def run_gate(job: Job, name: str, mode: str, payload: str) -> bool:
         cannot(f"{name}: a host step may only `podman run`; refused {argv[:2]}")
     words = [job.image_id if w == "@sdlc-image" else w for w in argv[2:]]
     check_words(job, name, words)
-    safe = ["--cap-drop=all", "--security-opt=no-new-privileges", "--events-backend=none"]
+    safe = ["--cap-drop=all", *job.nnp, "--events-backend=none"]
     if seconds:
         ok = stays_up(job, name, safe, words, seconds)
         return ok or mode == "host-up-advisory"
@@ -741,6 +748,16 @@ def run_gate(job: Job, name: str, mode: str, payload: str) -> bool:
     if proc.returncode != 1:
         cannot(f"{name}: podman run exited {proc.returncode}; nothing was judged")
     return False
+
+
+def no_new_privileges(job: Job) -> list[str]:
+    """[NNP], or [] when the engine reports AppArmor. Asked once, as bin/sdlc asks it;
+    an engine that does not answer keeps the flag."""
+    proc = job.run([*job.podman, "info", "--format", "{{.Host.Security.AppArmorEnabled}}"])
+    apparmor = proc.returncode == 0 and (proc.stdout or "").strip() == "true"
+    if apparmor:
+        print("image: the engine enforces AppArmor; gates run without no-new-privileges")
+    return [] if apparmor else [NNP]
 
 
 def check_words(job: Job, name: str, words: list[str]) -> None:
