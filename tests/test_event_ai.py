@@ -1055,6 +1055,61 @@ check(
     result["triage"]["queue"] == "backlog" and "code" not in result,
 )
 
+
+# K10, III: an outside issue reaches triage only after a maintainer's ready-for-triage.
+EVENTS = f"/repos/{REPO}/issues/9/events"
+
+
+def labeled(login: str, kind: str = "User", label: str = "ready-for-triage") -> dict[str, Any]:
+    return {"event": "labeled", "label": {"name": label}, "actor": {"login": login, "type": kind}}
+
+
+PERMS = {
+    ("GET", f"/repos/{REPO}/collaborators/maint/permission"): {"permission": "write"},
+    ("GET", f"/repos/{REPO}/collaborators/reader/permission"): {"permission": "read"},
+}
+
+rig = Rig(PERMS | {("GET", EVENTS): []}, trust="outside")
+code, result = rig.go("issues", issue_event(), WITH_CLAUDE)
+check(
+    "outside issue opened: waits for a maintainer, nothing cloned, no model",
+    code == 0
+    and result["skip"] == "outside issue waits for ready-for-triage"
+    and result["trust"] == "outside"
+    and rig.ran("git fetch") == []
+    and rig.ran("claude") == [],
+)
+
+for why, history in (
+    ("a reader's label", [labeled("reader")]),
+    ("a bot's label", [labeled("maint", "Bot")]),
+    ("another label by a maintainer", [labeled("maint", label="bug")]),
+    ("a stranger's label", [labeled("nobody")]),
+):
+    rig = Rig(PERMS | {("GET", EVENTS): history}, trust="outside")
+    _, result = rig.go("issues", issue_event("labeled", "ready-for-triage"), WITH_CLAUDE)
+    check(f"outside issue, {why}: still waits", "skip" in result and rig.ran("claude") == [])
+
+rig = Rig(PERMS, trust="outside")
+_, result = rig.go("issues", issue_event("labeled", "ready-for-triage"), WITH_CLAUDE)
+check(
+    "outside issue: an unreadable history is a refusal", "skip" in result and not rig.ran("claude")
+)
+
+rig = Rig(PERMS | {("GET", EVENTS): [labeled("reader"), labeled("maint")]}, trust="outside")
+_, result = rig.go("issues", issue_event("labeled", "ready-for-triage"), WITH_CLAUDE)
+check(
+    "outside issue a maintainer queued: triaged",
+    "skip" not in result and result["triage"]["queue"] == "backlog" and len(rig.ran("claude")) == 1,
+)
+
+rig = Rig(trust="write")
+_, result = rig.go("issues", issue_event(), WITH_CLAUDE)
+check(
+    "a maintainer's own issue: no history lookup",
+    "triage" in result and not rig.api.made("GET", "*/events*"),
+)
+
 for label, event in (
     ("another label", issue_event("labeled", "bug")),
     ("closed", issue_event("closed")),
