@@ -255,6 +255,7 @@ def sibling(ctx: Ctx, name: str, image: str, shell: str) -> list[str]:
     return [
         *ctx.engine,
         *["run", "--rm", "--name", name, "--network=host", "--security-opt=no-new-privileges"],
+        "--security-opt=label=disable",  # as the fleet file launches this job: no relabel
         *["-v", f"{root}:{root}", "-v", f"{ctx.socket}:{sock}", "-w", root],
         *[w for k, v in sorted(given.items()) for w in ("-e", f"{k}={v}")],
         *["--entrypoint", "bash", ctx.image, "-euo", "pipefail", "-c", shell],

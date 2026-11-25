@@ -323,6 +323,7 @@ def test_the_sibling_has_the_workspace_the_socket_and_the_runners_network() -> N
     assert got["volumes"] == [f"{HOST}:{HOST}", f"{SOCKET}:/var/run/docker.sock"], got
     assert got["workdir"] == [HOST]
     assert "--network=host" in argv and "--security-opt=no-new-privileges" in argv
+    assert "--security-opt=label=disable" in argv  # the runner's tree and socket keep their labels
     env = got["env"]
     assert env["GITHUB_WORKSPACE"] == HOST and env["CI"] == "true"
     assert env["TMPDIR"] == f"{HOST}/.sdlc-boot-tmp" and env["HOME"] == env["TMPDIR"]
