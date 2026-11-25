@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.5] - 2026-11-25
+
 ### Added
 
 - A local release's image is attested with SLSA v1 provenance, the predicate
