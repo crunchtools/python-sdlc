@@ -8,6 +8,10 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- write verifies a release whose version is dynamic: with `version` in
+  `[project].dynamic`, the version is read from `[tool.hatch.version].path` at
+  the merge (ashigaru's `VERSION`), a relative path inside the repository holding
+  an X.Y.Z, instead of refusing it as None (a1416)
 - promote reads a repo's own `version` label before the OCI version its base
   sets, so the rebuild of a tagged release (hermes 1.2.0 on hummingbird/python
   3.13.18) moves its version tag (a1551)

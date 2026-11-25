@@ -19,7 +19,7 @@ import re
 import tempfile
 import tomllib
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sdlc_jobs import _tools as tools
@@ -215,12 +215,11 @@ def _tree_version(api: Api, repo: str, sha: str) -> str | bool | None:
     got = _file_at(api, repo, "pyproject.toml", sha)
     if got is not None:
         try:
-            project = tomllib.loads(base64.b64decode(got["content"]).decode()).get("project")
+            doc = tomllib.loads(base64.b64decode(got["content"]).decode())
         except _UNREADABLE:
             return None
-        if project is not None:
-            found = project.get("version") if isinstance(project, dict) else None
-            return found if isinstance(found, str) else None
+        if doc.get("project") is not None:
+            return _project_version(api, repo, sha, doc)
     node = _file_at(api, repo, "package.json", sha)
     if node is None:
         return False if got is None else None
@@ -229,6 +228,42 @@ def _tree_version(api: Api, repo: str, sha: str) -> str | bool | None:
     except (*_UNREADABLE, AttributeError):
         return None
     return found if isinstance(found, str) else None
+
+
+def _project_version(api: Api, repo: str, sha: str, doc: dict[str, Any]) -> str | None:
+    """`[project].version`, or a dynamic one from the hatch path; None when neither."""
+    project = doc["project"] if isinstance(doc["project"], dict) else {}
+    found = project.get("version")
+    if isinstance(found, str):
+        return found
+    dynamic = project.get("dynamic")
+    if isinstance(dynamic, list) and "version" in dynamic:
+        return _hatch_version(api, repo, sha, doc)
+    return None
+
+
+def _hatch_version(api: Api, repo: str, sha: str, doc: dict[str, Any]) -> str | None:
+    """A dynamic version read from `[tool.hatch.version].path` at `sha` (ashigaru's VERSION).
+
+    Only a relative path inside the repository, and only a file that holds an
+    X.Y.Z; anything else is None, as a pyproject naming no version is.
+    """
+    hatch = (doc.get("tool") or {}).get("hatch") if isinstance(doc.get("tool"), dict) else None
+    table = hatch.get("version") if isinstance(hatch, dict) else None
+    path = table.get("path") if isinstance(table, dict) else None
+    if not isinstance(path, str) or not path or "\\" in path:
+        return None
+    parts = PurePosixPath(path).parts
+    if PurePosixPath(path).is_absolute() or ".." in parts or not parts:
+        return None
+    got = _file_at(api, repo, "/".join(parts), sha)
+    if got is None:
+        return None
+    try:
+        found = base64.b64decode(got["content"]).decode().strip()
+    except (*_UNREADABLE, TypeError):
+        return None
+    return found if _VERSION.fullmatch(found) else None
 
 
 def _verify(
