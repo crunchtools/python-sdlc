@@ -52,4 +52,4 @@ if sudo -n true 2>/dev/null; then
   sudo -n dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -8 | sed 's/^/dmesg: /'
   sudo -n journalctl -k --no-pager 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -8 | sed 's/^/kern: /'
 fi
-exit 0
+say "PROBE DONE (failing on purpose so the log can be read)"; exit 1
