@@ -1161,9 +1161,10 @@ def kind_pytest_in_image(name: str, settings: dict) -> list[tuple[str, str, str]
         "--read-only",
         "--tmpfs",
         "/tmp:rw,exec,size=2g,mode=1777",
-        "--cap-drop=all",
-        "--security-opt",
-        "no-new-privileges",
+        # No --cap-drop or no-new-privileges here: bin/sdlc's run_host adds
+        # both, and drops no-new-privileges on an AppArmor host, where it
+        # stacks the profile and a test cannot kill its own child (#181). One
+        # passed here survived that rule and failed claude-agent's tmux tests.
         "-v",
         f"{volume}:/sdlc-cache:ro",
         "-e",
