@@ -94,7 +94,8 @@ case $image in
       || podman --events-backend=none image exists -- "$image" \
       || cannot "$image could not be pulled"
     digest=$(podman --events-backend=none image inspect \
-               --format '{{.Digest}}' -- "$image") || digest= ;;
+               --format '{{.Digest}}' -- "$image" 2> "$dir/inspect.err") \
+      || cannot "$image could not be inspected: $(cat "$dir/inspect.err")" ;;
 esac
 hex=${digest#sha256:}
 case $digest in sha256:*) ;; *) cannot "$image has no sha256 digest to verify" ;; esac
