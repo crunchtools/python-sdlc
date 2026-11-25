@@ -6,6 +6,11 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `bin/sdlc-bootstrap` reports a failed `podman image inspect` with podman's own
+  error, instead of "has no sha256 digest to verify". It still fails closed.
+
 ## [0.15.1] - 2026-11-25
 
 ### Fixed

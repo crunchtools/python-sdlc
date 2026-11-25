@@ -31,7 +31,9 @@ printf '%s\n' "\$*" >> "$W/log"
 case " \$* " in
   *" pull "*)         [ ! -e "$W/pull-fails" ] ;;
   *" image exists "*) [ ! -e "$W/absent" ] ;;
-  *" image inspect "*) cat "$W/digest" ;;
+  *" image inspect "*)
+    [ ! -e "$W/inspect-fails" ] || { echo 'Error: inspecting object: boom' >&2; exit 125; }
+    cat "$W/digest" ;;
   *" verify "*)       [ ! -e "$W/unsigned" ] || { echo 'Error: no signatures found' >&2; exit 10; } ;;
   *" launcher "*)
     printf 'printf "%%s|%%s|%%s\\\\n" "\$SDLC_IMAGE" "\$SDLC_VERIFIED_FROM" "\$*" > "$W/ran"\n' ;;
@@ -41,7 +43,7 @@ EOF
 chmod +x "$W/bin/podman"
 
 reset() {
-  rm -rf "$W/log" "$W/ran" "$W/cache" "$W/pull-fails" "$W/absent" "$W/unsigned"
+  rm -rf "$W/log" "$W/ran" "$W/cache" "$W/pull-fails" "$W/absent" "$W/unsigned" "$W/inspect-fails"
   printf '%s\n' "$D" > "$W/digest"
 }
 boot() {             # args...: run the bootstrap, set RC and OUT
@@ -137,6 +139,16 @@ for d in '' '<none>' 'sha256:abc' "sha256:$(printf 'G%.0s' $(seq 64))"; do
     bad "inspect answering '$d': exit $RC"; cat "$W/log"
   fi
 done
+
+reset
+touch "$W/inspect-fails"
+boot versions
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'could not be inspected: Error: inspecting object: boom' \
+   && ! printf '%s' "$OUT" | grep -q 'no sha256 digest' && ! grep -q ' verify \| launcher ' "$W/log"; then
+  ok "a failed inspect reports its own error, not a missing digest"
+else
+  bad "failed inspect: exit $RC"; printf '%s\n' "$OUT"
+fi
 
 reset
 E=sha256:$(printf 'b%.0s' $(seq 64))
