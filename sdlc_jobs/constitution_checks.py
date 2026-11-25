@@ -218,7 +218,7 @@ def _resolving_install(command: str) -> tuple[bool, list[str]]:
     return resolving or bool(requirements), requirements
 
 
-def containerfile_commands(text: str) -> list[tuple[int, str]]:
+def _containerfile_commands(text: str) -> list[tuple[int, str]]:
     """Logical shell commands and the line each starts on: comments dropped,
     continuations joined, each split on && and ;.
 
@@ -314,7 +314,7 @@ def check_locked_install(root: Path, report: Findings) -> None:
     """
     has_lock = _own_file(root, root / "uv.lock")
     for path in _files(root, "Containerfile*"):
-        commands = containerfile_commands(path.read_text(errors="ignore"))
+        commands = _containerfile_commands(path.read_text(errors="ignore"))
         any_resolving = any_locked = False
         states = _locked_paths(commands)
         for (line, command), (cwd, locked) in zip(commands, states, strict=True):
