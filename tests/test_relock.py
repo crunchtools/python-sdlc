@@ -209,6 +209,7 @@ for name, path, text in [
     ("nested-python-version", "pkg/.python-version", "3.12\n"),
     ("uv-toml", "uv.toml", 'python-preference = "only-system"\n'),
     ("nested-uv-toml", "pkg/uv.toml", "\n"),
+    ("tool-not-a-table", "pyproject.toml", "tool = 1\n" + PYPROJECT),
     ("tool-uv", "pyproject.toml", PYPROJECT + '\n[tool.uv]\npython-preference = "only-system"\n'),
 ]:
     s = Scene(name)

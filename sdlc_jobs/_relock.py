@@ -172,6 +172,8 @@ def sibling(env: Mapping[str, str], name: str, image: str, src: str, out: str) -
         "--security-opt=no-new-privileges",
         "--security-opt=label=disable",
         "--read-only",
+        # podman-run(1): `private` is bridge when rootful, pasta when rootless. Both
+        # reach the index; `none` would not, and `host` is the runner's own.
         "--network=private",
         "--tmpfs",
         TMPFS,
@@ -249,7 +251,9 @@ def uv_table(git: Callable[..., bytes], spec: str) -> Any:
         except ValueError:
             return {}
     text = git("show", spec).decode("utf-8")
-    return tomllib.loads(text).get("tool", {}).get("uv", {})
+    tool = tomllib.loads(text).get("tool", {})
+    # A `tool` that is not a table is compared as it is: a change to it still moves.
+    return tool.get("uv", {}) if isinstance(tool, dict) else tool
 
 
 def take(lock: Path, into: Path) -> str | None:
