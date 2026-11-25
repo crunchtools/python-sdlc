@@ -6,6 +6,26 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-11-25
+
+### Changed
+
+- One image build per release. A merge to the default branch builds no image unless
+  it is a release merge; the weekly and parent rebuilds run only when a release tag
+  names the commit, so unreleased code is never published. A pull request runs the
+  container gates (a throwaway build, never pushed) only when it changes a
+  Containerfile, a `.containerignore` or a lockfile; other pull requests skip them.
+- The fleet file runs sdlc on the runner's own podman: no `container:` job, no
+  Docker. Each job starts the runner's rootful podman socket and runs sdlc-bootstrap
+  with the job's work directory mounted at the same path, so GitHub's runners and
+  Exedore's run the same engine the same way.
+
+### Removed
+
+- Build-once candidates: `quay.io/crunchtools/candidates`, the OIDC-federated robot,
+  the pull request's image job and the merge's adoption of its digest. quay.io offers
+  no robot federation to this org, so no candidate was ever pushed.
+
 ## [0.15.2] - 2026-11-25
 
 ### Fixed

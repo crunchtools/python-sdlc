@@ -15,7 +15,8 @@ to review:
   - `write` outside the triage events, `image` and `pypi` act on `check`'s
     plan only when `check` succeeded: each `if:` says
     `needs.check.result == 'success'` itself
-  - `image`'s env maps REGISTRY_REDHAT_IO_USER and REGISTRY_REDHAT_IO_PASSWORD, never on a PR
+  - `image`'s env maps REGISTRY_REDHAT_IO_USER and REGISTRY_REDHAT_IO_PASSWORD;
+    image never runs on a PR
   - in sdlc's own file, `test` is the only job whose `if:` admits
     pull_request, with `permissions: { contents: read }`, no `environment` and
     no `container`; and sdlc's `check` does not admit pull_request and is
@@ -84,8 +85,8 @@ GUARDED_RUNNER = (
 DOC = ROOT / "docs" / "marketplace-free-ci.md"
 # The doc's first ```yaml block, which "The fleet file" opens with.
 FLEET_BLOCK = re.compile(r"^```yaml\n(?P<body>.*?)^```$", re.M | re.S)
-# `key: &name <value>` to the end of the line: the anchor's definition.
-ANCHOR = re.compile(r"&(\w+) .*$", re.M)
+# `key: &name <value>` to the end of the line, or the indented block under it.
+ANCHOR = re.compile(r"&(\w+)(?: .*$|\n(?:      .*(?:\n|$))+)", re.M)
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -116,8 +117,10 @@ def job_text(text: str, job_id: str) -> str:
 
 
 def as_aliases(text: str) -> str:
-    """The text with each anchor's definition written as its alias."""
-    return ANCHOR.sub(r"*\1", text)
+    """The text with each anchor's definition (inline, or a block below it) as its alias."""
+    return ANCHOR.sub(
+        lambda m: f"*{m.group(1)}" + ("\n" if m.group(0).endswith("\n") else ""), text
+    )
 
 
 def admits_pull_request(job: dict) -> bool:
@@ -246,8 +249,8 @@ for job_id in ("image", "pypi"):
 
 image_env = fleet["image"]["env"]
 for name in ("REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"):
-    want = f"${{{{ github.event_name != 'pull_request' && secrets.{name} || '' }}}}"
-    check(f"fleet: image's env maps {name}, never on a PR", image_env.get(name) == want)
+    want = f"${{{{ secrets.{name} }}}}"
+    check(f"fleet: image's env maps {name}; image never runs on a PR", image_env.get(name) == want)
 
 check("fleet: no `uses:` anywhere", not re.search(r"^\s*-?\s*uses:", fleet_text, re.M))
 check("fleet: top-level permissions are {}", parsed.get("permissions") == {})
