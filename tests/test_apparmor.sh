@@ -102,7 +102,7 @@ check() {
   [ "$_aa" = true ] || return 0
   # shellcheck disable=SC2086
   $T $PODMAN pull -q "$SDIMG" >/dev/null 2>&1 || cannot "$_who podman could not pull $SDIMG"
-  _r=$(systemd_stops --cap-drop=all --cap-add="$SYSTEMD_CAPS")
+  _r=$(systemd_stops --cap-drop=all --cap-add="$SYSTEMD_CAPS" ${NNP:+"$NNP"})
   case "$_r" in
     "running inactive "*|"degraded inactive "*) ok "$_who: systemd boots ($_r) and stops a unit" ;;
     *) bad "$_who: systemd as PID 1 did not boot and stop a unit: $_r" ;;
