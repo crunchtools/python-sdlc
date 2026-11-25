@@ -130,6 +130,19 @@ check_version grype     "$(inside sh -c 'printf %s "$SDLC_GRYPE_VERSION"')" \
                         "$(inside sh -c 'grype version' 2>&1)"
 check_version node      "$(inside sh -c 'printf %s "$SDLC_NODE_VERSION"')" \
                         "$(inside sh -c 'node --version' 2>&1)"
+# Node reads full ICU data through NODE_ICU_DATA (sdlc#164): Hummingbird's
+# small-icu node segfaulted on Intl.Segmenter's segment() and had only en. Run
+# as the gate runs a check, every capability dropped, so the data file must be
+# readable without CAP_DAC_OVERRIDE.
+_icu=$(podman run --rm --cap-drop=all --entrypoint="" "$IMAGE" node -e '
+  const g = [...new Intl.Segmenter("en", { granularity: "grapheme" }).segment("a\u{1F44D}\u{1F3FD}")].length;
+  const fr = new Intl.DateTimeFormat("fr", { month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(2026, 0, 15)));
+  console.log(`graphemes=${g} month=${fr}`);' 2>&1) || true
+if [ "$_icu" = "graphemes=2 month=janvier" ]; then
+  ok "node has full ICU: Intl.Segmenter segments graphemes and fr formats in French"
+else
+  bad "node's ICU is not full (want 'graphemes=2 month=janvier'): $_icu"
+fi
 # The probe is `--help | head -1` ("markdownlint-cli2 v0.24.0 (markdownlint
 # ..."): the package has no --version flag, and its banner names the version.
 check_version markdownlint-cli2 "$(inside sh -c 'printf %s "$SDLC_MARKDOWNLINT_CLI2_VERSION"')" \

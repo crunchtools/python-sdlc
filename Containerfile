@@ -70,6 +70,12 @@ ARG CODEQL_SHA256=d862cb11aff035988f178703b69751be072f2aa7e76616f16bb725a207b50b
 # to 3.14: Hummingbird ships one nodejs24 at a time and drops the old build, so
 # an exact RPM version would fail the weekly rebuild that exists to take errata.
 ARG NODE_MAJOR=24
+# Full ICU data for that node (sdlc#164). Hummingbird builds nodejs with
+# small-icu, which has no break-iterator data, so Intl.Segmenter's segment()
+# segfaults rather than throwing. It must be the ICU major node was built with;
+# the release API's asset `digest` for icu4c-<v>-data-bin-l.zip is the value.
+ARG ICU_DATA_VERSION=78.3
+ARG ICU_DATA_SHA256=982619632b78887f1895b063e96e8c3cc7f99283337c8abbd05aa71635de613c
 ARG MARKDOWNLINT_CLI2_VERSION=0.24.2
 ARG DOCKER_CLI_VERSION=29.9.3
 ARG COSIGN_VERSION=2.6.5
@@ -159,6 +165,7 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
     SDLC_HADOLINT_VERSION=${HADOLINT_VERSION} \
     SDLC_GRYPE_VERSION=${GRYPE_VERSION} \
     SDLC_NODE_VERSION=${NODE_MAJOR} \
+    SDLC_ICU_DATA_VERSION=${ICU_DATA_VERSION} \
     SDLC_MARKDOWNLINT_CLI2_VERSION=${MARKDOWNLINT_CLI2_VERSION} \
     SDLC_LYCHEE_VERSION=${LYCHEE_VERSION} \
     SDLC_DOCKER_VERSION=${DOCKER_CLI_VERSION} \
@@ -225,6 +232,26 @@ RUN dnf install -y --no-best "nodejs${NODE_MAJOR}" "nodejs${NODE_MAJOR}-npm" \
  && rm -rf /var/cache/dnf \
  && node --version | grep -q "^v${NODE_MAJOR}\." \
  && npm --version
+
+# The full ICU data the node above reads through NODE_ICU_DATA: small-icu
+# keeps only root and en and no break-iterator rules, so Intl.Segmenter crashed
+# the vitest worker on rotv's tests and every non-en locale fell back to en. The data must match node's ICU major, or node refuses
+# to start (U_FILE_ACCESS_ERROR), which fails this step rather than a repo's
+# tests. Then segment() itself, which is what crashed.
+RUN set -eu; \
+    icu_major=${ICU_DATA_VERSION%%.*}; \
+    node -p 'process.versions.icu' | grep -q "^${icu_major}\." \
+      || { echo "node's ICU is $(node -p 'process.versions.icu'), not ${ICU_DATA_VERSION}'s major: move ICU_DATA_VERSION" >&2; exit 1; }; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o /tmp/icu.zip \
+      "https://github.com/unicode-org/icu/releases/download/release-${ICU_DATA_VERSION}/icu4c-${ICU_DATA_VERSION}-data-bin-l.zip"; \
+    echo "${ICU_DATA_SHA256}  /tmp/icu.zip" | sha256sum -c -; \
+    install -d -m 0755 /usr/share/node-icu; \
+    python3 -I -c 'import sys, zipfile; open(sys.argv[2], "wb").write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[3]))' \
+      /tmp/icu.zip "/usr/share/node-icu/icudt${icu_major}l.dat" "icudt${icu_major}l.dat"; \
+    chmod 0644 "/usr/share/node-icu/icudt${icu_major}l.dat"; \
+    rm -f /tmp/icu.zip; \
+    NODE_ICU_DATA=/usr/share/node-icu node -e 'const n = [...new Intl.Segmenter("en", { granularity: "grapheme" }).segment("a\u{1F44D}\u{1F3FD}")].length; if (n !== 2) { console.error(`Intl.Segmenter gave ${n} graphemes, not 2`); process.exit(1); }'
+ENV NODE_ICU_DATA=/usr/share/node-icu
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 

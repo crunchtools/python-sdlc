@@ -8,6 +8,14 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- The node stack's tests no longer crash on `Intl.Segmenter`, and non-English
+  locales format as themselves (#164). Hummingbird's nodejs24 is built with
+  small-icu, which keeps only `root` and `en` and no break-iterator data, so
+  `segment()` segfaulted the vitest worker on rotv's tests. The image now
+  carries ICU's full data, `icu4c-78.3-data-bin-l.zip` from unicode-org's
+  release pinned by sha256, at `/usr/share/node-icu`, and sets
+  `NODE_ICU_DATA`. The build fails if node's ICU major moves off
+  `ICU_DATA_VERSION`, and it, and the contract test, segment graphemes.
 - `sdlc event`, `check`, `image` and `pypi` no longer fail with git's "dubious
   ownership" error when the runner's mounted workspace is owned by another uid:
   every git call sdlc makes there (fetch, clone, `rev-parse`, and the launcher's
