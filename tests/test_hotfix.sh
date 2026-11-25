@@ -122,7 +122,7 @@ else bad "SDLC_KEY: $(grep '^self' "$LOG")"; fi
 
 # a1667: self.sh's image builds check's planned version without write, and its
 # sign wants write's success and release, which the tag before it stands for.
-if has 'self-in job=image check={"write":true,"release":{"version":"1.2.3","publish":"image"}} write= release='
+if has 'self-in job=image check={"write":true,"image":true,"release":{"version":"1.2.3","publish":"image"}} write= release='
 then ok "image is handed check's plan for 1.2.3 and nothing of write's"
 else bad "image inputs: $(grep '^self-in job=image' "$LOG")"; fi
 if has "self-in job=sign check= write=success release={\"version\":\"1.2.3\",\"sha\":\"$SHA\"}"

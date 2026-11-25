@@ -140,7 +140,9 @@ test_all() {
 # default-branch push whose tree carries a version with a CHANGELOG heading
 # and no vX.Y.Z tag yet is a release merge as far as check can tell; write
 # verifies it against the API, and tags it only after image has passed; sign
-# acts only on write's output.
+# acts only on write's output. `image` is always true on a release: sdlc builds
+# one for every release, and write.py refuses one whose planned image was
+# skipped, so the plan must say so (a1667).
 plan() {
   if [ "${GITHUB_EVENT_NAME:-}" != push ]; then
     printf '{"write":false,"release":null}'
@@ -151,7 +153,7 @@ plan() {
   _tags=$(git ls-remote --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "refs/tags/v$_v") \
     || die "cannot list the tags of $GITHUB_REPOSITORY"
   if [ -z "$_tags" ] && grep -q "^## \\[$_v\\]\\( \\|\$\\)" "$here/CHANGELOG.md"; then
-    jq -cn --arg v "$_v" '{write: true, release: {version: $v, publish: "image"}}'
+    jq -cn --arg v "$_v" '{write: true, image: true, release: {version: $v, publish: "image"}}'
   else
     printf '{"write":false,"release":null}'
   fi

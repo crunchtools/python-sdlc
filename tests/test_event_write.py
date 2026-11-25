@@ -844,6 +844,11 @@ for label, plan, results in (
     ("boot failed", gated, {"SDLC_IMAGE": "success", "SDLC_BOOT": "failure"}),
     ("a planned boot was skipped", gated, {"SDLC_IMAGE": "success", "SDLC_BOOT": "skipped"}),
     ("image's result is empty", gated, {"SDLC_IMAGE": "", "SDLC_BOOT": "success"}),
+    (
+        "sdlc's own planned image was skipped (no boot job maps SDLC_BOOT)",
+        {"write": True, "image": True, "release": planned},
+        {"SDLC_IMAGE": "skipped"},
+    ),
 ):
     mock_publish.reset_mock()
     rig = Rig()

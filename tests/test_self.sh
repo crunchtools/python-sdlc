@@ -279,7 +279,7 @@ SRVENV="GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=crunchtools/sdlc"
 reset; : > "$W/tags"
 # shellcheck disable=SC2086
 run check check GITHUB_EVENT_NAME=push $SRVENV
-if [ "$RC" -eq 0 ] && grep -qxF 'result={"write":true,"release":{"version":"0.13.0","publish":"image"}}' "$W/out" \
+if [ "$RC" -eq 0 ] && grep -qxF 'result={"write":true,"image":true,"release":{"version":"0.13.0","publish":"image"}}' "$W/out" \
    && in_log '^git ls-remote --tags https://github.com/crunchtools/sdlc refs/tags/v0.13.0$' \
    && ! in_log '--no-cache'; then
   ok "plan: a version with a CHANGELOG heading and no tag is a release merge (cached build)"
@@ -320,7 +320,7 @@ printf '\n%s\n' '-- image'
 # check's plan, never write's result: write tags only once this build has
 # passed (a1667), so image cannot wait on it.
 img() { run image release GITHUB_EVENT_NAME=push "$@"; }
-PLAN_R='SDLC_CHECK={"write":true,"release":{"version":"0.13.0","publish":"image"}}'
+PLAN_R='SDLC_CHECK={"write":true,"image":true,"release":{"version":"0.13.0","publish":"image"}}'
 reset; img "$PLAN_R"
 WANT="result={\"digest\":\"$D1\",\"version\":\"0.13.0\",\"boot\":\"$DB\"}"
 if [ "$RC" -eq 0 ] && grep -qxF "$WANT" "$W/out" && [ "$(cat "$W/login-stdin")" = p ] \

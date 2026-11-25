@@ -394,8 +394,9 @@ a job that has nothing to take:
 - **`ai`, `write` and `gate`** run `sdlc-bootstrap`, which runs a **released**,
   signed sdlc, never the PR's tree.
 - **`image`** builds **only releases**, so its `if:` keys on the plan's
-  `release`, not on the `image` key the fleet's `image` job reads: sdlc's plan
-  never reports `image`, because nothing but a release is ever built to quay.
+  `release`. sdlc's plan reports `image: true` with every release, and only
+  then, because nothing but a release is ever built to quay; `write` refuses
+  a release whose planned image did not succeed.
   On a push, that means a merge `check` planned as a release; the version is
   the plan's, which must be the tree's. `write` verifies it with the full test
   (under "Releases run from the merge") and tags it only once `image` has

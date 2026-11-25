@@ -84,7 +84,7 @@ export COSIGN_IMAGE=ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc
 export GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=crunchtools/sdlc
 
 # image builds the version check would plan; write's verdict is sign's input.
-plan=$(jq -cn --arg v "$version" '{write: true, release: {version: $v, publish: "image"}}')
+plan=$(jq -cn --arg v "$version" '{write: true, image: true, release: {version: $v, publish: "image"}}')
 GITHUB_JOB=image MODE=release GITHUB_EVENT_NAME=push SDLC_CHECK=$plan \
   GITHUB_OUTPUT=$work/out SDLC_KEY='' SDLC_KEY_PASSWORD='' "$here/scripts/self.sh"
 built=$(sed -n 's/^result=//p' "$work/out")
