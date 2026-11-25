@@ -6,8 +6,15 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-11-25
+
 ### Fixed
 
+- The ai job reviews a pull request's net diff, not its per-commit patches. In
+  the patch form, a file one commit adds and a later one removes, and every
+  intermediate line number, look like part of the PR; Gatehouse anchored
+  findings there and GitHub refused the whole review ("Line could not be
+  resolved", gatehouse#173), so the write job failed and the gate held the PR.
 - `bin/sdlc-bootstrap` reports a failed `podman image inspect` with podman's own
   error, instead of "has no sha256 digest to verify". It still fails closed.
 
