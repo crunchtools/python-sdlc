@@ -110,6 +110,7 @@ FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE)
 # container-scan, bootc-lint), and nothing else: a repo's config cannot add one.
 RUN_FLAGS = ("--rm", "--read-only")
 RUN_VALUED = (
+    "--cap-add",
     "--pull",
     "--network",
     "-e",
@@ -123,6 +124,10 @@ RUN_VALUED = (
 EVENTS = ("push", "schedule", "workflow_dispatch")  # the workflow's `if:`
 PLAN_FIELDS = 4  # name, stage, mode, argv
 STATE_FIELDS = 3  # running, exit code, OOM-killed
+# The one capability a host step may take back, and only bootc-lint on a read-only
+# root: the planner's BOOTC_LINT_CAP, which `bootc container lint` needs to walk
+# directories root does not own.
+BOOTC_LINT_CAP = "DAC_OVERRIDE"
 SYSTEMD = ("/sbin/init", "/usr/sbin/init", "/lib/systemd/systemd", "/usr/lib/systemd/systemd")
 
 
@@ -759,6 +764,7 @@ def check_words(job: Job, name: str, words: list[str]) -> None:
     read alike. An unknown option, a stray word or a value off its rule is a 2.
     """
     sources = (f"{job.volume}:", f"{job.host_root}:")
+    read_only = cap = False
     i = 0
     while i < len(words):
         word = words[i]
@@ -767,7 +773,11 @@ def check_words(job: Job, name: str, words: list[str]) -> None:
             break
         opt, eq, value = word.partition("=")
         if opt in RUN_FLAGS and not eq:
+            read_only = read_only or opt == "--read-only"
             continue
+        if opt == "--cap-add" and name != "bootc-lint":
+            cannot(f"{name}: refused podman option {word!r} in a host step (not bootc-lint)")
+        cap = cap or opt == "--cap-add"
         shown = word
         if opt in RUN_VALUED:
             if not eq and i < len(words):
@@ -778,13 +788,17 @@ def check_words(job: Job, name: str, words: list[str]) -> None:
             if run_value_ok(opt, value, sources):
                 continue
         cannot(f"{name}: refused podman option {shown!r} in a host step")
+    if cap and not read_only:
+        cannot(f"{name}: refused podman option '--cap-add' in a host step without --read-only")
 
 
 def run_value_ok(opt: str, value: str, sources: tuple[str, ...]) -> bool:
     """An allowlisted option's value. --pull, --network, -v/--volume and --mount
-    must be the planner's own (never, none, an allowed source, type=image,); any
-    other allowlisted option takes any non-empty value."""
+    must be the planner's own (never, none, an allowed source, type=image,), and
+    --cap-add only DAC_OVERRIDE (check_words also holds it to bootc-lint on a
+    read-only root); any other allowlisted option takes any non-empty value."""
     rules: dict[str, Callable[[str], bool]] = {
+        "--cap-add": lambda v: v == BOOTC_LINT_CAP,
         "--pull": lambda v: v == "never",
         "--network": lambda v: v == "none",
         "-v": lambda v: v.startswith(sources),

@@ -1636,6 +1636,21 @@ check(
     str(lint_words),
 )
 check(
+    "bootc-lint takes DAC_OVERRIDE back, not DAC_READ_SEARCH, on a read-only root",
+    "--read-only" in lint_words[: lint_words.index("--")],
+    str(lint_words),
+)
+check(
+    "bootc-lint gets back only the one capability its walk needs",
+    [
+        (w, lint_words[i + 1])
+        for i, w in enumerate(lint_words[: lint_words.index("--")])
+        if w.startswith("--cap")
+    ]
+    == [("--cap-add", "DAC_OVERRIDE")],
+    str(lint_words),
+)
+check(
     "bootc-lint runs bootc in the built tag, image after --",
     lint_words[lint_words.index("--") + 1 :] == ["localhost/fx:sdlc", "container", "lint"]
     and lint_words[lint_words.index("--entrypoint") + 1] == "bootc",
