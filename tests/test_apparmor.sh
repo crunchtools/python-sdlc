@@ -19,6 +19,9 @@ cd "$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || exit 2
 IMG=docker.io/library/alpine:3.22@sha256:9db2934886712d877c932e07249c75a59e6ca27adfbccc05261987a17bef2d63
 SDIMG=registry.access.redhat.com/ubi10/ubi-init@sha256:1938686cb8d7a2a69440d55f5e7b9b5efb61eea460a654879e69abf54b5b9faa
 SYSTEMD_CAPS=$(sed -n 's/^SYSTEMD_CAPS=//p' bin/sdlc)
+# bin/sdlc's own rule for no-new-privileges, from `NNP=` to the blank line after
+# it, so changing the rule there changes what runs here.
+NNP_RULE=$(sed -n '/^NNP=/,/^$/p' bin/sdlc)
 T="timeout -k 5 30"
 FAILED=0
 ok()  { printf 'ok   %s\n' "$*"; }
@@ -27,6 +30,10 @@ cannot() { printf 'test_apparmor: CANNOT RUN: %s\n' "$*" >&2; exit 2; }
 
 printf '== gate containers signal their own processes\n\n'
 [ -n "$SYSTEMD_CAPS" ] || cannot "no SYSTEMD_CAPS= line in bin/sdlc"
+case "$NNP_RULE" in
+  *podman\ info*) ;;
+  *) cannot "no NNP= rule asking podman info in bin/sdlc" ;;
+esac
 
 # Prints KILL_OK or KILL_FAIL <why>: a shell kills the child it started.
 kills_child() {
@@ -79,9 +86,14 @@ check() {
   $T $PODMAN pull -q "$IMG" >/dev/null 2>&1 || cannot "$_who podman could not pull $IMG"
   # shellcheck disable=SC2086
   _aa=$($T $PODMAN info --format '{{.Host.Security.AppArmorEnabled}}' 2>/dev/null)
-  # bin/sdlc's rule: no-new-privileges unless podman reports AppArmor.
-  NNP=--security-opt=no-new-privileges
-  [ "$_aa" = true ] && NNP=
+  # bin/sdlc's rule, run against this podman: its `podman` is the one checked.
+  # `command` reaches the real binary, never this function; the rule calls it
+  # through eval, and sudo below runs the binary, not the function.
+  # shellcheck disable=SC2086,SC2032,SC2329
+  podman() { command $PODMAN "$@"; }
+  NNP=
+  eval "$NNP_RULE"
+  unset -f podman
   _r=$(kills_child --cap-drop=all ${NNP:+"$NNP"})
   case "$_r" in
     KILL_OK) ok "$_who (AppArmor=${_aa:-unknown}): a gate container kills its own child" ;;
@@ -104,6 +116,7 @@ check() {
 
 PODMAN=podman
 check rootless
+# shellcheck disable=SC2033
 if sudo -n podman version >/dev/null 2>&1; then
   PODMAN="sudo -n podman"
   check rootful
