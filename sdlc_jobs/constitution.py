@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sdlc_jobs import _tools as tools
+from sdlc_jobs import constitution_checks as rules
 
 CLEAN, FOUND, CANNOT_RUN = 0, 1, 2
 
@@ -117,6 +118,8 @@ COVERAGE: dict[str, str] = {
     "R4": "rule",
     "R5": "review",
     "S1": "rule",
+    # A repo overriding the fleet's release-age cooldown is a rule
+    # (constitution_checks); the pins themselves and Renovate's PRs are review.
     "S2": "review",
     "S3": "rule",  # dependency audit and image scan
     "S4": "review",
@@ -132,6 +135,10 @@ COVERAGE: dict[str, str] = {
     "D1": "review",
     "D2": "review",
     "D3": "rule",
+    # Partial rules stay "review" while the rest of the principle is judged:
+    # K1's size bound and read-only test, K11's credential literal
+    # (constitution_checks). K12's "private" needs the GitHub API, so
+    # it is review with the rest of K12.
     **dict.fromkeys((f"K{n}" for n in range(1, 16)), "review"),
     "G1": "rule",
     "G2": "rule",
@@ -387,6 +394,13 @@ def check(root: Path) -> Report:
     check_changelog(root, report)
     check_release(root, report)
     check_version_sync(root, kinds, report)
+    rules.check_locked_install(root, report)
+    rules.check_renovate_overrides(root, report)
+    ids = {k.id for k in kinds}
+    if "K1" in ids:
+        rules.check_http_bounds(root, report)
+    if "K11" in ids:
+        rules.check_skills(root, report)
     return report
 
 

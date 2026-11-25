@@ -23,6 +23,16 @@ All notable changes to this project are documented here, following
 
 ### Added
 
+- `sdlc-constitution check` makes four more rule checks, ported from the v1
+  validator (RT #1666). S1: a Containerfile that installs Python dependencies
+  does so with `--no-deps`, from a file it exported from the committed
+  `uv.lock` (or a hash-pinned one), or by `uv sync --frozen`. S2: a repo's own
+  Renovate config does not change the fleet's release-age cooldown. K1 (kind
+  `mcp-server`): a server that makes HTTP requests reads the body in bounded
+  pieces against a named ceiling, and a test rejects an oversized body. K11
+  (kind `claude-skill`): no `SKILL.md` assigns a credential literal. Each
+  finding cites its principle; the rest of K1, S2 and K11 stays with review.
+  A file committed as a symlink, or reached through one, is never read.
 - tests/test_workflows.py pins the bootstrap's launch line in the fleet file
   and in sdlc's own (or the file it is given): the socket's mode and owner,
   `--user 0` and `label=disable`, the mounts, the exact `--env` list, no other

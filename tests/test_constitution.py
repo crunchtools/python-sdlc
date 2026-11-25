@@ -35,7 +35,50 @@ def mcp_server(root: Path) -> None:
     (root / "uv.lock").write_text("version = 1\n")
     (root / "Containerfile").write_text('FROM quay.io/hummingbird/python\nLABEL version="1.2.0"\n')
     (root / "tests").mkdir()
-    (root / "tests" / "test_tools.py").write_text("READ_ONLY = 'readOnlyHint'\n")
+    (root / "tests" / "test_tools.py").write_text(TESTS)
+    write("src/x/client.py", CLIENT)(root)
+
+
+TESTS = "READ_ONLY = 'readOnlyHint'\n\n\ndef test_response_too_large(): ...\n"
+
+
+# K1: an HTTP client that reads in pieces and stops at a named ceiling.
+CLIENT = """import httpx
+
+MAX_RESPONSE_SIZE = 10
+
+
+async def fetch(client, url):
+    body = b""
+    async with client.stream("GET", url) as response:
+        async for chunk in response.aiter_bytes():
+            body += chunk
+            if len(body) > MAX_RESPONSE_SIZE:
+                raise ValueError("too large")
+    return body
+"""
+# The ceiling is read from the header only, in another function from the stream.
+HEADER_ONLY = """import httpx
+
+MAX_RESPONSE_SIZE = 10
+
+
+def too_big(response):
+    return int(response.headers["content-length"]) > MAX_RESPONSE_SIZE
+
+
+async def fetch(client, url):
+    async with client.stream("GET", url) as response:
+        return b"".join([c async for c in response.aiter_bytes()])
+"""
+# S1: the lock exported frozen, then both installs with --no-deps.
+LOCKED_INSTALL = """FROM quay.io/hummingbird/python
+LABEL version="1.2.0"
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-hashes -o req.txt \\
+ && pip install --no-deps -r req.txt \\
+ && pip install --no-deps .
+"""
 
 
 def findings(setup, *breaks) -> list[str]:
@@ -75,6 +118,57 @@ FAILS: list[tuple[str, tuple, str]] = [
     ("no lockfile", (drop("uv.lock"),), "S1"),
     ("no tests", (drop("tests/test_tools.py"),), "C7"),
     ("no read-only partition test", (write("tests/test_tools.py", "x = 1\n"),), "K1"),
+    (
+        "HTTP read with no bounded pieces",
+        (
+            write(
+                "src/x/client.py", "import httpx\n\ndef get(c, u):\n    return c.get(u).content\n"
+            ),
+        ),
+        "K1",
+    ),
+    ("ceiling from content-length only", (write("src/x/client.py", HEADER_ONLY),), "K1"),
+    (
+        "no oversized-body test",
+        (write("tests/test_tools.py", "READ_ONLY = 'readOnlyHint'\n"),),
+        "K1",
+    ),
+    (
+        "pip install . re-resolves",
+        (write("Containerfile", LOCKED_INSTALL.replace("--no-deps .", ".")),),
+        "S1",
+    ),
+    (
+        "lock named only in a comment",
+        (
+            write(
+                "Containerfile",
+                'FROM x\nLABEL version="1.2.0"\n# installs from uv.lock\n'
+                "RUN pip install --no-deps -r requirements.txt\n",
+            ),
+        ),
+        "S1",
+    ),
+    (
+        "renovate sets the cooldown",
+        (write("renovate.json", '{"minimumReleaseAge": "1 day"}'),),
+        "S2",
+    ),
+    (
+        "renovate cooldown inside a packageRule, JSON5",
+        (write(".github/renovate.json5", "{packageRules: [{stabilityDays: 0}]}"),),
+        "S2",
+    ),
+    (
+        "renovate extends a cooldown preset",
+        (write("renovate.json", '{"extends": ["config:best-practices"]}'),),
+        "S2",
+    ),
+    (
+        "package.json renovate key",
+        (write("package.json", '{"renovate": {"extends": ["security:minimumReleaseAgeNpm"]}}'),),
+        "S2",
+    ),
     ("no Containerfile", (drop("Containerfile"),), "K1"),
     ("no changelog", (drop("CHANGELOG.md"),), "R2"),
     ("no Unreleased", (write("CHANGELOG.md", "## [1.2.0] - 2026-11-24\n"),), "R2"),
@@ -150,6 +244,191 @@ def test_each_break_is_caught() -> None:
     for name, breaks, principle in FAILS:
         got = findings(mcp_server, *breaks)
         assert any(f.startswith(f"{principle}:") for f in got), (name, got)
+
+
+# S1: the lock exported in one stage, carried to another, installed relative to WORKDIR.
+MULTI_STAGE = """FROM quay.io/hummingbird/python AS lock
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-dev -o /requirements.txt
+FROM quay.io/hummingbird/python
+LABEL version="1.2.0"
+COPY --from=lock /requirements.txt /tmp/
+WORKDIR /tmp
+RUN pip install --no-deps -r requirements.txt
+"""
+
+
+def test_s1_the_install_itself_is_locked() -> None:
+    fails = [
+        # Copying the lock in is no proof: the install reads a file nobody exported.
+        (
+            "COPY uv.lock, install another file",
+            'FROM x\nLABEL version="1.2.0"\nCOPY uv.lock requirements.txt ./\n'
+            "RUN pip install --no-deps -r requirements.txt\n",
+        ),
+        (
+            "exported without --frozen",
+            'FROM x\nLABEL version="1.2.0"\nRUN uv export -o /r.txt\n'
+            "RUN pip install --no-deps -r /r.txt\n",
+        ),
+        ("uv sync re-locks", 'FROM x\nLABEL version="1.2.0"\nRUN uv sync --no-dev\n'),
+    ]
+    for name, containerfile in fails:
+        got = findings(mcp_server, write("Containerfile", containerfile))
+        assert any(f.startswith("S1:") for f in got), (name, got)
+    passes = [
+        ("exported in one stage, installed in the next", MULTI_STAGE),
+        ("uv sync --frozen", 'FROM x\nLABEL version="1.2.0"\nRUN uv sync --frozen --no-dev\n'),
+        (
+            "a hash-pinned requirements file is a lock",
+            'FROM x\nLABEL version="1.2.0"\nCOPY req.txt /r.txt\n'
+            "RUN pip install --require-hashes --no-deps -r /r.txt\n",
+        ),
+    ]
+    for name, containerfile in passes:
+        got = findings(mcp_server, write("Containerfile", containerfile))
+        assert got == [], (name, got)
+
+
+def test_s1_names_the_line_not_the_command() -> None:
+    # The command may carry an index credential; the finding must not repeat it.
+    got = findings(
+        mcp_server,
+        write(
+            "Containerfile",
+            'FROM x\nLABEL version="1.2.0"\n\n'
+            "RUN pip install --index-url https://u:s3cr3tvalue@pypi.example.test/simple .\n",
+        ),
+    )
+    s1 = [f for f in got if f.startswith("S1:")]
+    assert s1 and all("s3cr3tvalue" not in f for f in s1), s1
+    assert any("Containerfile:4 " in f for f in s1), s1
+
+
+def test_s1_lock_committed_but_never_used() -> None:
+    # Every install takes --no-deps, yet none reads the lock: only the file-level finding.
+    unused = 'FROM x\nLABEL version="1.2.0"\nCOPY uv.lock ./\nRUN pip install --no-deps .\n'
+    got = findings(mcp_server, write("Containerfile", unused))
+    assert got == [
+        "S1: Containerfile resolves Python dependencies but never installs from uv.lock "
+        "(`uv export --frozen` to a file it installs, or `uv sync --frozen`)"
+    ], got
+    # With no lock committed there is nothing to install from (S1 still asks for one).
+    got = findings(mcp_server, write("Containerfile", unused), drop("uv.lock"))
+    assert not any("never installs" in f for f in got), got
+
+
+def link(name, outside: Path, text: str):
+    """Commit `name` as a symlink to a file outside the repo holding `text`."""
+
+    def go(root: Path) -> None:
+        target = outside / name.replace("/", "_")
+        target.write_text(text)
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).unlink(missing_ok=True)
+        (root / name).symlink_to(target)
+
+    return go
+
+
+def test_symlinked_files_are_not_read() -> None:
+    # is_file() follows a link, so a committed symlink would be judged by a file
+    # outside the repo. Each case fails as a real file and is ignored as a link.
+    unlocked = 'FROM x\nLABEL version="1.2.0"\nRUN pip install .\n'
+    cooldown = '{"minimumReleaseAge": "1 day"}'
+    leak = '---\nname: leak\n---\npassword = "hunter2"\n'
+    cases = [
+        ("S1", mcp_server, "Containerfile", unlocked),
+        ("S2", mcp_server, "renovate.json", cooldown),
+        ("S2", mcp_server, ".github/renovate.json", cooldown),
+        ("K11", skill, "skills/leak/SKILL.md", leak),
+    ]
+    for principle, setup, name, text in cases:
+        assert any(f.startswith(f"{principle}:") for f in findings(setup, write(name, text))), name
+        with tempfile.TemporaryDirectory() as outside:
+            got = findings(setup, link(name, Path(outside), text))
+        assert not any(f.startswith(f"{principle}:") for f in got), (name, got)
+    # A path through a symlinked directory leaves the repo just the same.
+    with tempfile.TemporaryDirectory() as outside:
+        (Path(outside) / "renovate.json").write_text(cooldown)
+        got = findings(mcp_server, lambda root: (root / ".github").symlink_to(outside))
+    assert not any(f.startswith("S2:") for f in got), got
+    # A symlinked uv.lock is no committed lock, so an install that skips it is fine.
+    with tempfile.TemporaryDirectory() as outside:
+        got = findings(
+            mcp_server,
+            link("uv.lock", Path(outside), "version = 1\n"),
+            write("Containerfile", 'FROM x\nLABEL version="1.2.0"\nRUN pip install --no-deps .\n'),
+        )
+    assert not any(f.startswith("S1:") for f in got), got
+
+
+def test_s2_unreadable_package_json() -> None:
+    got = findings(mcp_server, write("package.json", '{"renovate": {'))
+    assert any(f.startswith("S2:") and "package.json" in f for f in got), got
+
+
+def test_new_checks_pass_compliant_variants() -> None:
+    # Each passes the compliant repo with the rule's subject present and done right.
+    ok = [
+        ("locked install", write("Containerfile", LOCKED_INSTALL)),
+        (
+            "a named pin resolves nothing",
+            write("Containerfile", LOCKED_INSTALL + "RUN pip install uv==0.9.0\n"),
+        ),
+        (
+            "renovate config without the cooldown",
+            write("renovate.json", '{"extends": ["config:recommended"], "labels": ["deps"]}'),
+        ),
+        (
+            "package.json without renovate",
+            write("package.json", '{"name": "x", "minimumReleaseAge": 1}'),
+        ),
+        ("no HTTP client at all", write("src/x/client.py", "import json\n")),
+    ]
+    for name, change in ok:
+        got = findings(mcp_server, change)
+        assert got == [], (name, got)
+    # K1 is the MCP server's: a forked server's unbounded client is not judged by it.
+    got = findings(
+        mcp_server,
+        kinds('["forked-mcp-server"]'),
+        write("src/x/client.py", "import httpx\n"),
+        write("tests/test_tools.py", "x = 1\n"),
+    )
+    assert got == [], got
+
+
+def skill(root: Path) -> None:
+    """A compliant claude-skill repo."""
+    (root / "LICENSE").write_text(AGPL)
+    (root / "CHANGELOG.md").write_text(CHANGELOG)
+    (root / "sdlc.toml").write_text('[tool.sdlc]\nrepo-kinds = ["claude-skill"]\n')
+    write(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: x\n---\n\n## Phase 1\n\n"
+        'GITHUB_TOKEN="$(gh auth token)" gh pr view\n',
+    )(root)
+    # A checker's broken fixture under tests/ is not a skill this repo ships.
+    write("tests/broken/SKILL.md", 'api_key = "not-a-real-key"\n')(root)
+
+
+def test_skill() -> None:
+    assert findings(skill) == [], findings(skill)
+    for leak in ('password = "hunter2"', "TOKEN=ghp_abc123def456", "api_key: abc123"):
+        got = findings(skill, write("skills/leak/SKILL.md", f"---\nname: leak\n---\n{leak}\n"))
+        assert any(f.startswith("K11:") for f in got), (leak, got)
+    # Expansions, placeholders and prose name a credential without holding one.
+    fine = ("TOKEN=$GH_TOKEN", "api_key: <your key>", "token: {{ vault }}", "token: the one gh has")
+    for line in fine:
+        got = findings(skill, write("skills/fine/SKILL.md", f"---\nname: fine\n---\n{line}\n"))
+        assert got == [], (line, got)
+    # A vendored tree is not the repo's own source, and is never walked.
+    for vendored in ("node_modules", ".venv"):
+        got = findings(skill, write(f"{vendored}/x/SKILL.md", 'password = "hunter2"\n'))
+        assert got == [], (vendored, got)
+    # The credential rule is K11's: the same file in an mcp-server repo is P3's scan, not this.
+    assert findings(mcp_server, write("skills/leak/SKILL.md", 'password = "hunter2"\n')) == []
 
 
 def test_kinds_relax() -> None:
