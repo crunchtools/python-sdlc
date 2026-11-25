@@ -900,11 +900,12 @@ run_up() {             # seconds run-args -> the smoke verdict
   podman logs "$_cname" 2>&1 || :
   podman rm -f -v "$_cname" >/dev/null 2>&1 || :
   # Exit 0 is a pass whatever OOMKilled says: nested rootless podman reports
-  # it true even for `true`. It counts only beside a non-zero exit.
+  # it true even for `true`, and for an image that exits 1 on its own. It
+  # counts only beside 137, the SIGKILL a real OOM kill ends in.
   case "$_upstate" in
     'true '*)      printf 'still running after %ss: the image starts and stays up\n' "$_upsecs"; return 0 ;;
     'false 0 '*)   return 0 ;;
-    *' true')      printf '%s: the container was killed for memory\n' "$ME" >&2; return 1 ;;
+    'false 137 true') printf '%s: the container was killed for memory\n' "$ME" >&2; return 1 ;;
     'false '*)     printf '%s: the container exited %s within %ss of starting\n' "$ME" \
                      "$(printf '%s' "$_upstate" | cut -d' ' -f2)" "$_upsecs" >&2; return 1 ;;
     *)             printf '%s: podman could not report the container state; nothing was judged\n' "$ME" >&2

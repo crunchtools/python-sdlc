@@ -8,6 +8,13 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `container-smoke` reports "killed for memory" only for exit 137. Nested
+  rootless podman sets OOMKilled on an image that simply exits 1, so a crashing
+  image was blamed on memory instead of its own exit code, and self.sh failed.
+- This repo's pre-commit passes again: Gourmand's CH012 hits in
+  scripts/convert_repo.py and sdlc_jobs/promote.py are path-scoped exceptions
+  in gourmand-exceptions.toml, with what each pairs and why it stays.
+
 - sdlc-bootstrap (`boot/sdlc`) resolves `:<major>` in the registry, in the same
   `cosign verify` that checks it, and runs the digest from the verified
   payload. It used to read the digest back from the first `RepoDigests` entry

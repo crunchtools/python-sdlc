@@ -306,3 +306,37 @@ justification = """
   a run of twelve assign/if/return statements, the opening of every job \
   module's entry, not duplicated logic, so there is no helper to extract.
 """
+
+# Copy-paste detection matches statement shape, not meaning, and both files
+# are long runs of the same shape: fetch a value, check its type, refuse.
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "scripts/convert_repo.py"
+classification = "gourmand_bug"
+justification = """
+  What CH012 pairs is guard-clause shape, not logic. convert_hooks, \
+  known_variants and same_gatehouse each read a parsed YAML mapping, check \
+  isinstance on a key, and bail or rebuild a dict -- but over different \
+  files (.pre-commit-config.yaml vs gatehouse.yml) and different keys, and a \
+  shared helper would be a get-check-return wrapper that hides which field \
+  each one refuses on. move_config matches _relock.shim and convert_workflows \
+  matches promote.validate_image only as sequences of early refusals; they \
+  share no data, no callers and no module, and sdlc_jobs is the image's code \
+  while this script is a one-off repo converter that must not import it.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/promote.py"
+classification = "gourmand_bug"
+justification = """
+  run, sign and plan_tags are matched on their shape -- a check, then \
+  cannot(...) with a specific message, repeated -- which is how every job in \
+  sdlc_jobs (_boot, renovate) validates its inputs, because the exit-2 \
+  contract wants each refusal to name the exact input that failed. The \
+  checks themselves differ: run validates the event and environment, sign \
+  the key pair and signature, plan_tags the tag moves. Folding them into a \
+  table-driven validator would trade a readable refusal per line for \
+  indirection, and the convert_repo.py matches cross a deliberate boundary \
+  (the image's jobs vs a standalone script).
+"""
