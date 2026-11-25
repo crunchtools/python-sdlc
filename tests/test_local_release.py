@@ -7,6 +7,8 @@
   - `write` is handed SDLC_IMAGE and SDLC_BOOT, so its own refusal holds here
     as it does in CI
   - the App key reaches `write` alone, and is unset before `promote`
+  - the podman service holds none of the secrets: a build secret whose id names
+    a variable in the service's environment reaches its RUN empty (a1679)
 
 Run: python3 tests/test_local_release.py
 """
@@ -50,6 +52,18 @@ unset = text.find("unset ASHIGARU_APP_KEY")
 check(
     "the App key is unset after write and before promote",
     at.get("write", -1) < unset < at.get("promote", -1),
+)
+
+# Every secret the script reads from stdin, and the token it mints.
+secrets = {"GITHUB_TOKEN"}
+for loop in re.findall(r"^for name in ([A-Z_ ]+); do", text, re.M):
+    secrets |= set(loop.split())
+service = re.search(r"^CONTAINERS_CONF_OVERRIDE=.*?system service", text, re.M | re.S)
+unset_in_service = set(re.findall(r"-u (\w+)", service[0])) if service else set()
+check(
+    "the podman service is started without any secret in its environment",
+    len(secrets) > 1 and secrets <= unset_in_service,
+    str(sorted(secrets - unset_in_service)),
 )
 
 

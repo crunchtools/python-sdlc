@@ -6,6 +6,17 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- **local-release.sh starts its podman service with no secret in its
+  environment (a1679).** The service inherited every secret the script exports,
+  and a build secret whose id names a variable in the service's environment
+  reaches the RUN empty: ubi10-httpd-perl-mariadb's
+  `--mount=type=secret,id=RHSM_ACTIVATION_KEY` read nothing, and
+  subscription-manager said "Must specify an activation key". The lowercase
+  ids (`activation_key`) never collided. CI was not affected: a runner's podman
+  holds no secret.
+
 ## [0.16.6] - 2026-11-25
 
 ### Changed
