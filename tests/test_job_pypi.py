@@ -51,6 +51,7 @@ class FakeTools(Tools):
         self.pulls = pulls
         self.default = default
         self.argvs: list[list[str]] = []
+        self.envs: list[dict[str, str]] = []
         self.urls: list[str] = []
         self.dist = [f"mcp_example-{VERSION}.tar.gz", f"mcp_example-{VERSION}-py3-none-any.whl"]
         self.head = SHA
@@ -67,6 +68,7 @@ class FakeTools(Tools):
         if argv[:3] == ["podman", "--remote", "--url"]:
             argv = ["podman", *argv[4:]]
         self.argvs.append(argv)
+        self.envs.append(dict(env or {}))
         out = ""
         if argv[:2] == ["podman", "inspect"]:
             out = json.dumps(
@@ -315,3 +317,15 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_rev_parse_trusts_the_mounted_workspace() -> None:
+    """The workspace is owned by another uid than the container's git (#157)."""
+    tools, env, tmp = make()
+    with tmp:
+        assert pypi.run("push", {}, env, tools) == 0
+    i = next(i for i, a in enumerate(tools.argvs) if a[:2] == ["git", "rev-parse"])
+    genv = tools.envs[i]
+    n = int(genv["GIT_CONFIG_COUNT"]) - 1
+    assert genv[f"GIT_CONFIG_KEY_{n}"] == "safe.directory"
+    assert genv[f"GIT_CONFIG_VALUE_{n}"] == str(tools.root.resolve())  # never `*`

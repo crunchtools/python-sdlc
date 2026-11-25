@@ -89,6 +89,18 @@ class FakeRunner:
 FAILED: list[str] = []
 
 
+def carries_credential(env: Mapping[str, str]) -> bool:
+    """Does any git config in `env` set an extraheader or carry an authorization header?
+
+    Header names are case-insensitive, so the match is too.
+    """
+    keys = (v for k, v in env.items() if k.startswith("GIT_CONFIG_KEY_"))
+    values = (v for k, v in env.items() if k.startswith("GIT_CONFIG_VALUE_"))
+    return any("extraheader" in k.lower() for k in keys) or any(
+        "authorization" in v.lower() for v in values
+    )
+
+
 def check(name: str, cond: bool, detail: str = "") -> None:
     print(f"{'ok  ' if cond else 'FAIL'} {name}" + (f" -- {detail}" if detail and not cond else ""))
     if not cond:

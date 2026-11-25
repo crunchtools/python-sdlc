@@ -6,6 +6,14 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `sdlc event`, `check`, `image` and `pypi` no longer fail with git's "dubious
+  ownership" error when the runner's mounted workspace is owned by another uid:
+  every git call sdlc makes there (fetch, clone, `rev-parse`, and the launcher's
+  git) marks that one tree as a `safe.directory` through the environment, never
+  `*` (#157).
+
 ## [0.15.0] - 2026-11-24
 
 ### Fixed

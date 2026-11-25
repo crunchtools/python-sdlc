@@ -61,6 +61,7 @@ from sdlc_jobs._core import (
     tool_sdlc,
     workspace,
 )
+from sdlc_jobs._tools import safe_directory
 
 SDLC = "sdlc"  # this image's own in-image half, found on PATH
 ACCEPTED = 202
@@ -209,8 +210,10 @@ def launch(
     script = Path(tempfile.mkdtemp(prefix="sdlc-launcher-")) / "sdlc"
     script.write_text(must(tools, [SDLC, "launcher", image]))
     script.chmod(0o700)
+    # The launcher runs git in the mounted workspace (rev-parse, diff): #157.
     child = {
         **env,
+        **safe_directory(env, root),
         "SDLC_HOST_REPO": host,
         "CONTAINER_HOST": env.get("CONTAINER_HOST") or SOCKET,
     }

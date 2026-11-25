@@ -79,6 +79,7 @@ from sdlc_jobs._core import (
     step,
     workspace,
 )
+from sdlc_jobs._tools import safe_directory
 
 QUAY = "quay.io"
 ORG = "crunchtools"
@@ -211,6 +212,9 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     job.images, job.needs = build_order(root, job.images)
     job.child_env = {k: v for k, v in env.items() if k not in SECRETS}
     job.child_env["REGISTRY_AUTH_FILE"] = str(job.auth)
+    job.child_env.update(
+        safe_directory(job.child_env, root)
+    )  # git and `sdlc` in the workspace: #157
     job.event = event_name
     try:
         job.tree = job.must(["git", "rev-parse", "HEAD^{tree}"]).strip()

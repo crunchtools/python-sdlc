@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import sdlc_root
-from fake_github import FakeGitHub, FakeRunner, check, finish
+from fake_github import FakeGitHub, FakeRunner, carries_credential, check, finish
 
 from sdlc_jobs import _core as core
 from sdlc_jobs import renovate
@@ -281,7 +281,7 @@ check(
 check(
     "the constitution is cloned at this run's sha, without a token",
     any(SHA in a for a in dry["git"].ran("git fetch"))
-    and not any("GIT_CONFIG_VALUE_0" in e for _a, e, _c, _s in dry["git"].calls),
+    and not any(carries_credential(e) for _a, e, _c, _s in dry["git"].calls),
 )
 (argv, child), (argv_b, child_b) = dry["run"].calls
 check(

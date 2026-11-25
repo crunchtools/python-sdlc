@@ -26,7 +26,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import IO, NoReturn, TypedDict, Unpack
 
-from sdlc_jobs._tools import git_auth
+from sdlc_jobs._tools import git_env
 
 CLEAN = 0
 FOUND = 1
@@ -319,8 +319,8 @@ def fetch_tree(tools: Tools, env: Mapping[str, str], root: Path, repo: str) -> N
         cannot("GITHUB_SHA and GITHUB_REPOSITORY name the commit to check; one is unset")
     server = env.get("GITHUB_SERVER_URL") or "https://github.com"
     token = env.get("GITHUB_TOKEN", "")
-    genv = {**env, **(git_auth(token) if token else {"GIT_TERMINAL_PROMPT": "0"})}
     root.mkdir(parents=True, exist_ok=True)
+    genv = {**env, **git_env(root, token, env)}
     for argv in (
         ["git", "init", "-q", "."],
         ["git", "remote", "add", "origin", f"{server}/{repo}"],

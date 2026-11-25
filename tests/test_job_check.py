@@ -73,6 +73,7 @@ class FakeTools(Tools):
         self.image = SDLC_REF  # what this container says it was run from
         self.stdin: list[str | None] = []
         self.cwds: list[str | None] = []
+        self.envs: list[dict[str, str]] = []  # each run's env, in argvs' order
         self.env: dict[str, str] = {}  # added to the job's environment
         self.trees: dict[str, str] = {}  # commit -> tree, for gated_on_pr
         self.jobs: list[dict] = []  # the jobs of the merged PR head's ci.yml run
@@ -92,6 +93,7 @@ class FakeTools(Tools):
         self.argvs.append(argv)
         self.stdin.append(input)
         self.cwds.append(cwd)
+        self.envs.append(dict(env or {}))
         if argv[0] == "podman" and argv[-2:] == ["inspect", "job-ctr"]:
             mount = {"Destination": tempfile.gettempdir(), "Source": "/host/tmp"}
             return cp(
@@ -637,3 +639,41 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_launcher_trusts_the_mounted_workspace() -> None:
+    """bin/sdlc runs git in the runner's workspace, owned by another uid (#157)."""
+    t = FakeTools()
+    t.env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.x", "GIT_CONFIG_VALUE_0": "y"}
+    go("pull_request", t)
+    _, child = t.launched[0]
+    assert child["GIT_CONFIG_COUNT"] == "2"
+    assert (child["GIT_CONFIG_KEY_0"], child["GIT_CONFIG_VALUE_0"]) == ("core.x", "y")
+    assert child["GIT_CONFIG_KEY_1"] == "safe.directory"
+    assert Path(child["GIT_CONFIG_VALUE_1"]).name == "ws"  # the workspace, never `*`
+
+
+def test_fetch_tree_trusts_only_the_workspace_and_keeps_git_config() -> None:
+    """fetch_tree's git calls name the workspace as safe.directory after the job's own
+    GIT_CONFIG_* entries, which survive (#157)."""
+    t = FakeTools()
+    t.env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.x",
+        "GIT_CONFIG_VALUE_0": "y",
+        "GITHUB_TOKEN": "tok",
+    }
+    go("pull_request", t)
+    fetched = [e for a, e in zip(t.argvs, t.envs, strict=True) if a[:1] == ["git"]]
+    assert [a[:2] for a in t.argvs if a[:1] == ["git"]] == [
+        ["git", "init"],
+        ["git", "remote"],
+        ["git", "fetch"],
+        ["git", "checkout"],
+    ]
+    for env in fetched:
+        assert env["GIT_CONFIG_COUNT"] == "3"
+        assert (env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]) == ("core.x", "y")
+        assert env["GIT_CONFIG_KEY_1"] == "http.https://github.com/.extraheader"
+        assert env["GIT_CONFIG_KEY_2"] == "safe.directory"
+        assert Path(env["GIT_CONFIG_VALUE_2"]).name == "ws"  # the workspace, never `*`
