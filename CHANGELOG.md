@@ -6,6 +6,16 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- Gourmand runs in the fleet again (#177). The cutover deleted every repo's
+  `gourmand.yml`, and `sdlc ci` leaves Gourmand out (constitution XII), so
+  nothing ran it. The `check` job now runs the launcher's `gourmand` after
+  `sdlc ci` wherever it runs the gates, and the worse of the two exits is the
+  job's: a Gourmand finding fails `sdlc / check`, as `Code Quality (Gourmand)`
+  did. A repo that skips `gourmand` in `[tool.sdlc.push]` is not reviewed here
+  either. No ci.yml changes.
+
 ## [0.15.7] - 2026-11-25
 
 ### Fixed

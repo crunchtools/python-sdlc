@@ -520,10 +520,10 @@ def in_stacks(check: str, stacks: tuple[str, ...]) -> bool:
     return owner is None or any(o in stacks for o in owner)
 
 
-# CI runs push's checks except these two, which it gets from their own
-# workflows: Gatehouse's posts PR comments and must never be a blocking check,
-# and the constitution requires Gourmand's CI job to be the shared reusable one.
-# Running them again here would pay twice and make the reviewer blocking.
+# CI runs push's checks except these two, which the fleet's ci.yml renders in
+# their own steps: Gatehouse in the `ai` and `gate` jobs, where it posts PR
+# comments and must never block `sdlc ci`, and Gourmand in the `check` job, after
+# `sdlc ci` (sdlc_jobs/check.py `review`). Running them here too would pay twice.
 CI_EXCLUDES = ("gourmand", "gatehouse")
 
 # Built-in checks that are a question about the developer's clone or need its

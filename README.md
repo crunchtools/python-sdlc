@@ -44,9 +44,10 @@ contains. `gatehouse` runs it too, as of gatehouse#134 (constitution#138).
 - **push** renders every verdict, once, over `origin/<default-branch>...HEAD`.
   It never builds a container — that is minutes, and a push you wait minutes
   for is a push people stop making.
-- **ci** runs push's checks except Gourmand and Gatehouse, which CI already runs
-  through their own workflows, plus the repo's own checks, such as building its
-  image.
+- **ci** runs push's checks except Gourmand and Gatehouse, which the fleet's
+  ci.yml runs in their own steps (Gourmand in `check`, after `sdlc ci`;
+  Gatehouse in `ai` and `gate`), plus the repo's own checks, such as building
+  its image.
 
 Because the laptop and CI run the same image and the same commands, a green
 push predicts a green CI.
