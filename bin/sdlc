@@ -464,7 +464,7 @@ run_in_image() {
   # container started first (gates.sh:157-161). Those two run one at a time and
   # never hit it.
   #
-  # The GIT_CONFIG_* trio marks /repo safe: on a CI runner the checkout belongs
+  # The GIT_CONFIG_* trio marks /repo, and only /repo, safe: on a CI runner the checkout belongs
   # to the runner's user, not the container's, and git refuses a repository it
   # does not own (exit 128), as a repo command's env does in sdlc's own runner.
   set -- \
@@ -478,7 +478,7 @@ run_in_image() {
     --tmpfs /tmp:rw,exec,size=4g,mode=1777 \
     -e HOME=/tmp \
     -e PYTHONPYCACHEPREFIX=/tmp/pycache \
-    -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
+    -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
     -e SEMGREP_SETTINGS_FILE=/tmp/semgrep.yml \
     -e "SDLC_PROJECT=$PROJECT" \
     ${SDLC_CONFIG_IMAGE:+-e SDLC_CONFIG_IMAGE} \
