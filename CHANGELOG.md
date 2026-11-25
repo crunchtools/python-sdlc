@@ -6,6 +6,10 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Removed
+
+- sdlc's own `ashigaru.yml`, `gatehouse.yml`, `gatehouse-retriage.yml`, `gourmand.yml` and `bootstrap.yml`: `ci.yml` replaced them (#212). `container.yml` and `update-tools.yml` stay for now.
+
 ### Fixed
 
 - `bin/sdlc-bootstrap`: `main` tries the fleet key before sdlc's, each key's verification errors are labelled with the key, and the report no longer needs host `sed`.
