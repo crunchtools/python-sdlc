@@ -106,8 +106,8 @@ LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/sdlc"
 LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python, container, node, bootc and docs repos, with the clients a runner job needs."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
-LABEL version="0.16.0"
-LABEL org.opencontainers.image.version="0.16.0"
+LABEL version="0.16.1"
+LABEL org.opencontainers.image.version="0.16.1"
 
 # What the image carries, readable without starting anything. `sdlc versions`
 # prints these and a consuming repo's CI pins them.
@@ -435,7 +435,8 @@ RUN rm -rf /tmp/* /tmp/.[!.]* 2>/dev/null || true
 
 COPY sdlc /usr/local/bin/sdlc
 COPY bin/sdlc-constitution /usr/local/bin/sdlc-constitution
-RUN chmod 0755 /usr/local/bin/sdlc /usr/local/bin/sdlc-constitution
+COPY bin/sdlc-secret-scan /usr/local/bin/sdlc-secret-scan
+RUN chmod 0755 /usr/local/bin/sdlc /usr/local/bin/sdlc-constitution /usr/local/bin/sdlc-secret-scan
 
 # The host launcher rides in the image it starts, so a repo with no `rev:` gets
 # it with `sdlc launcher <ref>` (bin/sdlc-bootstrap) and it floats with the tag.

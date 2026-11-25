@@ -275,6 +275,7 @@ DEFAULTS = {
         "pytest",
         "npm-test",
         "gourmand",
+        "secret-scan",
         "gatehouse",
         "semgrep",
         "pip-audit",
@@ -2812,6 +2813,52 @@ def t_gourmand(s: dict) -> int:
         return run(["gourmand", "check", "--full", "--cache-dir", cache, "."])[0]
 
 
+SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def secret_scan_base() -> str | None:
+    """The commit `secret-scan` diffs HEAD against, or None when there is none.
+
+    CI names it: the check job fetches the pull request's base, or the push's
+    `before`, into a depth-1 tree and passes SDLC_DIFF_BASE. A base CI named
+    and git cannot read is a 2, never a pass: a scan with nothing to compare
+    is how every repo went unscanned after the cutover (#213). Anywhere else
+    it is where this branch left the default branch, which bin/sdlc names.
+    """
+    given = os.environ.get("SDLC_DIFF_BASE", "")
+    if given:
+        if not SHA.fullmatch(given):
+            cannot(f"SDLC_DIFF_BASE is {given!r}, not a commit sha")
+        if run(["git", "cat-file", "-e", f"{given}^{{commit}}"])[0] != CLEAN:
+            cannot(f"SDLC_DIFF_BASE names {given}, which is not in this tree's history")
+        return given
+    default = os.environ.get("SDLC_DEFAULT_BRANCH", "")
+    if not default:
+        return None
+    rc, out = run(["git", "merge-base", default, "HEAD"], tee=True)
+    if rc != CLEAN:
+        cannot(f"no merge base between {default} and HEAD; the branch's changes are unknown")
+    return out.strip()
+
+
+def t_secret_scan(s: dict) -> int:
+    """Refuse an added plaintext secret (constitution XVII), in any repo.
+
+    Gourmand reads the whole tree for slop; this reads only the lines the
+    change adds, so a fixture already on the default branch is not re-judged.
+    The rules are bin/sdlc-secret-scan's, gatehouse's old gourmand.yml step.
+    """
+    base = secret_scan_base()
+    if base is None:
+        print("no base commit to compare against; nothing to scan")
+        return CLEAN
+    step(f"sdlc-secret-scan {base[:12]}..HEAD")
+    rc = run(["sdlc-secret-scan", base])[0]
+    if rc not in (CLEAN, FOUND):
+        cannot(f"sdlc-secret-scan could not diff {base[:12]}..HEAD (exit {rc})")
+    return rc
+
+
 def ci_required_findings(consensus: dict) -> list[dict]:
     """The reported findings CI's gate would hold a pull request for.
 
@@ -3723,6 +3770,7 @@ BUILTINS = {
     "mypy": t_mypy,
     "pytest": t_pytest,
     "gourmand": t_gourmand,
+    "secret-scan": t_secret_scan,
     "gatehouse": t_gatehouse,
     "semgrep": t_semgrep,
     "pip-audit": t_pip_audit,

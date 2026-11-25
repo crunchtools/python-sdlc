@@ -13,6 +13,7 @@ It does four things, in this order, because a failed check still prints its plan
 2. Run the gates (pull_request, push, dispatch): the launcher's `ci`, which is the
    fleet's `sdlc ci` -- ruff, mypy, pytest, semgrep, pip-audit, CodeQL, the
    constitution validator, and the container build, smoke and scan for an image repo.
+   The secret scan diffs against a base commit this job fetches (`diff_base`).
    Then Gourmand (`review`), which `sdlc ci` leaves out and this job runs beside it.
 3. Scan for code scanning on a default-branch push and the weekly run: `sdlc sarif`
    reruns CodeQL and semgrep with an output directory mounted, and this job uploads
@@ -39,7 +40,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,11 @@ NO_CODE_SCANNING = re.compile(
 )
 SARIF_DIR = "sdlc-sarif"  # under RUNNER_TEMP, which the runner's engine can mount
 SARIF_LIMIT = 10_000_000  # bytes, gzipped: GitHub refuses a larger upload
+# Where each event names the commit `secret-scan` diffs against (`diff_base`).
+BASE_OF: dict[str, Callable[[dict], str | None]] = {
+    "pull_request": lambda e: ((e.get("pull_request") or {}).get("base") or {}).get("sha"),
+    "push": lambda e: e.get("before"),
+}
 
 
 def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
@@ -152,7 +158,8 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         extra = pr_build_paths(image_settings(root, repo))
         if not touches_image(tools, env, repo, event, extra):
             skip = CONTAINER_GATES
-    rc = max(gates(tools, env, root, skip=skip), review(tools, env, root))
+    base = diff_base(tools, env, root, event_name, event)
+    rc = max(gates(tools, env, root, skip=skip, base=base), review(tools, env, root))
     if default_push:
         rescan(tools, env, root, repo)
     return rc
@@ -323,12 +330,57 @@ def launch(
     return tools.run(argv, cwd=str(root), env=child, stream=stream)
 
 
-def gates(tools: Tools, env: Mapping[str, str], root: Path, skip: tuple[str, ...] = ()) -> int:
+def diff_base(
+    tools: Tools, env: Mapping[str, str], root: Path, event_name: str, event: dict
+) -> str | None:
+    """The commit `secret-scan` diffs against, fetched into the workspace; None for none.
+
+    The tree is at depth 1, so there is no base to find: the pull request's base, or
+    what a push moved from. A new branch has no `before`, so it diffs from the default
+    branch's tip. The sha comes from the payload, so it is checked before git sees it.
+    """
+    pick = BASE_OF.get(event_name)
+    if pick is None:
+        return None
+    sha = pick(event) or ""
+    ref = sha
+    if not sha or set(sha) == {"0"}:
+        branch = (event.get("repository") or {}).get("default_branch") or ""
+        if not branch:
+            cannot("a push with no `before` and no default branch has no base to diff")
+        ref = branch
+    elif not re.fullmatch(r"[0-9a-f]{40}", sha):
+        cannot(f"the event's base {sha!r} is not a commit sha")
+    genv = {**env, **git_env(root, env.get("GITHUB_TOKEN", ""), env)}
+    must(
+        tools,
+        ["git", "fetch", "-q", "--no-tags", "--depth=1", "origin", ref],
+        cwd=str(root),
+        env=genv,
+    )
+    if ref == sha:
+        return sha
+    tip = must(tools, ["git", "rev-parse", "FETCH_HEAD"], cwd=str(root), env=genv).strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", tip):
+        cannot(f"the default branch's tip {tip!r} is not a commit sha")
+    return tip
+
+
+def gates(
+    tools: Tools,
+    env: Mapping[str, str],
+    root: Path,
+    skip: tuple[str, ...] = (),
+    base: str | None = None,
+) -> int:
     """`sdlc ci` for this tree, through the launcher so repo code runs only nested.
 
     `skip` is the container gates when `image` runs them on this pull request instead.
+    `base` is what `secret-scan` diffs against, as SDLC_DIFF_BASE.
     """
     step("gates: sdlc ci")
+    if base:
+        env = {**env, "SDLC_DIFF_BASE": base}
     if skip:
         print(f"the container gates run in `image`, on the release build: {', '.join(skip)}")
         given = [s for s in env.get("SDLC_SKIP", "").split(",") if s.strip()]

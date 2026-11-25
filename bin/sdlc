@@ -443,6 +443,7 @@ run_in_image() {
     ${CACHE_VOLUME:+-e "SDLC_CACHE_VOLUME=$CACHE_VOLUME"} \
     ${SDLC_SKIP:+-e SDLC_SKIP} \
     ${SDLC_ARGS:+-e SDLC_ARGS} \
+    ${SDLC_DIFF_BASE:+-e SDLC_DIFF_BASE} \
     ${SDLC_GATEHOUSE_SAMPLES:+-e SDLC_GATEHOUSE_SAMPLES} \
     "$@"
 
