@@ -15,6 +15,15 @@ All notable changes to this project are documented here, following
   job's: a Gourmand finding fails `sdlc / check`, as `Code Quality (Gourmand)`
   did. A repo that skips `gourmand` in `[tool.sdlc.push]` is not reviewed here
   either. No ci.yml changes.
+- `bin/sdlc-bootstrap` trusts sdlc's own release key (`boot/keys/sdlc.pub`,
+  inlined) for quay.io/crunchtools/sdlc, so local hooks verify `:latest` again:
+  every release since 0.15.2 is signed by that key alone, and the launcher
+  refused them all (#185). A release (`latest`, `X.Y.Z`) is accepted on sdlc's
+  key only, because every fleet repo's promote job holds the fleet key; `main`,
+  which container.yml still signs with the fleet key, and an `@sha256` digest
+  are accepted on either. 0.15.1 and older are fleet-signed, so they run by
+  digest, not by tag. `scripts/sign-digest.sh` and `scripts/attest-digest.sh`
+  read the fleet key out of the launcher by name.
 
 ## [0.15.7] - 2026-11-25
 

@@ -25,7 +25,7 @@ D=sha256:$(printf 'c%.0s' $(seq 64))
 A=quay.io/crunchtools/sdlc
 B=quay.io/crunchtools/python-sdlc
 SHA=$(printf 'a%.0s' $(seq 40))
-sed -n '/^-----BEGIN PUBLIC KEY-----$/,/^-----END PUBLIC KEY-----$/p' bin/sdlc-bootstrap > "$W/fleet.pub"
+sed -n "/<<'FLEET_KEY'\$/,/^FLEET_KEY\$/p" bin/sdlc-bootstrap | sed '1d;$d' > "$W/fleet.pub"
 
 # The fake cosign. `public-key` prints $W/secret.pub; a reference carries a
 # type of attestation when $W/att/<repo>_<type> exists; every attest also logs

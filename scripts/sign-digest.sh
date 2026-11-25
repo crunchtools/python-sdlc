@@ -30,9 +30,9 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 pub=$work/fleet.pub
-sed -n '/^-----BEGIN PUBLIC KEY-----$/,/^-----END PUBLIC KEY-----$/p' \
-  "$here/bin/sdlc-bootstrap" > "$pub"
-[ -s "$pub" ] || { echo "bin/sdlc-bootstrap carries no public key" >&2; exit 1; }
+# The fleet key by name: bin/sdlc-bootstrap also carries sdlc's own key.
+sed -n "/<<'FLEET_KEY'\$/,/^FLEET_KEY\$/p" "$here/bin/sdlc-bootstrap" | sed '1d;$d' > "$pub"
+[ -s "$pub" ] || { echo "bin/sdlc-bootstrap carries no fleet key" >&2; exit 1; }
 cosign public-key --key env://COSIGN_PRIVATE_KEY > "$work/secret.pub"
 cmp -s "$work/secret.pub" "$pub" \
   || { echo "COSIGN_PRIVATE_KEY is not the private half of the key bin/sdlc-bootstrap trusts" >&2; exit 1; }
