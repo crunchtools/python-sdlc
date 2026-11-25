@@ -2799,8 +2799,16 @@ def t_gourmand(s: dict) -> int:
             f"loaded. Add a gourmand.toml (an empty [output] table is enough) or remove "
             f"{orphan}"
         )
-    step("gourmand check --full")
-    return run(["gourmand", "check", "--full", "."])[0]
+    # gourmand keeps its cache in .gourmand-cache/ under the tree. CI's check job runs it
+    # as the image's non-root user on a checkout it cannot write (and a review mount is
+    # read-only), where that is "Permission denied" before a single check: the cache goes
+    # to a scratch directory instead whenever the tree is not ours to write.
+    if os.access(REPO, os.W_OK):
+        step("gourmand check --full")
+        return run(["gourmand", "check", "--full", "."])[0]
+    with tempfile.TemporaryDirectory(prefix="gourmand-cache-") as cache:
+        step("gourmand check --full (cache outside the read-only tree)")
+        return run(["gourmand", "check", "--full", "--cache-dir", cache, "."])[0]
 
 
 def ci_required_findings(consensus: dict) -> list[dict]:
