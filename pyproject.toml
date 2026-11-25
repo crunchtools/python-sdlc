@@ -99,9 +99,6 @@ max-complexity = 10
 # Its fixtures are the fleet's files byte for byte, long lines included: the
 # script matches the pinned CI step exactly, so a wrapped copy tests nothing.
 "tests/test_convert_repo.py" = ["S101", "E501"]
-# The same fixtures, and counts asserted as the numbers they are.
-"tests/test_fleet_wave.py" = ["S101", "E501", "PLR2004"]
-"tests/test_cutover.py" = ["S101", "E501", "PLR2004"]
 # The sdlc_jobs suites assert counts as the numbers they are, and hand the jobs
 # fake credentials ("tok", a fake App key) so nothing real is ever near a test.
 "tests/test_event_*.py" = ["S101", "PLR2004", "S105", "S106"]

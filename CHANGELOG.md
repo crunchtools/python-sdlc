@@ -9,6 +9,7 @@ All notable changes to this project are documented here, following
 ### Removed
 
 - sdlc's own `ashigaru.yml`, `gatehouse.yml`, `gatehouse-retriage.yml`, `gourmand.yml` and `bootstrap.yml`: `ci.yml` replaced them (#212). `container.yml` and `update-tools.yml` stay for now.
+- The constitution v1 readers: `sdlc-validate` (`validate`), the launcher's host clone of the pinned constitution (`host_constitution`), the v1 branch of the `constitution` check, and `scripts/cutover.py` and `scripts/fleet_wave.py` now the fleet cutover is done. A repo still carrying `.specify/memory/constitution.md` gets exit 2 from `sdlc-constitution check` (#214).
 
 ### Fixed
 

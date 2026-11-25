@@ -42,41 +42,6 @@ justification = """
 """
 classification = "by_design"
 
-# A shape match, not a copy. CH012 pairs convert_hooks (rewrites the hooks
-# file) with fleet_wave.py's verify (checks a conversion after --apply): no
-# line, call or name is shared, only a run of assign/if/return statements of
-# similar length. Reshaping verify to dodge it was tried and changed nothing.
-[[exceptions]]
-check = "CH012-copy_paste_detection"
-path = "scripts/convert_repo.py"
-classification = "gourmand_bug"
-justification = """
-  convert_hooks and scripts/fleet_wave.py's verify share no line, call or \
-  identifier: one rewrites .pre-commit-config.yaml text, the other runs the \
-  converter a second time and inspects the git index. The match is a run of \
-  nine assign/if/return statements, which is the shape of most short Python \
-  functions, not duplicated logic. Two restructurings of verify left it in \
-  place, so there is no shared helper to extract.
-"""
-
-# The same shape match, moving as the functions it pairs are reshaped. CH012
-# pairs cutover.py's plan_move (ruleset PUTs) with its commit_runs (a GraphQL
-# read of check runs), and its verify_pr (is this the conversion PR) with
-# fleet_wave.py's convert and renovate.py's Job.discover. Earlier it paired
-# job_span, since removed, with provenance.py's provenance.
-[[exceptions]]
-check = "CH012-copy_paste_detection"
-path = "scripts/cutover.py"
-classification = "gourmand_bug"
-justification = """
-  plan_move builds ruleset PUTs and commit_runs reads check runs over \
-  GraphQL; verify_pr checks a pull request's head, base and state, while \
-  fleet_wave's convert runs the converter and renovate's Job.discover lists \
-  repositories. No pair shares a line, call or identifier: the match is a \
-  run of assignments, guards and a raise or return, the shape of most \
-  validating functions, so there is no shared helper to extract.
-"""
-
 # The image layout, not a guess. sdlc_jobs runs only inside the sdlc image,
 # whose Containerfile puts Ashigaru's scripts and the constitution's scripts
 # at these paths; the tests point the module attributes at fixtures.
@@ -136,24 +101,6 @@ justification = """
   finding ids for real ones and runs Ashigaru's fix_publish.py. The match is \
   ten assignments and calls of similar length, the shape of most short \
   Python functions, so there is no shared helper to extract.
-"""
-
-# The same shape match again: CH012 pairs fleet_wave.py's verify (checks a
-# conversion is a fixed point and owns only its paths) with whichever
-# sdlc_jobs function has a similar run of assign/if/raise statements, and
-# moves each time that one is reshaped: ashigaru_caller's partners before,
-# _boot.boot_settings and write.Job.route now.
-[[exceptions]]
-check = "CH012-copy_paste_detection"
-path = "scripts/fleet_wave.py"
-classification = "gourmand_bug"
-justification = """
-  verify re-runs the converter and cutover on a checkout and refuses what \
-  is not a fixed point; boot_settings parses [tool.sdlc.image]'s boot keys \
-  and Job.route dispatches an event to write's handlers. They share no \
-  line, call or identifier. Reshaping the other side has moved the match \
-  to a different function each time, which is what a shape match does and \
-  duplicated logic does not.
 """
 
 # Three statements: run one of Ashigaru's scripts, check it, return what it
@@ -261,31 +208,6 @@ justification = """
   modules by statement count and shape alone: guards that call cannot(), \
   assignments, one return. It shares no line, call or identifier with them, \
   so there is no helper to extract.
-"""
-
-[[exceptions]]
-check = "CH012-copy_paste_detection"
-path = "sdlc_jobs/pypi.py"
-classification = "gourmand_bug"
-justification = """
-  run (refuses unless write succeeded, the tree asks for PyPI and the API \
-  agrees with write, then builds and publishes) is paired with promote's run \
-  and two functions in scripts/fleet_wave.py: nine statements of guards, \
-  assignments and one return, with no line, call or identifier in common. \
-  The helpers they might share (parse_release, needed, verify_release) are \
-  already shared or specific to each job.
-"""
-
-[[exceptions]]
-check = "CH012-copy_paste_detection"
-path = "sdlc_jobs/promote.py"
-classification = "gourmand_bug"
-justification = """
-  sign (cosign sign with the fleet key, then verify it) is paired with \
-  scripts/fleet_wave.py's convert, and run with pypi's run: nine statements \
-  of assignments, guards and one return, sharing no line, call or \
-  identifier. They sign an image and convert a repository; there is no \
-  helper to extract.
 """
 
 # A REST route, not a filesystem path.
