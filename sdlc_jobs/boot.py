@@ -42,6 +42,7 @@ from sdlc_jobs._core import (
     DIGEST,
     EXTRA_IMAGES,
     FOUND,
+    PODMAN_CANNOT_CREATE,
     TIMED_OUT,
     Image,
     Tools,
@@ -212,6 +213,8 @@ def boot_image(ctx: Ctx, img: Image, image: str) -> int:
         finally:
             print(f"::{resume}::", flush=True)
             ctx.tools.run([*ctx.engine, "rm", "--force", name], env=dict(ctx.env))
+        if done.returncode == PODMAN_CANNOT_CREATE:  # 126/127 are bash's, on the repo's shell
+            cannot(f"{what}: podman could not start the container (exit 125); nothing was judged")
         if done.returncode == TIMED_OUT:
             print(f"{what}: REFUSED: still running after {timeout}s", flush=True)
             return FOUND

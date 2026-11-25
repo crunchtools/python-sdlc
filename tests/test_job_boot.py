@@ -364,6 +364,19 @@ def test_on_github_hosted_the_pull_and_the_run_use_podman_too() -> None:
     assert parts(t.runs[0]["argv"])["env"]["RUNNER_ENVIRONMENT"] == "github-hosted"
 
 
+def test_podman_failing_to_start_the_container_is_a_2() -> None:
+    t = FakeTools(lambda _sh: 125)
+    msg = ""
+    try:
+        go(t, CONTRACT)
+    except CannotRunError as exc:
+        msg = str(exc)
+    assert "podman could not start the container" in msg, "a podman 125 was not a 2"
+    assert t.argvs[-1][4:6] == ["rm", "--force"], t.argvs[-1]
+    t = FakeTools(lambda _sh: 127)  # bash's: the repo's shell named a missing command
+    assert go(t, CONTRACT)[0] == 1
+
+
 def test_a_timeout_is_a_1_bounded_by_boot_timeout() -> None:
     t = FakeTools(lambda _sh: TIMED_OUT)
     rc, out, _ = go(t, CONTRACT + toml(boot="none", boot_none_reason="x", boot_timeout=LIMIT))
