@@ -43,7 +43,7 @@ case $repo in */*/*|/*|*/|*[!A-Za-z0-9._/-]*) die "$repo is not owner/name" ;; *
 case $sha in *[!0-9a-f]*) die "$sha is not a 40-hex commit" ;; esac
 [ "${#sha}" -eq 40 ] || die "$sha is not a 40-hex commit"
 [ "$(id -u)" -eq 0 ] || die "run as root: the jobs drive the host's podman socket"
-for tool in podman skopeo jq curl openssl; do
+for tool in podman skopeo jq curl openssl unshare; do
   command -v "$tool" > /dev/null || die "$tool is not on PATH"
 done
 
@@ -144,14 +144,20 @@ case $status in identical|ahead) ;; *) die "$sha is not on $repo's $default ($st
 # podman.socket and its configuration are left as they are.
 sock=$work/podman.sock
 printf '[containers]\nlabel = false\n' > "$work/containers.conf"
-# No default mounts: on a RHEL host podman puts the host's entitlement in every
-# container's /run/secrets, and subscription-manager then refuses to register in
-# a build's RHSM step ("operating in container mode"). A runner VM mounts none.
-: > "$work/mounts.conf"
-# podman itself, not the pod function: $! must be the service, for cleanup to stop it.
+# No host entitlement: on a RHEL host podman's mounts.conf puts the host's
+# entitlement in every container's /run/secrets, and subscription-manager then
+# refuses to register in a build's RHSM step ("operating in container mode").
+# A runner VM mounts none. The service runs in a private mount namespace with an
+# empty directory over that source, so only its containers lose it;
+# --default-mounts-file is not honored by a build through the API.
+mkdir "$work/no-secrets"
+# podman itself, exec'd by unshare and sh: $! must be the service, for cleanup to stop it.
+# shellcheck disable=SC2016 # $1 and $@ are the inner sh's
 CONTAINERS_CONF_OVERRIDE=$work/containers.conf TMPDIR=$store/tmp \
-  podman --root "$store/storage" --runroot /run/sdlc-release/runroot \
-    --default-mounts-file "$work/mounts.conf" system service --time=0 "unix://$sock" &
+  unshare -m --propagation private sh -c \
+    'mount --bind "$1" /usr/share/rhel/secrets 2> /dev/null || [ ! -d /usr/share/rhel/secrets ] || exit 1; shift; exec "$@"' \
+    sh "$work/no-secrets" podman --root "$store/storage" --runroot /run/sdlc-release/runroot \
+      system service --time=0 "unix://$sock" &
 service=$!
 tries=0
 until [ -S "$sock" ]; do
