@@ -6,6 +6,15 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-11-25
+
+### Fixed
+
+- Gate containers run AppArmor-unconfined where podman reports AppArmor. Ubuntu
+  26.04 labels crun's processes `//&crun`, and the default container profile then
+  refuses signals between a container's own processes, so a test that kills a
+  child it spawned failed with EPERM.
+
 ## [0.15.3] - 2026-11-25
 
 ### Changed
