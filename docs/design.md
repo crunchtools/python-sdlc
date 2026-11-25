@@ -23,9 +23,11 @@ Three properties follow from that, and all three are load-bearing:
    `1.0.0` ships a binary reporting `0.16.5`. A consuming repo pins the tag, so
    the gap has to be visible or the tool is not really pinned.
 
-3. **The image carries tools, never project policy.** Rulesets stay in the
-   repo being checked. Baking one here means one repo's rule change breaks all
-   the others.
+3. **The image carries the tools and the constitution v2 rule checks.** Every
+   check lives in sdlc, and no repository runs a constitution check of its own.
+   A consumer's ruleset is its pinned sdlc release, and a new tool, version,
+   threshold or file layout is an sdlc release, so one repo's rule change
+   cannot break the others unannounced.
 
 ## The exit code contract
 

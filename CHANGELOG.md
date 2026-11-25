@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `docs/design.md` principle 3 now matches constitution 2.0.0 G3: the image
+  carries the tools and the v2 rule checks, and a rule change is an sdlc
+  release (#200).
+
 ### Security
 
 - `ai` runs the model in a sibling container instead of as its own child
