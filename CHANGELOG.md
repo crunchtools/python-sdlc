@@ -30,6 +30,24 @@ All notable changes to this project are documented here, following
 
 - sdlc's own release plan carries `image: true`, so `write`'s own refusal
   holds back a release whose image was skipped, not only ci.yml's `if:` (a1667)
+- S2 parses a Renovate config as JSON5 and judges the keys it sets and the
+  presets it extends, so a locked name in a description, a comment or
+  `ignorePresets` is no longer an override. The locked keys and presets come
+  from the constitution's `fleet.toml`, not a list in sdlc. A preset from
+  outside Renovate's built-ins and crunchtools/constitution (`github>…`,
+  `local>…`, a URL, an npm package) is reported as unjudgeable. The image adds
+  json5 0.17.3 (sdlc#203, a1411)
+- The image carries one constitution pin, at constitution main, with
+  `constitution.md` and `fleet.toml`; `audit_alert` is vendored as
+  `sdlc_jobs/_audit_alert.py`, since the constitution deleted it (a1411)
+- S1 counts a `--require-hashes` install as from the lock only when the flag is
+  the install's own and its requirements file is one the repo commits, copied
+  in and not named by any later shell command except as an install's `-r`
+  (so `>>`, `sed -i`, `cp` and `curl -o` over it count as generated). A copy
+  into `.`, the WORKDIR or a known directory keeps the file's name. Commands
+  now split on `||` and `|` too, with inline comments dropped (a `#` inside
+  quotes is text), and an exec-form `COPY ["src", "dest"]` is read as JSON
+  (sdlc#203, a1411)
 
 ## [0.16.5] - 2026-11-25
 

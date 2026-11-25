@@ -448,7 +448,7 @@ def release_plan(tools: Tools, env: Mapping[str, str], root: Path, repo: str) ->
 def audit(tools: Tools, env: Mapping[str, str], root: Path) -> dict | None:
     """The weekly dependency audit: pip-audit's JSON report, from the image's own gate.
 
-    `write` hands it to the constitution's `audit_alert`, which opens, rewrites or
+    `write` hands it to sdlc's `_audit_alert`, which opens, rewrites or
     closes the one alert issue, so a clean report is handed on as well. None when
     there is no Python project to audit.
     """

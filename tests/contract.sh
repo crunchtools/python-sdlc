@@ -81,7 +81,7 @@ for probe in \
   "pyjwt:/opt/constitution-venv/bin/python3 -c 'import jwt; print(jwt.__version__)'" \
   "gh:gh --version" \
   "ashigaru:test -f /opt/ashigaru/scripts/common.py && ls /opt/ashigaru/prompts/review.md /opt/ashigaru/schemas/review.json" \
-  "constitution-scripts:test -f /opt/constitution/scripts/audit_alert.py && echo present" \
+  "constitution-files:ls /opt/constitution/constitution.md /opt/constitution/fleet.toml" \
   "sdlc_jobs-path:/opt/constitution-venv/bin/python3 -c 'import sys; assert \"/usr/local/lib/sdlc\" in sys.path; print(\"on path\")'" \
   "git:git --version" \
   "jq:jq --version" \
