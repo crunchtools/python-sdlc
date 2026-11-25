@@ -16,8 +16,9 @@ All notable changes to this project are documented here, following
 - `image` builds, smoke-tests and scans an image whose checks `sdlc plan ci`
   leaves out: an RHSM build (skipped in ci, where there are no subscription
   secrets) or a python repo naming no container stack. It plans
-  `container-build`, `container-smoke` and `container-scan` by name, which ignores
-  ci's skip and stacks, instead of failing with "plans no container-build".
+  `container-build`, `container-smoke` and `container-scan` by name (for a bootc
+  image, `container-build`, `container-scan` and `bootc-lint`), which ignores ci's
+  skip and stacks, instead of failing with "plans no container-build".
 
 ## [0.15.0] - 2026-11-24
 

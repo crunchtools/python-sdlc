@@ -92,6 +92,7 @@ US = "\x1f"  # the plan's argv separator
 SHA = re.compile(r"[0-9a-f]{40}")
 GATES = ("container-smoke", "container-scan", "bootc-lint")
 IMAGE_CHECKS = ("container-build", "container-smoke", "container-scan")
+BOOTC_CHECKS = ("container-build", "container-scan", "bootc-lint")  # the bootc stack's
 SECRETS = (
     "QUAY_USERNAME",
     "QUAY_PASSWORD",
@@ -629,7 +630,8 @@ def gate_plan(job: Job) -> dict[str, tuple[str, str]]:
     # RHSM build, which needs secrets only this job holds) or where a python repo
     # names no container stack. The image is still built and gated here: planned by
     # name, a check ignores ci's skip and stacks.
-    for check in IMAGE_CHECKS:
+    checks = BOOTC_CHECKS if root_is_bootc(job) else IMAGE_CHECKS
+    for check in checks:
         if check in plan:
             continue
         for line in job.must(["sdlc", "plan", check]).splitlines():
@@ -637,6 +639,16 @@ def gate_plan(job: Job) -> dict[str, tuple[str, str]]:
             if len(parts) == PLAN_FIELDS:
                 plan.setdefault(parts[0], (parts[2], parts[3]))
     return plan
+
+
+def root_is_bootc(job: Job) -> bool:
+    """The planner's rule for the bootc stack: the root image's final base names bootc."""
+    name = next((f for f in ("Containerfile", "Dockerfile") if (job.root / f).is_file()), None)
+    if name is None:
+        return False
+    text = (job.root / name).read_text(encoding="utf-8", errors="replace")
+    found = final_stage(text, strict=False, overrides=build_arg_map(job.settings))
+    return bool(found and found[1] and "bootc" in found[1].lower())
 
 
 def lint(job: Job) -> bool:

@@ -456,6 +456,26 @@ def test_image_checks_ci_leaves_out_are_still_run_here() -> None:
     assert any("scan-rootfs" in a for a in t.argvs), "the scan ran"
 
 
+def test_a_bootc_image_ci_leaves_out_is_still_linted_here() -> None:
+    t = FakeTools()
+    t.bootc = True
+    t.ci_skip = {"container-build", "container-scan", "bootc-lint"}  # an RHSM bootc build
+    rc, _ = go(t, "FROM quay.io/crunchtools/rhel10-bootc:latest\nRUN true\n")
+    assert rc == 0 and t.pushed(), t.log
+    assert ["sdlc", "plan", "bootc-lint"] in t.argvs
+    assert ["sdlc", "plan", "container-smoke"] not in t.argvs
+    assert t.build_argv()[t.build_argv().index("--format") + 1] == "oci"
+    assert any("lint" in a for a in t.argvs if a[4:5] == ["run"])
+
+
+def test_a_container_image_never_plans_bootc_lint() -> None:
+    t = FakeTools()
+    t.ci_skip = {"container-build", "container-smoke", "container-scan"}
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0, t.log
+    assert ["sdlc", "plan", "bootc-lint"] not in t.argvs
+
+
 def test_an_image_check_ci_plans_is_not_planned_again() -> None:
     t = FakeTools()
     rc, _ = go(t, QUAY_PARENT)
