@@ -36,6 +36,11 @@ All notable changes to this project are documented here, following
   `sdlc-secret-scan`'s shapes. S1 requires git to track `uv.lock`, not just
   find it in the checkout. K1 flags a server that turns its HTTP timeout off,
   or uses `requests`/`urllib.request` without ever setting one.
+- renovate, pypi, ai, relock and boot ask the engine about AppArmor, as image
+  has since #217, and leave no-new-privileges off their nested containers
+  where it reports it (#181); `--cap-drop=all` stays. They passed it
+  unconditionally, so on an AppArmor runner a process in those containers
+  could not signal its own child (a1555).
 
 - sdlc-bootstrap (`boot/sdlc`) resolves `:<major>` in the registry, in the same
   `cosign verify` that checks it, and runs the digest from the verified

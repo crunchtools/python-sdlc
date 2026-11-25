@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import secrets
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from sdlc_jobs._boot import TIMEOUT, boot_settings
@@ -42,6 +42,7 @@ from sdlc_jobs._core import (
     DIGEST,
     EXTRA_IMAGES,
     FOUND,
+    NNP,
     PODMAN_CANNOT_CREATE,
     TIMED_OUT,
     Image,
@@ -52,6 +53,7 @@ from sdlc_jobs._core import (
     images,
     inspect_self,
     must,
+    no_new_privileges,
     podman,
     step,
     workspace,
@@ -108,6 +110,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         return CLEAN
     host_root, own_image = host_mount(tools, env, root)
     ctx = Ctx(tools, env, root, podman(env), host_root, own_image, socket_of(tools, env))
+    ctx.nnp = no_new_privileges(env, tools.run)
     for img, image in gated:
         if boot_image(ctx, img, image) == FOUND:
             return FOUND
@@ -123,6 +126,7 @@ class Ctx:
     host_root: str  # the workspace's path on the runner, where the shell sees it
     image: str  # this job's own image: bash and the podman shim
     socket: str  # the runner's socket, on the runner
+    nnp: list[str] = field(default_factory=lambda: [NNP])  # [] on an AppArmor engine
 
 
 def socket_of(tools: Tools, env: Mapping[str, str]) -> str:
@@ -254,7 +258,7 @@ def sibling(ctx: Ctx, name: str, image: str, shell: str) -> list[str]:
     }
     return [
         *ctx.engine,
-        *["run", "--rm", "--name", name, "--network=host", "--security-opt=no-new-privileges"],
+        *["run", "--rm", "--name", name, "--network=host", *ctx.nnp],
         "--security-opt=label=disable",  # as the fleet file launches this job: no relabel
         *["-v", f"{root}:{root}", "-v", f"{ctx.socket}:{sock}", "-w", root],
         *[w for k, v in sorted(given.items()) for w in ("-e", f"{k}={v}")],

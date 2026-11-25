@@ -633,7 +633,7 @@ succeeded and the plan says `boot` (an image sets one of those keys), and
   the secret jobs run (`runs-on: *secret`): the socket is the credential.
   The shell does not run in the job: the
   job starts a container of its own image beside it (`--network=host`,
-  no-new-privileges), mounts the workspace at its runner path as the working
+  no-new-privileges unless the engine reports AppArmor), mounts the workspace at its runner path as the working
   directory, sets `TMPDIR` and `HOME` under it (`.sdlc-boot-tmp`) and mounts the
   socket. So a `-v` source, `mktemp` and `127.0.0.1` mean what they did under
   container-release. The container is removed after each shell, a timeout
