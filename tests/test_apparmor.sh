@@ -24,6 +24,8 @@ SYSTEMD_CAPS=$(sed -n 's/^SYSTEMD_CAPS=//p' bin/sdlc)
 NNP_RULE=$(sed -n '/^NNP=/,/^$/p' bin/sdlc)
 T="timeout -k 5 30"
 FAILED=0
+ERR=$(mktemp) || exit 2
+trap 'rm -f "$ERR"' EXIT
 ok()  { printf 'ok   %s\n' "$*"; }
 bad() { printf 'FAIL %s\n' "$*"; FAILED=$((FAILED + 1)); }
 cannot() { printf 'test_apparmor: CANNOT RUN: %s\n' "$*" >&2; exit 2; }
@@ -50,9 +52,8 @@ systemd_stops() {
   _c=sdlc-apparmor-$$
   # shellcheck disable=SC2086
   $T $PODMAN --events-backend=none run -d --rm --name "$_c" --systemd=always \
-    --network=none "$@" "$SDIMG" >/dev/null 2>"/tmp/sdlc-apparmor-$$.err" \
-    || { echo "no-start: $(tail -1 "/tmp/sdlc-apparmor-$$.err")"; rm -f "/tmp/sdlc-apparmor-$$.err"; return; }
-  rm -f "/tmp/sdlc-apparmor-$$.err"
+    --network=none "$@" "$SDIMG" >/dev/null 2>"$ERR" \
+    || { echo "no-start: $(tail -1 "$ERR")"; return; }
   _st=
   for _ in $(seq 1 30); do
     # shellcheck disable=SC2086
