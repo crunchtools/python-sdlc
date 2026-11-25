@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-25
+
 ### Fixed
 
 - `sdlc event`, `check`, `image` and `pypi` no longer fail with git's "dubious
