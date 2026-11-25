@@ -480,7 +480,10 @@ def test_an_image_check_ci_plans_is_not_planned_again() -> None:
     t = FakeTools()
     rc, _ = go(t, QUAY_PARENT)
     assert rc == 0, t.log
-    assert not any(a[:2] == ["sdlc", "plan"] and a[2] in ("container-build", "container-smoke") for a in t.argvs)
+    assert not any(
+        a[:2] == ["sdlc", "plan"] and a[2] in ("container-build", "container-smoke")
+        for a in t.argvs
+    )
 
 
 def test_a_scan_finding_on_a_check_ci_left_out_stops_the_push() -> None:
