@@ -42,6 +42,7 @@ log_since() {
     || : > "$RUN/podman.log"
 }
 
+tests/test_apparmor.sh  # PROBE a1379, temporary
 printf '== host contract: bin/sdlc\n\n'
 
 case "$(head -1 bin/sdlc)" in
