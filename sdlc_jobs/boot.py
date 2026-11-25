@@ -52,6 +52,7 @@ from sdlc_jobs._core import (
     host_mount,
     images,
     inspect_self,
+    mounts_of,
     must,
     no_new_privileges,
     podman,
@@ -130,8 +131,12 @@ class Ctx:
 
 
 def socket_of(tools: Tools, env: Mapping[str, str]) -> str:
-    """The runner's path of the socket this container has at SOCKET_PATH; or a 2."""
-    mounts = inspect_self(tools, env).get("Mounts") or []
+    """The runner's path of the socket this container has at SOCKET_PATH; or a 2.
+
+    Its own mounts and those it took by --volumes-from: podman lists none of the
+    latter under `Mounts`, and the bootstrap starts this job's container so.
+    """
+    mounts = mounts_of(tools, env, inspect_self(tools, env), str(workspace(env)))
     found = [m for m in mounts if str(m.get("Destination", "")).rstrip("/") == SOCKET_PATH]
     if not found:
         cannot(f"the runner's socket is not mounted at {SOCKET_PATH} in this container")
