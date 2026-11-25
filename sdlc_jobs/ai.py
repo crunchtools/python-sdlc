@@ -25,15 +25,17 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import secrets
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from http import HTTPStatus
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from sdlc_jobs import _core as core
 from sdlc_jobs import _findings, constitution
 from sdlc_jobs import _tools as tools
 from sdlc_jobs._github import (
@@ -69,6 +71,13 @@ DENIED = [f"{tool}(//{tree}/**)" for tree in ("proc", "sys") for tool in ("Read"
 SETTINGS = json.dumps({"permissions": {"deny": DENIED}}, separators=(",", ":"))
 READ_ONLY_TOOLS = "Read,Glob,Grep"
 EDIT_TOOLS = "Read,Edit,Write,Glob,Grep"
+# The model runs in a sibling container, not as this job's child: this job is
+# root and holds the socket, and a bare Write in --allowedTools reaches any path,
+# so a model steered by a diff or an issue comment could rewrite a binary this
+# job runs next. The sibling has no socket, none of this job's environment but
+# the model's own token, a read-only root, the scratch dir read-only, and the
+# checkout writable but for its .git, which `collect` runs git in.
+MODEL_TMP = "/tmp:rw,exec,size=1g,mode=1777"  # noqa: S108 -- inside the sibling
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,10 @@ SHA_LEN = 40
 # bare list, which Gourmand's parser cannot read.
 UNREADABLE_CAPTURE = (OSError, ValueError, KeyError, TypeError)
 MODEL_SECONDS = 3600  # one agent or one review, as the workflows' job timeouts allowed
+# The client's own limit: past MODEL_SECONDS podman stops the sibling itself.
+# Killing only the client would leave it running with the token, so the
+# sibling is removed by name whatever the run's outcome.
+MODEL_GRACE = 60
 AUTO_CATEGORIES = {"bug", "documentation", "performance"}
 MIN_CONFIDENCE = 0.7
 
@@ -107,9 +120,15 @@ def main(event_name: str, event: dict[str, Any], env: Mapping[str, str]) -> int:
         return OK
     repo = repo_of(event, env)
     api = GitHub(env.get("GITHUB_TOKEN", ""))
-    with tempfile.TemporaryDirectory(prefix="sdlc-ai-") as scratch:
+    # Under RUNNER_TEMP, a mount of this container, so the model's sibling can mount it.
+    with tempfile.TemporaryDirectory(
+        prefix="sdlc-ai-", dir=env.get("RUNNER_TEMP") or None
+    ) as scratch:
         site = tools.Site(repo, env, tools.run, Path(scratch))
-        code, result = run(event_name, event, Job(site, api))
+        work = Path(scratch)
+        code, result = run(
+            event_name, event, Job(site, api, lambda: core.host_mount(core.Tools(), env, work))
+        )
     return hand_on(env, result, code)
 
 
@@ -138,8 +157,10 @@ def hand_on(env: Mapping[str, str], result: Mapping[str, Any], code: int) -> int
 class Job:
     """One run of `ai`: the repository, the read-only API, the runner and a scratch dir."""
 
-    def __init__(self, site: tools.Site, api: Api) -> None:
-        self.site, self.api = site, api
+    def __init__(self, site: tools.Site, api: Api, mount: Callable[[], tuple[str, str]]) -> None:
+        """`mount` gives the scratch dir's host path and this job's image, asked once."""
+        self.site, self.api, self.mount = site, api, mount
+        self.mounted: tuple[str, str] | None = None
         self.env, self.repo, self.runner, self.work = site.env, site.repo, site.runner, site.work
         self.read_token = site.env.get("GITHUB_TOKEN", "")
 
@@ -494,8 +515,9 @@ class Job:
         shape = json.loads(
             (tools.ASHIGARU_SCRIPTS.parent / "schemas" / f"{agent.schema}.json").read_text()
         )
+        name = f"sdlc-ai-model-{secrets.token_hex(8)}"
         argv = [
-            "claude",
+            *self.sibling(cwd, name),
             "-p",
             "--model",
             agent.model,
@@ -511,12 +533,71 @@ class Job:
             "json",
         ]
         env = tools.child_env(self.env, CLAUDE_CODE_OAUTH_TOKEN=self.env["CLAUDE_CODE_OAUTH_TOKEN"])
-        done = self.runner(argv, env=env, cwd=cwd, stdin=prompt, timeout=MODEL_SECONDS)
+        try:
+            done = self.runner(
+                argv, env=env, cwd=cwd, stdin=prompt, timeout=MODEL_SECONDS + MODEL_GRACE
+            )
+        finally:
+            self.remove(name)
         if done.returncode != 0:
             raise CannotRunError(
                 f"claude ({agent.schema}) exited {done.returncode}: {done.stderr[-400:]}"
             )
         return structured(done.stdout, agent.schema)
+
+    def remove(self, name: str) -> None:
+        """`podman rm -f` of the model's sibling; gone already is fine, a failure is said."""
+        argv = [*core.podman(self.env), "rm", "-f", "--ignore", name]
+        done = self.runner(argv, env=tools.child_env(self.env), timeout=tools.GIT_SECONDS)
+        if done.returncode != 0:
+            print(f"::warning::could not remove {name}: {(done.stderr or done.stdout).strip()}")
+
+    def sibling(self, cwd: Path, name: str) -> list[str]:
+        """podman's argv up to claude's own: the model's container (see MODEL_TMP)."""
+        if self.mounted is None:
+            self.mounted = self.mount()
+        host, image = self.mounted
+        if "@sha256:" not in image:
+            raise CannotRunError(f"this job's image is not pinned by digest: {image!r}")
+
+        def on_host(path: Path) -> str:
+            return str(Path(host) / path.relative_to(self.work))
+
+        git = cwd / ".git"
+        return [
+            *core.podman(self.env),
+            "run",
+            "--rm",
+            "--name",
+            name,
+            "--timeout",
+            str(MODEL_SECONDS),
+            "-i",
+            "--pull=never",
+            "--user",
+            "0",
+            "--cap-drop=all",
+            "--security-opt=no-new-privileges",
+            "--security-opt=label=disable",
+            "--read-only",
+            "--tmpfs",
+            MODEL_TMP,
+            "-v",
+            f"{host}:{self.work}:ro",
+            "-v",
+            f"{on_host(cwd)}:{cwd}:rw",
+            "-v",
+            f"{on_host(git)}:{git}:ro",
+            "-w",
+            str(cwd),
+            "-e",
+            "HOME=/tmp",
+            "-e",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "--entrypoint",
+            "claude",
+            image,
+        ]
 
     def collect(self, checkout: Path) -> str:
         """What the model changed, as code.yml collected it: staged, binary-safe."""

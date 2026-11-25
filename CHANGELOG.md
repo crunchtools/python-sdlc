@@ -6,6 +6,15 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Security
+
+- `ai` runs the model in a sibling container instead of as its own child
+  (a1133): no socket, none of the job's environment but the model's token, a
+  read-only root, and the checkout writable but for its `.git`. A bare `Write`
+  reaches any path, and the job is root on the socket, so a model steered by a
+  diff or a comment could have rewritten a binary the job runs next.
+  docs/socket-audit.md has the audit of every job.
+
 ### Added
 
 - tests/test_workflows.py pins the bootstrap's launch line in the fleet file

@@ -310,6 +310,16 @@ justification = """
 """
 
 [[exceptions]]
+check = "EV001-lint_suppression"
+path = "sdlc_jobs/ai.py"
+classification = "by_design"
+justification = """
+  `noqa: S108` on MODEL_TMP, the `--tmpfs /tmp` of the model's sibling \
+  container, the same case as renovate.py's: a mount point inside a fresh \
+  container with its own private tmpfs, and HOME=/tmp points at it.
+"""
+
+[[exceptions]]
 check = "CQ013-hardcoded_years"
 path = "sdlc_jobs/_boot.py"
 classification = "by_design"
