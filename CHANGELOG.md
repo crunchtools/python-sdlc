@@ -89,6 +89,11 @@ Until step 2 the image job says the three keys are not enforced.
 
 ### Changed
 
+- sdlc itself is on constitution v2: `[tool.sdlc] repo-kinds = ["cli-tool",
+  "container-image"]` in pyproject.toml, `.specify/` deleted, and its rationale
+  moved to docs/design.md. `.github/workflows/constitution.yml` (the v1
+  validator) goes with it; `sdlc / check` runs the v2 check in `sdlc ci` (#198)
+
 - Where podman reports AppArmor, gate containers drop no-new-privileges and keep
   the default AppArmor profile enforced. Before, they ran AppArmor-unconfined
   (0.15.4). The cause, measured on Ubuntu 26.04.1 with rootful podman 5.7.0 and

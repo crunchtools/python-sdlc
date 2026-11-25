@@ -106,3 +106,9 @@ max-complexity = 10
 # fake credentials ("tok", a fake App key) so nothing real is ever near a test.
 "tests/test_event_*.py" = ["S101", "PLR2004", "S105", "S106"]
 "tests/fake_github.py" = ["S101", "PLR2004", "S105", "S106"]
+
+[tool.sdlc]
+# What this repository is, for the constitution's v2 check (section K). A CLI,
+# `sdlc`, whose exit codes are its contract (K3), shipped as the one image the
+# fleet pins (K6).
+repo-kinds = ["cli-tool", "container-image"]

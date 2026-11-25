@@ -1,14 +1,8 @@
-# sdlc Constitution
+# Why sdlc is built the way it is
 
-> **Version:** 0.1.0
-> **Ratified:** 2026-11-04
-> **Amended:** 2026-11-04
-> **Status:** Active
-> **Inherits:** [crunchtools/constitution](https://github.com/crunchtools/constitution) v1.60.0
-> **Profile:** Container Image
-
-This is a manifest. It carries only what is unique to this repo; the fleet rules
-and the Container Image profile are inherited, not restated.
+The README's "What's different here" states the rules Gatehouse reviews this
+repo against. This page keeps the reasons behind them, carried over from the
+repo's constitution v1 manifest when it converted (#198).
 
 ## What this image promises
 
@@ -22,7 +16,7 @@ Three properties follow from that, and all three are load-bearing:
    `gates.sh` pinned `gatehouse:latest`, podman's default pull policy is
    `missing`, so a cached tag was never refreshed and the local gate ran a
    two-week-old reviewer while CI pulled fresh. A floating pin in this image is
-   a floating pin in 35 repos.
+   a floating pin in every repo that uses it.
 
 2. **`sdlc versions` reports what is installed beside what was pinned.** An
    image tag and the binary inside it can disagree — the Gourmand image tagged
@@ -30,8 +24,8 @@ Three properties follow from that, and all three are load-bearing:
    the gap has to be visible or the tool is not really pinned.
 
 3. **The image carries tools, never project policy.** Rulesets stay in the
-   repo being checked. Baking one here means one repo's rule change breaks the
-   other thirty-four.
+   repo being checked. Baking one here means one repo's rule change breaks all
+   the others.
 
 ## The exit code contract
 
@@ -46,7 +40,7 @@ than a pile of `podman run` lines in each consumer. Specifically:
 
 - Anything that is not the tool's own verdict is a 2. Podman's 125, 126 and 127
   mean the container never started, so they are a 2 and not a 1. The script this
-  replaces mapped them to 1 through `|| fail`, reporting "found something" for
+  replaced mapped them to 1 through `|| fail`, reporting "found something" for
   "could not invoke".
 - A missing or unwritable cache, an out-of-date lockfile, an absent config path
   and an unreachable origin are each a 2. None of them may report 0.
@@ -61,13 +55,14 @@ project's own plugins inside their own interpreter, so they must come from the
 project environment. This is a deliberate hole in the one-pin promise and is
 documented as such in `README.md` rather than papered over.
 
-**The constitution validator is cloned at the consumer's tag, never baked.** The
-fleet spans `Inherits:` v1.0.0 to v1.29.0; a baked copy would judge most repos by
-rules they have not adopted. Two details that are not optional: the clone must
-bring `constitution.md` and `profiles/requirements.toml`, because the validator
+**For a repo still on constitution v1, the validator is cloned at that repo's
+tag, never baked.** v1 manifests each name the release they inherit, and a baked
+copy would judge them by rules they have not adopted. The clone must bring
+`constitution.md` and `profiles/requirements.toml`, because the validator
 resolves them from its own directory and silently skips most of its checks when
 they are absent; and `--pinned` is correct only because the clone is made at the
-tag the repo itself names.
+tag the repo itself names. A v2 repo is judged by `sdlc-constitution check`,
+whose rules ship in the image.
 
 ## Running as root is the correct choice here
 
@@ -86,10 +81,9 @@ taking it out from under whichever started first.
 
 ## Contract test
 
-The Container Image profile requires a contract test against the pushed digest.
 For an image whose entire purpose is "these executables exist at these
-versions", that test is the central one, not a formality. It asserts three
-things:
+versions", the contract test against the pushed digest is the central test, not
+a formality. It asserts three things:
 
 - every tool EXECUTES, not merely that it is present -- a `COPY --from` can land
   a binary that exists and dies on exec, which is how a renamed Gatehouse venv
