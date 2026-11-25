@@ -263,11 +263,13 @@ def take(lock: Path, into: Path) -> str | None:
         return f"the sibling's uv.lock is not a uv lock: {err}"
     if not is_uv_lock(doc):
         return "the sibling's uv.lock is not a uv lock: no integer `version` or a bad `[[package]]`"
-    mode = into.stat().st_mode & 0o777 if into.is_file() and not into.is_symlink() else 0o644
+    # git records only the exec bit, so mkstemp's 0600 is kept unless the old lock had it.
+    executable = into.is_file() and not into.is_symlink() and into.stat().st_mode & 0o100
     fd, staged = tempfile.mkstemp(prefix=".uv.lock-", dir=into.parent)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
-    os.chmod(staged, mode)
+    if executable:
+        os.chmod(staged, 0o700)
     os.replace(staged, into)
     return None
 
