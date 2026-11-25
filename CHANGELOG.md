@@ -13,6 +13,24 @@ All notable changes to this project are documented here, following
   `--user 0` and `label=disable`, the mounts, the exact `--env` list, no other
   option, and the bootstrap by digest with `event` (#178)
 
+- `tests/test_apparmor.sh`, run by the contract test: rootless, and rootful
+  through `sudo -n`, a gate container kills its own child. On an AppArmor host,
+  systemd also boots and stops a unit, and the log says whether
+  no-new-privileges still blocks the kill. `tests/test_host_contract.sh` pins
+  the gate, smoke, systemd and host-run invocations with AppArmor on and off.
+
+### Changed
+
+- Where podman reports AppArmor, gate containers drop no-new-privileges and keep
+  the default AppArmor profile enforced. Before, they ran AppArmor-unconfined
+  (0.15.4). The cause, measured on Ubuntu 26.04.1 with rootful podman 5.7.0 and
+  crun 1.21: under no-new-privileges, AppArmor stacks the container profile onto
+  crun's (`containers-default-0.66.0//&crun`). The default profile does not name
+  that label as a signal peer, so a process could not kill its own child and
+  systemd as PID 1 never left `initializing`. Without no-new-privileges the
+  profile is applied as is, and both work. Rootless podman reports no AppArmor,
+  so it is unaffected; SELinux hosts keep no-new-privileges (#181).
+
 ### Fixed
 
 - Gourmand runs in the fleet again (#177). The cutover deleted every repo's

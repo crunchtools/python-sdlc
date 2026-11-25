@@ -42,7 +42,6 @@ log_since() {
     || : > "$RUN/podman.log"
 }
 
-tests/test_apparmor.sh  # PROBE a1379, temporary
 printf '== host contract: bin/sdlc\n\n'
 
 case "$(head -1 bin/sdlc)" in
@@ -104,6 +103,9 @@ for _last in "\$@"; do :; done
 # The image's own entrypoint and command, for the systemd PID 1 check: an
 # image named systemd-ep has ENTRYPOINT /sbin/init, one named systemd-cmd only
 # CMD /usr/lib/systemd/systemd, and any other image neither.
+case " \$* " in
+  *" info "*) [ "\$(cat "$SHIM/apparmor" 2>/dev/null)" = true ] && printf 'true\n'; exit 0 ;;
+esac
 case " \$* " in
   *" image inspect "*)
     case "\$*:\$_last" in
@@ -1773,6 +1775,41 @@ if [ "$rc" -eq 0 ] && grep -q 'GATEHOUSE SKIPPED: no remote URL' "$RUN/gh-out"; 
 else
   bad "no remote found did not skip loudly (rc=$rc)"; sed 's/^/       /' "$RUN/gh-out"
 fi
+
+printf '\n== no-new-privileges, and no AppArmor profile, on every run\n\n'
+
+# AppArmor hosts get no-new-privileges dropped (it blocks the profile
+# transition) and no apparmor= option at all; elsewhere it stays on. Four sites
+# build a run: a gate (rc-five), host-up (up-stays), host-systemd (sd-pass), and
+# a plain host step (gate-word).
+nnp_sites() {            # on|off
+  _mode=$1
+  for _t in rc-five up-stays sd-pass gate-word; do
+    log_mark
+    PATH="$SHIM" sh bin/sdlc "$_t" >/dev/null 2>&1 || true
+    log_since
+    _run=$(grep -E '(^| )run ' "$RUN/podman.log" | grep -- '--cap-drop=all' | head -1)
+    if [ -z "$_run" ]; then
+      bad "AppArmor $_mode: $_t made no locked-down run"
+    elif grep -q 'apparmor=' "$RUN/podman.log"; then
+      bad "AppArmor $_mode: $_t passed an apparmor= option"
+    elif [ "$_mode" = on ]; then
+      case "$_run" in
+        *no-new-privileges*) bad "AppArmor on: $_t still passed no-new-privileges" ;;
+        *) ok "AppArmor on: $_t runs with --cap-drop=all, no no-new-privileges, no apparmor=" ;;
+      esac
+    else
+      case "$_run" in
+        *--security-opt=no-new-privileges*) ok "AppArmor off: $_t runs with --cap-drop=all and no-new-privileges, no apparmor=" ;;
+        *) bad "AppArmor off: $_t lost no-new-privileges" ;;
+      esac
+    fi
+  done
+}
+printf 'true\n' > "$SHIM/apparmor"
+nnp_sites on
+rm -f "$SHIM/apparmor"
+nnp_sites off
 
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then

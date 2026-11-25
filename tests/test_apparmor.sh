@@ -1,101 +1,113 @@
 #!/bin/sh
-# PROBE (a1379, temporary): what lets a gate container kill its own child on an
-# AppArmor host. Prints evidence for each candidate setting; never fails.
+# A gate container can signal its own processes, on every podman this machine
+# has: rootless, and rootful through `sudo -n` where that works (the fleet's
+# runners hand the gate root's podman socket). crunchtools/sdlc#181.
+#
+# On an AppArmor host, no-new-privileges makes AppArmor stack the container
+# profile onto crun's (`containers-default-<v>//&crun`) and a process cannot
+# kill its own child, so bin/sdlc drops no-new-privileges there and keeps the
+# profile enforced. tests/test_host_contract.sh pins that bin/sdlc passes these
+# options; this test runs them for real. On an AppArmor host the systemd
+# container must also boot and stop a unit, and the old setting is tried once
+# so the log says whether the kernel still stacks (when it stops, #181's
+# workaround can go).
+#
+# Usage: tests/test_apparmor.sh
 set -u
+cd "$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || exit 2
+
 IMG=docker.io/library/alpine:3.22@sha256:9db2934886712d877c932e07249c75a59e6ca27adfbccc05261987a17bef2d63
-say() { printf 'apparmor-probe: %s\n' "$*"; }
+SDIMG=registry.access.redhat.com/ubi10/ubi-init@sha256:1938686cb8d7a2a69440d55f5e7b9b5efb61eea460a654879e69abf54b5b9faa
+SYSTEMD_CAPS=$(sed -n 's/^SYSTEMD_CAPS=//p' bin/sdlc)
+T="timeout -k 5 30"
+FAILED=0
+ok()  { printf 'ok   %s\n' "$*"; }
+bad() { printf 'FAIL %s\n' "$*"; FAILED=$((FAILED + 1)); }
+cannot() { printf 'test_apparmor: CANNOT RUN: %s\n' "$*" >&2; exit 2; }
 
-say "== host"
-uname -a
-grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release 2>/dev/null
-podman version --format '{{.Client.Version}}' 2>&1 | sed 's/^/podman /'
-crun --version 2>&1 | head -2
-command -v runc >/dev/null && runc --version 2>&1 | head -1
-say "rootless=$(podman info --format '{{.Host.Security.Rootless}}' 2>&1) apparmor=$(podman info --format '{{.Host.Security.AppArmorEnabled}}' 2>&1) runtime=$(podman info --format '{{.Host.OCIRuntime.Name}} {{.Host.OCIRuntime.Path}}' 2>&1)"
-say "host label: $(cat /proc/self/attr/current 2>&1) / $(cat /proc/self/attr/apparmor/current 2>&1)"
-ls /etc/apparmor.d 2>/dev/null | grep -i -E 'crun|runc|podman|contain|buildah|conmon' | sed 's/^/apparmor.d: /'
-for f in /etc/apparmor.d/crun /etc/apparmor.d/podman /etc/apparmor.d/runc; do
-  [ -r "$f" ] && { say "--- $f"; grep -v '^\s*#' "$f" | grep -v '^\s*$'; }
-done
-if sudo -n true 2>/dev/null; then
-  sudo -n cat /sys/kernel/security/apparmor/profiles 2>/dev/null \
-    | grep -i -E 'crun|runc|podman|contain|conmon' | sed 's/^/loaded: /'
-fi
+printf '== gate containers signal their own processes\n\n'
+[ -n "$SYSTEMD_CAPS" ] || cannot "no SYSTEMD_CAPS= line in bin/sdlc"
 
-if [ "$(podman info --format '{{.Host.Security.AppArmorEnabled}}' 2>/dev/null)" != true ]; then
-  say "no AppArmor here; candidates still run for comparison"
-fi
-podman pull -q "$IMG" >/dev/null 2>&1 || say "pull failed"
-
-PODMAN=podman
-probe() {
-  _name=$1; shift
-  # shellcheck disable=SC2086
-  _out=$($PODMAN --events-backend=none run --rm --log-driver=none "$@" "$IMG" sh -c '
-    printf "label=%s " "$(cat /proc/self/attr/current 2>/dev/null)"
-    printf "nnp=%s " "$(grep NoNewPrivs /proc/self/status | tr -dc 0-9)"
+# Prints KILL_OK or KILL_FAIL <why>: a shell kills the child it started.
+kills_child() {
+  # The script is the container's, so its $p is meant for its shell.
+  # shellcheck disable=SC2086,SC2016
+  $T $PODMAN --events-backend=none run --rm --log-driver=none --network=none "$@" "$IMG" sh -c '
     sleep 30 & p=$!
     if kill "$p" 2>/tmp/e; then echo KILL_OK; else echo "KILL_FAIL $(cat /tmp/e)"; fi
-    wait "$p" 2>/dev/null; :' 2>&1)
-  say "[$_name] $_out"
-}
-BASE="--cap-drop=all --security-opt=no-new-privileges"
-# shellcheck disable=SC2086
-candidates() {
-probe "base (cap-drop, nnp)"            $BASE
-probe "base + apparmor=unconfined"      $BASE --security-opt apparmor=unconfined
-probe "cap-drop only (no nnp)"          --cap-drop=all
-probe "nothing"
-probe "base + label=disable"            $BASE --security-opt label=disable
-command -v runc >/dev/null && probe "base + runtime runc" $BASE --runtime runc
-probe "base + systemd-ish caps"         --cap-drop=all --cap-add=KILL --security-opt=no-new-privileges
+    wait "$p" 2>/dev/null; :' 2>&1 | tail -1
 }
 
-SDIMG=registry.access.redhat.com/ubi10/ubi-init@sha256:1938686cb8d7a2a69440d55f5e7b9b5efb61eea460a654879e69abf54b5b9faa
-SDCAPS=CHOWN,DAC_OVERRIDE,FOWNER,KILL,NET_BIND_SERVICE,SETGID,SETPCAP,SETUID
-# systemd as PID 1 must start, then stop a unit (systemd signals its child).
-sdprobe() {
-  _name=$1; shift
-  _c=aa-sd-$$
-  T="timeout -k 5 20"
+# Prints the system state and a stopped unit's state: systemd as PID 1 boots
+# and stops a unit, which it does by signalling the unit's process.
+systemd_stops() {
+  _c=sdlc-apparmor-$$
   # shellcheck disable=SC2086
-  $T $PODMAN --events-backend=none run -d --rm --name "$_c" --systemd=always "$@" "$SDIMG" >/dev/null 2>&1 \
-    || { say "[sd $_name] could not start"; $T $PODMAN rm -f -t 0 "$_c" >/dev/null 2>&1; return; }
+  $T $PODMAN --events-backend=none run -d --rm --name "$_c" --systemd=always \
+    --network=none "$@" "$SDIMG" >/dev/null 2>&1 || { echo "no-start"; return; }
   _st=
   for _ in $(seq 1 30); do
+    # shellcheck disable=SC2086
     _st=$($T $PODMAN exec "$_c" systemctl is-system-running 2>/dev/null) || :
     case "$_st" in running|degraded) break ;; esac
     sleep 1
   done
-  $T $PODMAN exec "$_c" systemd-run --no-block --unit=aaprobe sleep 300 >/dev/null 2>&1
+  # shellcheck disable=SC2086
+  $T $PODMAN exec "$_c" systemd-run --no-block --unit=sdlc-probe sleep 300 >/dev/null 2>&1
   sleep 2
-  $T $PODMAN exec "$_c" systemctl stop --no-block aaprobe >/dev/null 2>&1
+  # shellcheck disable=SC2086
+  $T $PODMAN exec "$_c" systemctl stop --no-block sdlc-probe >/dev/null 2>&1
   _after=
   for _ in $(seq 1 15); do
-    _after=$($T $PODMAN exec "$_c" systemctl show -p ActiveState --value aaprobe 2>&1)
+    # shellcheck disable=SC2086
+    _after=$($T $PODMAN exec "$_c" systemctl show -p ActiveState --value sdlc-probe 2>/dev/null)
     [ "$_after" = inactive ] && break
     sleep 1
   done
-  _lab=$($T $PODMAN exec "$_c" cat /proc/1/attr/current 2>&1)
-  say "[sd $_name] pid1=$_lab state=$_st unit-after-stop=$_after"
-  $T $PODMAN rm -f -t 0 "$_c" >/dev/null 2>&1 || say "[sd $_name] rm timed out"
+  # shellcheck disable=SC2086
+  $T $PODMAN rm -f -t 0 "$_c" >/dev/null 2>&1 || :
+  echo "$_st $_after"
 }
-SDBASE="--cap-drop=all --cap-add=$SDCAPS --security-opt=no-new-privileges"
-say "== rootless: skipped this round"
-if sudo -n true 2>/dev/null; then
+
+# One podman, by the label it is reported under.
+check() {
+  _who=$1
+  # shellcheck disable=SC2086
+  $T $PODMAN pull -q "$IMG" >/dev/null 2>&1 || cannot "$_who podman could not pull $IMG"
+  # shellcheck disable=SC2086
+  _aa=$($T $PODMAN info --format '{{.Host.Security.AppArmorEnabled}}' 2>/dev/null)
+  # bin/sdlc's rule: no-new-privileges unless podman reports AppArmor.
+  NNP=--security-opt=no-new-privileges
+  [ "$_aa" = true ] && NNP=
+  _r=$(kills_child --cap-drop=all ${NNP:+"$NNP"})
+  case "$_r" in
+    KILL_OK) ok "$_who (AppArmor=${_aa:-unknown}): a gate container kills its own child" ;;
+    *)       bad "$_who (AppArmor=${_aa:-unknown}): a gate container could not kill its own child: $_r" ;;
+  esac
+  [ "$_aa" = true ] || return 0
+  # shellcheck disable=SC2086
+  $T $PODMAN pull -q "$SDIMG" >/dev/null 2>&1 || cannot "$_who podman could not pull $SDIMG"
+  _r=$(systemd_stops --cap-drop=all --cap-add="$SYSTEMD_CAPS")
+  case "$_r" in
+    "running inactive"|"degraded inactive") ok "$_who: systemd boots ($_r) and stops a unit" ;;
+    *) bad "$_who: systemd as PID 1 did not boot and stop a unit: $_r" ;;
+  esac
+  _r=$(kills_child --cap-drop=all --security-opt=no-new-privileges)
+  case "$_r" in
+    KILL_OK) printf 'note %s\n' "$_who: no-new-privileges no longer blocks the kill; #181's workaround can go" ;;
+    *)       printf 'note %s\n' "$_who: with no-new-privileges the kill still fails ($_r), so dropping it is still needed" ;;
+  esac
+}
+
+PODMAN=podman
+check rootless
+if sudo -n podman version >/dev/null 2>&1; then
   PODMAN="sudo -n podman"
-  say "== rootful: apparmor=$(sudo -n podman info --format '{{.Host.Security.AppArmorEnabled}}' 2>&1) rootless=$(sudo -n podman info --format '{{.Host.Security.Rootless}}' 2>&1)"
-  sudo -n podman pull -q "$IMG" >/dev/null 2>&1 || say "rootful pull failed"
-  $PODMAN pull -q "$SDIMG" >/dev/null 2>&1 || say "rootful sd pull failed"
-  sdprobe "crun nnp (today without the fix)" $SDBASE
-  sdprobe "crun nnp unconfined (0.15.4)"    $SDBASE --security-opt apparmor=unconfined
-  sdprobe "runc nnp"                         $SDBASE --runtime runc
-  sdprobe "crun no-nnp"                      --cap-drop=all --cap-add=$SDCAPS
-  say "rootful runtimes: $(sudo -n podman info --format '{{json .Host.OCIRuntime}}' 2>&1 | head -c 300)"
-  say "containers.conf runtimes: $(sudo -n podman info --format json 2>/dev/null | grep -o '"runtimes"[^]]*' | head -c 200)"
+  check rootful
+else
+  printf 'note rootful: no passwordless sudo here, only rootless podman checked\n'
 fi
-if sudo -n true 2>/dev/null; then
-  sudo -n dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -8 | sed 's/^/dmesg: /'
-  sudo -n journalctl -k --no-pager 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -8 | sed 's/^/kern: /'
-fi
-say "PROBE DONE (failing on purpose so the log can be read)"; exit 1
+
+printf '\n'
+[ "$FAILED" -eq 0 ] || { printf '%s check(s) failed\n' "$FAILED"; exit 1; }
+printf 'all passed\n'
