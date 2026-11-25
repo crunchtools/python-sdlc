@@ -78,6 +78,7 @@ tools.ASHIGARU_SCRIPTS = STUBS / "scripts"
 
 REPO = "o/r"
 HEAD, BASE, EARLIER = "a" * 40, "b" * 40, "c" * 40
+IMAGE = "quay.io/crunchtools/sdlc@sha256:" + "d" * 64
 COMPLETE = "Gatehouse found no issues.\n\n<!-- gatehouse review complete -->"
 INLINE = [
     {"path": "a.py", "line": 3, "body": "**HIGH** (Bug Hunter): one"},
@@ -194,7 +195,7 @@ class Rig:
 
     def job(self, env: dict[str, str] | None = None) -> ai.Job:
         site = Site(REPO, env or BASE_ENV, self.runner, self.work, api_for=lambda _t: self.api)
-        return ai.Job(site, self.api)
+        return ai.Job(site, self.api, lambda: (f"/host{self.work}", IMAGE))
 
     def go(
         self, name: str, event: dict[str, Any], env: dict[str, str] | None = None
@@ -736,6 +737,29 @@ check(
     "fix: claude's only credential is its own token",
     creds == {"CLAUDE_CODE_OAUTH_TOKEN"} and cenv["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-tok",
 )
+vols = [cargv[i + 1] for i, v in enumerate(cargv) if v == "-v"]
+check(
+    "fix: claude runs in a sibling without the socket, on this job's image by digest",
+    cargv[0] == "podman"
+    and cargv[cargv.index("--url") + 2] == "run"
+    and not any("sock" in v for v in vols)
+    and "--volumes-from" not in cargv
+    and cargv[cargv.index(IMAGE) + 1] == "-p"
+    and arg_after(cargv, "--entrypoint") == "claude"
+    and {"--cap-drop=all", "--read-only", "--security-opt=no-new-privileges"} <= set(cargv),
+)
+check(
+    "fix: the sibling may write the checkout but not its .git, and reads the scratch dir only",
+    f"/host{ccwd}:{ccwd}:rw" in vols
+    and f"/host{ccwd}/.git:{ccwd}/.git:ro" in vols
+    and f"/host{rig.work}:{rig.work}:ro" in vols
+    and arg_after(cargv, "-w") == str(ccwd),
+)
+check(
+    "fix: the sibling is handed the model's token by name and nothing else of the job's",
+    [cargv[i + 1] for i, v in enumerate(cargv) if v == "-e"]
+    == ["HOME=/tmp", "CLAUDE_CODE_OAUTH_TOKEN"],
+)
 check(
     "fix: --settings carries the /proc deny rule",
     arg_after(cargv, "--settings") == ai.SETTINGS
@@ -1156,6 +1180,22 @@ with tempfile.TemporaryDirectory() as scratch:
     )
     check("hand_on: nothing of the blob is carried", "blob" not in decoded)
     check("hand_on: too large keeps a worse code", quiet(ai.hand_on, hand_env, huge, 2) == 2)
+
+unpinned = Rig()
+unpinned_job = ai.Job(
+    Site(REPO, BASE_ENV, unpinned.runner, unpinned.work, api_for=lambda _t: unpinned.api),
+    unpinned.api,
+    lambda: ("/host", "quay.io/crunchtools/sdlc:1"),
+)
+try:
+    unpinned_job.model("PROMPT", ai.FIX, unpinned.work)
+    refused = False
+except CannotRunError:
+    refused = True
+check(
+    "model: an image not pinned by digest is refused before anything runs",
+    refused and unpinned.runner.calls == [],
+)
 
 if __name__ == "__main__":
     sys.exit(finish())
