@@ -18,7 +18,7 @@ Ashigaru's scripts (relock.py keeps PATH and drops the rest), and that `uv`:
     than the runner's: the package index is what it is there to reach
   - hands back only uv.lock, taken only when it parses as a uv lock.
 
-Its exit is uv's, or 2 with the reason on stderr; relock.py turns anything but
+Its exit is 0, or 2 with the reason and uv's output on stderr; relock.py turns anything but
 0 into a refusal, and the run hands over to a person.
 """
 
@@ -113,7 +113,7 @@ def shim(config: Mapping[str, Any], argv: Sequence[str], run: Run = subprocess.r
 def lock_beside(
     env: Mapping[str, str], image: str, mount: tuple[Path, str], checkout: Path, run: Run
 ) -> int:
-    """Lock `checkout` in a sibling and take back its uv.lock; uv's exit, or REFUSED.
+    """Lock `checkout` in a sibling and take back its uv.lock; 0, or REFUSED.
 
     `mount` is write's scratch dir and its path on the host, where the engine mounts from.
     """
@@ -136,8 +136,8 @@ def lock_beside(
     sys.stderr.write(done.stdout + done.stderr)
     if done.returncode in ENGINE_FAILED:
         return refuse(f"podman could not start the sibling (exit {done.returncode})")
-    if done.returncode != 0:
-        return int(done.returncode)
+    if done.returncode != 0:  # uv's failure is not a verdict: the lock could not be made
+        return refuse(f"`uv lock --no-build` exited {done.returncode} in the sibling")
     why = take(out / "uv.lock", checkout / "uv.lock")
     return refuse(why) if why else 0
 

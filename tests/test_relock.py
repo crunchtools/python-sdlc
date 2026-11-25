@@ -57,6 +57,9 @@ if "inspect" in args:
                         "ImageName": {image!r}}}]))
 elif "run" in args and pathlib.Path({log!r} + ".fail").exists():
     sys.exit(125)
+elif "run" in args and pathlib.Path({log!r} + ".uvfail").exists():
+    print("No solution found")
+    sys.exit(1)
 elif "run" in args:
     out = next(a for a in args if a.endswith(":/out:rw")).rsplit(":", 2)[0]
     pathlib.Path(out, "uv.lock").write_text({lock!r})
@@ -233,6 +236,18 @@ done = s.lock("lock", "--no-build")
 check(
     "engine: podman failing to start the sibling is 2, said so, not uv's verdict",
     done.returncode == _relock.REFUSED and "could not start" in done.stderr,
+    done.stderr,
+)
+
+s = Scene("uvfail")
+s.stage("pyproject.toml", PYPROJECT.replace('version = "0"', 'version = "1"'))
+Path(f"{s.log}.uvfail").touch()
+done = s.lock("lock", "--no-build")
+check(
+    "uv failing in the sibling is 2, with uv's output, and the lock left alone",
+    done.returncode == _relock.REFUSED
+    and "No solution found" in done.stderr
+    and (s.checkout / "uv.lock").read_text() == LOCK,
     done.stderr,
 )
 
