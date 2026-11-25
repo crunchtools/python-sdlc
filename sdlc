@@ -1500,11 +1500,18 @@ def check_container_scan(cfg: dict, name: str, s: dict) -> list[tuple[str, str, 
 # produced, which is the same bytes and the same verdict, and the fleet's bootc
 # repos already gate on exactly `podman run --rm "$IMAGE" bootc container lint`.
 #
-# Measured, not assumed: it needs nothing the launcher withholds. Under the
+# It reads the image's whole filesystem, as root, and nothing else. Under the
 # launcher's `--cap-drop=all --security-opt=no-new-privileges`, with no network,
-# it runs to the same verdict as unrestricted (quay.io/centos-bootc/
-# centos-bootc:stream10), because it only reads the image's own filesystem. So
-# run_host stays exactly as it is and this check asks for no capability.
+# that holds for quay.io/centos-bootc/centos-bootc:stream10, but not for an
+# image with a directory root does not own and may not read: RHEL's
+# setroubleshoot ships /var/lib/setroubleshoot 0700 setroubleshoot, and with no
+# capability the lint stops at "Permission denied (os error 13)" where the
+# in-build RUN passes (rhel10-bootc-server 1.8.1, a1654). The RUN has podman's
+# default set, which holds DAC_OVERRIDE, so that is the one capability this
+# check takes back, on a --read-only root so the override cannot write there.
+# Not DAC_READ_SEARCH: it is outside the default set because it is what
+# open_by_handle_at needs, the "shocker" escape that reads host files by
+# handle, and default seccomp allows that call only when the cap is held.
 #
 # `--entrypoint bootc`, not a trailing `bootc`: a bootc base's ENTRYPOINT is
 # not the CLI and a repo may set its own, so the binary is named explicitly.
@@ -1512,6 +1519,12 @@ def check_container_scan(cfg: dict, name: str, s: dict) -> list[tuple[str, str, 
 # they are in a build -- and 1 is a failed lint, which is a finding. A podman
 # that never started the container is 125-127, which the launcher maps to 2.
 LINT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+# The one capability bootc-lint gets back after --cap-drop=all, on a read-only
+# root: reading files whatever their mode, which `bootc container lint` needs to
+# walk the image. See check_bootc_lint for why it is not DAC_READ_SEARCH.
+BOOTC_LINT_CAP = "DAC_OVERRIDE"
 
 
 def check_bootc_lint(cfg: dict, name: str, s: dict) -> list[tuple[str, str, str]]:
@@ -1533,6 +1546,7 @@ def check_bootc_lint(cfg: dict, name: str, s: dict) -> list[tuple[str, str, str]
         if not LINT_NAME_RE.fullmatch(lint):
             cannot(f"{name}: skip {lint!r} is not a lint name (see `bootc container lint --list`)")
     argv = ["podman", "run", "--rm", "--pull=never", "--network", "none"]
+    argv += ["--read-only", "--cap-add", BOOTC_LINT_CAP]
     # `--` before the image, as in smoke: nothing after it is a podman option,
     # and bin/sdlc checks the word that follows it.
     argv += ["--entrypoint", "bootc", "--", container_image(cfg, s), "container", "lint"]

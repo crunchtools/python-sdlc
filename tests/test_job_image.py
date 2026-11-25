@@ -699,6 +699,10 @@ def test_gate_unlisted_options_are_refused() -> None:
         ["--net=host"],
         ["--net", "none"],
         ["--cap-add=all"],
+        ["--cap-add", "SYS_ADMIN"],
+        ["--cap-add=DAC_OVERRIDE"],
+        ["--cap-add=DAC_READ_SEARCH"],
+        ["--cap-add="],
         ["--pull=always"],
         ["--rm=true"],
         ["stray"],
@@ -716,6 +720,52 @@ def test_gate_volume_outside_the_allowed_sources_is_refused() -> None:
 def test_gate_mount_that_is_not_an_image_is_refused() -> None:
     assert "type=bind" in gate_refused("--mount", "type=bind,source=/,destination=/host")
     assert "type=volume" in gate_refused(drop=("type=image,", "type=volume,"))
+
+
+BOOTC_FROM = "FROM quay.io/crunchtools/rhel10-bootc:latest\nRUN true\n"
+
+
+def bootc_lint_with(*words: str) -> tuple[FakeTools, str]:
+    """The bootc plan with `words` after bootc-lint's --rm: (tools, refusal or "")."""
+    t = FakeTools()
+    t.bootc = True
+    rm = US.join(["--rm", "--entrypoint"])
+    t.plan = plan_text(bootc=True).replace(rm, US.join(["--rm", *words, "--entrypoint"]), 1)
+    try:
+        go(t, BOOTC_FROM)
+    except CannotRunError as exc:
+        return t, str(exc)
+    return t, ""
+
+
+def test_gate_bootc_lint_takes_dac_override_on_a_read_only_root() -> None:
+    for words in (
+        ["--read-only", "--cap-add", "DAC_OVERRIDE"],
+        ["--cap-add=DAC_OVERRIDE", "--read-only"],
+    ):
+        t, msg = bootc_lint_with(*words)
+        assert not msg and t.pushed(), (words, msg)
+        lint = next(a for a in t.argvs if a[4:5] == ["run"] and "lint" in a)
+        added = max(i for i, w in enumerate(lint) if w.startswith("--cap-add"))
+        assert lint.index("--cap-drop=all") < added, lint
+
+
+def test_gate_bootc_lint_capability_is_held_to_its_rule() -> None:
+    for words, why in (
+        (["--cap-add", "DAC_OVERRIDE"], "without --read-only"),
+        (["--read-only", "--cap-add", "DAC_READ_SEARCH"], "'DAC_READ_SEARCH'"),
+        (["--read-only", "--cap-add=DAC_READ_SEARCH"], "'DAC_READ_SEARCH'"),
+        (["--read-only", "--cap-add", "SYS_ADMIN"], "'SYS_ADMIN'"),
+        (["--read-only", "--cap-add", "all"], "'all'"),
+    ):
+        t, msg = bootc_lint_with(*words)
+        assert "refused podman option" in msg and why in msg, (words, msg)
+        assert not t.pushed(), words
+
+
+def test_gate_only_bootc_lint_takes_a_capability() -> None:
+    msg = gate_refused("--read-only", "--cap-add", "DAC_OVERRIDE")  # container-scan
+    assert "not bootc-lint" in msg, msg
 
 
 def test_gate_allowed_mounts_pass() -> None:

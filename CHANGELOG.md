@@ -28,6 +28,16 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `bootc-lint` gets `DAC_OVERRIDE` back after `--cap-drop=all`, on a
+  `--read-only` root, and nothing else. `bootc container lint` walks the whole
+  image as root, and a RHEL bootc image with setroubleshoot ships
+  `/var/lib/setroubleshoot` 0700 to another user, so the gate stopped at
+  "Permission denied (os error 13)" on an image whose in-build lint, with
+  podman's default capabilities, passed (rhel10-bootc-server 1.8.1, a1654).
+  Not `DAC_READ_SEARCH`: it is what `open_by_handle_at` needs, the "shocker"
+  escape, which is why it is outside the default set. The image job takes
+  `--cap-add` only for bootc-lint, only `DAC_OVERRIDE`, and only beside
+  `--read-only`.
 - sdlc's own release plan carries `image: true`, so `write`'s own refusal
   holds back a release whose image was skipped, not only ci.yml's `if:` (a1667)
 - S2 parses a Renovate config as JSON5 and judges the keys it sets and the
