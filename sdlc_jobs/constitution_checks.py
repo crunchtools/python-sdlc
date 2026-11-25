@@ -71,6 +71,20 @@ OVERSIZE_TEST = re.compile(r"too.?large|too.?big|oversiz|MAX_RESPONSE", re.IGNOR
 _FUNC_START = re.compile(r"^(?=[ \t]*(?:async[ \t]+)?def[ \t])", re.MULTILINE)
 
 
+_FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _nested_functions(node: ast.AST) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The functions directly inside `node`, not descending into any of them."""
+    found = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _FUNCTION_TYPES):
+            found.append(child)
+        else:
+            found.extend(_nested_functions(child))
+    return found
+
+
 def _function_scopes(text: str) -> list[str]:
     """Each function's own source, nested function bodies removed.
 
@@ -81,17 +95,19 @@ def _function_scopes(text: str) -> list[str]:
     except SyntaxError:  # a null byte is one too, since Python 3.12
         return _FUNC_START.split(text)
     lines = text.splitlines()
-    func_types = (ast.FunctionDef, ast.AsyncFunctionDef)
     scopes = []
-    for fn in ast.walk(tree):
-        if not isinstance(fn, func_types):
-            continue
-        skip: set[int] = set()
-        for inner in ast.walk(fn):
-            if inner is not fn and isinstance(inner, func_types):
-                skip.update(range(inner.lineno, (inner.end_lineno or inner.lineno) + 1))
-        end = fn.end_lineno or fn.lineno
-        scopes.append("\n".join(lines[i - 1] for i in range(fn.lineno, end + 1) if i not in skip))
+    # One pass: each node is visited once, under its innermost function.
+    stack = _nested_functions(tree)
+    while stack:
+        fn = stack.pop()
+        inner = _nested_functions(fn)
+        stack.extend(inner)
+        own, line = [], fn.lineno
+        for nested in sorted(inner, key=lambda n: n.lineno):
+            own.extend(lines[line - 1 : nested.lineno - 1])
+            line = max(line, (nested.end_lineno or nested.lineno) + 1)
+        own.extend(lines[line - 1 : fn.end_lineno or fn.lineno])
+        scopes.append("\n".join(own))
     return scopes
 
 
