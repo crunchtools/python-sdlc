@@ -27,9 +27,11 @@ if [ "$(podman info --format '{{.Host.Security.AppArmorEnabled}}' 2>/dev/null)" 
 fi
 podman pull -q "$IMG" >/dev/null 2>&1 || say "pull failed"
 
+PODMAN=podman
 probe() {
   _name=$1; shift
-  _out=$(podman --events-backend=none run --rm --log-driver=none "$@" "$IMG" sh -c '
+  # shellcheck disable=SC2086
+  _out=$($PODMAN --events-backend=none run --rm --log-driver=none "$@" "$IMG" sh -c '
     printf "label=%s " "$(cat /proc/self/attr/current 2>/dev/null)"
     printf "nnp=%s " "$(grep NoNewPrivs /proc/self/status | tr -dc 0-9)"
     sleep 30 & p=$!
@@ -39,7 +41,7 @@ probe() {
 }
 BASE="--cap-drop=all --security-opt=no-new-privileges"
 # shellcheck disable=SC2086
-{
+candidates() {
 probe "base (cap-drop, nnp)"            $BASE
 probe "base + apparmor=unconfined"      $BASE --security-opt apparmor=unconfined
 probe "cap-drop only (no nnp)"          --cap-drop=all
@@ -48,6 +50,15 @@ probe "base + label=disable"            $BASE --security-opt label=disable
 command -v runc >/dev/null && probe "base + runtime runc" $BASE --runtime runc
 probe "base + systemd-ish caps"         --cap-drop=all --cap-add=KILL --security-opt=no-new-privileges
 }
+say "== rootless"
+candidates
+if sudo -n true 2>/dev/null; then
+  PODMAN="sudo -n podman"
+  say "== rootful: apparmor=$(sudo -n podman info --format '{{.Host.Security.AppArmorEnabled}}' 2>&1) rootless=$(sudo -n podman info --format '{{.Host.Security.Rootless}}' 2>&1)"
+  sudo -n podman pull -q "$IMG" >/dev/null 2>&1 || say "rootful pull failed"
+  candidates
+  probe "rootful: base, kill -0 self"     $BASE
+fi
 if sudo -n true 2>/dev/null; then
   sudo -n dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -8 | sed 's/^/dmesg: /'
   sudo -n journalctl -k --no-pager 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -8 | sed 's/^/kern: /'
