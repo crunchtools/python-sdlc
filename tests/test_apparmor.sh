@@ -50,6 +50,31 @@ probe "base + label=disable"            $BASE --security-opt label=disable
 command -v runc >/dev/null && probe "base + runtime runc" $BASE --runtime runc
 probe "base + systemd-ish caps"         --cap-drop=all --cap-add=KILL --security-opt=no-new-privileges
 }
+
+SDIMG=registry.access.redhat.com/ubi10/ubi-init@sha256:1938686cb8d7a2a69440d55f5e7b9b5efb61eea460a654879e69abf54b5b9faa
+SDCAPS=CHOWN,DAC_OVERRIDE,FOWNER,KILL,NET_BIND_SERVICE,SETGID,SETPCAP,SETUID
+# systemd as PID 1 must start, then stop a unit (systemd signals its child).
+sdprobe() {
+  _name=$1; shift
+  _c=aa-sd-$$
+  # shellcheck disable=SC2086
+  $PODMAN --events-backend=none run -d --rm --name "$_c" --systemd=always "$@" "$SDIMG" >/dev/null 2>&1 \
+    || { say "[sd $_name] could not start"; return; }
+  _st=
+  for _ in $(seq 1 30); do
+    _st=$($PODMAN exec "$_c" systemctl is-system-running 2>/dev/null) || :
+    case "$_st" in running|degraded) break ;; esac
+    sleep 1
+  done
+  $PODMAN exec "$_c" systemd-run --unit=aaprobe sleep 300 >/dev/null 2>&1
+  $PODMAN exec "$_c" systemctl stop aaprobe >/dev/null 2>&1
+  _after=$($PODMAN exec "$_c" systemctl show -p ActiveState --value aaprobe 2>&1)
+  _res=$($PODMAN exec "$_c" systemctl show -p Result --value aaprobe 2>&1)
+  _lab=$($PODMAN exec "$_c" cat /proc/1/attr/current 2>&1)
+  say "[sd $_name] pid1=$_lab state=$_st unit-after-stop=$_after result=$_res"
+  $PODMAN rm -f -t 0 "$_c" >/dev/null 2>&1
+}
+SDBASE="--cap-drop=all --cap-add=$SDCAPS --security-opt=no-new-privileges"
 say "== rootless"
 candidates
 if sudo -n true 2>/dev/null; then
@@ -57,7 +82,13 @@ if sudo -n true 2>/dev/null; then
   say "== rootful: apparmor=$(sudo -n podman info --format '{{.Host.Security.AppArmorEnabled}}' 2>&1) rootless=$(sudo -n podman info --format '{{.Host.Security.Rootless}}' 2>&1)"
   sudo -n podman pull -q "$IMG" >/dev/null 2>&1 || say "rootful pull failed"
   candidates
-  probe "rootful: base, kill -0 self"     $BASE
+  $PODMAN pull -q "$SDIMG" >/dev/null 2>&1 || say "rootful sd pull failed"
+  sdprobe "crun nnp (today without the fix)" $SDBASE
+  sdprobe "crun nnp unconfined (0.15.4)"    $SDBASE --security-opt apparmor=unconfined
+  sdprobe "runc nnp"                         $SDBASE --runtime runc
+  sdprobe "crun no-nnp"                      --cap-drop=all --cap-add=$SDCAPS
+  say "rootful runtimes: $(sudo -n podman info --format '{{json .Host.OCIRuntime}}' 2>&1 | head -c 300)"
+  say "containers.conf runtimes: $(sudo -n podman info --format json 2>/dev/null | grep -o '"runtimes"[^]]*' | head -c 200)"
 fi
 if sudo -n true 2>/dev/null; then
   sudo -n dmesg 2>/dev/null | grep -i 'apparmor="DENIED"' | tail -8 | sed 's/^/dmesg: /'
