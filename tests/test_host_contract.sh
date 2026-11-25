@@ -1445,14 +1445,14 @@ else
 fi
 
 # main is still signed by the fleet key alone (container.yml): under the same
-# PATH, the launcher asks sdlc's key, then the fleet key, and runs it. A
-# release such as :latest never asks the fleet key, and refusing it is a 2.
+# PATH, the launcher asks the fleet key first, which vouches for it, and runs
+# it. A release such as :latest never asks the fleet key, and refusing it is a 2.
 : > "$SHIM/unsigned-sdlc"
 log_mark
 rm -rf "$RUN/cache"
 SDLC_IMAGE=main boot tiers > "$RUN/out" 2>&1 || true
 log_since
-if grep -q -- " verify --key /sdlc.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
+if ! grep -q -- ' verify --key /sdlc.pub ' "$RUN/podman.log" \
    && grep -q -- " verify --key /fleet.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
    && last_run | grep -q -- " $PINNED tiers\$"; then
   ok "SDLC_IMAGE=main signed by the fleet key alone verifies with podman and POSIX sh"
