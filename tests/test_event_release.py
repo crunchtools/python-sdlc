@@ -27,9 +27,7 @@ from sdlc_jobs._tools import Done, Site
 
 # The module attributes the image sets; these suites only read them off argv.
 ASHIGARU = sdlc_root.ROOT / "ashigaru-scripts"
-CONSTITUTION = sdlc_root.ROOT / "constitution-scripts"
 tools.ASHIGARU_SCRIPTS = ASHIGARU
-tools.CONSTITUTION_SCRIPTS = CONSTITUTION
 
 REPO, SHA, TOKEN = "crunchtools/demo", "a" * 40, "app-token-123"
 ENV = {"PATH": "/bin", "ASHIGARU_APP_KEY": "SECRET-KEY", "GITHUB_TOKEN": "gh-tok"}
@@ -412,8 +410,11 @@ check(
     str(argv[4:]),
 )
 check(
-    "audit names the constitution's scripts from the module attribute", argv[4] == str(CONSTITUTION)
+    "audit imports the vendored module from the package root",
+    argv[4] == str(launchers.PACKAGE_ROOT)
+    and (Path(argv[4]) / "sdlc_jobs/_audit_alert.py").is_file(),
 )
+check("audit: the child script imports sdlc_jobs._audit_alert", "_audit_alert" in argv[3])
 check(
     "audit: AUTHOR override is the App's",
     'audit_alert.AUTHOR = "app/ashigaru-crunchtools-com"' in argv[3],
@@ -443,7 +444,9 @@ with tempfile.TemporaryDirectory(prefix="launchers-") as scratch_dir:
         "    print('publish', repo, version, sha)\n"
         "    return 0 if version != '9.9.9' else 1\n"
     )
-    (scripts_dir / "audit_alert.py").write_text(
+    (scripts_dir / "sdlc_jobs").mkdir()
+    (scripts_dir / "sdlc_jobs" / "__init__.py").write_text("")
+    (scripts_dir / "sdlc_jobs" / "_audit_alert.py").write_text(
         "import sys\n"
         "AUTHOR = 'github-actions[bot]'\n"
         "def main():\n"
@@ -486,29 +489,27 @@ with tempfile.TemporaryDirectory(prefix="launchers-") as scratch_dir:
             env=tools.child_env({}),
         )
         check("launcher: publish maps a crash to 3", done.returncode == 3, done.stderr)
-    with mock.patch.object(tools, "CONSTITUTION_SCRIPTS", scripts_dir):
-        argv = [
-            sys.executable,
-            "-I",
-            "-c",
-            launchers._AUDIT,
-            str(scripts_dir),
-            "--json",
-            "r.json",
-            "--repo",
-            "o/r",
-        ]
-        done = tools.run(argv, env=tools.child_env({}))
-        check(
-            "launcher: audit sets AUTHOR to the App and passes the rest of argv",
-            done.returncode == 0
-            and done.stdout.strip()
-            == "audit app/ashigaru-crunchtools-com --json r.json --repo o/r",
-            done.stdout + done.stderr,
-        )
-        argv[-1] = "o/crash"
-        done = tools.run(argv, env=tools.child_env({}))
-        check("launcher: audit maps a crash to 3", done.returncode == 3, done.stderr)
+    argv = [
+        sys.executable,
+        "-I",
+        "-c",
+        launchers._AUDIT,
+        str(scripts_dir),
+        "--json",
+        "r.json",
+        "--repo",
+        "o/r",
+    ]
+    done = tools.run(argv, env=tools.child_env({}))
+    check(
+        "launcher: audit sets AUTHOR to the App and passes the rest of argv",
+        done.returncode == 0
+        and done.stdout.strip() == "audit app/ashigaru-crunchtools-com --json r.json --repo o/r",
+        done.stdout + done.stderr,
+    )
+    argv[-1] = "o/crash"
+    done = tools.run(argv, env=tools.child_env({}))
+    check("launcher: audit maps a crash to 3", done.returncode == 3, done.stderr)
 
 if __name__ == "__main__":
     sys.exit(finish())

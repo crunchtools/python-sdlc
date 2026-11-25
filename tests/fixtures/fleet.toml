@@ -1,0 +1,13 @@
+# The renovate_locked lists of the constitution's fleet.toml (crunchtools/constitution
+# main), which the image carries at /opt/constitution/fleet.toml.
+[fleet]
+renovate_locked = [
+  "minimumReleaseAge",
+  "minimumReleaseAgeBehaviour",
+  "internalChecksFilter",
+  "stabilityDays",
+]
+renovate_locked_presets = [
+  "config:best-practices",
+  "security:minimumReleaseAge*",
+]

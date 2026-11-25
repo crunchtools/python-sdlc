@@ -50,8 +50,9 @@ check = "CH001-absolute_paths"
 path = "sdlc_jobs/_tools.py"
 classification = "by_design"
 justification = """
-  ASHIGARU_SCRIPTS, CONSTITUTION_SCRIPTS and CONSTITUTION_TEXT name where the \
-  sdlc image's Containerfile installs the code and text the jobs use, the \
+  ASHIGARU_SCRIPTS, CONSTITUTION_TEXT and \
+  CONSTITUTION_FLEET name where the sdlc image's Containerfile installs the \
+  code, text and fleet data the jobs use, the \
   same way sdlc names \
   /repo and /cache. They are module attributes, not environment toggles, so \
   a run cannot be pointed at other code by a variable (design: no variable \
@@ -157,6 +158,17 @@ justification = """
   registry.redhat.io. They are fixed, named once as module constants, and \
   asserted by tests/test_job_image.py; there is no config to move them to \
   because the file layout is the image's, not the repo's.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/_audit_alert.py"
+classification = "gourmand_bug"
+justification = """
+  _audit_alert.main (reads a pip-audit report and keeps the alert issue \
+  through gh) is paired with constitution.main (dispatches the \
+  sdlc-constitution subcommands): both build an argparse parser and act on \
+  its args, with no line, call or identifier in common past argparse itself.
 """
 
 [[exceptions]]

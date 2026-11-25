@@ -4,8 +4,9 @@
 one thing it does that outlives the run, so nothing here trusts what `check`
 planned: the plan decides which jobs are needed, the API decides whether the
 release is real. Tagging and the GitHub Release stay Ashigaru's own code
-(`release_publish.publish`) and the audit issue stays the constitution's
-`audit_alert`; this module only decides when they may run and with what.
+(`release_publish.publish`) and the audit issue stays sdlc's own
+`_audit_alert` (vendored from the constitution); this module only decides
+when they may run and with what.
 
 Return ints follow the contract in `_github`: 0 done, 1 a refusal or verdict,
 and `CannotRunError` for anything that stopped the job from judging.
@@ -34,6 +35,9 @@ _NOT_FOUND = 404
 _UNREADABLE = (KeyError, ValueError, UnicodeDecodeError)
 # How uv.lock records the package it locks from the checkout itself.
 _ROOT_SOURCES = ({"editable": "."}, {"virtual": "."})
+# The directory holding the `sdlc_jobs` package, handed to the audit child so it
+# imports the vendored `_audit_alert` without relying on the interpreter's path.
+PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 
 # Run under `python3 -I`, with the repo, version and sha as argv and never
 # spliced into the code. `publish` returns 1 for a CHANGELOG that is not at the
@@ -61,7 +65,7 @@ import sys, traceback
 sys.path.insert(0, sys.argv[1])
 sys.argv[1:2] = []
 try:
-    import audit_alert
+    from sdlc_jobs import _audit_alert as audit_alert
     audit_alert.AUTHOR = "app/{APP_SLUG}"
     code = audit_alert.main()
 except BaseException:
@@ -345,8 +349,8 @@ def publish(site: Site, token: str, version: str, sha: str) -> int:
 def audit_issue(site: Site, audit: Mapping[str, Any], token: str, run_url: str) -> int:
     """Keep the weekly audit's one alert issue in step with the scan, as the App.
 
-    `audit` is the pip-audit JSON report `check` hands on. The constitution's
-    `audit_alert` decides what to create, rewrite or close; this runs it with
+    `audit` is the pip-audit JSON report `check` hands on. The vendored
+    `_audit_alert` decides what to create, rewrite or close; this runs it with
     the App's token and teaches it that the App's issues are its own.
     """
     with tempfile.TemporaryDirectory(prefix="sdlc-audit-") as scratch:
@@ -358,7 +362,7 @@ def audit_issue(site: Site, audit: Mapping[str, Any], token: str, run_url: str) 
                 "-I",
                 "-c",
                 _AUDIT,
-                str(tools.CONSTITUTION_SCRIPTS),
+                str(PACKAGE_ROOT),
                 "--json",
                 str(report),
                 "--event",

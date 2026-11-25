@@ -29,6 +29,9 @@ dev = [
     # sdlc_jobs/_app_token.py signs the Ashigaru App's JWT with it; the image
     # carries the same pin for `write`. The tests sign with a fake.
     "pyjwt[crypto]>=2.10",
+    # The S2 check parses Renovate configs as JSON5, as Renovate reads them;
+    # the image carries the same pin.
+    "json5>=0.17",
     # Pinned to a release past the fleet's 7-day cooldown.
     "types-pyyaml==6.0.12.20261113",
 ]

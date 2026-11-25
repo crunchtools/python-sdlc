@@ -3106,7 +3106,7 @@ def pip_audit_once(env: dict[str, str], report: Path | None = None) -> tuple[int
 
 
 # The line `pip-audit -- --report` prints its report on, for the weekly `check`
-# job (sdlc_jobs/check.py), which hands it to the constitution's audit_alert.
+# job (sdlc_jobs/check.py), which hands it to sdlc's _audit_alert.
 AUDIT_REPORT = "SDLC-AUDIT-REPORT "
 
 

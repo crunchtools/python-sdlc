@@ -60,6 +60,7 @@ ARG RUFF_VERSION=0.17.1
 ARG SEMGREP_VERSION=1.177.0
 ARG PIP_AUDIT_VERSION=2.9.0
 ARG PYYAML_VERSION=6.0.3
+ARG JSON5_VERSION=0.17.3
 ARG CODEQL_BUNDLE=codeql-bundle-v2.27.4
 # The release publishes a checksum file for the full bundle only, none for the
 # Python bundle installed below, so its sha256 is pinned here. Bump it with
@@ -88,15 +89,16 @@ ARG PYJWT_VERSION=2.15.1
 ARG GH_VERSION=2.104.0
 ARG GH_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
 # What sdlc_jobs runs: Ashigaru's scripts, prompts and schemas, and the
-# constitution's scripts and text, each at a release and fetched by its commit,
-# never by a tag that can move. The text is what v2 repos are judged against:
-# `sdlc-constitution context` hands it to Gatehouse.
+# constitution's text and fleet data, each at a release and fetched by its
+# commit, never by a tag that can move. The text is what v2 repos are judged
+# against: `sdlc-constitution context` hands it to Gatehouse; fleet.toml holds
+# what S2 judges Renovate configs by (renovate_locked, renovate_locked_presets).
 # Ashigaru is v5.4.0, tag pending: write depends on
 # 5.4.0's staged_refusal patch filter.
 ARG ASHIGARU_VERSION=5.4.0
 ARG ASHIGARU_COMMIT=044cdff812619be9d2e424ab4118084db56cb05e
 ARG CONSTITUTION_VERSION=2.0.0
-ARG CONSTITUTION_COMMIT=03835d9933d3b656188279688ef486cb4ec62dd0
+ARG CONSTITUTION_COMMIT=e4b6fa17cd7a84834e7b0d12b96a3b34d0612878
 
 # The base runs non-root; installing needs root. The image drops back at the end.
 USER root
@@ -248,13 +250,14 @@ RUN uv tool install "ruff==${RUFF_VERSION}" \
  && rm -rf /root/.cache/uv
 
 # The interpreter `sdlc` and the constitution validator run under, kept apart
-# from the tool venvs it has nothing to do with. PyYAML for both; PyJWT with
+# from the tool venvs it has nothing to do with. PyYAML for both; json5 for the
+# S2 check's Renovate configs; PyJWT with
 # cryptography because sdlc_jobs signs the Ashigaru App's RS256 JWT inside the
 # `sdlc` process, so it has to be importable here and cannot live in a venv of
 # its own. cryptography is pinned beside it so the extra cannot float it.
 RUN uv venv /opt/constitution-venv \
  && VIRTUAL_ENV=/opt/constitution-venv uv pip install --quiet "pyyaml==${PYYAML_VERSION}" \
-      "pyjwt[crypto]==${PYJWT_VERSION}" "cryptography==${CRYPTOGRAPHY_VERSION}" \
+      "json5==${JSON5_VERSION}" "pyjwt[crypto]==${PYJWT_VERSION}" "cryptography==${CRYPTOGRAPHY_VERSION}" \
  && rm -rf /root/.cache/uv
 
 # Gourmand is a single Rust binary -- 25 MB, linking only libc, libm and libgcc,
@@ -389,8 +392,8 @@ RUN set -eu; \
     rm -f /tmp/gh.tgz; \
     gh --version | head -1
 
-# Ashigaru's scripts, prompts and schemas, and the constitution's scripts, at
-# the commits above: the paths sdlc_jobs/_tools.py names. Each must say it is
+# Ashigaru's scripts, prompts and schemas, and the constitution's text and fleet
+# data, at the commits above: the paths sdlc_jobs/_tools.py names. Each must say it is
 # the version its ARG names (Ashigaru's VERSION file, the constitution's
 # `> **Version:**` line), or the build fails. Data the jobs run, not packages,
 # so one shallow fetch of the commit and nothing of its history.
@@ -410,7 +413,7 @@ RUN set -eu; \
     [ "$got" = "${CONSTITUTION_VERSION}" ] || { \
       echo "CONSTITUTION_COMMIT ${CONSTITUTION_COMMIT} is version '$got', not CONSTITUTION_VERSION ${CONSTITUTION_VERSION}" >&2; exit 1; }; \
     mkdir -p /opt/constitution; \
-    cp -r /tmp/constitution/scripts /tmp/constitution/constitution.md /opt/constitution/; \
+    cp /tmp/constitution/constitution.md /tmp/constitution/fleet.toml /opt/constitution/; \
     rm -rf /tmp/ashigaru /tmp/constitution
 
 # sdlc_jobs, the ai/write/gate handlers `sdlc event` imports, on the

@@ -18,10 +18,14 @@ import sys
 import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sdlc_jobs import constitution as c
+
+# /opt/constitution is the image's, not a checkout's.
+c.rules.FLEET = Path(__file__).resolve().parent / "fixtures" / "fleet.toml"
 
 AGPL = "GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3, 19 November 2007\n"
 CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n## [1.2.0] - 2026-11-24\n"
@@ -286,10 +290,56 @@ def test_s1_the_install_itself_is_locked() -> None:
             'FROM x\nLABEL version="1.2.0"\nCOPY req.txt /r.txt\n'
             "RUN pip install --require-hashes --no-deps -r /r.txt\n",
         ),
+        (
+            "the whole repo copied in, the hashed file installed from it",
+            'FROM x\nLABEL version="1.2.0"\nWORKDIR /app\nCOPY . .\n'
+            "RUN pip install --require-hashes --no-deps -r req.txt\n",
+        ),
+        (
+            "a glob copies the hashed file",
+            'FROM x\nLABEL version="1.2.0"\nCOPY req*.txt /app/\n'
+            "RUN pip install --require-hashes --no-deps -r /app/req.txt\n",
+        ),
     ]
     for name, containerfile in passes:
-        got = findings(mcp_server, write("Containerfile", containerfile))
+        got = findings(mcp_server, write("req.txt", HASHED), write("Containerfile", containerfile))
         assert got == [], (name, got)
+
+
+HASHED = "x==1.0 --hash=sha256:" + "0" * 64 + "\n"
+
+
+def test_s1_require_hashes_counts_only_a_committed_file() -> None:
+    # --require-hashes proves the install matches the file, not that the file is
+    # the repo's: one the build generates is hashed against what it resolved then.
+    fails = [
+        (
+            "generated during the build",
+            'FROM x\nLABEL version="1.2.0"\n'
+            "RUN pip-compile --generate-hashes -o /r.txt pyproject.toml \\\n"
+            " && pip install --require-hashes --no-deps -r /r.txt\n",
+        ),
+        (
+            "carried from another stage",
+            "FROM x AS gen\nRUN pip-compile --generate-hashes -o /r.txt\n"
+            'FROM x\nLABEL version="1.2.0"\nCOPY --from=gen /r.txt /r.txt\n'
+            "RUN pip install --require-hashes --no-deps -r /r.txt\n",
+        ),
+        (
+            "the committed copy is regenerated over",
+            'FROM x\nLABEL version="1.2.0"\nCOPY req.txt /r.txt\n'
+            "RUN pip-compile --generate-hashes --output-file=/r.txt\n"
+            "RUN pip install --require-hashes --no-deps -r /r.txt\n",
+        ),
+        (
+            "named in the Containerfile but not in the repo",
+            'FROM x\nLABEL version="1.2.0"\nCOPY other.txt /r.txt\n'
+            "RUN pip install --require-hashes --no-deps -r /r.txt\n",
+        ),
+    ]
+    for name, containerfile in fails:
+        got = findings(mcp_server, write("req.txt", HASHED), write("Containerfile", containerfile))
+        assert any(f.startswith("S1:") and "committed hash-pinned" in f for f in got), (name, got)
 
 
 def test_s1_names_the_line_not_the_command() -> None:
@@ -368,6 +418,99 @@ def test_symlinked_files_are_not_read() -> None:
 def test_s2_unreadable_package_json() -> None:
     got = findings(mcp_server, write("package.json", '{"renovate": {'))
     assert any(f.startswith("S2:") and "package.json" in f for f in got), got
+    got = findings(mcp_server, write("renovate.json5", "{extends: ["))
+    assert any(f.startswith("S2:") and "renovate.json5" in f for f in got), got
+
+
+def test_s2_reads_keys_not_text() -> None:
+    # A locked name in a description, a comment or ignorePresets overrides nothing.
+    ok = [
+        ("description", '{"description": "keeps minimumReleaseAge: 7 days as is"}'),
+        (
+            "JSON5 comment",
+            '{\n  // minimumReleaseAge: "0 days" would be wrong\n  labels: ["deps"],\n}',
+        ),
+        ("block comment", '/* "extends": ["config:best-practices"] */ {"labels": ["deps"]}'),
+        ("ignorePresets", '{"ignorePresets": ["security:minimumReleaseAgeNpm"]}'),
+        ("a preset named in a value", '{"labels": ["config:best-practices"]}'),
+    ]
+    for name, text in ok:
+        got = findings(mcp_server, write("renovate.json5", text))
+        assert got == [], (name, got)
+    fails = [
+        ("unquoted JSON5 key", "{minimumReleaseAge: '0 days'}", "minimumReleaseAge"),
+        ("preset with arguments", '{"extends": ["security:minimumReleaseAgeNpm(1)"]}', "Npm"),
+        (
+            "extends inside a packageRule",
+            '{"packageRules": [{"extends": ["config:best-practices"]}]}',
+            "best-practices",
+        ),
+        ("a JSON5 renovaterc", "{packageRules: [{internalChecksFilter: 'none'}]}", "Filter"),
+    ]
+    for name, text, cited in fails:
+        got = findings(mcp_server, write(".renovaterc", text))
+        assert any(f.startswith("S2:") and cited in f for f in got), (name, got)
+
+
+def test_s2_presets_from_elsewhere_cannot_be_judged() -> None:
+    # A preset outside Renovate's built-ins and the constitution can set the
+    # cooldown where this check cannot see it.
+    for preset in [
+        "github>someone/presets:fast",
+        "local>someone/renovate-config",
+        "gitlab>group/project",
+        "https://example.test/preset.json",
+        "@acme/renovate-config",
+        "acme",
+        "unknownns:thing",
+    ]:
+        got = findings(mcp_server, write("renovate.json", f'{{"extends": ["{preset}"]}}'))
+        assert any(f.startswith("S2:") and "cannot be judged" in f and preset in f for f in got), (
+            preset,
+            got,
+        )
+    for preset in [
+        "github>crunchtools/constitution//renovate/default#v1",
+        "local>crunchtools/constitution",
+        "config:recommended",
+        ":semanticCommits",
+        "group:monorepos",
+        "helpers:pinGitHubActionDigests",
+        "docker:pinDigests",
+        ":label(deps)",
+    ]:
+        got = findings(mcp_server, write("renovate.json", f'{{"extends": ["{preset}"]}}'))
+        assert got == [], (preset, got)
+
+
+def test_s2_locked_keys_come_from_the_constitution() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        fleet = Path(tmp) / "fleet.toml"
+        fleet.write_text(
+            '[fleet]\nrenovate_locked = ["prHourlyLimit"]\n'
+            'renovate_locked_presets = ["group:all*"]\n'
+        )
+        with mock.patch.object(c.rules, "FLEET", fleet):
+            got = findings(
+                mcp_server,
+                write(
+                    "renovate.json",
+                    '{"prHourlyLimit": 0, "minimumReleaseAge": null,'
+                    ' "extends": ["group:allNonMajor"]}',
+                ),
+            )
+        assert got == [
+            "S2: renovate.json sets `prHourlyLimit`; the release-age cooldown is the fleet's, "
+            "not a repo's to change",
+            "S2: renovate.json extends `group:allNonMajor`, "
+            "which sets its own release-age cooldown",
+        ], got
+        # With no policy to read, a config is unknown, not compliant.
+        with mock.patch.object(c.rules, "FLEET", Path(tmp) / "absent.toml"):
+            got = findings(mcp_server, write("renovate.json", '{"labels": ["deps"]}'))
+            assert any(f.startswith("S2:") and "cannot be judged" in f for f in got), got
+            # ... and a repo with no Renovate config needs none.
+            assert findings(mcp_server) == [], findings(mcp_server)
 
 
 def test_new_checks_pass_compliant_variants() -> None:
@@ -617,6 +760,83 @@ def test_s1_lock_must_be_tracked() -> None:
         got = c.check(root).findings
         assert "S1: `uv.lock` is not committed: git does not track it" in got, got
         _git(root, "add", "uv.lock")
+        assert c.check(root).findings == [], c.check(root).findings
+
+
+def test_s1_a_directory_destination_keeps_the_name() -> None:
+    # `.`, the WORKDIR and any directory the build already knows take the
+    # source's own name, so the committed file is what the install reads.
+    install = "RUN pip install --require-hashes --no-deps -r /app/req.txt\n"
+    for name, copy in [
+        ("COPY into .", "WORKDIR /app\nCOPY req.txt .\n"),
+        ("COPY into the WORKDIR by path", "WORKDIR /app\nCOPY req.txt /app\n"),
+        ("COPY into a known directory", "COPY src /app/src\nCOPY req.txt /app/src\n"),
+    ]:
+        containerfile = 'FROM x\nLABEL version="1.2.0"\n' + copy
+        if "known directory" in name:
+            containerfile += install.replace("/app/req.txt", "/app/src/req.txt")
+        else:
+            containerfile += install
+        got = findings(mcp_server, write("req.txt", HASHED), write("Containerfile", containerfile))
+        assert got == [], (name, got)
+
+
+def test_s1_require_hashes_is_the_installs_own_flag() -> None:
+    # A rewrite of the committed copy, or the flag anywhere but on pip itself.
+    head = 'FROM x\nLABEL version="1.2.0"\nWORKDIR /app\nCOPY req.txt /app/req.txt\n'
+    install = "pip install --require-hashes --no-deps -r req.txt"
+    fails = [
+        ("appended to", f"RUN echo 'y==1' >> req.txt && {install}\n"),
+        ("edited in place", f"RUN sed -i 's/1.0/2.0/' req.txt && {install}\n"),
+        ("overwritten by cp", f"RUN cp /tmp/gen.txt req.txt\nRUN {install}\n"),
+        ("downloaded over", f"RUN curl -sSo req.txt https://example.test/r\nRUN {install}\n"),
+        ("flag after ||", "RUN pip install --no-deps -r req.txt || echo --require-hashes\n"),
+        ("flag after |", "RUN pip install --no-deps -r req.txt | tee log --require-hashes\n"),
+        ("flag in a comment", "RUN pip install --no-deps -r req.txt # --require-hashes\n"),
+    ]
+    for name, run in fails:
+        got = findings(mcp_server, write("req.txt", HASHED), write("Containerfile", head + run))
+        assert any(f.startswith("S1:") and "committed hash-pinned" in f for f in got), (name, got)
+    # Reading it in another install, as -r, leaves it the repo's.
+    ok = head + f"RUN {install} --target /w && {install}\n"
+    got = findings(mcp_server, write("req.txt", HASHED), write("Containerfile", ok))
+    assert got == [], got
+
+
+def test_s1_a_quoted_hash_is_no_comment() -> None:
+    # `#` inside quotes is text, so what follows it is still judged.
+    for quoted in ('"step #1"', "'step #1'"):
+        containerfile = f'FROM x\nLABEL version="1.2.0"\nRUN echo {quoted} && pip install .\n'
+        got = findings(mcp_server, write("Containerfile", containerfile))
+        assert any(f.startswith("S1:") and "--no-deps" in f for f in got), (quoted, got)
+
+
+def test_s1_exec_form_copy() -> None:
+    # COPY ["src", "dest"] is the JSON form of COPY src dest.
+    for copy in ('COPY ["req.txt", "./"]', 'COPY --chown=1:1 ["req.txt", "/app/req.txt"]'):
+        containerfile = (
+            f'FROM x\nLABEL version="1.2.0"\nWORKDIR /app\n{copy}\n'
+            "RUN pip install --no-deps --require-hashes -r req.txt\n"
+        )
+        got = findings(mcp_server, write("req.txt", HASHED), write("Containerfile", containerfile))
+        assert got == [], (copy, got)
+
+
+def test_s1_hashed_file_must_be_tracked() -> None:
+    copy = 'FROM x\nLABEL version="1.2.0"\nCOPY req.txt /r.txt\n'
+    install = write(
+        "Containerfile", copy + "RUN pip install --require-hashes --no-deps -r /r.txt\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mcp_server(root)
+        install(root)
+        write("req.txt", HASHED)(root)
+        _git(root, "init", "-q")
+        _git(root, "add", "--", ".", ":!req.txt")
+        got = c.check(root).findings
+        assert any(f.startswith("S1:") and "committed hash-pinned" in f for f in got), got
+        _git(root, "add", "req.txt")
         assert c.check(root).findings == [], c.check(root).findings
 
 
