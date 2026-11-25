@@ -6,8 +6,13 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-11-25
+
 ### Fixed
 
+- scripts/local-release.sh runs its podman service in a private mount namespace
+  that hides a RHEL host's entitlement, so subscription-manager in a build's RHSM
+  step registers instead of refusing in container mode (a1551, #233)
 - write verifies a release whose version is dynamic: with `version` in
   `[project].dynamic`, the version is read from `[tool.hatch.version].path` at
   the merge (ashigaru's `VERSION`), a relative path inside the repository holding
