@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.9] - 2026-11-25
+
 ### Fixed
 
 - `bin/sdlc-bootstrap`: `main` tries the fleet key before sdlc's, each key's verification errors are labelled with the key, and the report no longer needs host `sed`.
