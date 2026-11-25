@@ -1455,9 +1455,9 @@ if grep -q '^        entry: \.sdlc/bin/sdlc commit$' examples/pre-commit-floatin
    && grep -q '^        entry: \.sdlc/bin/sdlc push$' examples/pre-commit-floating.yaml \
    && grep -q '^    steps: &event$' examples/ci.yml \
    && grep -Eq '^          quay\.io/crunchtools/sdlc-bootstrap@sha256:[0-9a-f]{64} event$' examples/ci.yml; then
-  ok "the floating hooks run .sdlc/bin/sdlc, and the fleet file runs sdlc event"
+  ok "the floating hooks run .sdlc/bin/sdlc, and the fleet file runs sdlc-bootstrap's event by digest"
 else
-  bad "examples/ do not run .sdlc/bin/sdlc as the hooks, or sdlc event as CI"
+  bad "examples/ do not run .sdlc/bin/sdlc as the hooks, or sdlc-bootstrap's event by digest as CI"
 fi
 
 # container-scan runs the gate's own image as a host step, and only the

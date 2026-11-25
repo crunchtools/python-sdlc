@@ -19,7 +19,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import sdlc_root  # noqa: F401
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from fake_github import check, finish
 
 from sdlc_jobs import _core
@@ -46,11 +48,11 @@ class Fake(_core.Tools):
 
 def mapped(docs: dict[str, dict[str, Any]], root: str) -> tuple[str, str]:
     orig = _core.own_container_id
-    _core.own_container_id = lambda *_: SIB  # type: ignore[assignment]
+    vars(_core)["own_container_id"] = lambda *_: SIB
     try:
         return _core.host_mount(Fake(docs), {}, Path(root))
     finally:
-        _core.own_container_id = orig  # type: ignore[assignment]
+        vars(_core)["own_container_id"] = orig
 
 
 podman_sibling = {
