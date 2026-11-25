@@ -346,16 +346,19 @@ if [ -z "${SDLC_MEMORY:-}" ] && [ "${MEM_AVAILABLE:-0}" -gt 0 ] \
   GATE_MEMORY=${MEM_AVAILABLE}m
 fi
 
-# Ubuntu 26.04's AppArmor gives every process crun starts a stacked
-# `//&crun` label, and the default container profile then refuses signals
-# between a container's OWN processes: a test that kills the child it spawned
-# fails with EPERM (data-collector, josui, claude-agent). Where podman reports
-# AppArmor, the gate containers run unconfined by it; cap-drop=all,
-# no-new-privileges and the user namespace still hold. Elsewhere (SELinux) the
-# option is never passed.
-APPARMOR=
+# On an AppArmor host, no-new-privileges makes AppArmor STACK the container
+# profile onto crun's own (Ubuntu 26.04 ships `crun` as an unconfined-flag
+# profile): the container runs as `containers-default-<v>//&crun`, which the
+# default profile does not name as a signal peer, so a process cannot signal
+# its own child (EPERM; systemd as PID 1 never leaves `initializing`). Without
+# no-new-privileges the profile is applied, not stacked, and enforced. So where
+# podman reports AppArmor the gate containers drop no-new-privileges and keep
+# AppArmor. With cap-drop=all a setuid exec gains no capability; in the systemd
+# container one can regain SYSTEMD_CAPS, still inside the enforced profile.
+# Elsewhere (SELinux) no-new-privileges is always passed. crunchtools/sdlc#181.
+NNP=--security-opt=no-new-privileges
 [ "$(podman info --format '{{.Host.Security.AppArmorEnabled}}' 2>/dev/null)" = true ] \
-  && APPARMOR=apparmor=unconfined
+  && NNP=
 
 CACHE_VOLUME=${SDLC_CACHE_VOLUME:-crunchtools-hook-cache}
 
@@ -470,7 +473,7 @@ run_in_image() {
   set -- \
     --events-backend=none run --rm --log-driver=none \
     ${PULL_NEWER:+--pull=newer} \
-    --cap-drop=all --security-opt=no-new-privileges ${APPARMOR:+--security-opt "$APPARMOR"} \
+    --cap-drop=all ${NNP:+"$NNP"} \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     -v "$HOST_REPO:/repo:$_mode,z" -w /repo \
     -v "$CACHE_VOLUME:/cache" \
@@ -918,7 +921,7 @@ run_up() {             # seconds run-args -> the smoke verdict
   _cname=$(unique_name sdlc-smoke)
   _uprc=0
   podman --events-backend=none run -d --name "$_cname" --log-driver=k8s-file \
-    --cap-drop=all --security-opt=no-new-privileges ${APPARMOR:+--security-opt "$APPARMOR"} \
+    --cap-drop=all ${NNP:+"$NNP"} \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     "$@" </dev/null >/dev/null || _uprc=$?
   case "$_uprc" in
@@ -1075,7 +1078,7 @@ run_systemd() {        # timeout payload -> the step's verdict
   SD_LIVE=$_sdname
   podman --events-backend=none run -d --rm --name "$_sdname" --log-driver=k8s-file \
     --systemd=always --timeout "$SYSTEMD_LIFETIME" \
-    --cap-drop=all --cap-add="$SYSTEMD_CAPS" --security-opt=no-new-privileges ${APPARMOR:+--security-opt "$APPARMOR"} \
+    --cap-drop=all --cap-add="$SYSTEMD_CAPS" ${NNP:+"$NNP"} \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     "$@" </dev/null >/dev/null || _sdrc=$?
   case "$_sdrc" in
@@ -1193,7 +1196,7 @@ run_host() {           # argv [seconds] -> the step's verdict
                         --memory "$GATE_MEMORY" "$@" ;;
     run)   check_image_word "$@"
            set -- --events-backend=none run --log-driver=none \
-                        --cap-drop=all --security-opt=no-new-privileges ${APPARMOR:+--security-opt "$APPARMOR"} \
+                        --cap-drop=all ${NNP:+"$NNP"} \
                         --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 "$@" ;;
     *)     die "a host step may only build or run; refused: podman $_sub" ;;
   esac

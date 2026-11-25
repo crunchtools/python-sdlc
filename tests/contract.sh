@@ -745,6 +745,17 @@ else
   bad "/usr/share/sdlc/bootstrap is not this commit's bin/sdlc-bootstrap"
 fi
 
+# The gate's confinement on this host: its containers can still signal their own
+# processes, rootless and rootful (crunchtools/sdlc#181).
+# Its 2 (could not run, e.g. an image would not pull) stays a 2, never a verdict.
+printf '\n'
+_aarc=0
+tests/test_apparmor.sh || _aarc=$?
+case "$_aarc" in
+  0) ok "gate containers signal their own processes on this host" ;;
+  2) printf 'contract test CANNOT RUN: tests/test_apparmor.sh could not run\n'; exit 2 ;;
+  *) bad "tests/test_apparmor.sh failed: a gate container cannot signal its own processes here" ;;
+esac
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
   printf 'contract test PASSED\n'
