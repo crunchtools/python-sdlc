@@ -28,6 +28,8 @@ contains. `gatehouse` runs it too, as of gatehouse#134 (constitution#138).
 - **The contract test is the central test:** the pushed digest holds every
   promised executable at its pinned version.
 
+The reasons behind each of these are in [docs/design.md](docs/design.md).
+
 ## Three commands, three config blocks
 
 | Command | Runs when | Config block in `pyproject.toml` |
