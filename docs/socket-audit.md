@@ -55,17 +55,13 @@ VM uids (gha-runner-egress.nft:19-24), and podman listens on no TCP port.
 So one job cannot inspect another job's container: whoever holds a socket
 reaches only their own job's secrets, plus root in a VM that is thrown away.
 
-Two things the repo cannot confirm:
-
-- The legacy container runners `gha-runner-uncached@` and `gha-runner-cached@`
-  are still in deploy/exedore, carrying the `crunchtools-uncached` label
-  (gha-runner-uncached.env:8). The README says the VMs replaced them. If an
-  instance is still enabled, its rootless engine is per instance, not per job.
-  The scratch area is wiped between jobs, but that is a weaker boundary than a
-  VM. Check with `systemctl list-units 'gha-runner-*@*'` on Exedore.
-- The repo describes no gloval pool. Its deploy files were removed and the
-  README says gloval's runners were retired on 2026-11-18. Exedore is the only
-  pool.
+The legacy container runners `gha-runner-uncached@` and `gha-runner-cached@`
+are still in deploy/exedore, carrying the `crunchtools-uncached` label
+(gha-runner-uncached.env:8). If enabled, they would share an engine per
+instance, not per job. A host check on Exedore found them disabled and not
+running (crunchtools/gha-runner#67). The repo describes no gloval pool: its
+deploy files were removed, and the README says gloval's runners were retired
+on 2026-11-18.
 
 ## Fixes
 
