@@ -885,6 +885,28 @@ check(
     and not {k for k in removed[0][1] if "TOKEN" in k or "KEY" in k},
 )
 
+with tempfile.TemporaryDirectory(prefix="ai-runner-temp-") as runner_temp:
+    temp_env = {
+        "GITHUB_REPOSITORY": REPO,
+        "GITHUB_OUTPUT": str(Path(runner_temp) / "out"),
+        "RUNNER_TEMP": runner_temp,
+    }
+    with (
+        mock.patch.object(ai, "GitHub", return_value=FakeGitHub()),
+        mock.patch.object(ai, "run", return_value=(0, {"v": 1})) as ran,
+        mock.patch.object(ai.core, "host_mount", return_value=("/host/t", IMAGE)) as mounted,
+    ):
+        quiet(ai.main, "issues", issue_event(), temp_env)
+        started = ran.call_args[0][2]
+        asked = started.mount()
+    check(
+        "main: scratch is under RUNNER_TEMP, and the sibling's mount is asked for that dir",
+        started.work.parent == Path(runner_temp)
+        and asked == ("/host/t", IMAGE)
+        and mounted.call_args[0][1] is temp_env
+        and mounted.call_args[0][2] == started.work,
+    )
+
 for label, kw, env_for in (
     ("a fork PR", {"ref": "ashigaru/issue-7", "head_repo": "evil/r"}, WITH_CLAUDE),
     (

@@ -561,7 +561,7 @@ class Job:
             raise CannotRunError(f"this job's image is not pinned by digest: {image!r}")
 
         def on_host(path: Path) -> str:
-            return host + str(path)[len(str(self.work)) :]
+            return str(Path(host) / path.relative_to(self.work))
 
         git = cwd / ".git"
         return [
