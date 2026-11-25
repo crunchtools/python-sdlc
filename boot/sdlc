@@ -3,17 +3,19 @@
 #
 # The fleet file names this image by digest, so this is the trust root of every
 # job. In order:
-#   1. resolve quay.io/crunchtools/sdlc:<major> to a digest;
-#   2. verify that digest against the baked sdlc public key(s);
+#   1. resolve quay.io/crunchtools/sdlc:<major> to a digest in the registry
+#      and verify it against the baked sdlc public key(s), in one cosign call;
+#   2. pull that digest;
 #   3. read the signed `version` annotation and the image's `version` label,
 #      and refuse unless they agree and are at or above the baked minimum;
 #   4. run the image by that digest as a sibling container on the job's
 #      socket, with the job's workspace and environment;
 #   5. exit with whatever it exits with.
 #
-# Nothing from the image runs before its signature is checked: the pull only
-# stores bytes, and every question asked of them until step 4 is answered by
-# cosign and `docker image inspect`. It then runs by digest and --pull=never,
+# Nothing from the image runs before its signature is checked: it is pulled
+# only after, by the digest verified, and the pull only stores bytes. Every
+# question asked of them until step 4 is answered by cosign and
+# `docker image inspect`. It then runs by digest and --pull=never,
 # so a moving tag changes nothing mid-run.
 #
 # Accepted risk: whoever can write quay.io/crunchtools/sdlc can point :<major>
@@ -78,26 +80,21 @@ esac
 is_semver "$MIN" || cannot "the baked minimum '$MIN' is not X.Y.Z"
 [ "${MIN%%.*}" = "$MAJOR" ] || cannot "the baked minimum $MIN is not in major $MAJOR"
 
-# Resolve. The tag is pulled every time, because it is what moves. The digest
-# is read back from the pulled image and checked for shape before it is
-# trusted with a command line.
-docker pull -q "$REPO:$MAJOR" > /dev/null || cannot "$REPO:$MAJOR could not be pulled"
-digest=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$REPO:$MAJOR" \
-           | grep "^$REPO@sha256:" | head -n 1) || digest=
-hex=${digest#"$REPO"@sha256:}
-case $hex in *[!0-9a-f]*) hex= ;; esac
-[ "${#hex}" -eq 64 ] || cannot "$REPO:$MAJOR has no sha256 digest to verify"
-pinned=$REPO@sha256:$hex
-
-# Verify: the first key that accepts it wins, which is what lets a rotation
-# ship two. The repo annotation ties the signature to this repository, so a
-# signature made on another image with the same key does not count.
+# Resolve and verify in one step, in the registry: cosign resolves the tag
+# there and checks every signature it returns against the digest it resolved,
+# so the digest in the verified payload is the one :<major> names. Never read
+# back from the local store: on a host that built the image, docker's
+# RepoDigests lists the build's own manifest digest, never pushed and never
+# signed, under every name the image has, first (a1566). The first key that
+# accepts wins, which is what lets a rotation ship two. The repo annotation
+# ties the signature to this repository, so a signature made on another image
+# with the same key does not count.
 err=$(mktemp) || cannot "no temporary file"
 trap 'rm -f "$err" "$err.all"' EXIT
 signed=
 for k in $keys; do
   if signed=$(cosign verify --key "$k" --insecure-ignore-tlog=true \
-                -a repo=crunchtools/sdlc "$pinned" 2> "$err"); then
+                -a repo=crunchtools/sdlc "$REPO:$MAJOR" 2> "$err"); then
     break
   fi
   signed=
@@ -105,8 +102,17 @@ for k in $keys; do
 done
 if [ -z "$signed" ]; then
   cat "$err.all" >&2
-  cannot "$pinned ($REPO:$MAJOR) could not be verified as signed by sdlc"
+  cannot "$REPO:$MAJOR could not be verified as signed by sdlc"
 fi
+# One digest, checked for shape before it is trusted with a command line.
+digest=$(printf '%s' "$signed" \
+           | jq -r '[.[].critical.image["docker-manifest-digest"] // empty] | unique | .[]') || digest=
+hex=${digest#sha256:}
+case $digest in sha256:*) ;; *) hex= ;; esac
+case $hex in *[!0-9a-f]*) hex= ;; esac
+[ "${#hex}" -eq 64 ] || cannot "$REPO:$MAJOR's signature names no single sha256 digest"
+pinned=$REPO@sha256:$hex
+docker pull -q "$pinned" > /dev/null || cannot "$pinned ($REPO:$MAJOR) could not be pulled"
 
 # Version: the signed annotation is the claim, the label is what the image
 # says of itself, and both must be one strict SemVer in this major at or above

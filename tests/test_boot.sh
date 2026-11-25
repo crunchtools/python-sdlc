@@ -26,7 +26,8 @@ HEX=$(printf 'a%.0s' $(seq 64))
 REPO=quay.io/crunchtools/sdlc
 
 # The fake docker logs its argv, one line per call, and is steered by files in
-# $W: `pull-fails`, `repodigests` (what inspect prints for RepoDigests),
+# $W: `pull-fails`, `repodigests` (what inspect prints for RepoDigests, which
+# boot must never trust: see the a1566 case),
 # `label` (the version label), `no-self` (HOSTNAME is not a container) and
 # `inner-rc` (what `docker run` exits with).
 cat > "$W/bin/docker" <<EOF2
@@ -44,33 +45,44 @@ case "\$1" in
 esac
 EOF2
 
-# The fake cosign verifies only with a key whose file name is in `accept`, and
-# then prints the payload cosign prints: one object per signature, the
-# annotations under .optional. `versions` lists the annotations to put in it.
+# The fake cosign is the registry too: a tag resolves to the digest in `tag`,
+# and only a digest listed in `signed` carries signatures. It verifies only
+# with a key whose file name is in `accept`, and then prints the payload
+# cosign prints: one object per signature, the digest under .critical and the
+# annotations under .optional. `versions` lists the annotations to put in it;
+# `payload` (when present) overrides the digests the payload names.
 cat > "$W/bin/cosign" <<EOF2
 #!/bin/sh
 printf '%s\n' "\$*" >> "$W/log"
 [ "\$1" = verify ] || exit 99
 [ "\$2" = --key ] || exit 99
 _k=\$(basename "\$3")
+for _ref; do :; done
+case \$_ref in *@*) _d=\${_ref#*@} ;; *) _d=\$(cat "$W/tag") ;; esac
+grep -qx "\$_d" "$W/signed" || { echo "no signatures found" >&2; exit 1; }
 grep -qx "\$_k" "$W/accept" 2> /dev/null || { echo "no matching signatures" >&2; exit 1; }
+[ ! -e "$W/payload" ] || _d=\$(cat "$W/payload")
 _out='['
 _sep=
 for _v in \$(cat "$W/versions"); do
-  _out="\$_out\$_sep{\"optional\":{\"repo\":\"crunchtools/sdlc\",\"version\":\"\$_v\"}}"
-  _sep=,
+  for _p in \$_d; do
+    _out="\$_out\$_sep{\"critical\":{\"image\":{\"docker-manifest-digest\":\"\$_p\"}},\"optional\":{\"repo\":\"crunchtools/sdlc\",\"version\":\"\$_v\"}}"
+    _sep=,
+  done
 done
 printf '%s]\n' "\$_out"
 EOF2
 chmod +x "$W/bin/docker" "$W/bin/cosign"
 
 reset() {
-  rm -rf "$W/log" "$W/pull-fails" "$W/no-self" "$W/keys"
+  rm -rf "$W/log" "$W/pull-fails" "$W/no-self" "$W/keys" "$W/payload"
   mkdir -p "$W/keys/keys"
   : > "$W/keys/keys/a.pub"
   printf '0\n' > "$W/keys/major"
   printf '0.12.0\n' > "$W/keys/minimum"
   printf '%s@sha256:%s\n' "$REPO" "$HEX" > "$W/repodigests"
+  printf 'sha256:%s\n' "$HEX" > "$W/tag"
+  printf 'sha256:%s\n' "$HEX" > "$W/signed"
   printf '0.12.1\n' > "$W/label"
   printf '0.12.1\n' > "$W/versions"
   printf 'a.pub\n' > "$W/accept"
@@ -100,8 +112,9 @@ if [ "$RC" -eq 0 ] && [ "$(grep -c '^run ' "$W/log")" -eq 1 ] \
    && printf '%s' "$RUNLINE" | grep -q -- '--volumes-from selfid123' \
    && printf '%s' "$RUNLINE" | grep -q -- '--pull=never' \
    && printf '%s' "$RUNLINE" | grep -q -- " $REPO@sha256:$HEX event\$" \
-   && grep -q -- "^pull -q $REPO:0\$" "$W/log" \
-   && grep -q -- "^verify --key $W/keys/keys/a.pub --insecure-ignore-tlog=true -a repo=crunchtools/sdlc $REPO@sha256:$HEX\$" "$W/log"; then
+   && grep -q -- "^pull -q $REPO@sha256:$HEX\$" "$W/log" \
+   && grep -q -- "^verify --key $W/keys/keys/a.pub --insecure-ignore-tlog=true -a repo=crunchtools/sdlc $REPO:0\$" "$W/log" \
+   && [ "$(grep -n '^verify ' "$W/log" | head -n 1 | cut -d: -f1)" -lt "$(grep -n '^pull ' "$W/log" | cut -d: -f1)" ]; then
   ok "a verified image runs by digest, from this container's volumes, with the args"
 else
   bad "happy path: exit $RC"; cat "$W/log"; printf '%s\n' "$OUT"
@@ -185,21 +198,26 @@ for v in 0.12 0.12.0-rc1 0.12.1.1 v0.12.1 0.012.1 0.12.x ''; do
   refused "version '$v' is not strict SemVer"
 done
 
-for d in '' "$REPO@sha256:abc" "$REPO@sha256:$(printf 'G%.0s' $(seq 64))" \
-         "other.io/x@sha256:$HEX" "$REPO@sha256:$(printf 'a%.0s' $(seq 65))"; do
+for d in '' sha256:abc "sha256:$(printf 'G%.0s' $(seq 64))" "sha512:$HEX" \
+         "sha256:$(printf 'a%.0s' $(seq 65))" "sha256:$HEX sha256:$(printf 'b%.0s' $(seq 64))"; do
   reset
-  printf '%s\n' "$d" > "$W/repodigests"
+  printf '%s\n' "$d" > "$W/payload"
   run event
-  refused "RepoDigest '$d' is refused"
+  refused "a payload naming digest(s) '$d' is refused" "no single sha256 digest"
 done
 
+# a1566: on the host that built the release, docker lists the build's own
+# manifest digest (never pushed, never signed) first in RepoDigests, beside
+# the one the registry's :0 names. Boot runs what the registry's tag names.
 reset
-printf 'other.io/x@sha256:%s\n%s@sha256:%s\n' "$HEX" "$REPO" "$HEX" > "$W/repodigests"
+LOCAL=$(printf 'b%.0s' $(seq 64))
+printf '%s@sha256:%s\n%s@sha256:%s\n' "$REPO" "$LOCAL" "$REPO" "$HEX" > "$W/repodigests"
 run event
-if [ "$RC" -eq 0 ] && ran; then
-  ok "the digest is picked from the line that names the repository"
+if [ "$RC" -eq 0 ] && ran && grep -q -- "^run .* $REPO@sha256:$HEX event\$" "$W/log" \
+   && ! grep -q "$LOCAL" "$W/log"; then
+  ok "the digest is the registry's for :0, not the local build's first RepoDigest (a1566)"
 else
-  bad "digest pick: exit $RC"; printf '%s\n' "$OUT"
+  bad "a1566 local digest: exit $RC"; printf '%s\n' "$OUT"
 fi
 
 reset

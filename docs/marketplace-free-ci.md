@@ -206,9 +206,11 @@ literal, so only a reviewed commit to `ci.yml` can change it; no variable can.
 `sdlc-bootstrap` is `bin/sdlc-bootstrap` grown into an image. It holds cosign, the
 **sdlc public key**, the major version it follows and a **minimum version**,
 all baked in. In every job it does five things:
-1. It resolves `quay.io/crunchtools/sdlc:<major>` to a digest.
-2. It verifies that digest:
+1. It resolves `quay.io/crunchtools/sdlc:<major>` to a digest in the registry and
+   verifies it in one call:
    `cosign verify --key sdlc.pub -a repo=crunchtools/sdlc` (`--insecure-ignore-tlog`, as today).
+   The digest comes from the verified payload, never from the local store.
+2. It pulls that digest.
 3. It reads the `version` annotation and the image's `version` label. It
    refuses unless they agree and are at or above the baked minimum.
 4. It runs `sdlc event` from that digest, as a sibling container on the

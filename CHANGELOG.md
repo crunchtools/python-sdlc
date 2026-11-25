@@ -6,6 +6,17 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- sdlc-bootstrap (`boot/sdlc`) resolves `:<major>` in the registry, in the same
+  `cosign verify` that checks it, and runs the digest from the verified
+  payload. It used to read the digest back from the first `RepoDigests` entry
+  after a pull. On a host that had built the release, that entry was the
+  build's own manifest digest, never pushed and never signed, so it refused a
+  correctly signed `:0` (a1566). Release order was already right: the
+  signature lands before any tag moves, and `tests/test_self.sh` now pins that
+  order.
+
 ## [0.16.2] - 2026-11-25
 
 ### Added
