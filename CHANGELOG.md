@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.8] - 2026-11-25
+
 ### Fixed
 
 - `docs/design.md` principle 3 now matches constitution 2.0.0 G3: the image
