@@ -23,21 +23,30 @@ mkdir "$W/bin"
 D=sha256:$(printf 'a%.0s' $(seq 64))
 FLEET=quay.io/crunchtools/sdlc
 
-# The fake podman. Its behaviour is files in $W: `pull-fails`, `absent`,
+# The fake podman. Its behaviour is files in $W: `pull-fails` (the registry
+# cannot be reached, so cosign cannot resolve a tag either), `absent`,
 # `unsigned` (by either key), `unsigned-sdlc` and `unsigned-fleet` (by that
-# key), and `digest` (what inspect answers). The launcher it prints
-# records the environment and arguments it ran with.
+# key), `unsigned-digests` (digests signed by neither), `digest` (what the
+# local copy's inspect answers) and `remote` (the digest the registry resolves
+# the tag to, in full). The launcher it prints records the environment and arguments it
+# ran with.
 cat > "$W/bin/podman" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$W/log"
 case " \$* " in
   *" pull "*)         [ ! -e "$W/pull-fails" ] ;;
+  *" triangulate "*)
+    [ ! -e "$W/pull-fails" ] || { echo 'Error: dial tcp: no route to host' >&2; exit 1; }
+    cat "$W/remote" ;;
   *" image exists "*) [ ! -e "$W/absent" ] ;;
   *" image inspect "*)
     [ ! -e "$W/inspect-fails" ] || { echo 'Error: inspecting object: boom' >&2; exit 125; }
     cat "$W/digest" ;;
   *" verify "*)
     [ ! -e "$W/unsigned" ] || { echo 'Error: no signatures found' >&2; exit 10; }
+    for _d in \$(cat "$W/unsigned-digests" 2>/dev/null); do
+      case " \$* " in *"@\$_d "*) echo 'Error: no signatures found' >&2; exit 10 ;; esac
+    done
     case " \$* " in *" --key /sdlc.pub "*) _k=sdlc ;; *) _k=fleet ;; esac
     [ ! -e "$W/unsigned-\$_k" ] || { echo "Error: no \$_k signature found" >&2; exit 10; } ;;
   *" launcher "*)
@@ -49,8 +58,9 @@ chmod +x "$W/bin/podman"
 
 reset() {
   rm -rf "$W/log" "$W/ran" "$W/cache" "$W/pull-fails" "$W/absent" "$W/unsigned" "$W/inspect-fails" \
-    "$W/unsigned-sdlc" "$W/unsigned-fleet"
+    "$W/unsigned-sdlc" "$W/unsigned-fleet" "$W/unsigned-digests"
   printf '%s\n' "$D" > "$W/digest"
+  printf '%s\n' "$FLEET@$D" > "$W/remote"
 }
 boot() {             # args...: run the bootstrap, set RC and OUT
   RC=0
@@ -88,6 +98,35 @@ else
   bad "no cache marker for the verified digest"
 fi
 
+# The registry names the digest, never the local copy (a1569): a seat that
+# pulled the tag while it pointed at an unsigned digest still has that digest
+# under the tag's name, and must verify and run the signed one the tag names now.
+S=sha256:$(printf 'c%.0s' $(seq 64))
+reset
+printf '%s\n' "$S" > "$W/digest"
+printf '%s\n' "$S" > "$W/unsigned-digests"
+boot versions
+if [ "$RC" -eq 0 ] && [ "$(cat "$W/ran" 2>/dev/null)" = "$FLEET@$D|$FLEET:latest|versions" ] \
+   && ! grep -q "$S" "$W/log" && ! grep -q ' inspect ' "$W/log"; then
+  ok "a stale unsigned digest under the tag's local name is never verified: the registry's digest runs"
+else
+  bad "stale local digest: exit $RC, ran '$(cat "$W/ran" 2>/dev/null)'"; printf '%s\n' "$OUT"; cat "$W/log"
+fi
+
+reset
+touch "$W/absent"
+boot versions
+pull_at=$(grep -n " pull -q -- $FLEET@$D\$" "$W/log" | cut -d: -f1)
+verify_at=$(grep -n " verify .* $FLEET@$D\$" "$W/log" | cut -d: -f1)
+if [ "$RC" -eq 0 ] && [ -n "$pull_at" ] && [ -n "$verify_at" ] && [ "$pull_at" -lt "$verify_at" ] \
+   && ! grep -q " pull -q -- $FLEET:latest\$" "$W/log" && [ -e "$W/ran" ]; then
+  ok "the digest a tag resolves to is pulled by digest when missing, then verified; the tag is never pulled"
+else
+  bad "resolved digest not here: exit $RC"; cat "$W/log"
+fi
+
+reset
+boot versions
 rm -f "$W/log" "$W/ran"
 touch "$W/pull-fails"
 boot versions
@@ -200,8 +239,8 @@ fi
 reset
 touch "$W/pull-fails" "$W/absent"
 boot versions
-if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'could not be pulled'; then
-  ok "an image that cannot be pulled and is not here is a 2"
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'could not be resolved at the registry and is not here: Error: dial tcp'; then
+  ok "a tag that cannot be resolved and is not here is a 2"
 else
   bad "unpullable: exit $RC"; printf '%s\n' "$OUT"
 fi
@@ -216,18 +255,31 @@ else
 fi
 
 for d in '' '<none>' 'sha256:abc' "sha256:$(printf 'G%.0s' $(seq 64))"; do
-  reset
-  printf '%s\n' "$d" > "$W/digest"
-  boot versions
-  if [ "$RC" -eq 2 ] && ! grep -q ' verify \| launcher ' "$W/log"; then
-    ok "inspect answering '$d' is a 2 before anything runs"
-  else
-    bad "inspect answering '$d': exit $RC"; cat "$W/log"
-  fi
+  for at in remote digest; do
+    reset
+    if [ "$at" = remote ]; then printf '%s\n' "$FLEET@$d" > "$W/remote"
+    else printf '%s\n' "$d" > "$W/digest"; touch "$W/pull-fails"; fi
+    boot versions
+    if [ "$RC" -eq 2 ] && ! grep -q ' verify \| launcher ' "$W/log"; then
+      ok "$at answering '$d' is a 2 before anything runs"
+    else
+      bad "$at answering '$d': exit $RC"; cat "$W/log"
+    fi
+  done
 done
 
 reset
-touch "$W/inspect-fails"
+printf '%s\n' "docker.io/evil/sdlc@$D" > "$W/remote"
+boot versions
+if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q "not a digest of $FLEET" \
+   && ! grep -q ' verify \| launcher ' "$W/log"; then
+  ok "a tag resolved to another repository is a 2 before anything runs"
+else
+  bad "foreign resolution: exit $RC"; printf '%s\n' "$OUT"
+fi
+
+reset
+touch "$W/inspect-fails" "$W/pull-fails"
 boot versions
 if [ "$RC" -eq 2 ] && printf '%s' "$OUT" | grep -q 'could not be inspected: Error: inspecting object: boom' \
    && ! printf '%s' "$OUT" | grep -q 'no sha256 digest' && ! grep -q ' verify \| launcher ' "$W/log"; then

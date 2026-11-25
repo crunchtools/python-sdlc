@@ -39,6 +39,12 @@ All notable changes to this project are documented here, following
   correctly signed `:0` (a1566). Release order was already right: the
   signature lands before any tag moves, and `tests/test_self.sh` now pins that
   order.
+- `bin/sdlc-bootstrap`, the launcher a converted repo runs, resolves a tag in
+  the registry with the pinned cosign's `triangulate --type=digest`, pulls
+  that digest when it is missing, and verifies and runs it (a1569). It read
+  the digest from the local copy, so a seat that pulled a tag while it pointed
+  at an unsigned digest kept refusing the signed one after every later pull,
+  until someone removed the image. Offline, the local copy still stands.
 
 ## [0.16.2] - 2026-11-25
 

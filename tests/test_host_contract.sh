@@ -80,8 +80,8 @@ done
 # begin `lanes-` exercise the parallel executor: their steps print markers,
 # sleep and exit on command, so a test can pin what the launcher does with a
 # lane that fails, a lane that is slow, and two lanes writing one terminal.
-# The digest every pulled tag resolves to, which the bootstrap then verifies
-# and runs by.
+# The digest every tag resolves to at the registry, which the bootstrap then
+# verifies and runs by.
 DIG64=feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface
 TAB=$(printf '\t')
 US=$(printf '\037')
@@ -105,6 +105,9 @@ for _last in "\$@"; do :; done
 # CMD /usr/lib/systemd/systemd, and any other image neither.
 case " \$* " in
   *" info "*) [ "\$(cat "$SHIM/apparmor" 2>/dev/null)" = true ] && printf 'true\n'; exit 0 ;;
+esac
+case " \$* " in
+  *" triangulate --type=digest "*) printf 'quay.io/crunchtools/sdlc@sha256:%s\n' "$DIG64"; exit 0 ;;
 esac
 case " \$* " in
   *" image inspect "*)
