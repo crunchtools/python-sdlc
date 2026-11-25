@@ -385,7 +385,12 @@ def latest_is_newer(job: Job, new: tuple[int, int, int] | None) -> bool:
         return False
     raw = job.must(["skopeo", "inspect", f"docker://{job.ref}:latest"])
     current = label_version(parse_json(raw, "skopeo inspect of latest").get("Labels") or {})
-    return current is not None and current > new
+    if current is None or current <= new:
+        return False
+    # As in refuse_mislabelled: a label that names no release of this repo is inherited
+    # from the base (Hummingbird's python sets 3.14.x) and says nothing about this one.
+    name = "{}.{}.{}".format(*current)
+    return get(job, f"/repos/{job.repo}/git/ref/tags/v{name}").status == OK
 
 
 def get(job: Job, path: str) -> Response:

@@ -47,6 +47,7 @@ for tool in podman skopeo jq curl openssl; do
   command -v "$tool" > /dev/null || die "$tool is not on PATH"
 done
 
+project=${repo#*/}
 here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 # The fleet file's own pins, read out of it so this loop cannot drift from CI.
 bootstrap=$(grep -o 'quay\.io/crunchtools/sdlc-bootstrap@sha256:[0-9a-f]\{64\}' "$here/examples/ci.yml" | head -1)
@@ -82,6 +83,12 @@ cleanup() {
     || echo "local-release: could not revoke the App token; it expires within the hour" >&2
   # Root-owned files the jobs left; the workspace holds no secret.
   rm -rf "$work"
+  # The images this run built, which a runner VM would take with it; not
+  # forced, so one a run beside this one still uses stays.
+  podman images -q --filter "label=org.opencontainers.image.revision=$sha" 2> /dev/null \
+    | sort -u | xargs -r podman rmi > /dev/null 2>&1 || :
+  podman images --format '{{.Repository}}:{{.Tag}}' 2> /dev/null | grep "^localhost/${project}[:-]" \
+    | xargs -r podman rmi > /dev/null 2>&1 || :
 }
 trap cleanup EXIT
 trap 'exit 2' HUP INT TERM
@@ -166,17 +173,19 @@ fi
 job() {
   _job=$1
   shift
-  mkdir -p "$work/$_job/ws" "$work/$_job/tmp"
+  # Named for the repo, as a runner's workspace is: the launcher names the
+  # image it builds (localhost/<dir>:sdlc) after this directory.
+  mkdir -p "$work/$_job/$project" "$work/$_job/tmp"
   : > "$work/$_job/output"
   say "job $_job"
   set +e
   ( podman --remote --url "unix://$sock" run --rm --user 0 --security-opt label=disable \
-      -v "$sock:/var/run/docker.sock" -v "$work:$work" -w "$work/$_job/ws" \
+      -v "$sock:/var/run/docker.sock" -v "$work:$work" -w "$work/$_job/$project" \
       -e CI=true -e GITHUB_ACTIONS=true -e RUNNER_OS=Linux -e RUNNER_ARCH=X64 \
       -e RUNNER_ENVIRONMENT=self-hosted -e "RUNNER_TEMP=$work/$_job/tmp" \
       -e "GITHUB_JOB=$_job" -e GITHUB_EVENT_NAME=push \
       -e "GITHUB_EVENT_PATH=$work/event.json" -e "GITHUB_OUTPUT=$work/$_job/output" \
-      -e "GITHUB_WORKSPACE=$work/$_job/ws" -e "GITHUB_REPOSITORY=$repo" \
+      -e "GITHUB_WORKSPACE=$work/$_job/$project" -e "GITHUB_REPOSITORY=$repo" \
       -e "GITHUB_REPOSITORY_OWNER=${repo%%/*}" -e "GITHUB_SHA=$sha" \
       -e "GITHUB_REF=refs/heads/$default" -e "GITHUB_REF_NAME=$default" -e GITHUB_REF_TYPE=branch \
       -e "GITHUB_RUN_ATTEMPT=$attempt" -e GITHUB_SERVER_URL=https://github.com -e "GITHUB_API_URL=$API" \
