@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-25
+
 ### Security
 
 - `secret-scan`, a check in push and ci for every repo, restores the
