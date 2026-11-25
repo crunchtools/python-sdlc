@@ -13,7 +13,7 @@ container-release ran this in a job with no credentials. This one runs in the jo
 that holds the registry secrets and the runner's socket, and anything that can
 drive that socket can read them (`podman inspect` of the job's own container). So
 the repo supplies data, never code or a podman option of its own choosing.
-Every boot container is confined as run_gate's are (`CONFINED`; systemd gets
+Every boot container is confined as run_gate's are (`confined`; systemd gets
 `SYSTEMD_CONFINED`), `boot-run-args` is held to `RUN_FLAGS` and `RUN_VALUED`, a
 volume is walked on disk before it is mounted, the MCP clients are this
 module's, and the HTTP one runs in a container of the sdlc image that joins the
@@ -86,9 +86,15 @@ RUN_VALUED: dict[str, Callable[[str], bool]] = {
     "-v": lambda v: REPO_VOLUME.fullmatch(v) is not None and ".." not in v.split(":")[0],
     "--volume": lambda v: REPO_VOLUME.fullmatch(v) is not None and ".." not in v.split(":")[0],
 }
-# Every boot container runs as run_gate's gates do: no capability, no new
-# privilege, no network but its own loopback (mcp-http's client joins that).
-CONFINED = ["--cap-drop=all", "--security-opt=no-new-privileges", "--network=none"]
+
+
+def confined(job: Job) -> list[str]:
+    """Every boot container runs as run_gate's gates do: no capability, no new
+    privilege unless the engine is AppArmor's (`Job.nnp`), no network but its own
+    loopback (mcp-http's client joins that)."""
+    return ["--cap-drop=all", *job.nnp, "--network=none"]
+
+
 # systemd as PID 1 needs podman's default capabilities back, named here and no
 # others, and keeps no-new-privileges off: units exec setuid helpers (httpd's
 # suexec, ping, sudo) that the flag would break.
@@ -327,7 +333,7 @@ def listed_tools(listed: object) -> list:
 def boot_mcp(job: Job, spec: Boot, image: str) -> str:
     """The server on stdio: initialize, notifications/initialized, tools/list."""
     name = boot_name(job)
-    argv = [*job.podman, "run", "--rm", "-i", "--name", name, "--pull=never", *CONFINED]
+    argv = [*job.podman, "run", "--rm", "-i", "--name", name, "--pull=never", *confined(job)]
     argv += [*spec.args(), image, *spec.cmd]
     msgs = [
         initialize(),
@@ -474,7 +480,7 @@ def boot_mcp_http(job: Job, spec: Boot, image: str) -> str:
                 "--network",
                 f"container:{name}",
                 "--cap-drop=all",
-                "--security-opt=no-new-privileges",
+                *job.nnp,
                 "--entrypoint",
                 "python3",
                 job.image_id,
@@ -489,7 +495,7 @@ def boot_mcp_http(job: Job, spec: Boot, image: str) -> str:
             timeout=spec.timeout + GRACE,
         )
 
-    return detached(job, spec, image, check, *CONFINED)
+    return detached(job, spec, image, check, *confined(job))
 
 
 def boot_systemd(job: Job, spec: Boot, image: str) -> str:
@@ -552,7 +558,7 @@ def boot_healthcheck(job: Job, spec: Boot, image: str) -> str:
             sleep(POLL_SECONDS)
         return f"not healthy within {spec.timeout}s"
 
-    return detached(job, spec, image, check, *CONFINED)
+    return detached(job, spec, image, check, *confined(job))
 
 
 def detached(job: Job, spec: Boot, image: str, check: Callable[[str], str], *confined: str) -> str:

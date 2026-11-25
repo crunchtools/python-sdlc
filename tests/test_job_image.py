@@ -134,6 +134,7 @@ class FakeTools(Tools):
         self.log = ""  # what the job printed, kept by go()
         self.landed = ""  # what gated-<sha> resolves to after a push
         self.http_calls: list[str] = []
+        self.apparmor = ""  # what `podman info` says of .Host.Security.AppArmorEnabled
 
     def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
         done = self._answer(argv, **kw)
@@ -198,6 +199,8 @@ class FakeTools(Tools):
                 out = (
                     ("true 0 false" if up else "false 1 false") if state_query else str(up).lower()
                 )
+            case "info":
+                out = self.apparmor + "\n"
             case "push":
                 if self.digest is not None:
                     Path(sub[sub.index("--digestfile") + 1]).write_text(self.digest + "\n")
@@ -977,6 +980,30 @@ def test_boot_mcp_http_sidecar_joins_the_servers_namespace() -> None:
     assert "--cap-drop=all" in client and "--security-opt=no-new-privileges" in client
     assert t.argvs[-1][4:] == ["volume", "rm", "-f", "sdlc-cache-7-1"]
     assert ["rm", "-f", "-v", BOOT] in t.boot_calls()
+
+
+def nnp_runs(t: FakeTools) -> list[list[str]]:
+    return [a for a in t.argvs if a[4:5] == ["run"] and image.NNP in a]
+
+
+def test_apparmor_engine_runs_gates_and_boot_without_no_new_privileges() -> None:
+    """crunchtools/sdlc#181 for the image job: it drives the engine itself, so it asks."""
+    for profile in ("mcp", "mcp-http", "healthcheck"):
+        t = FakeTools()
+        t.apparmor = "true"
+        assert run_boot(t, profile) == 0 and t.pushed(), profile
+        runs = [a for a in t.argvs if a[4:5] == ["run"]] + [a for a, _, _ in t.conversed]
+        assert len(runs) > 1 and all("--cap-drop=all" in a for a in runs), profile
+        assert not [a for a in runs if image.NNP in a], profile
+
+
+def test_engine_without_apparmor_keeps_no_new_privileges() -> None:
+    for answer in ("false", ""):
+        t = FakeTools()
+        t.apparmor = answer
+        assert run_boot(t, "mcp-http") == 0
+        runs = [a for a in t.argvs if a[4:5] == ["run"]]
+        assert runs and nnp_runs(t) == runs, answer
 
 
 def test_boot_mcp_http_defaults_to_8080_mcp() -> None:

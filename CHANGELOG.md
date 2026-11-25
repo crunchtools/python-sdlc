@@ -19,6 +19,11 @@ All notable changes to this project are documented here, following
   it in its own argv, so it reached podman anyway: claude-agent's tmux tests
   failed every `terminate()` with EPERM under 0.15.9. The launcher alone now
   adds `--cap-drop=all` and the option, where it holds.
+- The `image` job's gates (`container-smoke` and every planned `podman run`) and
+  its boot gate's containers no longer pass `no-new-privileges` unconditionally
+  (a1552). The job drives the runner's engine over the socket, so bin/sdlc's
+  AppArmor rule (#181) never saw them: it now asks the engine, as bin/sdlc does,
+  and leaves the option off where AppArmor is enforced.
 
 ## [0.15.9] - 2026-11-25
 
