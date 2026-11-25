@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.6] - 2026-11-25
+
 ### Changed
 
 - **A release is tagged only after its gates pass (a1667).** The fleet's
