@@ -26,6 +26,11 @@ All notable changes to this project are documented here, following
   (exit 1) in the PR check, as it already failed the image job, instead of
   ADVISORY and SKIPPED there. A PR no longer passes a lint its release fails.
 
+### Fixed
+
+- sdlc's own release plan carries `image: true`, so `write`'s own refusal
+  holds back a release whose image was skipped, not only ci.yml's `if:` (a1667)
+
 ## [0.16.5] - 2026-11-25
 
 ### Added
