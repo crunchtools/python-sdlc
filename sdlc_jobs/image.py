@@ -653,8 +653,12 @@ def pin_args(job: Job, text: str, stages: list[Parent], argv: list[str]) -> list
     pinned = {stage.index: stage.pinned for stage in stages}
     kept: list[str] = []
     seen = -1
+    continued = False
     for line in text.splitlines(keepends=True):
-        m = FROM_LINE.match(line)
+        # A line that continues the one before (a RUN's python -c "...from x import y")
+        # is never an instruction, as the parser that counted the stages joins it.
+        m = None if continued else FROM_LINE.match(line)
+        continued = line.rstrip("\r\n").endswith("\\")
         if m:
             seen += 1
         if m and seen in pinned:
