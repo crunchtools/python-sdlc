@@ -187,10 +187,10 @@ OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" 
         SDLC_IMAGE=main sh "$BOOT" versions 2>&1) || RC=$?
 if [ "$RC" -eq 2 ] && [ ! -e "$W/ran" ] && [ "$(verifies)" = "fleet sdlc " ] \
    && printf '%s' "$OUT" | grep -q "signed by sdlc's key or the crunchtools fleet key\$" \
-   && printf '%s' "$OUT" | grep -q 'sdlc key:' \
-   && printf '%s' "$OUT" | grep -q 'fleet key:' \
-   && printf '%s' "$OUT" | grep -q 'no sdlc signature found' \
-   && printf '%s' "$OUT" | grep -q 'no fleet signature found' \
+   && [ "$(printf '%s\n' "$OUT" | grep -E 'key:$|no (sdlc|fleet) signature found' \
+             | sed -e 's/^.*fleet key:$/FK/' -e 's/^.*sdlc key:$/SK/' \
+                   -e 's/^.*no fleet signature found.*$/fe/' -e 's/^.*no sdlc signature found.*$/se/' \
+             | tr '\n' ' ')" = "FK fe SK se " ] \
    && [ ! -d "$W/cache/sdlc/verified" ]; then
   ok "main signed by neither key is a 2 with both keys' refusals, runs nothing, remembers nothing"
 else
