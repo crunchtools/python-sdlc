@@ -115,6 +115,7 @@ class FakeTools(Tools):
         self.policy: dict | None = None
         self.built_file = ""
         self.plan = ""  # the plan `sdlc plan ci` prints; empty is the stock one
+        self.ci_skip: set[str] = set()  # checks `sdlc plan ci` leaves out; by name, planned
         self.stdin: list[str | None] = []
         self.digest: str | None = PUSHED  # what `podman push --digestfile` writes; None, none
         self.replies: dict[int, dict] = {1: INIT_OK, 2: TOOLS_OK}  # what the MCP server says
@@ -162,7 +163,13 @@ class FakeTools(Tools):
         if argv[:2] == ["git", "rev-parse"]:
             return cp(0, TREE + "\n")
         if argv[:2] == ["sdlc", "plan"]:
-            return cp(0, self.plan or plan_text(bootc=self.bootc))
+            rows = (self.plan or plan_text(bootc=self.bootc)).splitlines(keepends=True)
+            keep = (
+                (lambda name: name not in self.ci_skip)
+                if argv[2] == "ci"
+                else (lambda name: name == argv[2])
+            )
+            return cp(0, "".join(r for r in rows if keep(r.split("\t", 1)[0])))
         if argv[0] == "sdlc":
             return cp(self.lint_rc if argv[1:] == ["containerfile-lint"] else 0)
         assert argv[:3] == ["podman", "--remote", "--url"], argv
@@ -435,6 +442,56 @@ def test_push_builds_when_the_pull_request_recorded_no_candidate_for_this_tree()
         rc, _ = go(t, QUAY_PARENT)
         assert rc == 0 and t.built() and t.pushed(), (notes, t.log)
         assert not any(a[:2] == ["skopeo", "copy"] for a in t.argvs)
+
+
+def test_image_checks_ci_leaves_out_are_still_run_here() -> None:
+    names = ("container-build", "container-smoke", "container-scan")
+    # An RHSM build skips all three in ci; a python repo with no stacks plans none.
+    t = FakeTools()
+    t.ci_skip = set(names)
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0 and t.built() and t.pushed(), t.log
+    for name in names:
+        assert ["sdlc", "plan", name] in t.argvs, name
+    assert any("scan-rootfs" in a for a in t.argvs), "the scan ran"
+
+
+def test_a_bootc_image_ci_leaves_out_is_still_linted_here() -> None:
+    t = FakeTools()
+    t.bootc = True
+    t.ci_skip = {"container-build", "container-scan", "bootc-lint"}  # an RHSM bootc build
+    rc, _ = go(t, "FROM quay.io/crunchtools/rhel10-bootc:latest\nRUN true\n")
+    assert rc == 0 and t.pushed(), t.log
+    assert ["sdlc", "plan", "bootc-lint"] in t.argvs
+    assert ["sdlc", "plan", "container-smoke"] not in t.argvs
+    assert t.build_argv()[t.build_argv().index("--format") + 1] == "oci"
+    assert any("lint" in a for a in t.argvs if a[4:5] == ["run"])
+
+
+def test_a_container_image_never_plans_bootc_lint() -> None:
+    t = FakeTools()
+    t.ci_skip = {"container-build", "container-smoke", "container-scan"}
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0, t.log
+    assert ["sdlc", "plan", "bootc-lint"] not in t.argvs
+
+
+def test_an_image_check_ci_plans_is_not_planned_again() -> None:
+    t = FakeTools()
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0, t.log
+    assert not any(
+        a[:2] == ["sdlc", "plan"] and a[2] in ("container-build", "container-smoke")
+        for a in t.argvs
+    )
+
+
+def test_a_scan_finding_on_a_check_ci_left_out_stops_the_push() -> None:
+    t = FakeTools()
+    t.ci_skip = {"container-build", "container-smoke", "container-scan"}
+    t.scan_rc = 1
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc != 0 and not t.pushed(), t.log
 
 
 def test_a_recorded_candidate_that_does_not_check_out_is_refused() -> None:
