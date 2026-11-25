@@ -3596,6 +3596,24 @@ def result_uri(result: dict) -> str:
     return (phys.get("artifactLocation") or {}).get("uri", "?")
 
 
+def read_sarif(sarif: Path) -> dict:
+    """CodeQL's SARIF, held to the shape the filters walk: an object whose runs are objects."""
+    try:
+        data = json.loads(sarif.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        cannot(f"codeql wrote no readable SARIF: {exc}")
+    runs = data.get("runs", []) if isinstance(data, dict) else None
+    if not isinstance(runs, list) or not all(isinstance(r, dict) for r in runs):
+        cannot(f"codeql wrote SARIF without a list of runs: {sarif}")
+    data["runs"] = runs
+    for run_ in runs:
+        results = run_.get("results", [])
+        if not isinstance(results, list) or not all(isinstance(r, dict) for r in results):
+            cannot(f"codeql wrote a SARIF run whose results are not objects: {sarif}")
+        run_["results"] = results
+    return data
+
+
 def export_sarif(sarif: Path, ignores: list[str], dest: Path) -> None:
     """Write CodeQL's SARIF to `dest` without the results under `paths-ignore`.
 
@@ -3607,11 +3625,8 @@ def export_sarif(sarif: Path, ignores: list[str], dest: Path) -> None:
 
     Written to a temp file and renamed, so the uploader never reads half a file.
     """
-    try:
-        data = json.loads(sarif.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        cannot(f"codeql wrote no readable SARIF: {exc}")
-    for run_ in data.get("runs", []):
+    data = read_sarif(sarif)
+    for run_ in data["runs"]:
         run_["results"] = [
             r for r in run_.get("results", []) if not path_ignored(result_uri(r), ignores)
         ]
@@ -3626,12 +3641,9 @@ def export_sarif(sarif: Path, ignores: list[str], dest: Path) -> None:
 
 def sarif_findings(sarif: Path, ignores: list[str]) -> list[dict]:
     """Every result outside `paths-ignore`, with the key a baseline matches on."""
-    try:
-        data = json.loads(sarif.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        cannot(f"codeql wrote no readable SARIF: {exc}")
+    data = read_sarif(sarif)
     out = []
-    for run_ in data.get("runs", []):
+    for run_ in data["runs"]:
         for result in run_.get("results", []):
             phys = ((result.get("locations") or [{}])[0]).get("physicalLocation") or {}
             uri = result_uri(result)

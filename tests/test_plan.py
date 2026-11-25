@@ -2209,6 +2209,12 @@ with tempfile.TemporaryDirectory() as root:
     dest = exported / "codeql-results.sarif"
     msg = cannot_run(S.export_sarif, bad, [], dest)
     check("export of unreadable SARIF cannot run", bool(msg) and "readable" in msg, str(msg))
+    for shape in ("[]", '{"runs": {}}', '{"runs": [1]}', '{"runs": [{"results": [2]}]}'):
+        bad.write_text(shape)
+        msg = cannot_run(S.export_sarif, bad, [], dest)
+        check(f"export of SARIF shaped {shape} cannot run", bool(msg) and "codeql wrote" in msg)
+        msg = cannot_run(S.sarif_findings, bad, [])
+        check(f"findings of SARIF shaped {shape} cannot run", bool(msg) and "codeql wrote" in msg)
     msg = cannot_run(S.export_sarif, Path(root, "absent.sarif"), [], dest)
     check("export of absent SARIF cannot run", bool(msg) and "readable" in msg, str(msg))
     msg = cannot_run(S.export_sarif, raw, [], Path(root, "no-such-dir", "out.sarif"))
