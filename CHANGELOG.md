@@ -112,6 +112,16 @@ Until step 2 the image job says the three keys are not enforced.
 
 ### Fixed
 
+- `scripts/hotfix.sh` tags vX.Y.Z through the Ashigaru App, as `write` tags a
+  release merge (sdlc#191, a1383). Tag ruleset 27841014 lets only the App
+  create v*.*.* tags, so 0.15.2 through 0.15.7 shipped untagged. Between the
+  image and sign steps, hotfix.sh signs the App's JWT with openssl and mints
+  `write`'s TAG token for sdlc alone; only that token, on stdin, reaches the
+  image just built, where `sdlc_jobs/_hotfix.py` runs Ashigaru's
+  `release_publish`. The token is revoked on exit. A tag already at the commit
+  is a re-run, one at another commit a refusal. The stdin JSON now also
+  carries `ASHIGARU_CLIENT_ID` and `ASHIGARU_APP_KEY`, and the host needs
+  openssl and curl.
 - Gourmand runs in the fleet again (#177). The cutover deleted every repo's
   `gourmand.yml`, and `sdlc ci` leaves Gourmand out (constitution XII), so
   nothing ran it. The `check` job now runs the launcher's `gourmand` after

@@ -265,13 +265,8 @@ def publish_release(
     if isinstance(verdict, str):
         return _error(f"{repo}@{sha[:7]} is not a release merge: {verdict}"), None
     version, pull = verdict
-    done = site.runner(
-        ["python3", "-I", "-c", _PUBLISH, str(tools.ASHIGARU_SCRIPTS), repo, version, sha],
-        env=tools.child_env(site.env, GH_TOKEN=token),
-        timeout=tools.GIT_SECONDS,
-    )
-    if tools.verdict(done, "release_publish"):
-        return _error(f"{repo} v{version} was not published: {done.stdout.strip()[-300:]}"), None
+    if publish(site, token, version, sha):
+        return 1, None
     release = {
         "version": version,
         "sha": sha,
@@ -279,6 +274,23 @@ def publish_release(
         "publish": planned.get("publish") or "",
     }
     return 0, release
+
+
+def publish(site: Site, token: str, version: str, sha: str) -> int:
+    """Tag `sha` as v`version` and publish its GitHub Release, as Ashigaru does.
+
+    Only the caller decides that `sha` is that release: `publish_release` from
+    the merged release pull request, `_hotfix` from the tree scripts/hotfix.sh
+    just signed.
+    """
+    done = site.runner(
+        ["python3", "-I", "-c", _PUBLISH, str(tools.ASHIGARU_SCRIPTS), site.repo, version, sha],
+        env=tools.child_env(site.env, GH_TOKEN=token),
+        timeout=tools.GIT_SECONDS,
+    )
+    if tools.verdict(done, "release_publish"):
+        return _error(f"{site.repo} v{version} was not published: {done.stdout.strip()[-300:]}")
+    return 0
 
 
 def audit_issue(site: Site, audit: Mapping[str, Any], token: str, run_url: str) -> int:

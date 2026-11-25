@@ -150,7 +150,7 @@ mkdir -p "$W/repo/scripts" "$W/repo/boot/keys" "$W/repo/tests" "$W/repo/bin"
 cp "$SRC" "$W/repo/scripts/self.sh"
 for s in tests/test_host_contract.sh tests/test_bootstrap.sh tests/test_sign_digest.sh \
          tests/test_attest_digest.sh tests/test_provenance.py tests/test_revision_of.sh \
-         tests/test_release_version.py tests/test_boot.sh tests/test_self.sh tests/contract.sh \
+         tests/test_release_version.py tests/test_boot.sh tests/test_self.sh tests/test_hotfix.sh tests/contract.sh \
          tests/test_container_stack.sh tests/test_node_stack.sh tests/test_bootc_stack.sh \
          tests/test_docs_stack.sh bin/sdlc; do
   # shellcheck disable=SC2016

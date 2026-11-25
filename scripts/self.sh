@@ -73,7 +73,7 @@ SHELL_FILES='bin/sdlc bin/sdlc-bootstrap boot/sdlc scripts/self.sh scripts/relea
   tests/test_host_contract.sh tests/test_container_stack.sh tests/test_node_stack.sh
   tests/test_bootc_stack.sh tests/test_docs_stack.sh tests/test_revision_of.sh
   tests/test_bootstrap.sh tests/test_sign_digest.sh tests/test_attest_digest.sh
-  tests/test_boot.sh tests/test_self.sh tests/test_apparmor.sh .semgrep/run-tests.sh'
+  tests/test_boot.sh tests/test_self.sh tests/test_hotfix.sh tests/test_apparmor.sh .semgrep/run-tests.sh'
 SHELLCHECK=docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
 
 # Builds the tree in $1 as sdlc and sdlc-bootstrap, tagged $2 and $3. A run no
@@ -107,7 +107,8 @@ test_all() {
   podman run --rm -v "$here:/mnt:ro,z" -w /mnt "$SHELLCHECK" $SHELL_FILES
   for t in tests/test_host_contract.sh tests/test_bootstrap.sh tests/test_sign_digest.sh \
            tests/test_attest_digest.sh tests/test_provenance.py tests/test_revision_of.sh \
-           tests/test_release_version.py tests/test_boot.sh tests/test_self.sh; do
+           tests/test_release_version.py tests/test_boot.sh tests/test_self.sh \
+           tests/test_hotfix.sh; do
     "$t"
   done
   tests/contract.sh "$1"
