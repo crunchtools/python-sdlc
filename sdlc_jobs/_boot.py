@@ -18,8 +18,8 @@ Every boot container is confined as run_gate's are (`CONFINED`; systemd gets
 volume is walked on disk before it is mounted, the MCP clients are this
 module's, and the HTTP one runs in a container of the sdlc image that joins the
 server's network namespace, because the server's loopback is not this container's.
-`boot: command` and `contract-test` are shell: they are not run here, and the job
-prints so. They need a job of their own with no secret (crunchtools/sdlc#118).
+`boot: command` and `contract-test` are repo shell: they run in the `boot` job,
+which holds no secret, against the digest this job pushed (sdlc_jobs/boot.py).
 
 A missing `boot` is no gate: a repo that never called container-release has
 container-smoke. Every key is checked before the job logs in, so a typo is a 2
@@ -171,8 +171,7 @@ def boot_settings(s: dict) -> Boot | None:
     reason = text(s, "boot-none-reason").strip()
     if profile == "none" and not reason:
         cannot('[tool.sdlc.image] boot = "none" needs boot-none-reason')
-    if profile == "command" and not text(s, "boot-command").strip():
-        cannot('[tool.sdlc.image] boot = "command" needs boot-command')
+    check_command(s, profile)
     return Boot(
         profile,
         env,
@@ -184,6 +183,19 @@ def boot_settings(s: dict) -> Boot | None:
         whole(s, "boot-timeout", TIMEOUT, TIMEOUT_MAX),
         reason,
     )
+
+
+def check_command(s: dict, profile: str) -> None:
+    """boot = "command" needs boot-command; boot-command under another profile is ignored.
+
+    The second is a warning until every repo runs the fleet file with the boot job: a 2
+    here would fail the image job under the old file, which runs neither.
+    """
+    command = bool(text(s, "boot-command").strip())
+    if profile == "command" and not command:
+        cannot('[tool.sdlc.image] boot = "command" needs boot-command')
+    if command and profile != "command":
+        print(f'boot: WARNING: boot-command runs only under boot = "command", not {profile!r}')
 
 
 def words(s: dict, key: str) -> list[str]:
@@ -222,7 +234,7 @@ def boot_gate(job: Job, spec: Boot, image: str) -> bool:
         print(f"boot: SKIPPED: {spec.reason}", flush=True)
         return True
     if spec.profile == "command":
-        print('boot: NOT ENFORCED: boot = "command" is shell (crunchtools/sdlc#118)')
+        print('boot: boot = "command" is repo shell: the boot job runs it on the pushed digest')
         return True
     spec.run_args = on_host(job, spec.run_args)
     finding = PROFILE_RUN[spec.profile](job, spec, image)

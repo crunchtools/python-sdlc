@@ -356,3 +356,30 @@ justification = """
   extracted (the OIDC and Quay token reads into _field, the annotation parse \
   into _parsed); what is left is shape, not copied logic.
 """
+
+[[exceptions]]
+check = "CH001-absolute_paths"
+path = "sdlc_jobs/boot.py"
+classification = "by_design"
+justification = """
+  SDK_DIRS are the GitHub-hosted runner's preinstalled toolchains, the four \
+  directories container-release's free-disk removed. They are paths on that \
+  runner's host, mounted into a container of the job's own image to be \
+  emptied, named once as a module constant and asserted by \
+  tests/test_job_boot.py; the layout is the runner image's, not the repo's.
+"""
+
+# The same shape match: CH012 pairs boot.py's run with write.py's main,
+# renovate.py's run and _release.py's: an event check, an env read, a
+# workspace and a loop that returns early. No line, call or name is shared.
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/boot.py"
+classification = "gourmand_bug"
+justification = """
+  boot.run checks the event, refuses a held secret, re-validates image's \
+  result and runs each image's shell; write.main, renovate.run and \
+  _release's entry share no line, call or identifier with it. The match is \
+  a run of twelve assign/if/return statements, the opening of every job \
+  module's entry, not duplicated logic, so there is no helper to extract.
+"""

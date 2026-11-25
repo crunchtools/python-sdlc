@@ -731,6 +731,22 @@ def test_many_images_poll_each_parent() -> None:
     assert go("schedule", t, files=MANY, cron=check.POLL)[1]["image"] is True
 
 
+def test_plan_boot_is_true_only_when_an_image_sets_a_boot_job_key() -> None:
+    def planned(body: str) -> object:
+        files = {**IMAGE, "pyproject.toml": f"[tool.sdlc.image]\n{body}"}
+        return go("push", FakeTools(), files=files)[1]["boot"]
+
+    assert go("push", FakeTools(), files=IMAGE)[1]["boot"] is False
+    assert go("push", FakeTools())[1]["boot"] is False
+    assert planned('boot = "mcp"\n') is False
+    assert planned("free-disk = false\n") is False
+    assert planned('boot = "command"\nboot-command = "true"\n') is True
+    assert planned('contract-test = "true"\n') is True
+    assert planned("free-disk = true\n") is True
+    extra = {**MANY, "pyproject.toml": MANY["pyproject.toml"] + 'contract-test = "true"\n'}
+    assert go("push", FakeTools(), files=extra)[1]["boot"] is True
+
+
 def test_poll_reads_the_parent_build_args_choose() -> None:
     text = "ARG B=reg/x:1\nFROM ${B}\n"
     assert check.final_base(text, {"B": "quay.io/crunchtools/demo-base:latest"}) == (

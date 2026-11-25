@@ -4,7 +4,7 @@
 runs `sdlc_jobs.<job>` through `_core.run_job`. A job exposes either
 
     def run(event_name: str, event: dict, env: Mapping[str, str],
-            tools: Tools) -> int      # check, image, promote, pypi
+            tools: Tools) -> int      # check, image, boot, promote, pypi
     def main(event_name: str, event: dict, env: Mapping[str, str]) -> int
                                       # ai, write, gate
 

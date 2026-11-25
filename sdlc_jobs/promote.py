@@ -155,7 +155,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     """Sign, attest and tag the digest `image` pushed; 0 when it is promoted.
 
     Everything comes from `env`: GITHUB_REPOSITORY, SDLC_IMAGE_RESULT (image's
-    output), SDLC_CHECK, SDLC_WRITE and SDLC_RELEASE, and the signing key.
+    output), SDLC_CHECK, SDLC_BOOT, SDLC_WRITE and SDLC_RELEASE, and the signing key.
     `tools` runs skopeo and cosign (a fake in the suites). Raises
     CannotRunError, exit 2, when an input is malformed or would move a version
     backwards, or a signing or tagging step fails.
@@ -169,6 +169,10 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     if not env.get("GITHUB_TOKEN"):
         cannot("GITHUB_TOKEN is required: a tag read without it fails open on a private repo")
     built = validate_image(env, repo)
+    # The digest's own boot proof (sdlc_jobs/boot.py) passed. A fleet file older than
+    # the boot job maps no SDLC_BOOT: there the keys stay unenforced, as before it.
+    if plan(env).get("boot") and "SDLC_BOOT" in env:
+        needed("boot", env["SDLC_BOOT"])
     version = release_version(env, plan(env).get("release"))
     scratch = Path(tempfile.mkdtemp(prefix="sdlc-promote-", dir=env.get("RUNNER_TEMP") or None))
     scratch.chmod(0o700)

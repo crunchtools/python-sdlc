@@ -25,7 +25,8 @@ and bootc-lint, and they are run here through the socket as the launcher runs th
 Then the boot gate, `[tool.sdlc.image] boot`, as container-release ran it
 (sdlc_jobs/_boot.py).
 Container-release pushed before it gated; this job gates the local image and pushes only
-what passed, so no ungated digest exists in the registry.
+what passed, so no ungated digest exists in the registry, except for a repo whose
+boot-command, contract-test or free-disk the `boot` job judges after the push.
 
 A repo publishes its root image unless `[tool.sdlc.image] publish = false`, and each
 `[[tool.sdlc.images]]` entry EXTRA_IMAGES allows it (sdlc_jobs/_core.py). They are built
@@ -51,12 +52,12 @@ from pathlib import Path
 from sdlc_jobs import _prs
 from sdlc_jobs._boot import Boot, boot_gate, boot_settings
 from sdlc_jobs._core import (
+    BOOT_JOB,
     CLEAN,
     DIGEST,
     FLEET_PUBLIC_KEY,
     FOUND,
     FROM_AS_WORDS,
-    IMAGE_NOT_ENFORCED,
     PODMAN_CANNOT_CREATE,
     Image,
     RunOptions,
@@ -206,8 +207,13 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     for img in job.images:  # every key is checked before anything logs in
         boot_settings(img.settings)
         build_args(img.settings)
-        for key in sorted(IMAGE_NOT_ENFORCED & set(img.settings)):
-            print(f"image: {img.name}: {key} is not enforced here (crunchtools/sdlc#118)")
+        for key in sorted(BOOT_JOB & set(img.settings)):
+            where = (
+                "runs in the boot job, against the pushed digest"
+                if boot_job_declared(root)
+                else "is not enforced: this repo's fleet file has no boot job (#118)"
+            )
+            print(f"image: {img.name}: {key} {where}")
     job.images, job.needs = build_order(root, job.images)
     job.child_env = {k: v for k, v in env.items() if k not in SECRETS}
     job.child_env["REGISTRY_AUTH_FILE"] = str(job.auth)
@@ -221,6 +227,16 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     finally:
         job.run([*job.podman, "volume", "rm", "-f", job.volume])
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def boot_job_declared(root: Path) -> bool:
+    """True when this commit's fleet file has the `boot` job. Under an older one, which
+    the floating image also runs, boot-command, contract-test and free-disk run nowhere."""
+    try:
+        text = (root / ".github" / "workflows" / "ci.yml").read_text()
+    except OSError:
+        return False
+    return re.search(r"^  boot:", text, re.M) is not None
 
 
 def build_and_push(job: Job) -> int:

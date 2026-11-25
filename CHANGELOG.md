@@ -18,6 +18,44 @@ All notable changes to this project are documented here, following
   `rootfs/` in now gets its container gates on a pull request that changes only
   those (#186). Patterns are anchored at the repo root (`**` crosses
   directories); an absolute path, `..`, or more than 50 is refused with exit 2.
+- A credential-free `boot` job in the fleet file, between `image` and `promote`
+  (#118). It runs a repo's `boot-command` (with `boot = "command"`) and
+  `contract-test` as `bash -euo pipefail -c` with `IMAGE=<ref>@<digest>`, and
+  `free-disk` on a GitHub-hosted runner, against the digest `image` pushed. It
+  holds `contents: read` and `GITHUB_TOKEN` alone and refuses to start with a
+  secret in its environment. The shell runs in a sibling container of the job's
+  own image, started through the runner's socket and removed after each shell
+  (timeout included): the workspace is mounted at its runner path as the working
+  directory, `TMPDIR` and `HOME` are under it, and the socket and the runner's
+  network are there, so a `-v` source, `mktemp` and `127.0.0.1` mean what they
+  did under container-release. Its environment is a short list of the run's
+  variables and what is set for it, never the job's: no `GITHUB_TOKEN`, OIDC or
+  `ACTIONS_*`. The pull and the container go through podman-remote on the
+  runner's host podman socket, as every job now does. It never runs on a pull
+  request, since `image` does not. A non-zero exit or `boot-timeout` fails it, and `promote` needs it when
+  `check`'s plan says `boot` and the fleet file maps `SDLC_BOOT`, so nothing is
+  signed or tagged on a failed boot proof. `image` pushes `gated-<sha>` before
+  `boot` judges it, so for a repo that sets these keys the registry can hold an
+  ungated digest. The three keys are no longer "not enforced", and
+  `tests/test_job_boot.py` and `tests/test_workflows.py` pin it. `boot-command`
+  under a `boot` other than `command` is no longer a 2: it prints a warning and
+  is not run; `boot = "command"` without `boot-command` is still a 2.
+
+### Rollout
+
+1. Release the sdlc image. Under the old fleet file nothing changes: there is no
+   `boot` job and no `SDLC_BOOT`, so `promote` does not require boot and the three
+   keys stay unenforced, as in 0.15. `boot-command` under a non-command profile
+   warns.
+2. Roll the new `examples/ci.yml` (with the `boot` job) to each repo. From then
+   `boot` is required for a repo that sets the keys.
+3. After every repo is on the new fleet file, `boot-command` under a non-command
+   profile can become a 2.
+
+The reverse order is safe too: a repo on the new fleet file whose image is still
+0.15 gets no `boot` from `check`'s plan, so the `boot` job is skipped and
+`promote`, which admits a skipped `boot` when the plan did not ask for it, passes.
+Until step 2 the image job says the three keys are not enforced.
 
 ### Fixed
 

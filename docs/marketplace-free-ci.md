@@ -4,11 +4,11 @@ Design for a1051. Nothing here is implemented: it is the target that
 `convert_repo.py` and `cutover.py` will be changed to write, and the list of
 `sdlc` internals that have to exist first.
 
-## The fleet file: 113 lines, eight jobs
+## The fleet file: 123 lines, nine jobs
 
 Every fleet repo carries exactly this `.github/workflows/ci.yml`, byte for
 byte, whatever kind of repo it is. The one exception is crunchtools/sdlc
-itself, below. The file is 103 lines without comments. It contains no `uses:`
+itself, below. The file is 114 lines without comments. It contains no `uses:`
 of any kind: no `actions/checkout`, no reusable-workflow call and no
 third-party action. Every job runs one image, the sdlc **bootstrap**, by a
 literal digest, and one command, `sdlc event`. That command reads
@@ -89,13 +89,23 @@ jobs:
     env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
            SDLC_AI: "${{ needs.ai.result }}", SDLC_AI_0: "${{ needs.ai.outputs.p0 }}", SDLC_AI_1: "${{ needs.ai.outputs.p1 }}", SDLC_AI_2: "${{ needs.ai.outputs.p2 }}", SDLC_AI_3: "${{ needs.ai.outputs.p3 }}" }
     steps: *event
+  boot:  # no secret, a read token: a repo's boot-command and contract-test, shell run on the digest image pushed; promote needs it
+    name: sdlc / boot (${{ github.event_name }})
+    needs: [check, image]
+    if: needs.check.result == 'success' && needs.image.result == 'success' && fromJSON(needs.check.outputs.result || '{}').boot
+    runs-on: *secret  # the socket is the credential: crunchtools-uncached, one job per VM, or GitHub's
+    permissions: { contents: read }
+    env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_IMAGE_RESULT: "${{ needs.image.outputs.result }}" }
+    steps: *event
   promote:  # the cosign key: signs, attests and moves tags on a digest it did not build; idempotent; version only from write
-    needs: [check, image, write]
-    if: always() && !cancelled() && needs.image.result == 'success' && github.event_name != 'pull_request'
+    needs: [check, image, boot, write]
+    if: >-
+      always() && !cancelled() && needs.image.result == 'success' && github.event_name != 'pull_request'
+      && (needs.boot.result == 'success' || needs.boot.result == 'skipped' && !fromJSON(needs.check.outputs.result || '{}').boot)
     concurrency: { group: "promote-${{ github.repository }}", queue: max }
     runs-on: *secret
     permissions: { contents: read }
-    env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_CHECK: "${{ needs.check.outputs.result }}", SDLC_IMAGE_RESULT: "${{ needs.image.outputs.result }}", SDLC_WRITE: "${{ needs.write.result }}", SDLC_RELEASE: "${{ needs.write.outputs.release }}",
+    env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_CHECK: "${{ needs.check.outputs.result }}", SDLC_IMAGE_RESULT: "${{ needs.image.outputs.result }}", SDLC_BOOT: "${{ needs.boot.result }}", SDLC_WRITE: "${{ needs.write.result }}", SDLC_RELEASE: "${{ needs.write.outputs.release }}",
            QUAY_USERNAME: "${{ secrets.QUAY_USERNAME }}", QUAY_PASSWORD: "${{ secrets.QUAY_PASSWORD }}", COSIGN_PRIVATE_KEY: "${{ secrets.COSIGN_PRIVATE_KEY }}", COSIGN_PASSWORD: "${{ secrets.COSIGN_PASSWORD }}" }
     steps: *event
   pypi:  # OIDC only; re-derives the release from the API itself and must agree with write
@@ -131,7 +141,7 @@ jobs:
     steps: *event
 ```
 
-**Why 103 lines and not 20.** GitHub makes a separate job only where the
+**Why 114 lines and not 20.** GitHub makes a separate job only where the
 permissions, the secrets, the environment or the runner differ. Seven levels
 differ, and each job needs its `if`, `runs-on`, `environment`, `container`,
 `permissions`, `env` and `steps` lines. Merging any two would put a secret, a
@@ -307,7 +317,6 @@ jobs:
           || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
     runs-on: *secret
-    container: *boot
     permissions: {}
     outputs: { release: "${{ steps.e.outputs.release }}" }
     env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
@@ -321,7 +330,6 @@ jobs:
       || github.event_name == 'pull_request_review_comment' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     concurrency: { group: "gate-${{ github.event.pull_request.number }}-${{ github.event_name }}" }
     runs-on: ${{ vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}  # no repo code runs here, a fork's PR included
-    container: *boot
     permissions: { contents: read, pull-requests: write, actions: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
     steps: *event
@@ -506,10 +514,11 @@ benign. sdlc does not. Each job receives the results of the jobs it needs
 (`SDLC_AI`, `SDLC_WRITE`) together with `check`'s plan. A job that acts on
 the plan also requires `needs.check.result == 'success'` in its `if:`. A
 `check` that failed may have printed a plan before failing, and nothing acts
-on it: `image`, `write` (outside the triage events) and `pypi` all carry that
-test, and `promote` follows `image`. If the plan says a job was needed and
+on it: `image`, `boot`, `write` (outside the triage events) and `pypi` all carry
+that test, and `promote` follows `image`. If the plan says a job was needed and
 its result is anything but `success` (`skipped`, `failure`, `cancelled`), the
 dependent job fails. Three cases:
+- `promote` fails if `check` planned `boot` and `boot` did not succeed.
 - `promote` on a release merge fails if `write` did not succeed.
 - `pypi` fails if `write` did not succeed.
 - `gate` fails unless `ai` and `write` both succeeded for this head.
@@ -528,7 +537,8 @@ request. The App-only tag ruleset stays as it is today.
 | `ai` | | Claude and OpenRouter keys | issues, `pull_request_target`; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | an App key, a write token |
 | `image` | | quay, RHSM, registry.redhat.io | when `check` plans an image; our **uncached** runners | the cosign key |
 | `write` | | Ashigaru App key; queued | `pull_request_target`, issues, a `version` dispatch; otherwise only when a successful `check` plans `write` (a release merge, the weekly audit); never a rollback dispatch; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | a model |
-| `promote` | | cosign key, quay; queued | after `image`, and after `write` on a release; our **uncached** runners | an App key, a build |
+| `boot` | | none; read token, the socket | when `check` plans `boot` and `image` succeeded; where the secret jobs run: our **uncached** runners while the variable names exactly them | any secret |
+| `promote` | | cosign key, quay; queued | after `image` and `boot`, and after `write` on a release; our **uncached** runners | an App key, a build |
 | `pypi` | | none: OIDC, environment `pypi` for the publisher | a release merge that publishes to PyPI; our **uncached** runners | anything else |
 | `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; `ubuntu-latest` | any secret |
 | `renovate` | | `renovate`: Renovate App key; no `GITHUB_TOKEN`; queued | crunchtools/constitution only: the weekly schedule, a bare dispatch from the default branch; our **uncached** runners | a token of this repo's, a build |
@@ -591,6 +601,45 @@ against the built image. Each container has a unique name and podman's own
 time limit, and it is removed, then its token revoked, on every path, a
 cancel included.
 
+**`boot`** runs what a repo's `[tool.sdlc.image]` keeps as shell: `boot-command`
+(only with `boot = "command"`), then `contract-test`, each as
+`bash -euo pipefail -c <shell>` from the repo root with `IMAGE=<ref>@<digest>`,
+and `free-disk` before the pull. It runs only when `check` succeeded, `image`
+succeeded and the plan says `boot` (an image sets one of those keys), and
+`promote` needs it, so a digest whose boot proof fails is never signed or tagged.
+- **It holds no secret.** Its env is `GITHUB_TOKEN` (`contents: read`) and
+  `image`'s result, and it refuses (exit 2) if any registry or RHSM secret is
+  set. The shell runs in its own container, which is given a short list of the
+  run's variables (`GITHUB_SHA`, `RUNNER_OS` and the like), `CI`, `HOME`,
+  `TMPDIR`, `GITHUB_WORKSPACE`, `CONTAINER_HOST`, `DOCKER_HOST` and `IMAGE`, and
+  nothing else: no `GITHUB_TOKEN`, OIDC or `ACTIONS_*` variable. It runs with
+  workflow commands stopped. It still holds the socket, and through it can exec
+  into the job's own container and read `GITHUB_TOKEN` (`contents: read`) and
+  `ACTIONS_RUNTIME_TOKEN`: that is the job's whole credential, and why it is
+  given nothing more.
+- **It judges a digest already pushed.** `image` pushes `gated-<sha>` before
+  `boot` runs, so for a repo that sets these keys "no ungated digest exists in
+  the registry" no longer holds. Nothing is signed or tagged until `boot`
+  passes, and `image`, so `boot`, never runs on a pull request.
+- **Repo shell gets the runner's socket, in a sibling container.** That is safe
+  only because of our runner design: each crunchtools-uncached runner is an
+  ephemeral VM with its own engine, running one job and gone, so the shell can
+  run anything on the engine and the engine is scratch. `boot` runs only where
+  the secret jobs run (`runs-on: *secret`): the socket is the credential.
+  The shell does not run in the job: the
+  job starts a container of its own image beside it (`--network=host`,
+  no-new-privileges), mounts the workspace at its runner path as the working
+  directory, sets `TMPDIR` and `HOME` under it (`.sdlc-boot-tmp`) and mounts the
+  socket. So a `-v` source, `mktemp` and `127.0.0.1` mean what they did under
+  container-release. The container is removed after each shell, a timeout
+  included. Every runner's socket is its host podman's, the fleet file's launch,
+  so on a GitHub-hosted runner too the pull and the container go through
+  podman-remote.
+- **`free-disk`** empties the SDK directories (`/usr/share/dotnet`,
+  `/usr/local/lib/android`, `/opt/ghc`, `/opt/hostedtoolcache`) and prunes
+  images, only on a GitHub-hosted runner; on ours it says it is a no-op.
+- A non-zero exit, or `boot-timeout` (default 180s) elapsing, fails the job.
+
 **Private repos and the org's plan.** The plan could not be verified from this
 seat: the org's `plan` field needs an admin token. Two facts point to GitHub
 Free:
@@ -635,6 +684,9 @@ its robot and key must stay out of the fleet's reach, and it is one repo.
   with the LLM" (crunchtools/ashigaru `.github/workflows/code.yml`).
 - **`image` / `promote`:** the signing key never shares a job with a
   Containerfile build.
+- **`image` / `boot`:** repo shell never shares a job with the registry
+  secrets: `image` holds them and the socket, `boot` holds the socket and a
+  read token and no secret.
 - **`write` / `promote`:** no App key in the signing job. With downstream
   dispatch gone, nothing needs one there.
 - **`gate`:** it must come from the base definition and hold no secret, so it
@@ -711,6 +763,7 @@ CodeQL uploads as `/language:python`, and zizmor as `zizmor`.
 | write | issues | labels; opens the `ashigaru/issue-N` PR | triage.yml apply, code.yml publish |
 | write | workflow_dispatch with `version`, no `digest` | opens the release PR; a dispatch with `digest` is sdlc's rollback, and `write` does not run | release.yml open |
 | write | schedule, when `check` plans it | keeps the audit alert issue; only when the weekly audit's plan sets `write`, so the 6-hourly polls never mint the App key | dependency-audit.yml |
+| boot | after image, when `check` plans it | runs a repo's `boot-command` (`boot = "command"`) and `contract-test` on the digest `image` pushed; `free-disk` first | container-release's boot-command, contract-test and free-disk |
 | promote | after image | signs, attests, moves `latest`, and `X.Y.Z` from `write`'s output | container-release promote |
 | pypi | release merge push | re-verifies, `uv build` nested, `uv publish` by OIDC | publish.yml |
 | gate | pull_request_target | fails unless `ai` and `write` succeeded; workflow guard; triage, which needs a review of the head SHA | gatehouse.yml guard, triage.yml |

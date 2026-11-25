@@ -1206,7 +1206,16 @@ def test_boot_command_needs_boot_command_and_is_not_run() -> None:
     assert not any("./test.sh" in w for a in t.argvs for w in a), "the command was run"
 
 
-def test_boot_command_prints_not_enforced() -> None:
+def test_boot_command_under_another_profile_warns_and_does_not_fail() -> None:
+    t = FakeTools()
+    rc = run_boot(t, "none", boot_none_reason="no boot", boot_command="./test.sh")
+    assert rc == 0 and t.pushed() and not t.boot_calls()
+    assert "boot: WARNING: boot-command runs only under boot = \"command\", not 'none'" in t.log
+    assert not any("./test.sh" in w for a in t.argvs for w in a), "the command was run"
+
+
+def boot_message(fleet: str) -> str:
+    """What the image job prints of boot-command under a fleet file with `fleet` as its text."""
     t = FakeTools()
     with tempfile.TemporaryDirectory() as tmp:
         ws = Path(tmp) / "ws"
@@ -1214,6 +1223,8 @@ def test_boot_command_prints_not_enforced() -> None:
         (ws / ".git").mkdir()  # a checked-out tree: fetch_tree leaves it alone
         (ws / "Containerfile").write_text(QUAY_PARENT)
         (ws / "pyproject.toml").write_text(boot("command", boot_command="x")["pyproject.toml"])
+        (ws / ".github" / "workflows").mkdir(parents=True)
+        (ws / ".github" / "workflows" / "ci.yml").write_text(fleet)
         env = {
             "GITHUB_WORKSPACE": str(ws),
             "GITHUB_OUTPUT": str(Path(tmp) / "out"),
@@ -1230,7 +1241,18 @@ def test_boot_command_prints_not_enforced() -> None:
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             rc = image.run("push", {}, env, tools=t)
-    assert rc == 0 and "NOT ENFORCED" in out.getvalue(), out.getvalue()
+    assert rc == 0, out.getvalue()
+    return out.getvalue()
+
+
+def test_boot_command_points_at_the_boot_job_under_the_new_fleet_file() -> None:
+    out = boot_message("jobs:\n  image:\n    steps: []\n  boot:\n    steps: []\n")
+    assert "boot-command runs in the boot job" in out, out
+
+
+def test_boot_command_is_not_enforced_under_an_old_fleet_file() -> None:
+    out = boot_message("jobs:\n  image:\n    steps: []\n  promote:\n    steps: []\n")
+    assert "boot-command is not enforced: this repo's fleet file has no boot job" in out, out
 
 
 def test_boot_unknown_profile_refused() -> None:
