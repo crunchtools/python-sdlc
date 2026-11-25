@@ -2166,6 +2166,17 @@ with tempfile.TemporaryDirectory() as listed:
     Path(listed, S.SARIF_PLANNED).unlink()
     plan_of("ci", PY_ONLY, SDLC_SARIF_DIR=listed)
     check("no other target writes the list", not any(Path(listed).iterdir()))
+    real_write = Path.write_text
+    Path.write_text = lambda self, *a, **k: (
+        (_ for _ in ()).throw(OSError("read-only"))
+        if self.name == S.SARIF_PLANNED
+        else real_write(self, *a, **k)
+    )
+    try:
+        msg = cannot_run(lambda: plan_of("sarif", PY_ONLY, SDLC_SARIF_DIR=listed))
+    finally:
+        Path.write_text = real_write
+    check("a list it cannot write is a 2, not a crash", bool(msg) and "read-only" in msg, str(msg))
 
 # The SARIF a check hands the job: codeql's minus `paths-ignore`, baseline kept.
 with tempfile.TemporaryDirectory() as root:
@@ -2190,6 +2201,28 @@ with tempfile.TemporaryDirectory() as root:
     check(
         "export does not touch the SARIF it read",
         len(json.loads(raw.read_text())["runs"][0]["results"]) == len([keep, fixture, baselined]),
+    )
+    # A SARIF that cannot be read, or a write that fails, is a 2, and leaves no
+    # half file for the uploader to send.
+    bad = Path(root, "bad.sarif")
+    bad.write_text("{not json")
+    dest = exported / "codeql-results.sarif"
+    msg = cannot_run(S.export_sarif, bad, [], dest)
+    check("export of unreadable SARIF cannot run", bool(msg) and "readable" in msg, str(msg))
+    msg = cannot_run(S.export_sarif, Path(root, "absent.sarif"), [], dest)
+    check("export of absent SARIF cannot run", bool(msg) and "readable" in msg, str(msg))
+    msg = cannot_run(S.export_sarif, raw, [], Path(root, "no-such-dir", "out.sarif"))
+    check("a failed export write cannot run", bool(msg) and "cannot write" in msg, str(msg))
+    real_replace = Path.replace
+    Path.replace = lambda *_: (_ for _ in ()).throw(OSError("refused"))
+    try:
+        msg = cannot_run(S.export_sarif, raw, [], dest)
+    finally:
+        Path.replace = real_replace
+    check(
+        "a failed rename cannot run and removes its temp file",
+        bool(msg) and "refused" in msg and not Path(exported, ".codeql-results.sarif.tmp").exists(),
+        str(msg),
     )
 
     # t_codeql end to end, with CodeQL itself stubbed to write `raw`'s content.
