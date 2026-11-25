@@ -32,6 +32,8 @@ _NOT_FOUND = 404
 # A pyproject.toml that is there but cannot be read as one. A named tuple, not
 # PEP 758's bare list, which Gourmand's parser cannot read.
 _UNREADABLE = (KeyError, ValueError, UnicodeDecodeError)
+# How uv.lock records the package it locks from the checkout itself.
+_ROOT_SOURCES = ({"editable": "."}, {"virtual": "."})
 
 # Run under `python3 -I`, with the repo, version and sha as argv and never
 # spliced into the code. `publish` returns 1 for a CHANGELOG that is not at the
@@ -80,7 +82,8 @@ def open_release_pr(api: Api, repo: str, version: str, default_branch: str) -> i
     Ashigaru tags only a pull request the App wrote, so the App copies the
     prepared branch rather than a person opening the PR. A rerun finds the
     branch already there and moves it to the prepared commit; a PR already open
-    from it is left alone.
+    from it is left alone. Either way the copy then gets uv.lock's root package
+    at the version, the one version string a hand-prepared branch tends to miss.
     """
     if not _VERSION.fullmatch(version):
         return _error(f"not X.Y.Z: {version}")
@@ -91,14 +94,16 @@ def open_release_pr(api: Api, repo: str, version: str, default_branch: str) -> i
         if err.status != _NOT_FOUND:
             raise
         return _error(f"{repo} has no branch {source}: prepare the release there first")
-    try:
-        api.request("GET", f"/repos/{repo}/git/ref/heads/{branch}")
-    except ApiError as err:
-        if err.status != _NOT_FOUND:
-            raise
-        api.request("POST", f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha})
-    else:
-        api.request("PATCH", f"/repos/{repo}/git/refs/heads/{branch}", {"sha": sha, "force": True})
+    _point(api, repo, branch, sha)
+    stale = _lock_to(api, repo, branch, sha, version)
+    if stale:
+        return _error(f"{repo} {source}: {stale}")
+    return _open_pr(api, repo, sha, version, default_branch)
+
+
+def _open_pr(api: Api, repo: str, sha: str, version: str, default_branch: str) -> int:
+    """Open the release PR from `ashigaru/release-X.Y.Z`, unless one is already open."""
+    source, branch = f"chore/release-{version}", f"{_BRANCH}{version}"
     owner = repo.split("/", 1)[0]
     open_prs = api.request("GET", f"/repos/{repo}/pulls?head={owner}:{branch}&state=open") or []
     if open_prs:
@@ -122,14 +127,86 @@ def open_release_pr(api: Api, repo: str, version: str, default_branch: str) -> i
     return 0
 
 
-def _tree_version(api: Api, repo: str, sha: str) -> str | bool | None:
-    """The `[project].version` of pyproject.toml at `sha`; False when there is no such file."""
+def _point(api: Api, repo: str, branch: str, sha: str) -> None:
+    """Make `branch` point at `sha`: created when it is not there, force-moved when it is."""
     try:
-        got = api.request("GET", f"/repos/{repo}/contents/pyproject.toml?ref={sha}")
+        api.request("GET", f"/repos/{repo}/git/ref/heads/{branch}")
+    except ApiError as err:
+        if err.status != _NOT_FOUND:
+            raise
+        api.request("POST", f"/repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha})
+    else:
+        api.request("PATCH", f"/repos/{repo}/git/refs/heads/{branch}", {"sha": sha, "force": True})
+
+
+def _lock_root(text: str) -> dict[str, Any] | None:
+    """The package uv.lock locks from the checkout itself, or None; ValueError for two."""
+    found = tomllib.loads(text).get("package") or []
+    roots = [p for p in found if isinstance(p, dict) and p.get("source") in _ROOT_SOURCES]
+    if len(roots) > 1:
+        raise ValueError(f"{len(roots)} packages are locked from the checkout")
+    return roots[0] if roots else None
+
+
+def bump_lock(text: str, version: str) -> str | None:
+    """uv.lock with its root package at `version`; None when it is already there or has no root.
+
+    The root is the package uv locks from the checkout, `source = { editable = "." }`
+    or `{ virtual = "." }`, found by that and never by name: gatehouse's distribution
+    is gatehouse-crunchtools. Raises ValueError for a lock that cannot be edited safely.
+    """
+    root = _lock_root(text)
+    if root is None or root.get("version") == version:
+        return None
+    name, old = (re.escape(str(root.get(key))) for key in ("name", "version"))
+    entry = re.compile(
+        rf'^(\[\[package\]\]\nname = "{name}"\nversion = "){old}'
+        rf'("\nsource = \{{ (?:editable|virtual) = "\." \}}\n)',
+        re.MULTILINE,
+    )
+    bumped, count = entry.subn(rf"\g<1>{version}\g<2>", text)
+    if count != 1:
+        raise ValueError(f"the entry for {root.get('name')!r} is not laid out as uv writes it")
+    return bumped
+
+
+def _file_at(api: Api, repo: str, path: str, sha: str) -> dict[str, Any] | None:
+    """The contents API's answer for `path` at `sha`, or None when there is no such file."""
+    try:
+        return api.request("GET", f"/repos/{repo}/contents/{path}?ref={sha}")
     except ApiError as err:
         if err.status == _NOT_FOUND:
-            return False
+            return None
         raise
+
+
+def _lock_to(api: Api, repo: str, branch: str, sha: str, version: str) -> str | None:
+    """Commit uv.lock's root package at `version` onto `branch`, if it is not; the refusal, if any.
+
+    A prepared branch that moved pyproject.toml and not uv.lock fails `uv sync
+    --locked` in `check` (#187), so the App moves it rather than the PR going red.
+    """
+    got = _file_at(api, repo, "uv.lock", sha)
+    if got is None:
+        return None
+    try:
+        bumped = bump_lock(base64.b64decode(got["content"]).decode(), version)
+    except _UNREADABLE as err:
+        return f"uv.lock cannot be brought to {version}: {err}"
+    if bumped is not None:
+        content = base64.b64encode(bumped.encode()).decode()
+        message = f"chore: uv.lock carries {version}"
+        update = {"message": message, "content": content, "sha": got["sha"], "branch": branch}
+        api.request("PUT", f"/repos/{repo}/contents/uv.lock", update)
+        print(f"uv.lock: the root package now at {version}")
+    return None
+
+
+def _tree_version(api: Api, repo: str, sha: str) -> str | bool | None:
+    """The `[project].version` of pyproject.toml at `sha`; False when there is no such file."""
+    got = _file_at(api, repo, "pyproject.toml", sha)
+    if got is None:
+        return False
     try:
         text = base64.b64decode(got["content"]).decode()
         found = tomllib.loads(text).get("project", {}).get("version")

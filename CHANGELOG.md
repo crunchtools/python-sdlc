@@ -55,6 +55,15 @@ All notable changes to this project are documented here, following
   are accepted on either. 0.15.1 and older are fleet-signed, so they run by
   digest, not by tag. `scripts/sign-digest.sh` and `scripts/attest-digest.sh`
   read the fleet key out of the launcher by name.
+- A release PR carries the version in uv.lock too (#187). The `write` job's
+  dispatch copied `chore/release-X.Y.Z` as prepared, so a branch that moved
+  pyproject.toml and not uv.lock (gatehouse 0.34.0) failed `uv sync --locked`.
+  It now commits uv.lock's root package at the version onto
+  `ashigaru/release-X.Y.Z`, as the App, before opening the PR. The root is the
+  entry locked from the checkout (`source = { editable = "." }` or
+  `{ virtual = "." }`), never matched by name, so `gatehouse-crunchtools` in
+  repo `gatehouse` is found. A root with a dynamic version, which uv locks
+  with no version line, is left alone.
 
 ## [0.15.7] - 2026-11-25
 

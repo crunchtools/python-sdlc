@@ -22,7 +22,7 @@ from fake_github import FakeGitHub, FakeRunner, check, finish
 from sdlc_jobs import _release as launchers
 from sdlc_jobs import _tools as tools
 from sdlc_jobs._github import APP_LOGIN, ApiError, CannotRunError
-from sdlc_jobs._release import audit_issue, open_release_pr, publish_release
+from sdlc_jobs._release import audit_issue, bump_lock, open_release_pr, publish_release
 from sdlc_jobs._tools import Done, Site
 
 # The module attributes the image sets; these suites only read them off argv.
@@ -219,6 +219,114 @@ check("open: missing branch refused", opened(api) == 1 and not api.made("POST"))
 check(
     "open: bad version refused",
     opened(opener(False, []), "1.2") == 1 and opened(opener(False, []), "1.2.3-rc1") == 1,
+)
+
+
+# uv.lock: the root package moves with the release (#187)
+# gatehouse's shape: the distribution (gatehouse-crunchtools) is not the repo's
+# name (demo), and a dependency locked at the same version must stay put.
+GATEHOUSE_LOCK = """version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "gatehouse"
+version = "1.2.2"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "gatehouse-crunchtools"
+version = "1.2.2"
+source = { editable = "." }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx", specifier = ">=0.27" }]
+
+[[package]]
+name = "httpx"
+version = "0.28.1"
+source = { registry = "https://pypi.org/simple" }
+"""
+bumped = bump_lock(GATEHOUSE_LOCK, "1.2.3")
+check(
+    "lock: the editable root moves, whatever its name",
+    bumped
+    == GATEHOUSE_LOCK.replace(
+        'name = "gatehouse-crunchtools"\nversion = "1.2.2"',
+        'name = "gatehouse-crunchtools"\nversion = "1.2.3"',
+    ),
+    str(bumped),
+)
+check(
+    "lock: a dependency at the old version stays", 'name = "gatehouse"\nversion = "1.2.2"' in bumped
+)
+virtual = GATEHOUSE_LOCK.replace('{ editable = "." }', '{ virtual = "." }')
+check(
+    "lock: a virtual root moves",
+    'version = "1.2.3"\nsource = { virtual = "." }' in (bump_lock(virtual, "1.2.3") or ""),
+)
+check("lock: already at the version is no change", bump_lock(bumped, "1.2.3") is None)
+check(
+    "lock: no root is no change",
+    bump_lock(GATEHOUSE_LOCK.replace('{ editable = "." }', '{ editable = "pkg" }'), "1.2.3")
+    is None,
+)
+for label, text in (
+    (
+        "two roots",
+        GATEHOUSE_LOCK.replace('{ registry = "https://pypi.org/simple" }', '{ editable = "." }', 1),
+    ),
+    (
+        "an unusual layout",
+        GATEHOUSE_LOCK.replace('version = "1.2.2"\nsource = { editable', "source = { editable", 1),
+    ),
+):
+    try:
+        bump_lock(text, "1.2.3")
+        check(f"lock: {label} refused", False)
+    except ValueError:
+        check(f"lock: {label} refused", True)
+
+
+def lock_api(text: str, open_prs: list | None = None) -> FakeGitHub:
+    api = opener(False, open_prs or [])
+    api.routes[("GET", f"/repos/{REPO}/contents/uv.lock")] = {
+        "content": base64.b64encode(text.encode()).decode(),
+        "sha": "e" * 40,
+    }
+    api.routes[("PUT", f"/repos/{REPO}/contents/uv.lock")] = {}
+    return api
+
+
+api = lock_api(GATEHOUSE_LOCK)
+check("open: a stale lock opens the PR", opened(api) == 0 and api.made("POST", "*/pulls"))
+put = api.made("PUT", "*/contents/uv.lock")
+check(
+    "open: the lock is committed onto the App's branch, at the prepared tree",
+    len(put) == 1
+    and base64.b64decode(put[0][2]["content"]).decode() == bumped
+    and put[0][2]["sha"] == "e" * 40
+    and put[0][2]["branch"] == "ashigaru/release-1.2.3"
+    and len(api.made("GET", f"*/contents/uv.lock?ref={'c' * 40}")) == 1,
+    str(put),
+)
+check(
+    "open: the lock is moved after the branch, before the PR",
+    [c[0] for c in api.calls if c[0] != "GET"] == ["POST", "PUT", "POST"],
+)
+api = lock_api(GATEHOUSE_LOCK, [{"number": 9, "html_url": "https://x/pull/9"}])
+check(
+    "open: a rerun with the PR open moves the lock again",
+    opened(api) == 0 and api.made("PUT") and not api.made("POST", "*/pulls"),
+)
+api = lock_api(bumped)
+check("open: a current lock commits nothing", opened(api) == 0 and not api.made("PUT"))
+api = lock_api("not = [toml")
+check(
+    "open: an unreadable lock is refused before the PR",
+    opened(api) == 1 and not api.made("PUT") and not api.made("POST", "*/pulls"),
 )
 
 # audit_issue
