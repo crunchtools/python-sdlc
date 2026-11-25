@@ -6,6 +6,14 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.5] - 2026-11-25
+
+### Fixed
+
+- The gate container marks /repo safe for git. On a CI runner the checkout belongs to
+  the runner's user, not the container's, so a test that runs git failed with
+  "dubious ownership" (exit 128).
+
 ## [0.15.4] - 2026-11-25
 
 ### Fixed
