@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-25
+
 ### Removed
 
 - sdlc's own `ashigaru.yml`, `gatehouse.yml`, `gatehouse-retriage.yml`, `gourmand.yml` and `bootstrap.yml`: `ci.yml` replaced them (#212). `container.yml` and `update-tools.yml` stay for now.
