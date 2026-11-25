@@ -276,6 +276,7 @@ DEFAULTS = {
         "npm-test",
         "gourmand",
         "secret-scan",
+        "workflow-lint",
         "gatehouse",
         "semgrep",
         "pip-audit",
@@ -2859,6 +2860,42 @@ def t_secret_scan(s: dict) -> int:
     return rc
 
 
+# zizmor answers 0 clean, 10 to 14 for findings (the highest severity among
+# them, unknown to high), 3 when it collected nothing to audit, and 1 or 2 when
+# it could not run.
+ZIZMOR_NO_INPUTS = 3
+ZIZMOR_FOUND = range(10, 15)
+
+
+def t_workflow_lint(s: dict) -> int:
+    """zizmor over the repo's GitHub Actions workflows and actions, offline.
+
+    Advisory unless the repo says `gate = true`: when this check arrived most
+    of the fleet's workflows had high findings, and a wave that turned them all
+    red would teach SDLC_SKIP. An advisory finding is printed and marked
+    ADVISORY, never a pass. The repo's own zizmor.yml and its
+    `# zizmor: ignore[...]` comments apply as zizmor reads them.
+    """
+    gate = s.get("gate", False)
+    if not isinstance(gate, bool):
+        cannot("workflow-lint: gate must be true or false")
+    step("zizmor --offline, " + ("gating" if gate else "advisory"))
+    rc, out = run(
+        ["zizmor", "--offline", "--quiet", "--no-progress", "--color=never", "."], tee=True
+    )
+    if rc == ZIZMOR_NO_INPUTS and "no inputs collected" in out:
+        print("There are no workflows or actions in this repository; nothing to lint.")
+        return CLEAN
+    if rc in ZIZMOR_FOUND:
+        if gate:
+            return FOUND
+        print("ADVISORY: zizmor found the above; not gating (`gate = true` in its table to gate)")
+        return CLEAN
+    if rc != CLEAN:
+        cannot(f"zizmor could not run (exit {rc})")
+    return CLEAN
+
+
 def ci_required_findings(consensus: dict) -> list[dict]:
     """The reported findings CI's gate would hold a pull request for.
 
@@ -3771,6 +3808,7 @@ BUILTINS = {
     "pytest": t_pytest,
     "gourmand": t_gourmand,
     "secret-scan": t_secret_scan,
+    "workflow-lint": t_workflow_lint,
     "gatehouse": t_gatehouse,
     "semgrep": t_semgrep,
     "pip-audit": t_pip_audit,

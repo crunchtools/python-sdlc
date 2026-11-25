@@ -78,6 +78,7 @@ PYTHON_PUSH = [
     "pytest",
     "gourmand",
     "secret-scan",
+    "workflow-lint",
     "gatehouse",
     "semgrep",
     "pip-audit",
@@ -667,7 +668,14 @@ check(
 check(
     "the container stack alone pushes hadolint and the common checks",
     S.resolve(empty, "push", ("container",))
-    == ["containerfile-lint", "gourmand", "secret-scan", "gatehouse", "constitution"],
+    == [
+        "containerfile-lint",
+        "gourmand",
+        "secret-scan",
+        "workflow-lint",
+        "gatehouse",
+        "constitution",
+    ],
 )
 check(
     "the container stack builds, smokes and scans in ci, after push's checks",
@@ -675,6 +683,7 @@ check(
     == [
         "containerfile-lint",
         "secret-scan",
+        "workflow-lint",
         "constitution",
         "container-build",
         "container-smoke",
@@ -752,6 +761,7 @@ check(
         "npm-test",
         "gourmand",
         "secret-scan",
+        "workflow-lint",
         "gatehouse",
         "npm-audit",
         "constitution",
@@ -760,7 +770,7 @@ check(
 check(
     "ci runs the node checks and leaves the two reviewers to CI's own jobs",
     S.resolve(empty, "ci", ("node",))
-    == ["npm-lint", "npm-test", "secret-scan", "npm-audit", "constitution"],
+    == ["npm-lint", "npm-test", "secret-scan", "workflow-lint", "npm-audit", "constitution"],
 )
 check(
     "commit has no node check: an install is not seconds, offline or free",
@@ -1590,7 +1600,14 @@ BOOTC_CF = "FROM quay.io/fedora/fedora-bootc:42\n"
 check(
     "the bootc stack pushes hadolint and the common checks",
     S.resolve(empty, "push", ("bootc",))
-    == ["containerfile-lint", "gourmand", "secret-scan", "gatehouse", "constitution"],
+    == [
+        "containerfile-lint",
+        "gourmand",
+        "secret-scan",
+        "workflow-lint",
+        "gatehouse",
+        "constitution",
+    ],
 )
 bootc_ci = S.resolve(empty, "ci", ("bootc",))
 check(
@@ -1599,6 +1616,7 @@ check(
     == [
         "containerfile-lint",
         "secret-scan",
+        "workflow-lint",
         "constitution",
         "container-build",
         "bootc-lint",
@@ -1716,13 +1734,21 @@ check("image: a launcher tag beside the table is refused", msg is not None, str(
 check(
     "the docs stack pushes markdown-lint, the common checks, then link-check",
     S.resolve(empty, "push", ("docs",))
-    == ["markdown-lint", "gourmand", "secret-scan", "gatehouse", "link-check", "constitution"],
+    == [
+        "markdown-lint",
+        "gourmand",
+        "secret-scan",
+        "workflow-lint",
+        "gatehouse",
+        "link-check",
+        "constitution",
+    ],
     str(S.resolve(empty, "push", ("docs",))),
 )
 check(
     "ci is the docs push minus the reviewers",
     S.resolve(empty, "ci", ("docs",))
-    == ["markdown-lint", "secret-scan", "link-check", "constitution"],
+    == ["markdown-lint", "secret-scan", "workflow-lint", "link-check", "constitution"],
     str(S.resolve(empty, "ci", ("docs",))),
 )
 check(
@@ -1994,6 +2020,33 @@ got, argv, _ = docs_run(S.t_link_check, "lychee", 2, files={})
 check(
     "link-check with no Markdown is clean and runs nothing", got == S.CLEAN and argv == [], str(got)
 )
+
+
+# ------------------------------------------------------------ workflow-lint
+
+check(
+    "workflow-lint belongs to no stack and runs everywhere",
+    "workflow-lint" not in S.STACK_OF and S.BUILTINS["workflow-lint"] is S.t_workflow_lint,
+)
+got, argv, _ = docs_run(S.t_workflow_lint, "zizmor", 0)
+check("workflow-lint: exit 0 is clean", got == S.CLEAN, str(got))
+check("workflow-lint runs zizmor offline over the repo", "--offline" in argv and "." in argv)
+got, _, _ = docs_run(S.t_workflow_lint, "zizmor", 14)
+check("workflow-lint: a high finding is advisory by default", got == S.CLEAN, str(got))
+for rc in (10, 13, 14):
+    got, _, _ = docs_run(S.t_workflow_lint, "zizmor", rc, s={"gate": True})
+    check(f"workflow-lint with gate = true: exit {rc} is a finding", got == S.FOUND, str(got))
+got, _, _ = docs_run(S.t_workflow_lint, "zizmor", 3, out="Caused by:\n    no inputs collected\n")
+check("workflow-lint with no workflows is clean", got == S.CLEAN, str(got))
+for rc in (1, 2, 3):
+    got, _, _ = docs_run(S.t_workflow_lint, "zizmor", rc)
+    check(
+        f"workflow-lint: exit {rc} without a verdict could not run",
+        isinstance(got, str) and f"exit {rc}" in got,
+        str(got),
+    )
+got, _, _ = docs_run(S.t_workflow_lint, "zizmor", 0, s={"gate": "yes"})
+check("workflow-lint: gate must be a boolean", isinstance(got, str) and "gate" in got, str(got))
 
 
 # -------------------------------------------------------------- scan-rootfs

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "sdlc's own additions to the fleet policy it inherits from the constitution; they replace",
+    "update-tools.yml. The dockerfile manager moves the tools whose image a FROM names through",
+    "a global ARG, and the sdlc-bootstrap base digest, but only the ARG before the first FROM.",
+    "These move the copy inside the final stage with it, and markdownlint-cli2, which no FROM",
+    "names. Every match is one line, so a replacement never reaches another ARG's version; a",
+    "copy the dockerfile manager has already moved is not found again, and is left alone."
+  ],
+  "customManagers": [
+    {
+      "description": "Both copies of GOURMAND_VERSION.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG GOURMAND_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)\\n"
+      ],
+      "depNameTemplate": "quay.io/crunchtools/gourmand",
+      "datasourceTemplate": "docker",
+      "depTypeTemplate": "stage-arg"
+    },
+    {
+      "description": "Both copies of GATEHOUSE_VERSION.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG GATEHOUSE_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)\\n"
+      ],
+      "depNameTemplate": "quay.io/crunchtools/gatehouse",
+      "datasourceTemplate": "docker",
+      "depTypeTemplate": "stage-arg"
+    },
+    {
+      "description": [
+        "lychee's final-stage copy, the one RUFF_VERSION follows: the first copy moves with",
+        "the digest on its FROM line, which this match must not race."
+      ],
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG LYCHEE_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)\\nARG RUFF_VERSION="
+      ],
+      "depNameTemplate": "docker.io/lycheeverse/lychee",
+      "datasourceTemplate": "docker",
+      "depTypeTemplate": "stage-arg"
+    },
+    {
+      "description": "markdownlint-cli2, from npm.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^Containerfile$/"
+      ],
+      "matchStrings": [
+        "ARG MARKDOWNLINT_CLI2_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)\\n"
+      ],
+      "depNameTemplate": "markdownlint-cli2",
+      "datasourceTemplate": "npm"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "An ARG is a tag and carries no digest.",
+      "matchDepTypes": [
+        "stage-arg"
+      ],
+      "pinDigests": false
+    },
+    {
+      "description": "The bootstrap's base follows 2-builder's digest; a new tag is a fleet decision.",
+      "matchPackageNames": [
+        "quay.io/hummingbird/core-runtime"
+      ],
+      "matchFileNames": [
+        "boot/Containerfile"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "enabled": false
+    }
+  ]
+}

@@ -195,7 +195,7 @@ Gatehouse takes its settings from `~/.config/mcp-env/gatehouse.env` (or
 the same path, so the key stays a file and never enters the container's
 environment.
 
-Gourmand, `secret-scan`, Gatehouse, the constitution validator and
+Gourmand, `secret-scan`, `workflow-lint`, Gatehouse, the constitution validator and
 `hooks-installed` belong to no stack and run everywhere. A repo can add or drop a stack, and nothing more:
 
 ```toml
@@ -278,8 +278,8 @@ runs at commit.
 | Command | Runs |
 |---|---|
 | `commit` | ruff-check, ruff-format, gourmand, hooks-installed |
-| `push` | lint, mypy, pytest, gourmand, secret-scan, gatehouse, semgrep, pip-audit, constitution, codeql |
-| `ci` | lint, mypy, pytest, secret-scan, semgrep, pip-audit, constitution, codeql |
+| `push` | lint, mypy, pytest, gourmand, secret-scan, workflow-lint, gatehouse, semgrep, pip-audit, constitution, codeql |
+| `ci` | lint, mypy, pytest, secret-scan, workflow-lint, semgrep, pip-audit, constitution, codeql |
 
 `ruff-check` and `ruff-format` fix what they find, so they pass on anything
 fixable. `lint` is the same two tools as a verdict — `ruff check --no-fix` and
@@ -292,6 +292,11 @@ or a secret-named key given a literal. It reads only the lines added since the
 branch left the default branch; in CI, since the pull request's base or the
 push's `before`. A named literal in a test or doc file only warns, and a line
 carrying `gatehouse: allow-secret` is a fixture and is skipped.
+
+`workflow-lint` runs zizmor, offline, over the repo's GitHub Actions workflows
+and actions; a repo with none is clean. It is advisory: findings are printed
+and marked ADVISORY and do not fail, until the repo sets `gate = true` in its
+table. The repo's `zizmor.yml` and `# zizmor: ignore[...]` comments apply.
 
 `sdlc tiers` prints what each command runs in the repo you are in, and which
 lane each check runs in.
@@ -439,6 +444,7 @@ tests = ["tests/image/"]
 | `containerfile-lint` | `containerfiles` (default: the root Containerfile or Dockerfile and every `[[tool.sdlc.images]]` one), `threshold` |
 | `container-build` | the `image-build` kind's settings; `containerfile` defaults to the root one |
 | `container-smoke` | `gate` (default `false`: findings are advisory), `seconds` (default 10), `args`, `env`, `network` (default `false`), `image` |
+| `workflow-lint` | `gate` (default `false`: findings are advisory) |
 | `container-scan` | `fail_on` (default `critical`), `only_fixed` (default `true`), `image` |
 | `npm-lint`, `npm-test` | `packages` (default `["."]`) |
 | `npm-audit` | `packages`, `level` (`info`, `low`, `moderate`, `high`, `critical`; default `high`), `omit_dev` (default `false`: devDependencies are audited too) |

@@ -6,6 +6,22 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `workflow-lint`, a check in push and ci for every repo: zizmor, offline, over
+  its GitHub Actions workflows and actions (RT#1662). Advisory until a repo sets
+  `gate = true` in its table, because most of the fleet's workflows have high
+  findings today.
+- `renovate.json`: Renovate moves markdownlint-cli2 and the final-stage copies
+  of the Gourmand, Gatehouse and lychee ARGs, beside the first copies and the
+  sdlc-bootstrap base digest its dockerfile manager already moves, under the
+  fleet's 7-day release-age cooldown.
+
+### Removed
+
+- `update-tools.yml` and `scripts/update_tools.py`, the last user of the
+  crunchtools-ci App here (RT#1669): Renovate moves those pins now.
+
 ### Fixed
 
 - sdlc-bootstrap (`boot/sdlc`) resolves `:<major>` in the registry, in the same

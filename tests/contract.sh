@@ -420,7 +420,7 @@ fi
 # reads and the shell that acts on it, so it is checked on the real image.
 plan=$(podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
          "$IMAGE" sdlc plan push 2>&1 | cut -f1 | tr '\n' ' ')
-want="lint mypy pytest gourmand secret-scan gatehouse semgrep pip-audit constitution codeql "
+want="lint mypy pytest gourmand secret-scan workflow-lint gatehouse semgrep pip-audit constitution codeql "
 if [ "$plan" = "$want" ]; then
   ok "sdlc plan push lists the push defaults in order"
 else
@@ -581,7 +581,7 @@ printf 'FROM quay.io/hummingbird/python:3.14\nUSER 65532\n' > "$CFIX/Containerfi
 plan=$(podman run --rm -v "$CFIX:/repo:ro,z" -w /repo --entrypoint="" \
          -e SDLC_HOST_REPO=/host -e SDLC_CACHE_VOLUME=v -e SDLC_IMAGE=gate \
          "$IMAGE" sdlc plan ci 2>&1 | cut -f1 | awk '!s[$0]++' | tr '\n' ' ')
-want="containerfile-lint secret-scan constitution container-build container-smoke container-scan "
+want="containerfile-lint secret-scan workflow-lint constitution container-build container-smoke container-scan "
 if [ "$plan" = "$want" ]; then
   ok "a Containerfile-only repo plans the container stack in ci"
 else
@@ -665,7 +665,7 @@ docs() { podman run --rm --network=none -v "$DFIX:/repo:ro,z" -w /repo --entrypo
 plan=$(podman run --rm -v "$DFIX:/repo:ro,z" -w /repo --entrypoint="" \
          -e SDLC_HOST_REPO=/host -e SDLC_CACHE_VOLUME=v -e SDLC_IMAGE=gate \
          "$IMAGE" sdlc plan ci 2>&1 | cut -f1 | awk '!s[$0]++' | tr '\n' ' ')
-want="markdown-lint secret-scan link-check constitution "
+want="markdown-lint secret-scan workflow-lint link-check constitution "
 if [ "$plan" = "$want" ]; then
   ok "a Markdown-only repo plans the docs stack in ci"
 else
