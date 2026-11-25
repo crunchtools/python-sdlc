@@ -165,9 +165,17 @@ printf '[containers]\nlabel = false\n' > "$work/containers.conf"
 # empty directory over that source, so only its containers lose it;
 # --default-mounts-file is not honored by a build through the API.
 mkdir "$work/no-secrets"
-# podman itself, exec'd by unshare and sh: $! must be the service, for cleanup to stop it.
+# podman itself, exec'd by env, unshare and sh: $! must be the service, for cleanup to stop it.
+# The service holds none of this run's secrets, as a runner's podman holds none:
+# a build secret whose id names a variable in the service's environment reaches
+# the RUN empty, whatever its src= holds, so with RHSM_ACTIVATION_KEY and
+# RHSM_ORG_ID exported a RUN --mount=type=secret,id=RHSM_* read nothing and
+# subscription-manager said "Must specify an activation key" (a1679).
 # shellcheck disable=SC2016 # $1 and $@ are the inner sh's
 CONTAINERS_CONF_OVERRIDE=$work/containers.conf TMPDIR=$store/tmp \
+  env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD -u QUAY_USERNAME -u QUAY_PASSWORD \
+    -u ASHIGARU_APP_KEY -u RHSM_ACTIVATION_KEY -u RHSM_ORG_ID -u REGISTRY_REDHAT_IO_USER \
+    -u REGISTRY_REDHAT_IO_PASSWORD -u GITHUB_TOKEN \
   unshare -m --propagation private sh -c \
     'mount --bind "$1" /usr/share/rhel/secrets 2> /dev/null || [ ! -d /usr/share/rhel/secrets ] || exit 1; shift; exec "$@"' \
     sh "$work/no-secrets" podman --root "$store/storage" --runroot /run/sdlc-release/runroot \
