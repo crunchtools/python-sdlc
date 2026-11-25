@@ -624,6 +624,13 @@ def gate_plan(job: Job) -> dict[str, tuple[str, str]]:
         parts = line.split("\t", PLAN_FIELDS - 1)
         if len(parts) == PLAN_FIELDS:
             plan.setdefault(parts[0], (parts[2], parts[3]))
+    if "container-build" not in plan:
+        # ci skips the build where the check job cannot do it (an RHSM build, which
+        # needs secrets only this job holds). Planned by name, it ignores that skip.
+        for line in job.must(["sdlc", "plan", "container-build"]).splitlines():
+            parts = line.split("\t", PLAN_FIELDS - 1)
+            if len(parts) == PLAN_FIELDS:
+                plan.setdefault(parts[0], (parts[2], parts[3]))
     return plan
 
 

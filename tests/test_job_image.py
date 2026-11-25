@@ -115,6 +115,7 @@ class FakeTools(Tools):
         self.policy: dict | None = None
         self.built_file = ""
         self.plan = ""  # the plan `sdlc plan ci` prints; empty is the stock one
+        self.ci_skip: set[str] = set()  # checks `sdlc plan ci` leaves out; by name, planned
         self.stdin: list[str | None] = []
         self.digest: str | None = PUSHED  # what `podman push --digestfile` writes; None, none
         self.replies: dict[int, dict] = {1: INIT_OK, 2: TOOLS_OK}  # what the MCP server says
@@ -162,7 +163,13 @@ class FakeTools(Tools):
         if argv[:2] == ["git", "rev-parse"]:
             return cp(0, TREE + "\n")
         if argv[:2] == ["sdlc", "plan"]:
-            return cp(0, self.plan or plan_text(bootc=self.bootc))
+            rows = (self.plan or plan_text(bootc=self.bootc)).splitlines(keepends=True)
+            keep = (
+                (lambda name: name not in self.ci_skip)
+                if argv[2] == "ci"
+                else (lambda name: name == argv[2])
+            )
+            return cp(0, "".join(r for r in rows if keep(r.split("\t", 1)[0])))
         if argv[0] == "sdlc":
             return cp(self.lint_rc if argv[1:] == ["containerfile-lint"] else 0)
         assert argv[:3] == ["podman", "--remote", "--url"], argv
@@ -435,6 +442,14 @@ def test_push_builds_when_the_pull_request_recorded_no_candidate_for_this_tree()
         rc, _ = go(t, QUAY_PARENT)
         assert rc == 0 and t.built() and t.pushed(), (notes, t.log)
         assert not any(a[:2] == ["skopeo", "copy"] for a in t.argvs)
+
+
+def test_a_build_ci_skips_is_still_built_and_pushed() -> None:
+    t = FakeTools()
+    t.ci_skip = {"container-build"}  # an RHSM build: the check job cannot do it
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0 and t.built() and t.pushed(), t.log
+    assert ["sdlc", "plan", "container-build"] in t.argvs
 
 
 def test_a_recorded_candidate_that_does_not_check_out_is_refused() -> None:
