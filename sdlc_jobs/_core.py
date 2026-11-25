@@ -580,7 +580,7 @@ def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, s
     doc = inspect_self(tools, env, str(root))
     where = str(root)
     best: tuple[int, str] | None = None
-    for mount in doc.get("Mounts") or []:
+    for mount in mounts_of(tools, env, doc, str(root)):
         dest = str(mount.get("Destination", "")).rstrip("/")
         inside = bool(dest) and (where == dest or where.startswith(dest + "/"))
         if inside and (best is None or len(dest) > best[0]):
@@ -589,6 +589,26 @@ def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, s
     if best is None or not image:
         cannot(f"the workspace {root} is not a mount of this container, or its image is unknown")
     return best[1], image
+
+
+def mounts_of(tools: Tools, env: Mapping[str, str], doc: Mapping, cwd: str) -> list[dict]:
+    """An inspected container's mounts, with those it took by --volumes-from.
+
+    Docker lists the inherited mounts under the container's own `Mounts`; podman
+    lists none and names the sources in `HostConfig.VolumesFrom`, so boot's
+    sibling of the job container finds the workspace there.
+    """
+    mounts = [m for m in doc.get("Mounts") or [] if isinstance(m, dict)]
+    for src in (doc.get("HostConfig") or {}).get("VolumesFrom") or []:
+        name = str(src).split(":", 1)[0]
+        try:
+            other = json.loads(must(tools, [*podman(env), "inspect", name], cwd=cwd))[0]
+        except (ValueError, IndexError, TypeError) as exc:
+            cannot(
+                f"podman inspect of {name} (this container's --volumes-from) did not parse: {exc}"
+            )
+        mounts += [m for m in other.get("Mounts") or [] if isinstance(m, dict)]
+    return mounts
 
 
 SELF_ID = re.compile(
@@ -629,7 +649,15 @@ def image_of(doc: Mapping[str, object]) -> str:
     pinned by digest (the bootstrap runs it so), which the launcher needs; else
     the image id, which `podman run` takes as well. "" when neither is known."""
     name = str(doc.get("ImageName") or "")
-    return name if "@sha256:" in name else str(doc.get("Image") or "")
+    if "@sha256:" in name:
+        return name
+    # podman's Docker API (the runner VMs' `docker run`) records the image's tag,
+    # not the digest it was run by; its ImageDigest still says which one it is.
+    digest = str(doc.get("ImageDigest") or "")
+    repo = name.rsplit(":", 1)[0] if ":" in name.rsplit("/", 1)[-1] else name
+    if repo and DIGEST.fullmatch(digest):
+        return f"{repo}@{digest}"
+    return str(doc.get("Image") or "")
 
 
 def run_job(job: ModuleType, event_name: str, event: dict, env: Mapping[str, str]) -> int:

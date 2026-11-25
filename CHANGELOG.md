@@ -6,6 +6,18 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-25
+
+### Fixed
+
+- The fleet file's gates run on runners whose engine is podman behind a Docker
+  API (the Exedore runner VMs). boot's sibling of the job container lists no
+  mounts of its own there, only `HostConfig.VolumesFrom`, so the workspace is
+  now mapped through the job container's mounts; and podman records the tag,
+  not the digest, as the image name, so the launcher's image is pinned again
+  from `ImageDigest`. Before, every `sdlc / check` there stopped with "the
+  workspace ... is not a mount of this container" or "not pinned by digest".
+
 ## [0.15.1] - 2026-11-25
 
 ### Fixed
