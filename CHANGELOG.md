@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- promote reads a repo's own `version` label before the OCI version its base
+  sets, so the rebuild of a tagged release (hermes 1.2.0 on hummingbird/python
+  3.13.18) moves its version tag (a1551)
+
 ## [0.16.3] - 2026-11-25
 
 ### Added

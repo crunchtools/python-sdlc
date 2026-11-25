@@ -435,6 +435,14 @@ def test_rebuild_of_the_release_moves_the_version_tag() -> None:
     assert go(t) == 0 and t.tags["1.2.3"] == NEW
 
 
+def test_rebuild_reads_the_repos_version_over_its_bases() -> None:
+    # hermes: the repo labels version 1.2.0; hummingbird/python's OCI version is 3.13.18.
+    t = FakeTools()
+    t.labels[NEW] = {**built_labels("3.13.18"), "version": "1.2.0"}
+    t.release_tags["1.2.0"] = SHA
+    assert go(t) == 0 and t.tags["1.2.0"] == NEW and t.tags["latest"] == NEW
+
+
 def test_rebuild_of_an_annotated_release_tag_moves_it() -> None:
     t = FakeTools()
     t.annotated["1.2.3"] = SHA  # v1.2.3 is a tag object, one hop from this run's commit

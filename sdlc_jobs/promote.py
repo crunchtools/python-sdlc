@@ -56,7 +56,9 @@ from sdlc_jobs._core import (
 )
 from sdlc_jobs.image import ORG, QUAY
 
-VERSION_LABELS = ("org.opencontainers.image.version", "version")
+# The repo's own `version` first: a base sets both, and a repo that labels its version
+# usually overrides only `version` (hummingbird/python's OCI version is 3.13.x or 3.14.x).
+VERSION_LABELS = ("version", "org.opencontainers.image.version")
 MISSING = re.compile(r"manifest unknown|not found|no such|name unknown", re.IGNORECASE)
 COMMIT = re.compile(r"[0-9a-f]{40}")
 RELEASED_REF = re.compile(r"refs/heads/.+")
