@@ -57,31 +57,35 @@ SDCAPS=CHOWN,DAC_OVERRIDE,FOWNER,KILL,NET_BIND_SERVICE,SETGID,SETPCAP,SETUID
 sdprobe() {
   _name=$1; shift
   _c=aa-sd-$$
+  T="timeout -k 5 20"
   # shellcheck disable=SC2086
-  $PODMAN --events-backend=none run -d --rm --name "$_c" --systemd=always "$@" "$SDIMG" >/dev/null 2>&1 \
-    || { say "[sd $_name] could not start"; return; }
+  $T $PODMAN --events-backend=none run -d --rm --name "$_c" --systemd=always "$@" "$SDIMG" >/dev/null 2>&1 \
+    || { say "[sd $_name] could not start"; $T $PODMAN rm -f -t 0 "$_c" >/dev/null 2>&1; return; }
   _st=
   for _ in $(seq 1 30); do
-    _st=$($PODMAN exec "$_c" systemctl is-system-running 2>/dev/null) || :
+    _st=$($T $PODMAN exec "$_c" systemctl is-system-running 2>/dev/null) || :
     case "$_st" in running|degraded) break ;; esac
     sleep 1
   done
-  $PODMAN exec "$_c" systemd-run --unit=aaprobe sleep 300 >/dev/null 2>&1
-  $PODMAN exec "$_c" systemctl stop aaprobe >/dev/null 2>&1
-  _after=$($PODMAN exec "$_c" systemctl show -p ActiveState --value aaprobe 2>&1)
-  _res=$($PODMAN exec "$_c" systemctl show -p Result --value aaprobe 2>&1)
-  _lab=$($PODMAN exec "$_c" cat /proc/1/attr/current 2>&1)
-  say "[sd $_name] pid1=$_lab state=$_st unit-after-stop=$_after result=$_res"
-  $PODMAN rm -f -t 0 "$_c" >/dev/null 2>&1
+  $T $PODMAN exec "$_c" systemd-run --no-block --unit=aaprobe sleep 300 >/dev/null 2>&1
+  sleep 2
+  $T $PODMAN exec "$_c" systemctl stop --no-block aaprobe >/dev/null 2>&1
+  _after=
+  for _ in $(seq 1 15); do
+    _after=$($T $PODMAN exec "$_c" systemctl show -p ActiveState --value aaprobe 2>&1)
+    [ "$_after" = inactive ] && break
+    sleep 1
+  done
+  _lab=$($T $PODMAN exec "$_c" cat /proc/1/attr/current 2>&1)
+  say "[sd $_name] pid1=$_lab state=$_st unit-after-stop=$_after"
+  $T $PODMAN rm -f -t 0 "$_c" >/dev/null 2>&1 || say "[sd $_name] rm timed out"
 }
 SDBASE="--cap-drop=all --cap-add=$SDCAPS --security-opt=no-new-privileges"
-say "== rootless"
-candidates
+say "== rootless: skipped this round"
 if sudo -n true 2>/dev/null; then
   PODMAN="sudo -n podman"
   say "== rootful: apparmor=$(sudo -n podman info --format '{{.Host.Security.AppArmorEnabled}}' 2>&1) rootless=$(sudo -n podman info --format '{{.Host.Security.Rootless}}' 2>&1)"
   sudo -n podman pull -q "$IMG" >/dev/null 2>&1 || say "rootful pull failed"
-  candidates
   $PODMAN pull -q "$SDIMG" >/dev/null 2>&1 || say "rootful sd pull failed"
   sdprobe "crun nnp (today without the fix)" $SDBASE
   sdprobe "crun nnp unconfined (0.15.4)"    $SDBASE --security-opt apparmor=unconfined
