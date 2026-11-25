@@ -90,18 +90,18 @@ def cache_follows_writability() -> bool:
     ok = True
     seen: list[list[str]] = []
     real_run, real_step, real_access, real_repo = _SDLC.run, _SDLC.step, _SDLC.os.access, _SDLC.REPO
-    _SDLC.run = lambda argv, *a, **k: seen.append(list(argv)) or (0, "")
-    _SDLC.step = lambda *a, **k: None
+    _SDLC.run = lambda argv, *_a, **_k: seen.append(list(argv)) or (0, "")
+    _SDLC.step = lambda *_a, **_k: None
     try:
         with tempfile.TemporaryDirectory() as tmp:
             _SDLC.REPO = Path(tmp)
-            _SDLC.os.access = lambda *a, **k: False
+            _SDLC.os.access = lambda *_a, **_k: False
             _SDLC.t_gourmand({})
             argv = seen[-1]
             ok &= check("read-only tree passes --cache-dir", "--cache-dir" in argv, True)
             cache = argv[argv.index("--cache-dir") + 1] if "--cache-dir" in argv else ""
             ok &= check("the cache is outside the tree", Path(cache).is_relative_to(tmp), False)
-            _SDLC.os.access = lambda *a, **k: True
+            _SDLC.os.access = lambda *_a, **_k: True
             _SDLC.t_gourmand({})
             ok &= check(
                 "writable tree keeps the default", seen[-1], ["gourmand", "check", "--full", "."]

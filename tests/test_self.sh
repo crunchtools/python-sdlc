@@ -411,6 +411,18 @@ if [ "$RC" -eq 0 ] \
    && [ "$(n_log '^skopeo copy')" -eq 4 ] && ! in_log "^skopeo copy.*$B:0\$" && ! in_log "^skopeo copy.*$B:latest"; then
   ok "first release (:0 absent): signs sdlc and sdlc-bootstrap, moves 0.13.0, 0, latest and sdlc-bootstrap:0.13.0"
 else bad "release first: exit $RC"; dump; fi
+# Order: both signatures are in the log before the first tag moves, the
+# bootstrap's before sdlc-bootstrap:<v> and sdlc's before :0. A tag moved ahead
+# of its signature is a window in which an unsigned digest is what clients pull.
+first() { grep -n -- "$1" "$W/log" 2> /dev/null | head -n 1 | cut -d: -f1; }
+sg_a=$(first " sign --yes .*$A@$D1\$"); sg_b=$(first " sign --yes .*$B@$DB\$")
+mv_any=$(first '^skopeo copy'); mv_0=$(first "^skopeo copy.* docker://$A:0\$")
+mv_b=$(first "^skopeo copy.* docker://$B:0.13.0\$")
+if [ -n "$sg_a" ] && [ -n "$sg_b" ] && [ -n "$mv_any" ] && [ -n "$mv_0" ] && [ -n "$mv_b" ] \
+   && [ "$sg_a" -lt "$mv_any" ] && [ "$sg_b" -lt "$mv_any" ] \
+   && [ "$sg_b" -lt "$mv_b" ] && [ "$sg_a" -lt "$mv_0" ]; then
+  ok "release: every sign precedes the first tag move; sdlc's before :0, sdlc-bootstrap's before its tag"
+else bad "release order: sign sdlc=$sg_a boot=$sg_b, first copy=$mv_any, :0=$mv_0, boot tag=$mv_b"; fi
 if [ "$(n_log "^skopeo inspect .*{{.Digest}}.* docker://$A:latest\$")" -eq 1 ] \
    && [ "$(n_log "^skopeo inspect .*{{.Digest}}.* docker://$B:0.13.0\$")" -eq 1 ] \
    && in_log '^skopeo copy --authfile [^ ]* --all --preserve-digests'; then
