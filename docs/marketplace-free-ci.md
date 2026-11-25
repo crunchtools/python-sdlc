@@ -453,7 +453,7 @@ a job that has nothing to take:
 |---|---|
 | `ashigaru.yml` | deleted; its jobs are `ai` and `write` |
 | `gatehouse.yml`, `gatehouse-retriage.yml` | deleted; `ai`, `write`, `gate` |
-| `gourmand.yml`, `constitution.yml` | deleted; `check` runs both through `sdlc ci` |
+| `gourmand.yml`, `constitution.yml` | deleted; `check` runs the constitution in `sdlc ci` and Gourmand right after it (`check.py` `review`) |
 | `container.yml` (build, verify-digest, promote) | deleted; `check`, `image`, `sign` |
 | `release.yml` (open and tag with the App) | deleted; `write` opens, verifies and tags, and `sign` publishes |
 | `update-tools.yml` | deleted; Renovate updates the `Containerfile` pins |

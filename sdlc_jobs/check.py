@@ -13,6 +13,7 @@ It does four things, in this order, because a failed check still prints its plan
 2. Run the gates (pull_request, push, dispatch): the launcher's `ci`, which is the
    fleet's `sdlc ci` -- ruff, mypy, pytest, semgrep, pip-audit, CodeQL, the
    constitution validator, and the container build, smoke and scan for an image repo.
+   Then Gourmand (`review`), which `sdlc ci` leaves out and this job runs beside it.
 3. Upload SARIF on a default-branch push.
 4. The weekly run also audits dependencies and keeps the schedule alive.
 
@@ -75,6 +76,11 @@ EVENTS = ("pull_request", "push", "schedule", "workflow_dispatch")
 PLAN_LIMIT = 900_000
 RELEASE_REF = "ashigaru/release-"
 CONTAINER_GATES = ("container-build", "container-smoke", "container-scan", "bootc-lint")
+# The push verdict `sdlc ci` leaves out (its CI_EXCLUDES) that this job renders itself.
+# Gourmand reads the tree and needs no secret and no model, so after the cutover deleted
+# every repo's gourmand.yml this is where it runs (#177). Gatehouse, the other
+# exclusion, is `ai` and `gate`'s.
+REVIEW = "gourmand"
 # A pull request that changes one of these builds the image as a test (never pushed).
 IMAGE_INPUTS = re.compile(
     r"(^|/)(Containerfile|Dockerfile)(\.[^/]*)?$|(^|/)\.(container|docker)ignore$"
@@ -122,7 +128,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     skip: tuple[str, ...] = ()
     if event_name == "pull_request" and not touches_image(tools, env, repo, event):
         skip = CONTAINER_GATES
-    rc = gates(tools, env, root, skip=skip)
+    rc = max(gates(tools, env, root, skip=skip), review(tools, env, root))
     if default_push:
         upload_sarif(tools, env, repo)
     return rc
@@ -277,6 +283,21 @@ def gates(tools: Tools, env: Mapping[str, str], root: Path, skip: tuple[str, ...
         given = [s for s in env.get("SDLC_SKIP", "").split(",") if s.strip()]
         env = {**env, "SDLC_SKIP": ",".join([*given, *skip])}
     proc = launch(tools, env, root, "ci", stream=True)
+    return proc.returncode if proc.returncode in (CLEAN, FOUND) else CANNOT_RUN
+
+
+def review(tools: Tools, env: Mapping[str, str], root: Path) -> int:
+    """Gourmand for this tree, through the launcher as the gates are; its verdict.
+
+    Run unless the repo skips it in [tool.sdlc.push], the one tier that names it, so
+    a repo that opted out of it locally is not judged by it here either.
+    """
+    step(f"review: sdlc {REVIEW}")
+    skip = (tool_sdlc(root).get("push") or {}).get("skip") or []
+    if isinstance(skip, list) and REVIEW in skip:
+        print(f"review: {REVIEW} is skipped in [tool.sdlc.push]; not run", flush=True)
+        return CLEAN
+    proc = launch(tools, env, root, REVIEW, stream=True)
     return proc.returncode if proc.returncode in (CLEAN, FOUND) else CANNOT_RUN
 
 

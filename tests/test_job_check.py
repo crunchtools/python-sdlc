@@ -65,6 +65,7 @@ class FakeTools(Tools):
         self.launched: list[tuple[str, dict]] = []
         self.calls: list[tuple[str, str, bytes | None]] = []
         self.gate_rc = gate_rc
+        self.review_rc = 0  # what the launcher's `gourmand` exits with
         self.prs = prs if prs is not None else []
         self.audit_rc = 0
         self.audit_out: str | None = None  # None: the report for audit_rc
@@ -107,6 +108,9 @@ class FakeTools(Tools):
             self.launched.append((argv[1], dict(env or {})))
             if argv[1] == "ci":
                 return cp(self.gate_rc)
+            if argv[1] == check.REVIEW:
+                assert argv[2:] == [], argv
+                return cp(self.review_rc)
             assert argv[2:] == ["--", "--report"], argv
             return cp(self.audit_rc, self.report() if self.audit_out is None else self.audit_out)
         return self.tool(argv)
@@ -499,6 +503,59 @@ def test_dispatch_gates_and_plans_nothing() -> None:
     rc, plan = go("workflow_dispatch", t, files=IMAGE)
     assert rc == 0 and plan["image"] is False and plan["release"] is None and not plan["write"]
     assert gated(t)
+
+
+def launched(t: FakeTools) -> list[str]:
+    return [c for c, _ in t.launched]
+
+
+def test_a_fleet_pull_request_runs_gourmand_after_the_gates() -> None:
+    """#177: the cutover deleted every gourmand.yml and `sdlc ci` leaves Gourmand out."""
+    t = FakeTools()
+    rc, _ = go("pull_request", t, ref="refs/pull/1/merge")
+    assert rc == 0 and launched(t) == ["ci", check.REVIEW]
+    _, child = t.launched[1]
+    assert child["SDLC_HOST_REPO"].startswith("/host/tmp/")  # the same launcher, nested
+
+
+def test_gourmand_runs_wherever_the_gates_run() -> None:
+    for name, ref in (
+        ("push", "refs/heads/main"),
+        ("push", "refs/heads/topic"),
+        ("workflow_dispatch", "refs/heads/main"),
+    ):
+        t = FakeTools()
+        go(name, t, ref=ref)
+        assert launched(t) == ["ci", check.REVIEW], (name, ref)
+
+
+def test_no_gates_no_gourmand() -> None:
+    t = merged("c" * 40)  # a push of the tree its pull request passed
+    go("push", t, files=IMAGE)
+    assert check.REVIEW not in launched(t)
+    t = FakeTools()
+    go("schedule", t, cron=check.POLL, files=IMAGE)
+    assert check.REVIEW not in launched(t)
+
+
+def test_gourmand_verdict_joins_the_gates() -> None:
+    for gate_rc, review_rc, want in ((0, 1, 1), (1, 0, 1), (0, 2, 2), (0, 3, 2), (1, 2, 2)):
+        t = FakeTools(gate_rc=gate_rc)
+        t.review_rc = review_rc
+        rc, _ = go("pull_request", t, ref="refs/pull/1/merge")
+        assert rc == want, (gate_rc, review_rc)
+        assert launched(t) == ["ci", check.REVIEW]  # a failed gate still gets reviewed
+
+
+def test_a_repo_that_skips_gourmand_on_push_is_not_reviewed() -> None:
+    skip = {"pyproject.toml": '[tool.sdlc.push]\nskip = ["gourmand", "semgrep"]\n'}
+    t = FakeTools()
+    rc, _ = go("pull_request", t, files=skip, ref="refs/pull/1/merge")
+    assert rc == 0 and launched(t) == ["ci"]
+    other = {"pyproject.toml": '[tool.sdlc.push]\nskip = ["semgrep"]\n'}
+    t = FakeTools()
+    go("pull_request", t, files=other, ref="refs/pull/1/merge")
+    assert launched(t) == ["ci", check.REVIEW]
 
 
 def test_sarif_only_on_default_push() -> None:
