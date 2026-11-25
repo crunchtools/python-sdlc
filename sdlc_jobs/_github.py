@@ -1,7 +1,7 @@
 """The GitHub REST API, the job outputs and the exit-code contract, for every job.
 
-No `gh` and no third-party HTTP client: urllib, as `release_publish.py` and
-`update_tools.py` already do. Every call goes through `Api`, so a test hands a
+No `gh` and no third-party HTTP client: urllib, as `release_publish.py`
+already does. Every call goes through `Api`, so a test hands a
 job a fake and nothing touches real GitHub.
 """
 

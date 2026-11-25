@@ -467,7 +467,7 @@ a job that has nothing to take:
 | `bootstrap.yml` | deleted; a `bootstrap` dispatch of `ci.yml` runs `approve`, `image` and `sign` |
 | `container.yml` (build, verify-digest, promote) | stays for now; to go to `check`, `image`, `sign` |
 | `release.yml` (open and tag with the App) | deleted; `write` opens, verifies and tags, and `sign` publishes |
-| `update-tools.yml` | stays for now; Renovate is to update the `Containerfile` pins |
+| `update-tools.yml` | deleted; Renovate moves the `Containerfile` pins (`renovate.json`) |
 | `dependabot-automerge.yml` | deleted with Dependabot |
 
 sdlc is the one repo with environments: `registry`, `sdlc-signing` and
@@ -752,8 +752,8 @@ split stays at four chunks.
 
 This is sdlc's routing table, not the file's. It is listed by job, then event.
 Tool and category names are kept, so the Security tab's history carries over:
-CodeQL uploads as `/language:python` and semgrep as `semgrep`; zizmor, which no
-check runs yet, would upload as `zizmor`.
+CodeQL uploads as `/language:python` and semgrep as `semgrep`; zizmor, which
+`workflow-lint` runs without a SARIF upload, would upload as `zizmor`.
 
 | Job | Event | Runs | Was |
 |---|---|---|---|
@@ -1079,7 +1079,7 @@ in favour of Renovate `customManagers` on the `ARG` lines.
   nothing else. It changes rarely, and each
   change is a fleet edit of one digest.
 - **gh** is not needed: sdlc calls the REST API itself, as `release_publish.py`
-  and `update_tools.py` already do.
+  already does.
 
 ## The hard cases
 
