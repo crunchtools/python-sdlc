@@ -66,7 +66,8 @@ on 2026-11-18.
 ## Fixes
 
 - **ai: the model runs in a sibling container** (sdlc_jobs/ai.py `Job.sibling`).
-  The flags follow Renovate's: `--cap-drop=all`, `no-new-privileges`,
+  The flags follow Renovate's: `--cap-drop=all`, `no-new-privileges` (off on
+  an AppArmor engine, #181),
   `--read-only`, a private `/tmp`, this job's own image by digest with
   `--pull=never`, and only `CLAUDE_CODE_OAUTH_TOKEN` by name. The mounts are
   the scratch dir read-only, the checkout read-write, and the checkout's

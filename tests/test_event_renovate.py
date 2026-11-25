@@ -184,13 +184,15 @@ class FakeSocket:
     """The socket's tools: answers `podman inspect` of this container with its image,
     and records every command."""
 
-    def __init__(self) -> None:
+    def __init__(self, apparmor: str = "") -> None:
         self.calls: list[list[str]] = []
+        self.apparmor = apparmor  # what `podman info` says of .Host.Security.AppArmorEnabled
 
     def run(self, argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(argv))
         doc = [{"ImageName": IMAGE, "Image": "f" * 64}] if "inspect" in argv else []
-        return subprocess.CompletedProcess(argv, 0, json.dumps(doc), "")
+        out = self.apparmor if argv[-3:] == core.APPARMOR else json.dumps(doc)
+        return subprocess.CompletedProcess(argv, 0, out, "")
 
 
 GLOBAL = {"platform": "github", "autodiscover": True, "autodiscoverFilter": ["crunchtools/*"]}
@@ -618,6 +620,21 @@ with tempfile.TemporaryDirectory() as tmp:
     mi.write_text("1 2 0:1 / / rw - overlay overlay rw\n")
     check("own_container_id is empty outside a container", core.own_container_id(str(mi)) == "")
 check("own_container_id is empty without mountinfo", core.own_container_id("/nonexistent") == "")
+
+
+aa_sock = FakeSocket(apparmor="true\n")  # crunchtools/sdlc#181
+aa_job = renovate.Job(Site(HOME, base_env, FakeRunner(), TMP), Minter(), aa_sock, FakeRenovate())
+aa_argvs = [aa_job.nested(IMAGE, f"sdlc-renovate-{i}", 60) for i in range(2)]
+check(
+    "on an AppArmor engine the nested container keeps cap-drop and goes without NNP",
+    all("--cap-drop=all" in a and core.NNP not in a for a in aa_argvs),
+    str(aa_argvs[0]),
+)
+check(
+    "the engine is asked about AppArmor once per run, not per repository",
+    sum(c[-3:] == core.APPARMOR for c in aa_sock.calls) == 1,
+    str(aa_sock.calls),
+)
 
 check("the suite tests this checkout's job", Path(renovate.__file__).resolve() == JOB_FILE)
 

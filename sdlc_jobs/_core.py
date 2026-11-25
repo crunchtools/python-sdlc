@@ -21,11 +21,11 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import IO, NoReturn, TypedDict, Unpack
+from typing import IO, NoReturn, Protocol, TypedDict, Unpack
 
 from sdlc_jobs._tools import git_env
 
@@ -40,6 +40,12 @@ FROM_AS_WORDS = 3  # image, AS, name
 
 # The runner's container socket, as the job container sees it: GitHub mounts it there.
 SOCKET = "unix:///var/run/docker.sock"
+# bin/sdlc's rule, crunchtools/sdlc#181: on an AppArmor engine no-new-privileges
+# stacks the container's profile onto crun's (`containers-default//&crun`), and a
+# process cannot signal its own child (EPERM). There every container a job starts
+# keeps --cap-drop=all and AppArmor and goes without it; anywhere else it is passed.
+NNP = "--security-opt=no-new-privileges"
+APPARMOR = ["info", "--format", "{{.Host.Security.AppArmorEnabled}}"]
 # The fleet's cosign key, public half: what container-release and sign-digest.sh verify with.
 FLEET_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE5TlIf0f5VMBaCLJGtmh9fL3C/xYM
@@ -602,6 +608,31 @@ def plan(env: Mapping[str, str]) -> dict:
 def podman(env: Mapping[str, str]) -> list[str]:
     """podman driving the runner's engine through the socket, never one of its own."""
     return ["podman", "--remote", "--url", env.get("CONTAINER_HOST") or SOCKET]
+
+
+class Answer(Protocol):
+    """What any job's runner hands back: Tools.run's, _tools.run's, subprocess.run's."""
+
+    @property
+    def returncode(self) -> int: ...
+    @property
+    def stdout(self) -> str: ...
+
+
+UNASKED = (OSError, subprocess.SubprocessError, CannotRunError)  # an engine that cannot be asked
+
+
+def no_new_privileges(env: Mapping[str, str], ask: Callable[[list[str]], Answer]) -> list[str]:
+    """[NNP], or [] when the engine reports AppArmor; `ask` runs an argv with the job's own
+    runner. An engine that does not answer, or cannot be asked, keeps the flag."""
+    try:
+        proc = ask([*podman(env), *APPARMOR])
+    except UNASKED:
+        return [NNP]
+    apparmor = proc.returncode == 0 and (proc.stdout or "").strip() == "true"
+    if apparmor:
+        print("the engine enforces AppArmor; containers run without no-new-privileges")
+    return [] if apparmor else [NNP]
 
 
 def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, str]:

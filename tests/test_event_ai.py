@@ -1289,5 +1289,20 @@ check(
     refused and unpinned.runner.calls == [],
 )
 
+aa = Rig()
+aa.runner.answers.insert(0, (["info", "AppArmorEnabled"], Done(0, "true\n", "")))
+aa_job = ai.Job(
+    Site(REPO, BASE_ENV, aa.runner, aa.work, api_for=lambda _t: aa.api),
+    aa.api,
+    lambda: (f"/host{aa.work}", IMAGE),
+)
+aa_argvs = [aa_job.sibling(aa.work, f"sdlc-model-{i}") for i in range(2)]
+check(
+    "model: on an AppArmor engine the sibling keeps cap-drop and goes without NNP",
+    all("--cap-drop=all" in a and "--security-opt=no-new-privileges" not in a for a in aa_argvs),
+    str(aa_argvs[0]),
+)
+check("model: the engine is asked about AppArmor once", len(aa.runner.ran("AppArmorEnabled")) == 1)
+
 if __name__ == "__main__":
     sys.exit(finish())

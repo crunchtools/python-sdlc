@@ -309,15 +309,35 @@ def stalls(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
 
 
 code = _relock.lock_beside({}, IMAGE, (timeout_work, "/host/work"), timeout_work / "pr", stalls)
+ran = next((c for c in seen if "run" in c), [""])  # after the engine's AppArmor answer
 check(
     "timeout: a sibling past its time is refused, and still removed by name",
     code == _relock.REFUSED
     and any(c[-4:-1] == ["rm", "-f", "--ignore"] and c[-1].startswith("sdlc-relock-") for c in seen)
-    and seen[0][seen[0].index("--name") + 1] == seen[-1][-1],
+    and ran[ran.index("--name") + 1] == seen[-1][-1],
 )
 check(
     "timeout: the sibling's mounts are the host's paths, mapped from write's scratch dir",
-    "/host/work/pr:/src:ro" in seen[0],
+    "/host/work/pr:/src:ro" in ran,
+)
+
+
+def apparmor(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+    """An engine that reports AppArmor (crunchtools/sdlc#181); the sibling times out."""
+    seen.append(argv)
+    if "run" in argv:
+        raise subprocess.TimeoutExpired(argv, _relock.SECONDS + _relock.GRACE)
+    out = "true\n" if "AppArmorEnabled" in " ".join(argv) else ""
+    return subprocess.CompletedProcess(argv, 0, out, "")
+
+
+seen.clear()
+_relock.lock_beside({}, IMAGE, (timeout_work, "/host/work"), timeout_work / "pr", apparmor)
+ran = next((c for c in seen if "run" in c), [""])
+check(
+    "apparmor: on an AppArmor engine the sibling keeps cap-drop and goes without NNP",
+    "--cap-drop=all" in ran and "--security-opt=no-new-privileges" not in ran,
+    str(ran),
 )
 
 

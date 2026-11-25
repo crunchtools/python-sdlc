@@ -127,7 +127,10 @@ def lock_beside(
 
     out = Path(tempfile.mkdtemp(prefix="relock-", dir=work))
     name = f"sdlc-relock-{secrets.token_hex(6)}"
-    argv = sibling(env, name, image, on_host(checkout), on_host(out))
+    nnp = core.no_new_privileges(
+        env, lambda a: run(a, capture_output=True, text=True, timeout=SECONDS, check=False)
+    )
+    argv = sibling(env, name, image, (on_host(checkout), on_host(out)), nnp)
     try:
         done = run(argv, capture_output=True, text=True, timeout=SECONDS + GRACE, check=False)
     except subprocess.TimeoutExpired:
@@ -157,8 +160,12 @@ def remove(env: Mapping[str, str], name: str, run: Run) -> None:
         print(f"::warning::could not remove {name}: {(done.stderr or done.stdout).strip()}")
 
 
-def sibling(env: Mapping[str, str], name: str, image: str, src: str, out: str) -> list[str]:
-    """The sibling's `podman run`: `src` (host path) read-only, only `out` writable."""
+def sibling(
+    env: Mapping[str, str], name: str, image: str, paths: tuple[str, str], nnp: list[str]
+) -> list[str]:
+    """The sibling's `podman run`: `src` (host path) read-only, only `out` writable;
+    `nnp` is no_new_privileges's answer for this engine."""
+    src, out = paths
     return [
         *core.podman(env),
         "run",
@@ -171,7 +178,7 @@ def sibling(env: Mapping[str, str], name: str, image: str, src: str, out: str) -
         "--user",
         "0",
         "--cap-drop=all",
-        "--security-opt=no-new-privileges",
+        *nnp,
         "--security-opt=label=disable",
         "--read-only",
         f"--cpus={CPUS}",

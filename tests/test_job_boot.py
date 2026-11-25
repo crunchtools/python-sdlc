@@ -27,7 +27,7 @@ from typing import Unpack, cast
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sdlc_jobs import _core, boot
-from sdlc_jobs._core import TIMED_OUT, CannotRunError, RunOptions, Tools
+from sdlc_jobs._core import NNP, TIMED_OUT, CannotRunError, RunOptions, Tools
 
 
 def no_container_id(mountinfo: str = "") -> str:
@@ -67,6 +67,7 @@ class FakeTools(Tools):
         self.image = SELF  # the job's own image, as inspect reports it
         self.log = io.StringIO()  # what the job printed, in order with the argvs
         self.marks: list[tuple[int, str]] = []  # (argv count, printed text) at each shell
+        self.apparmor = ""  # what `podman info` says of .Host.Security.AppArmorEnabled
 
     def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
         env, stream, timeout = kw.get("env"), kw.get("stream"), kw.get("timeout")
@@ -85,6 +86,8 @@ class FakeTools(Tools):
             doc = {"ImageName": self.image, "Image": "", "Mounts": mounts}
             return cp(0, json.dumps([doc]))
         assert argv[0] == "podman", f"unexpected argv {argv}"
+        if "{{.Host.Security.AppArmorEnabled}}" in argv:
+            return cp(0, self.apparmor + "\n")
         return cp(0)
 
     def verbs(self) -> list[str]:
@@ -254,14 +257,14 @@ def test_contract_test_runs_after_boot_command_and_with_boot_none() -> None:
 def test_free_disk_empties_the_sdks_and_prunes_before_the_pull_on_github_hosted() -> None:
     t = FakeTools()
     rc, _, _ = go(t, toml(free_disk=True), RUNNER_ENVIRONMENT="github-hosted")
-    want = ["podman inspect"] * 2 + ["podman run", "podman image prune", "podman pull"]
-    assert rc == 0 and t.verbs() == want, t.verbs()
-    run = t.argvs[2]
+    want = ["podman inspect"] * 2 + ["podman info", "podman run", "podman image prune"]
+    assert rc == 0 and t.verbs() == [*want, "podman pull"], t.verbs()
+    run = t.argvs[3]
     for d in boot.SDK_DIRS:
         assert any(w.startswith(f"{d}:/free/") for w in run), (d, run)
     assert SELF in run and "--network=none" in run and run[-1] == boot.EMPTY
-    assert t.argvs[3][4:] == ["image", "prune", "--all", "--force"]
-    assert t.argvs[4][-1] == f"{REF}@{DIGEST}"
+    assert t.argvs[4][4:] == ["image", "prune", "--all", "--force"]
+    assert t.argvs[5][-1] == f"{REF}@{DIGEST}"
 
 
 def test_free_disk_with_no_known_image_of_the_job_is_a_2() -> None:
@@ -275,7 +278,9 @@ def test_free_disk_is_a_no_op_off_github_hosted_and_says_so() -> None:
     for runner in ({}, {"RUNNER_ENVIRONMENT": "self-hosted"}):
         t = FakeTools()
         rc, out, _ = go(t, toml(free_disk=True), **runner)
-        assert rc == 0 and t.verbs() == ["podman inspect"] * 2 + ["podman pull"], t.verbs()
+        assert rc == 0 and t.verbs() == ["podman inspect"] * 2 + ["podman info", "podman pull"], (
+            t.verbs()
+        )
         assert "free-disk: not a GitHub-hosted runner" in out, out
     t = FakeTools()
     rc, out, _ = go(t, toml(free_disk=False))
@@ -329,6 +334,16 @@ def test_the_sibling_has_the_workspace_the_socket_and_the_runners_network() -> N
     assert env["TMPDIR"] == f"{HOST}/.sdlc-boot-tmp" and env["HOME"] == env["TMPDIR"]
     assert env["CONTAINER_HOST"] == env["DOCKER_HOST"] == "unix:///var/run/docker.sock"
     assert not any(t.workspace in w for w in argv[:-1]), "a path of the job container's own"
+
+
+def test_apparmor_engine_runs_the_sibling_without_no_new_privileges() -> None:
+    """crunchtools/sdlc#181: no-new-privileges stacks AppArmor's profiles and breaks signals."""
+    t = FakeTools()
+    t.apparmor = "true"
+    assert go(t, COMMAND + CONTRACT)[0] == 0
+    assert t.shells() == ["./boot.sh\nexit 0", "make contract"]
+    assert all(NNP not in r["argv"] for r in t.runs)
+    assert sum("{{.Host.Security.AppArmorEnabled}}" in a for a in t.argvs) == 1
 
 
 def test_a_socket_that_is_not_mounted_is_a_2() -> None:

@@ -168,6 +168,7 @@ class Job:
         """`mount` gives the scratch dir's host path and this job's image, asked once."""
         self.site, self.api, self.mount = site, api, mount
         self.mounted: tuple[str, str] | None = None
+        self.nnp: list[str] | None = None  # [] on an AppArmor engine, asked once
         self.env, self.repo, self.runner, self.work = site.env, site.repo, site.runner, site.work
         self.read_token = site.env.get("GITHUB_TOKEN", "")
 
@@ -603,6 +604,11 @@ class Job:
         host, image = self.mounted
         if "@sha256:" not in image:
             raise CannotRunError(f"this job's image is not pinned by digest: {image!r}")
+        if self.nnp is None:
+            child = tools.child_env(self.env)
+            self.nnp = core.no_new_privileges(
+                self.env, lambda argv: self.runner(argv, env=child, timeout=tools.GIT_SECONDS)
+            )
 
         def on_host(path: Path) -> str:
             return str(Path(host) / path.relative_to(self.work))
@@ -621,7 +627,7 @@ class Job:
             "--user",
             "0",
             "--cap-drop=all",
-            "--security-opt=no-new-privileges",
+            *self.nnp,
             "--security-opt=label=disable",
             "--read-only",
             "--tmpfs",

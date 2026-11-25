@@ -238,6 +238,13 @@ class Job:
     mint: Mint
     tools: core.Tools
     runner: Stream = field(default=stream)
+    lockdown: list[str] | None = None  # no_new_privileges's answer, asked once
+
+    def nnp(self) -> list[str]:
+        """[NNP], or [] on an AppArmor engine (crunchtools/sdlc#181)."""
+        if self.lockdown is None:
+            self.lockdown = core.no_new_privileges(self.site.env, self.tools.run)
+        return self.lockdown
 
     def run(self, real: bool) -> int:
         """Renovate over the org with this commit's config, a repository at a
@@ -375,7 +382,7 @@ class Job:
             "--pull=never",
             "--log-driver=none",
             "--cap-drop=all",
-            "--security-opt=no-new-privileges",
+            *self.nnp(),
             "--read-only",
             "--tmpfs",
             "/tmp:rw,exec,size=1g,mode=1777",  # noqa: S108 -- inside the nested container
