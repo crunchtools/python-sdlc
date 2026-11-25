@@ -61,7 +61,7 @@ case $want in
 esac
 
 # The fleet key: crunchtools/constitution keys/crunchtools-bootc.pub, whose
-# private half promote signs with (container.yml). KEY_ID names the key in the
+# private half promote signs with (ci.yml's promote job, via sdlc event). KEY_ID names the key in the
 # cache path, so a new key trusts nothing the old one verified; the host
 # contract test checks it against the key's sha256.
 KEY_ID=9c300eea7ce2867d
@@ -94,7 +94,8 @@ case $image in
       || podman --events-backend=none image exists -- "$image" \
       || cannot "$image could not be pulled"
     digest=$(podman --events-backend=none image inspect \
-               --format '{{.Digest}}' -- "$image") || digest= ;;
+               --format '{{.Digest}}' -- "$image" 2> "$dir/inspect.err") \
+      || cannot "$image could not be inspected: $(cat "$dir/inspect.err")" ;;
 esac
 hex=${digest#sha256:}
 case $digest in sha256:*) ;; *) cannot "$image has no sha256 digest to verify" ;; esac
@@ -107,12 +108,12 @@ pinned=$FLEET@$digest
 # an offline seat, never a verdict, so failing to write it is not a failure.
 # CI always verifies: a self-hosted runner outlives the jobs it runs, and CI is
 # never offline.
-seen=
+verified_dir=
 if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ]; then :
-elif [ -n "${XDG_CACHE_HOME:-}" ]; then seen=$XDG_CACHE_HOME/sdlc/verified/$KEY_ID
-elif [ -n "${HOME:-}" ]; then seen=$HOME/.cache/sdlc/verified/$KEY_ID
+elif [ -n "${XDG_CACHE_HOME:-}" ]; then verified_dir=$XDG_CACHE_HOME/sdlc/verified/$KEY_ID
+elif [ -n "${HOME:-}" ]; then verified_dir=$HOME/.cache/sdlc/verified/$KEY_ID
 fi
-if [ -z "$seen" ] || [ ! -e "$seen/$hex" ]; then
+if [ -z "$verified_dir" ] || [ ! -e "$verified_dir/$hex" ]; then
   if ! podman --events-backend=none run --rm --log-driver=none --pull=missing \
          --cap-drop=all --security-opt=no-new-privileges --read-only \
          -v "$dir/fleet.pub:/fleet.pub:ro,Z" \
@@ -121,7 +122,7 @@ if [ -z "$seen" ] || [ ! -e "$seen/$hex" ]; then
     sed 's/^/sdlc:   /' "$dir/verify" >&2
     cannot "$pinned ($image) could not be verified as signed by the crunchtools fleet key"
   fi
-  [ -z "$seen" ] || { mkdir -p "$seen" && : > "$seen/$hex"; } 2> /dev/null || :
+  [ -z "$verified_dir" ] || { mkdir -p "$verified_dir" && : > "$verified_dir/$hex"; } 2> /dev/null || :
 fi
 
 # By digest from here on, and never pulled again: the bytes verified above are
