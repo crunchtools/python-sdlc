@@ -534,6 +534,14 @@ check(
     "PYTHONPYCACHEPREFIX=/tmp/pycache" in argv,
     str(argv),
 )
+# The launcher owns the lockdown: run_host adds --cap-drop=all, and
+# no-new-privileges only where it does not stack AppArmor's profile (#181).
+# One named in the plan reaches podman whatever that rule says.
+check(
+    "the in-image pytest run leaves cap-drop and no-new-privileges to the launcher",
+    not any(w.startswith(("--cap-", "--security-opt")) or "no-new-privileges" in w for w in argv),
+    str(argv),
+)
 
 # Push has two lanes: everything that computes, and the reviewer. Gatehouse
 # reads the diff bin/sdlc computed on the host, never the worktree, so it is the

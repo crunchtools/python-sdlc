@@ -542,7 +542,7 @@ container's loopback unless `network = true`.
 systemd gets back exactly the capabilities it needs to run units as their own
 users — `SETUID`, `SETGID`, `SETPCAP`, `CHOWN`, `FOWNER`, `DAC_OVERRIDE` and
 `KILL` — plus `NET_BIND_SERVICE` for a unit that listens below 1024, and keeps
-`no-new-privileges`. They are the launcher's to grant, not the config's. The
+`no-new-privileges` except on an AppArmor host (#181). They are the launcher's to grant, not the config's. The
 `setup` steps and `argv` together get 30 minutes once the service is ready; a
 step still running then is a finding and the container is removed. On Actions,
 workflow commands are stopped from boot until the container is gone. A

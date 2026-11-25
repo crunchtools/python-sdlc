@@ -13,6 +13,12 @@ All notable changes to this project are documented here, following
 ### Fixed
 
 - `bin/sdlc-bootstrap`: `main` tries the fleet key before sdlc's, each key's verification errors are labelled with the key, and the report no longer needs host `sed`.
+- `pytest-in-image` no longer passes its own `no-new-privileges` (a1493). On an
+  AppArmor host bin/sdlc drops that option, because it stacks the container
+  profile and a process cannot signal its own child (#181), but the check named
+  it in its own argv, so it reached podman anyway: claude-agent's tmux tests
+  failed every `terminate()` with EPERM under 0.15.9. The launcher alone now
+  adds `--cap-drop=all` and the option, where it holds.
 
 ## [0.15.9] - 2026-11-25
 
