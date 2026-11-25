@@ -6,6 +6,14 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.6] - 2026-11-25
+
+### Fixed
+
+- The image installs nodejs24-full-i18n. Hummingbird's node ships without full
+  ICU data, and without it `new Intl.Segmenter()` segfaults node, which crashed
+  vitest workers in the node stack's npm-test. The build now proves Segmenter works.
+
 ## [0.15.5] - 2026-11-25
 
 ### Fixed
