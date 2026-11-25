@@ -120,12 +120,45 @@ refused(
     gh([pull()], {"content": base64.b64encode(b"[project]\nname = 'x'\n").decode()}, npm("1.2.3")),
 )
 
+
+# a dynamic version, read from [tool.hatch.version].path (ashigaru's VERSION)
+def hatch(path: str) -> dict:
+    text = f'[project]\nname = "x"\ndynamic = ["version"]\n[tool.hatch.version]\npath = "{path}"\n'
+    return {"content": base64.b64encode(text.encode()).decode()}
+
+
+def text(body: str) -> dict:
+    return {"content": base64.b64encode(body.encode()).decode()}
+
+
+def hatch_gh(path: str, files: dict) -> FakeGitHub:
+    api = gh([pull()], hatch(path))
+    for name, body in files.items():
+        api.routes[("GET", f"/repos/{REPO}/contents/{name}")] = text(body)
+    return api
+
+
+refused("hatch path file missing", hatch_gh("VERSION", {}))
+refused("hatch path escapes the repo", hatch_gh("../VERSION", {"../VERSION": "1.2.3\n"}))
+refused("hatch path is absolute", hatch_gh("/etc/VERSION", {"/etc/VERSION": "1.2.3\n"}))
+refused("hatch path file is not a version", hatch_gh("VERSION", {"VERSION": "1.2.3-dev\n"}))
+refused("hatch path file mismatched", hatch_gh("VERSION", {"VERSION": "1.2.2\n"}))
+refused(
+    "dynamic version without a hatch path",
+    gh([pull()], text('[project]\nname = "x"\ndynamic = ["version"]\n')),
+)
+
 # success, with pyproject absent (404) and matching
 for label, api in (
     ("pyproject absent", gh([pull()])),
     ("pyproject matches", gh([pull()], toml("1.2.3"))),
     ("tools-only pyproject, package.json matches (rotv)", gh([pull()], TOOLS_ONLY, npm("1.2.3"))),
     ("no pyproject, package.json matches", gh([pull()], None, npm("1.2.3"))),
+    (
+        "dynamic version read from the hatch path (ashigaru)",
+        hatch_gh("VERSION", {"VERSION": "1.2.3\n"}),
+    ),
+    ("hatch path in a subdirectory", hatch_gh("src/x/VERSION", {"src/x/VERSION": " 1.2.3 \n"})),
 ):
     runner = FakeRunner()
     code, release = publish(api, runner)
