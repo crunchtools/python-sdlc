@@ -181,6 +181,11 @@ check(
     {"--cap-drop=all", "--security-opt=no-new-privileges", "--read-only"} <= set(argv),
 )
 check(
+    "sibling: bounded in CPU, memory and processes",
+    {f"--cpus={_relock.CPUS}", f"--memory={_relock.MEMORY}", f"--pids-limit={_relock.PIDS}"}
+    <= set(argv),
+)
+check(
     "sibling: a network of its own, not the runner's",
     "--network=private" in argv and "--network=host" not in argv,
 )
@@ -326,6 +331,30 @@ check(
     _relock.lock_beside({}, IMAGE, (timeout_work, "/host/work"), timeout_work / "pr", missing)
     == _relock.REFUSED,
 )
+
+
+def unreached(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+    """The engine, which these refusals must never reach."""
+    raise AssertionError(f"the engine was run: {argv}")
+
+
+s = Scene("bounds")
+s.stage("pyproject.toml", PYPROJECT.replace('version = "0"', 'version = "1"'))
+here = Path.cwd()
+os.chdir(s.checkout)
+try:
+    outside = _relock.shim(
+        {"work": str(TMP / "elsewhere"), "mount": [str(TMP), IMAGE]}, _relock.ALLOWED, unreached
+    )
+    unpinned = _relock.shim(
+        {"work": str(s.work), "mount": [str(s.work), "quay.io/crunchtools/sdlc:latest"]},
+        _relock.ALLOWED,
+        unreached,
+    )
+finally:
+    os.chdir(here)
+check("refused: a checkout outside write's scratch dir", outside == _relock.REFUSED)
+check("refused: a job image not pinned by digest", unpinned == _relock.REFUSED)
 
 runner_temp = TMP / "runner-temp"
 runner_temp.mkdir()

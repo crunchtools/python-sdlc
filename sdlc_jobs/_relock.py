@@ -48,6 +48,8 @@ REFUSED = 2  # relock.py hands over on any nonzero; 2 says the lock could not ru
 SECONDS = 540  # podman's --timeout on the sibling: inside relock.py's 600
 GRACE = 30  # the client's wait past that, so this shim and not relock removes the sibling
 ENGINE_FAILED = (125, 126, 127)  # podman's own: the sibling never ran uv
+# Bounds for one lock (constitution O3); uv resolving a large tree fits in them.
+CPUS, MEMORY, PIDS = 2, "2g", 512
 MAX_LOCK = 50 * 1024 * 1024
 SCRATCH = "/scratch"  # the sibling's only writable path but OUT: a tmpfs, its HOME and TMPDIR
 TMPFS = f"{SCRATCH}:rw,exec,size=1g,mode=1777"
@@ -172,6 +174,9 @@ def sibling(env: Mapping[str, str], name: str, image: str, src: str, out: str) -
         "--security-opt=no-new-privileges",
         "--security-opt=label=disable",
         "--read-only",
+        f"--cpus={CPUS}",
+        f"--memory={MEMORY}",
+        f"--pids-limit={PIDS}",
         # podman-run(1): `private` is bridge when rootful, pasta when rootless. Both
         # reach the index; `none` would not, and `host` is the runner's own.
         "--network=private",
