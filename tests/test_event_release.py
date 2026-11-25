@@ -323,6 +323,14 @@ check(
 )
 api = lock_api(bumped)
 check("open: a current lock commits nothing", opened(api) == 0 and not api.made("PUT"))
+api = opener(False, [])
+check(
+    "open: no uv.lock (404) opens the PR and commits nothing",
+    opened(api) == 0
+    and api.made("GET", f"*/contents/uv.lock?ref={'c' * 40}")
+    and not api.made("PUT")
+    and api.made("POST", "*/pulls"),
+)
 api = lock_api("not = [toml")
 check(
     "open: an unreadable lock is refused before the PR",
