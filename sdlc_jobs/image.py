@@ -123,7 +123,6 @@ RUN_VALUED = (
 EVENTS = ("push", "schedule", "workflow_dispatch")  # the workflow's `if:`
 PLAN_FIELDS = 4  # name, stage, mode, argv
 STATE_FIELDS = 3  # running, exit code, OOM-killed
-HADOLINT_UNPARSED = 4  # containerfile-lint: hadolint could not parse the file
 SYSTEMD = ("/sbin/init", "/usr/sbin/init", "/lib/systemd/systemd", "/usr/lib/systemd/systemd")
 
 
@@ -627,14 +626,16 @@ def root_is_bootc(job: Job) -> bool:
 
 
 def lint(job: Job) -> bool:
-    """containerfile-lint runs here: this container is the sdlc image. True is a finding."""
+    """containerfile-lint runs here: this container is the sdlc image. True is a finding.
+
+    Exit 1 is a finding, and that includes a Containerfile hadolint cannot
+    parse. Any other nonzero status is the tool, not the Containerfile.
+    """
     step("containerfile-lint")
     proc = job.run(["sdlc", "containerfile-lint"])
     show(proc)
     if proc.returncode == 0:
         return False
-    if proc.returncode == HADOLINT_UNPARSED:
-        cannot("containerfile-lint could not parse the Containerfile; nothing was judged")
     if proc.returncode != 1:
         cannot(f"containerfile-lint could not run (exit {proc.returncode})")
     return True

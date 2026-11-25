@@ -1,6 +1,6 @@
 #!/bin/sh
 # Release one fleet repo's commit from a host, without GitHub Actions: the
-# fleet ci.yml's check, image, boot and promote jobs, run in that order by the
+# fleet ci.yml's check, image, boot, write and promote jobs, run in that order by the
 # same pinned sdlc-bootstrap the workflow runs, on this host's podman socket,
 # with the environment the workflow would give each. Nothing here re-implements
 # a job: check gates the commit (`sdlc ci`), image verifies every parent and
@@ -23,9 +23,10 @@
 # github.token holds, and revoked on exit. The commit must be on the default
 # branch, as it must be for ci.yml's image and promote. The event is the push
 # of that commit, as CI saw it: when it merges an App-authored release pull
-# request, check plans the release, and ci.yml's `write` job runs here too,
-# with the App key, to verify the merge, tag vX.Y.Z and publish the GitHub
-# Release (only the App may create v* tags); promote then moves X.Y.Z with
+# request, check plans the release, and once image and boot have passed,
+# ci.yml's `write` job runs here too, with the App key, to verify the merge,
+# tag vX.Y.Z and publish the GitHub Release (only the App may create v* tags);
+# a failed gate tags nothing. promote then moves X.Y.Z with
 # `latest`. Any other commit moves `latest` alone. Like CI, check runs no
 # gates when the merged pull request's check passed on the same tree; image's
 # container gates always run. The image records no Actions run, so its SLSA
@@ -254,17 +255,6 @@ job check
 plan=$(output check result)
 printf '%s' "$plan" | jq -e 'type == "object"' > /dev/null || die "check wrote no plan"
 
-# write, on a release merge: the App key and nothing else, as in ci.yml.
-release='' write=skipped
-if printf '%s' "$plan" | jq -e '.release' > /dev/null; then
-  ASHIGARU_CLIENT_ID=$ASHIGARU_CLIENT_ID SDLC_CHECK=$plan \
-    job write -e ASHIGARU_CLIENT_ID -e ASHIGARU_APP_KEY -e SDLC_CHECK
-  release=$(output write release) write=success
-  printf '%s' "$release" | jq -e '.version' > /dev/null || die "write released nothing"
-  say "tagged v$(printf '%s' "$release" | jq -r .version) and published its GitHub Release"
-fi
-unset ASHIGARU_APP_KEY
-
 registry='-e QUAY_USERNAME -e QUAY_PASSWORD'
 for name in RHSM_ACTIVATION_KEY RHSM_ORG_ID REGISTRY_REDHAT_IO_USER REGISTRY_REDHAT_IO_PASSWORD; do
   eval "[ -z \"\${$name:-}\" ]" || registry="$registry -e $name"
@@ -279,6 +269,20 @@ if printf '%s' "$plan" | jq -e '.boot' > /dev/null; then
   SDLC_IMAGE_RESULT=$built job boot -e SDLC_IMAGE_RESULT
   boot=success
 fi
+
+# write, on a release merge, only now that image and boot have passed: a
+# failed gate has already ended the run, so no vX.Y.Z or GitHub Release ever
+# names an image that does not exist (a1667). The App key and nothing else, as
+# in ci.yml, with the gates' results for write's own refusal.
+release='' write=skipped
+if printf '%s' "$plan" | jq -e '.release' > /dev/null; then
+  ASHIGARU_CLIENT_ID=$ASHIGARU_CLIENT_ID SDLC_CHECK=$plan SDLC_IMAGE=success SDLC_BOOT=$boot \
+    job write -e ASHIGARU_CLIENT_ID -e ASHIGARU_APP_KEY -e SDLC_CHECK -e SDLC_IMAGE -e SDLC_BOOT
+  release=$(output write release) write=success
+  printf '%s' "$release" | jq -e '.version' > /dev/null || die "write released nothing"
+  say "tagged v$(printf '%s' "$release" | jq -r .version) and published its GitHub Release"
+fi
+unset ASHIGARU_APP_KEY
 
 SDLC_CHECK=$plan SDLC_IMAGE_RESULT=$built SDLC_BOOT=$boot SDLC_WRITE=$write SDLC_RELEASE=$release \
   SDLC_LOCAL_BUILDER=$SDLC_LOCAL_BUILDER \

@@ -175,6 +175,18 @@ justification = """
 
 [[exceptions]]
 check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/_release.py"
+classification = "gourmand_bug"
+justification = """
+  _hatch_version (reads a dynamic version from [tool.hatch.version].path at \
+  a commit) is paired with _relock.shim (refuses any `uv` call relock may \
+  not make, then locks in a sibling): nine guard-and-return statements of \
+  similar length with no line, call or identifier in common. Shape, not \
+  duplicated logic; it reports on main as well as on a1667's branch.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
 path = "sdlc_jobs/_core.py"
 classification = "gourmand_bug"
 justification = """

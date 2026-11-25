@@ -9,7 +9,7 @@
 #          test, the contract test and `sdlc ci` from what it built.
 #   check  default-branch push, schedule, dispatch. The same on reviewed code,
 #          then the plan (`result`) and the 60-day schedule keepalive.
-#   image  release: the verified release merge, version from write's output.
+#   image  release: the release merge check planned, before write tags it.
 #          weekly: the version :<major> carries, rebuilt from the commit its
 #          revision label names (never the mutable vX.Y.Z tag).
 #          bootstrap: sdlc's first release, once, by dispatch (see bootstrap_ok).
@@ -139,8 +139,8 @@ test_all() {
 # A plan, not an authority (docs: "Releases run from the merge"). A
 # default-branch push whose tree carries a version with a CHANGELOG heading
 # and no vX.Y.Z tag yet is a release merge as far as check can tell; write
-# verifies it against the API before anything is tagged, and image and sign
-# act only on write's output.
+# verifies it against the API, and tags it only after image has passed; sign
+# acts only on write's output.
 plan() {
   if [ "${GITHUB_EVENT_NAME:-}" != push ]; then
     printf '{"write":false,"release":null}'
@@ -344,15 +344,12 @@ mode_image() {
     *) die "image MODE=$MODE does not go with event ${GITHUB_EVENT_NAME:-none}" ;; esac
   login
   if [ "$MODE" = release ]; then
-    # write verified the merge against the API; a skipped or failed write is
-    # a failure here, never a benign skip.
-    [ "${SDLC_WRITE:-}" = success ] || die "write did not succeed (${SDLC_WRITE:-none}); nothing to build"
-    # An object with a version, a JSON string, or the bare version; whatever
-    # it is, semver below is the test.
-    _v=$(printf '%s' "${SDLC_RELEASE:-}" | jq -r 'if type == "object" then .version else . end' 2> /dev/null) \
-      || _v=${SDLC_RELEASE:-}
-    semver "$_v" || die "write's release version '$_v' is not X.Y.Z"
-    [ "$(tree_version "$here")" = "$_v" ] || die "the tree is $(tree_version "$here"), write released $_v"
+    # check's plan, not write's verdict: write tags only once this build and
+    # its contract test have passed (a1667), and sign signs only what write
+    # then released. A candidate is pushed as gated-<sha> and nothing more.
+    _v=$(printf '%s' "${SDLC_CHECK:-}" | jq -r '.release.version // empty' 2> /dev/null) || _v=
+    semver "$_v" || die "check planned no release X.Y.Z ('$_v'); nothing to build"
+    [ "$(tree_version "$here")" = "$_v" ] || die "the tree is $(tree_version "$here"), check planned $_v"
     _src=$here
   elif [ "$MODE" = bootstrap ]; then
     load_keys
@@ -462,6 +459,13 @@ mode_sign() {
     _was=$(revision_of "$QUAY@${_cur%% *}")
     _now=$(revision_of "$QUAY@$_d")
     [ "$_now" = "$_was" ] || die "the rebuild is of $_now, $QUAY:$MAJOR was built from $_was; refusing"
+  fi
+  if [ "$MODE" = release ]; then
+    # write verified the merge and tagged it after image passed; a skipped or
+    # failed write signs nothing, and its version must be the image's.
+    [ "${SDLC_WRITE:-}" = success ] || die "write did not succeed (${SDLC_WRITE:-none}); nothing to sign"
+    _rv=$(printf '%s' "${SDLC_RELEASE:-}" | jq -r '.version // empty' 2> /dev/null) || _rv=
+    [ "$_rv" = "$_v" ] || die "write released '$_rv', the image is $_v"
   fi
   # sdlc-bootstrap is checked before anything is signed, so a refusal signs nothing.
   _b=

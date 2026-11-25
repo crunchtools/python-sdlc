@@ -58,17 +58,21 @@ jobs:
            RHSM_ACTIVATION_KEY: "${{ secrets.RHSM_ACTIVATION_KEY }}", RHSM_ORG_ID: "${{ secrets.RHSM_ORG_ID }}",
            REGISTRY_REDHAT_IO_USER: "${{ secrets.REGISTRY_REDHAT_IO_USER }}", REGISTRY_REDHAT_IO_PASSWORD: "${{ secrets.REGISTRY_REDHAT_IO_PASSWORD }}" }
     steps: *event
-  write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
-    needs: [check, ai]
+  write:  # the Ashigaru App key, no model: verifies and tags a release merge once image and boot pass; comments, labels, PRs, leased pushes
+    needs: [check, ai, image, boot]
     if: >-
       always() && !cancelled() && !inputs.digest
       && (github.event_name == 'pull_request_target' || github.event_name == 'issues'
-          || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
+          || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write)
+             && (!fromJSON(needs.check.outputs.result || '{}').release
+                 || (needs.image.result == 'success' || needs.image.result == 'skipped' && !fromJSON(needs.check.outputs.result || '{}').image)
+                    && (needs.boot.result == 'success' || needs.boot.result == 'skipped' && !fromJSON(needs.check.outputs.result || '{}').boot)))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
     runs-on: *secret
     permissions: {}
     outputs: { release: "${{ steps.e.outputs.release }}" }
     env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
+           SDLC_IMAGE: "${{ needs.image.result }}", SDLC_BOOT: "${{ needs.boot.result }}",
            SDLC_AI: "${{ needs.ai.result }}", SDLC_AI_0: "${{ needs.ai.outputs.p0 }}", SDLC_AI_1: "${{ needs.ai.outputs.p1 }}", SDLC_AI_2: "${{ needs.ai.outputs.p2 }}", SDLC_AI_3: "${{ needs.ai.outputs.p3 }}" }
     steps: *event
   boot:  # no secret, a read token: a repo's boot-command and contract-test, shell run on the digest image pushed; promote needs it

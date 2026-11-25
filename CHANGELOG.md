@@ -6,6 +6,26 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- **A release is tagged only after its gates pass (a1667).** The fleet's
+  `write` needs `image` and `boot`, and on a release its `if:` wants each to
+  have succeeded or been skipped with none planned; `write` also refuses in
+  code when the `SDLC_IMAGE` or `SDLC_BOOT` it is handed says otherwise (a
+  fleet file older than this maps neither, and stays unenforced, as promote
+  treats `SDLC_BOOT`). A release whose image or boot fails leaves no `vX.Y.Z`
+  and no GitHub Release behind, as rhel10-bootc-server v1.8.0 did. Fleet repos
+  take it by re-copying `examples/ci.yml`.
+- `scripts/local-release.sh` runs check, image, boot, write, promote: `write`
+  after the gates, handed their results.
+- sdlc's own release: `image` builds the version `check` planned without
+  waiting on `write`, `write` waits on `image`, and `sign` signs only what
+  `write` then released (`SDLC_WRITE` success, `SDLC_RELEASE` at the image's
+  version). `scripts/hotfix.sh` hands self.sh the same inputs.
+- `containerfile-lint`: a Containerfile hadolint cannot parse is a finding
+  (exit 1) in the PR check, as it already failed the image job, instead of
+  ADVISORY and SKIPPED there. A PR no longer passes a lint its release fails.
+
 ## [0.16.5] - 2026-11-25
 
 ### Added
