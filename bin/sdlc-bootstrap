@@ -101,7 +101,8 @@ FLEET_KEY
 # person typed, so either key will do for those two. A release before 0.15.2
 # is reached by its digest.
 case $want in
-  main|@sha256:*) keys='sdlc fleet' who="sdlc's key or the crunchtools fleet key" ;;
+  main)           keys='fleet sdlc' who="sdlc's key or the crunchtools fleet key" ;;
+  @sha256:*)      keys='sdlc fleet' who="sdlc's key or the crunchtools fleet key" ;;
   *)              keys=sdlc         who="sdlc's key" ;;
 esac
 key_id() { case $1 in sdlc) printf '%s' "$SDLC_KEY_ID" ;; fleet) printf '%s' "$FLEET_KEY_ID" ;; esac; }
@@ -146,19 +147,21 @@ if [ -n "$verified_dir" ]; then
   done
 fi
 if [ -z "$verified" ]; then
-  : > "$dir/verify"
   for k in $keys; do
     if podman --events-backend=none run --rm --log-driver=none --pull=missing \
          --cap-drop=all --security-opt=no-new-privileges --read-only \
          -v "$dir/$k.pub:/$k.pub:ro,Z" \
          -- "$COSIGN" verify --key "/$k.pub" --insecure-ignore-tlog=true "$pinned" \
-         > /dev/null 2>> "$dir/verify"; then
+         > /dev/null 2> "$dir/verify.$k"; then
       verified=$k
       break
     fi
   done
   if [ -z "$verified" ]; then
-    sed 's/^/sdlc:   /' "$dir/verify" >&2
+    for k in $keys; do
+      printf 'sdlc:   %s key:\n' "$k" >&2
+      while IFS= read -r _l || [ -n "$_l" ]; do printf 'sdlc:     %s\n' "$_l" >&2; done < "$dir/verify.$k"
+    done
     cannot "$pinned ($image) could not be verified as signed by $who"
   fi
   [ -z "$verified_dir" ] || { _d=$verified_dir/$(key_id "$verified") \

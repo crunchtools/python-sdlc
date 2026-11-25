@@ -152,10 +152,10 @@ touch "$W/unsigned-sdlc"
 RC=0
 OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" \
         SDLC_IMAGE=main sh "$BOOT" versions 2>&1) || RC=$?
-if [ "$RC" -eq 0 ] && [ "$(verifies)" = "sdlc fleet " ] \
+if [ "$RC" -eq 0 ] && [ "$(verifies)" = "fleet " ] \
    && [ "$(cat "$W/ran" 2>/dev/null)" = "$FLEET@$D|$FLEET:main|versions" ] \
    && [ -e "$W/cache/sdlc/verified/$FLEET_ID/${D#sha256:}" ] && [ ! -d "$W/cache/sdlc/verified/$SDLC_ID" ]; then
-  ok "SDLC_IMAGE=main signed by the fleet key runs, after sdlc's key, remembered under the fleet key"
+  ok "SDLC_IMAGE=main signed by the fleet key runs on the first verification, remembered under the fleet key"
 else
   bad "fleet-signed main: exit $RC, verified with '$(verifies)'"; printf '%s\n' "$OUT"
 fi
@@ -170,11 +170,12 @@ else
 fi
 
 reset
+touch "$W/unsigned-fleet"
 RC=0
 OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" \
         SDLC_IMAGE=main sh "$BOOT" versions 2>&1) || RC=$?
-if [ "$RC" -eq 0 ] && [ "$(verifies)" = "sdlc " ]; then
-  ok "SDLC_IMAGE=main signed by sdlc's key never asks the fleet key"
+if [ "$RC" -eq 0 ] && [ "$(verifies)" = "fleet sdlc " ]; then
+  ok "SDLC_IMAGE=main signed by sdlc's key alone: the fleet key is tried first, then sdlc's"
 else
   bad "sdlc-signed main: exit $RC, verified with '$(verifies)'"
 fi
@@ -184,10 +185,12 @@ touch "$W/unsigned-sdlc" "$W/unsigned-fleet"
 RC=0
 OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" \
         SDLC_IMAGE=main sh "$BOOT" versions 2>&1) || RC=$?
-if [ "$RC" -eq 2 ] && [ ! -e "$W/ran" ] && [ "$(verifies)" = "sdlc fleet " ] \
+if [ "$RC" -eq 2 ] && [ ! -e "$W/ran" ] && [ "$(verifies)" = "fleet sdlc " ] \
    && printf '%s' "$OUT" | grep -q "signed by sdlc's key or the crunchtools fleet key\$" \
-   && printf '%s' "$OUT" | grep -q 'no sdlc signature found' \
-   && printf '%s' "$OUT" | grep -q 'no fleet signature found' \
+   && [ "$(printf '%s\n' "$OUT" | grep -E 'key:$|no (sdlc|fleet) signature found' \
+             | sed -e 's/^.*fleet key:$/FK/' -e 's/^.*sdlc key:$/SK/' \
+                   -e 's/^.*no fleet signature found.*$/fe/' -e 's/^.*no sdlc signature found.*$/se/' \
+             | tr '\n' ' ')" = "FK fe SK se " ] \
    && [ ! -d "$W/cache/sdlc/verified" ]; then
   ok "main signed by neither key is a 2 with both keys' refusals, runs nothing, remembers nothing"
 else
