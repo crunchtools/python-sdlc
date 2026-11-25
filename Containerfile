@@ -94,7 +94,7 @@ ARG GH_SHA256=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
 # Ashigaru is v5.4.0, tag pending: write depends on
 # 5.4.0's staged_refusal patch filter.
 ARG ASHIGARU_VERSION=5.4.0
-ARG ASHIGARU_COMMIT=499e50cff233c7a40455f4304718247475e4a73d
+ARG ASHIGARU_COMMIT=044cdff812619be9d2e424ab4118084db56cb05e
 ARG CONSTITUTION_VERSION=2.0.0
 ARG CONSTITUTION_COMMIT=03835d9933d3b656188279688ef486cb4ec62dd0
 
@@ -106,8 +106,8 @@ LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/sdlc"
 LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python, container, node, bootc and docs repos, with the clients a runner job needs."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
-LABEL version="0.16.2"
-LABEL org.opencontainers.image.version="0.16.2"
+LABEL version="0.16.3"
+LABEL org.opencontainers.image.version="0.16.3"
 
 # What the image carries, readable without starting anything. `sdlc versions`
 # prints these and a consuming repo's CI pins them.

@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-11-25
+
 ### Added
 
 - `workflow-lint`, a check in push and ci for every repo: zizmor, offline, over
@@ -24,6 +26,9 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- The image carries Ashigaru at 044cdff: publish arms auto-merge only on a base
+  branch that requires checks (ashigaru#257), and the staged guard refuses
+  .python-version, uv.toml, `[tool.uv]` and mode changes (ashigaru#263).
 - `write` verifies a release against package.json's version when pyproject.toml
   has no `[project]` table (rotv keeps only `[tool.sdlc]` there), instead of
   refusing every release of a Node repo as "at None".
