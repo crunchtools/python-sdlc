@@ -53,11 +53,20 @@ def toml(version: str) -> dict:
     return {"content": base64.b64encode(f'[project]\nversion = "{version}"\n'.encode()).decode()}
 
 
-def gh(pulls: list, pyproject: object = None) -> FakeGitHub:
+def gh(pulls: list, pyproject: object = None, package: object = None) -> FakeGitHub:
     routes: dict = {("GET", f"/repos/{REPO}/commits/{SHA}/pulls"): pulls}
     if pyproject is not None:
         routes[("GET", f"/repos/{REPO}/contents/pyproject.toml")] = pyproject
+    if package is not None:
+        routes[("GET", f"/repos/{REPO}/contents/package.json")] = package
     return FakeGitHub(routes)
+
+
+def npm(version: str) -> dict:
+    return {"content": base64.b64encode(f'{{"version": "{version}"}}'.encode()).decode()}
+
+
+TOOLS_ONLY = {"content": base64.b64encode(b"[tool.sdlc]\n").decode()}
 
 
 def site_for(api: FakeGitHub, runner: FakeRunner | None = None) -> Site:
@@ -105,11 +114,18 @@ refused("pyproject mismatched", gh([pull()], toml("1.2.2")))
 refused(
     "pyproject has no version", gh([pull()], {"content": base64.b64encode(b"[tool.x]\n").decode()})
 )
+refused("tools-only pyproject, package.json mismatched", gh([pull()], TOOLS_ONLY, npm("1.2.2")))
+refused(
+    "[project] without a version, even beside package.json",
+    gh([pull()], {"content": base64.b64encode(b"[project]\nname = 'x'\n").decode()}, npm("1.2.3")),
+)
 
 # success, with pyproject absent (404) and matching
 for label, api in (
     ("pyproject absent", gh([pull()])),
     ("pyproject matches", gh([pull()], toml("1.2.3"))),
+    ("tools-only pyproject, package.json matches (rotv)", gh([pull()], TOOLS_ONLY, npm("1.2.3"))),
+    ("no pyproject, package.json matches", gh([pull()], None, npm("1.2.3"))),
 ):
     runner = FakeRunner()
     code, release = publish(api, runner)
