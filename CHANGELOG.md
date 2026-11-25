@@ -6,6 +6,19 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- A local release's image is attested with SLSA v1 provenance, the predicate
+  CI's promote writes, signed with the fleet key. Its builder is
+  `scripts/local-release.sh` at the sdlc commit it ran from, never a workflow
+  run. Promote writes it only when the image's run label carries that run's
+  attempt and no run id (a1649).
+
+### Fixed
+
+- `scripts/local-release.sh` holds a per-project lock for the whole run, so two
+  runs of one repo no longer remove each other's images in cleanup (a1649)
+
 ## [0.16.4] - 2026-11-25
 
 ### Fixed

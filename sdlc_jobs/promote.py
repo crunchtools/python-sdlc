@@ -25,7 +25,10 @@ A re-run with the same inputs signs, attests and moves nothing and exits 0.
 
 Signing, the SBOM and the SLSA v1 provenance port `scripts/sign-digest.sh` and
 `scripts/attest-digest.sh` with the fleet key. syft parses the image, so it runs without
-the key in its environment; only `cosign sign` and `cosign attest` see it.
+the key in its environment; only `cosign sign` and `cosign attest` see it. A build
+`scripts/local-release.sh` ran records no Actions run; its provenance names that script
+as the builder instead, and only when the image's own run label is this very local
+run's (`local_provenance`).
 """
 
 from __future__ import annotations
@@ -64,6 +67,10 @@ COMMIT = re.compile(r"[0-9a-f]{40}")
 RELEASED_REF = re.compile(r"refs/heads/.+")
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
 WORKFLOW = ".github/workflows/ci.yml@"
+# What scripts/local-release.sh names itself as, pinned to the sdlc commit it ran from.
+LOCAL_BUILDER = re.compile(
+    r"https://github\.com/crunchtools/sdlc/blob/[0-9a-f]{40}/scripts/local-release\.sh"
+)
 OK = 200
 NOT_FOUND = 404
 EVENTS = ("push", "schedule", "workflow_dispatch")  # image's `if:` less pull_request
@@ -299,7 +306,7 @@ def attest(job: Job) -> None:
     if verifies(job, "--type", "slsaprovenance1", kind="verify-attestation"):
         print("provenance is already attested", flush=True)
         return
-    predicate = provenance(job.labels, job.repo)
+    predicate = provenance(job.labels, job.repo) or local_provenance(job)
     if predicate is None:
         print("the image records no run of this repo's ci.yml: no provenance attested", flush=True)
         return
@@ -344,18 +351,51 @@ def provenance(labels: Mapping[str, str], repo: str) -> dict | None:
     )
     if not honest:
         return None
-    path, ref = workflow.removeprefix(f"{repo}/").split("@", 1)
+    ref = workflow.removeprefix(trusted)
+    return predicate(repo, ref, commit, f"https://github.com/{builder}", run_url)
+
+
+def local_provenance(job: Job) -> dict | None:
+    """The predicate for a build scripts/local-release.sh ran, None for any other.
+
+    Only that script sets SDLC_LOCAL_BUILDER, and it runs image and promote in one
+    invocation with one GITHUB_RUN_ATTEMPT unique to it and no GITHUB_RUN_ID, which
+    image wrote into the run label. So a label naming no run and this attempt is this
+    invocation's build, and here this run is the build run.
+    """
+    env, labels = job.env, job.labels
+    builder, attempt, sha = (
+        env.get(k, "") for k in ("SDLC_LOCAL_BUILDER", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA")
+    )
+    ref = env.get("GITHUB_REF", "")
+    run_url = f"https://github.com/{job.repo}/actions/runs//attempts/{attempt}"
+    honest = (
+        LOCAL_BUILDER.fullmatch(builder)
+        and not env.get("GITHUB_RUN_ID")
+        and attempt.isdigit()
+        and labels.get("com.crunchtools.build.run") == run_url
+        and not labels.get("com.crunchtools.build.builder")
+        and not labels.get("com.crunchtools.build.workflow")
+        and RELEASED_REF.fullmatch(ref)
+        and COMMIT.fullmatch(sha)
+        and all(labels.get(k) == sha for k in BUILT_LABELS)
+    )
+    if not honest:
+        return None
+    return predicate(job.repo, ref, sha, builder, f"{builder}#attempt-{attempt}")
+
+
+def predicate(repo: str, ref: str, commit: str, builder: str, run: str) -> dict:
+    """SLSA v1: ci.yml's jobs at `ref` built `commit`, run as `run` by `builder`."""
     source = f"https://github.com/{repo}"
+    path = WORKFLOW.removesuffix("@")
     return {
         "buildDefinition": {
             "buildType": BUILD_TYPE,
             "externalParameters": {"workflow": {"ref": ref, "repository": source, "path": path}},
             "resolvedDependencies": [{"uri": f"git+{source}", "digest": {"gitCommit": commit}}],
         },
-        "runDetails": {
-            "builder": {"id": f"https://github.com/{builder}"},
-            "metadata": {"invocationId": run_url},
-        },
+        "runDetails": {"builder": {"id": builder}, "metadata": {"invocationId": run}},
     }
 
 
