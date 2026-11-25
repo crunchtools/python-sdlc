@@ -26,13 +26,14 @@ head, so nothing a model wrote can become an approval.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
-from sdlc_jobs import _release
+from sdlc_jobs import _release, _relock
 from sdlc_jobs import _tools as tools
 from sdlc_jobs._app_token import app_token
 from sdlc_jobs._github import (
@@ -72,7 +73,10 @@ def main(event_name: str, event: dict[str, Any], env: Mapping[str, str]) -> int:
     rollback = bool(env.get("DIGEST"))
     if not rollback:
         repo = repo_of(event, env)
-        with tempfile.TemporaryDirectory(prefix="sdlc-write-") as scratch:
+        # Under RUNNER_TEMP, a mount of this container, so relock's sibling can mount it.
+        with tempfile.TemporaryDirectory(
+            prefix="sdlc-write-", dir=env.get("RUNNER_TEMP") or None
+        ) as scratch:
             job = Job(Site(repo, env, tools.run, Path(scratch)))
             return job.route(event_name, event)
     print("write: a dispatch with a digest is sdlc's rollback; nothing for write to do.")
@@ -93,6 +97,7 @@ class Job:
         self.site = site
         self.env, self.repo, self.runner, self.work = site.env, site.repo, site.runner, site.work
         self.api_for = site.api_for
+        self.uv: Path | None = None  # the `uv` shim's directory, installed on first use
         # How a token is minted for a set of permissions; a test passes a fake.
         self.mint: Mint = mint or (lambda perms: app_token(site.env, site.repo, perms))
 
@@ -359,8 +364,16 @@ class Job:
     # -- shared ------------------------------------------------------------------------------
 
     def writer_env(self, token: str, *, git: bool = True) -> dict[str, str]:
-        """An Ashigaru script's environment: the App token for gh and, where it pushes, for git."""
-        return tools.child_env(self.env, GH_TOKEN=token, **(tools.git_auth(token) if git else {}))
+        """An Ashigaru script's environment: the App token for gh and, where it pushes, for git.
+
+        Its PATH starts with _relock's `uv`, so relock.py's `uv lock` runs in a
+        sibling with no socket and no secret, never in this job (#195).
+        """
+        if self.uv is None:
+            self.uv = _relock.install(self.work, self.env)
+        path = f"{self.uv}{os.pathsep}{self.env.get('PATH') or os.defpath}"
+        auth = tools.git_auth(token) if git else {}
+        return tools.child_env(self.env, GH_TOKEN=token, **auth) | {"PATH": path}
 
     def save(self, name: str, text: str) -> Path:
         """Write `text` as UTF-8 to `name` in the job's scratch dir and return its path."""
