@@ -76,8 +76,37 @@ def main() -> int:
         tree(config, "gourmand.toml")
         ok &= check("gourmand.toml alone", gourmand_orphan(config), None)
 
+    ok &= cache_follows_writability()
     print("PASS" if ok else "FAILED")
     return 0 if ok else 1
+
+
+def cache_follows_writability() -> bool:
+    """A tree it cannot write gets --cache-dir outside it; a writable one keeps the default.
+
+    CI's check job runs gourmand as the image's non-root user on a checkout it cannot
+    write, where the default .gourmand-cache/ is "Permission denied" (0.15.8).
+    """
+    ok = True
+    seen: list[list[str]] = []
+    real_run, real_step, real_access, real_repo = _SDLC.run, _SDLC.step, _SDLC.os.access, _SDLC.REPO
+    _SDLC.run = lambda argv, *a, **k: (seen.append(list(argv)) or (0, ""))
+    _SDLC.step = lambda *a, **k: None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            _SDLC.REPO = Path(tmp)
+            _SDLC.os.access = lambda *a, **k: False
+            _SDLC.t_gourmand({})
+            argv = seen[-1]
+            ok &= check("read-only tree passes --cache-dir", "--cache-dir" in argv, True)
+            cache = argv[argv.index("--cache-dir") + 1] if "--cache-dir" in argv else ""
+            ok &= check("the cache is outside the tree", Path(cache).is_relative_to(tmp), False)
+            _SDLC.os.access = lambda *a, **k: True
+            _SDLC.t_gourmand({})
+            ok &= check("writable tree keeps the default", seen[-1], ["gourmand", "check", "--full", "."])
+    finally:
+        _SDLC.run, _SDLC.step, _SDLC.os.access, _SDLC.REPO = real_run, real_step, real_access, real_repo
+    return ok
 
 
 if __name__ == "__main__":
