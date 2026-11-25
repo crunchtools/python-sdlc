@@ -134,34 +134,6 @@ complexity to the required check for a saving of milliseconds.
 """
 
 [[findings]]
-agent = "performance"
-category = "performance"
-file = "scripts/cutover.py"
-evidence = "return {\n    r[\"name\"]\n    for r in fleet(api)\n    if not refuse_private(r, include_private)\n    and is_converted(r[\"name\"], read_file(api, r[\"name\"], CI, r[\"default_branch\"]))\n}"
-status = "not-a-bug"
-reason = """
-One contents read per repo of a 70-repo org is about 70 calls per run, run \
-by hand once per conversion: far inside the 5,000/hour token limit, and a few \
-seconds of wall clock. Sequential is deliberate: the move must see the fleet \
-as it is, and concurrency would add rate-limit and ordering risk for nothing. \
-Reading the state every run is what makes the move idempotent.
-"""
-
-[[findings]]
-agent = "performance"
-category = "performance"
-file = "scripts/cutover.py"
-evidence = "for repo in sorted(done):\n    for scope, path in (\n        (\"repo\", \"actions/secrets\"),\n        (\"org\", \"actions/organization-secrets\"),\n    ):\n        names = secret_names(api, f\"/repos/{ORG}/{repo}/{path}\")"
-status = "not-a-bug"
-reason = """
---check is a manual audit of at most 70 repos, two reads each: about 140 \
-calls, well inside the API limit. GitHub has no endpoint that reports which \
-repos can read an org secret across the org with its repo-level secrets, and \
-both lists must be read per repo, because a refused read is an error, never \
-"none found" (provision-cosign-env.py's stale(), which this follows).
-"""
-
-[[findings]]
 agent = "constitution"
 category = "constitution"
 file = "Containerfile"

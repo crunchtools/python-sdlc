@@ -3131,24 +3131,11 @@ def pip_audit_gate(report: Path | None) -> int:
 
 
 def t_constitution(s: dict) -> int:
-    """Judge the repo by the constitution it is on.
-
-    v2 (constitution 2.0.0): a repo that carries no per-repo constitution is
-    judged by `sdlc-constitution check`, whose rules ship in this image, so a
-    rule change reaches every converted repo as one sdlc release (G5).
-
-    v1: a repo that still carries its manifest is validated against the
-    constitution IT pins, cloned at the tag the manifest names, never baked into
-    this image. Two reasons, and both matter: the fleet spans many v1 releases,
-    so a baked copy would judge most repos by rules they have not adopted; and
-    the validator resolves `constitution.md` and `profiles/` from its own
-    directory, so a partial copy makes its pin, file and version checks silently
-    vanish rather than fail.
+    """Judge the repo by constitution v2: `sdlc-constitution check`, whose rules
+    ship in this image, so a rule change reaches every converted repo as one
+    sdlc release (G5).
     """
-    manifest = Path(str(s.get("manifest", ".specify/memory/constitution.md")))
-    if not (REPO / manifest).is_file():
-        return run(["sdlc-constitution", "check", str(REPO)], env=project_env())[0]
-    return run(["sdlc-validate", str(manifest)], env=project_env())[0]
+    return run(["sdlc-constitution", "check", str(REPO)], env=project_env())[0]
 
 
 def t_codeql(s: dict) -> int:

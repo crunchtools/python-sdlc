@@ -130,29 +130,6 @@ files said per repo moves into `[tool.sdlc]`: `publish = "pypi"`, and a
 `skip-stacks` and `[tool.sdlc.ci] skip` where the image cannot check a stack
 yet or the Containerfile needs build secrets, as before.
 
-`scripts/fleet_wave.py` runs the wave: one pull request per consumer repo,
-converted by `convert_repo.py` and cut over by `scripts/cutover.py` (the
-constitution's `Inherits:` and hook `rev:`, Dependabot dropped, python-sdlc
-renamed, `.gemini/` removed with `--drop-gemini`), judged by the target
-constitution's validator. A private repo is refused unless `--include-private`.
-A plan by default (`--out DIR` for diffs and a report); `--apply` pushes
-`chore/fleet-cutover` and opens the pull request, and a TSV ledger records
-each repo. It reads `GH_TOKEN` for the API and pushes with git's credentials.
-
-The conversion PR deletes the workflows that report the old required checks,
-so it merges only by `scripts/cutover.py --merge REPO --pr N`, with an admin
-token: it refuses while the repo has a person's open pull request or an old
-`ashigaru/release-*` one, a PyPI repo whose publisher swap the `--pypi-ledger`
-does not record, or org secrets not yet scoped to selected repositories; it
-reads both new checks green, merges, moves the rulesets (recomputed from which
-repos carry the fleet file, counting the one just merged, so a re-run is
-safe; an active ruleset is never sent an empty list), drops the repo from each
-moved org secret, and brings bot pull requests up to date. Every mode exits 2
-while `examples/ci.yml` has no sdlc-bootstrap digest.
-`cutover.py --move-rulesets` runs the move alone, and `cutover.py --check`
-fails while a converted repo can still read a moved secret, the rulesets are
-out of step, or no ruleset guards `ashigaru/release-*`.
-
 **What floating trusts.** Whoever can move `quay.io/crunchtools/sdlc:latest`
 now decides the host-side code every seat and runner runs, and that code is no
 longer read in git at a pinned rev before it runs. Only this repo's release

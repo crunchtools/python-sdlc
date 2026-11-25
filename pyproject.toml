@@ -1,5 +1,5 @@
-# This repo ships no Python package: `sdlc` and `validate` are standalone
-# scripts run by path inside the image, the same arrangement
+# This repo ships no Python package: `sdlc` is a standalone
+# script run by path inside the image, the same arrangement
 # crunchtools/constitution uses for its validators. This file exists to
 # CONFIGURE the linters, which Gourmand's IF001 requires and which was a fair
 # finding -- the repo had Python files and no ruff configuration, so they were
@@ -35,12 +35,12 @@ dev = [
 
 [tool.mypy]
 python_version = "3.14"
-# `sdlc` and `validate` have no .py extension, so mypy would name both
-# `__main__` and refuse the pair; this names each after its file instead.
+# `sdlc` has no .py extension, so mypy would name it
+# `__main__`; this names it after its file instead.
 scripts_are_modules = true
 # What `sdlc push` checks when it runs mypy bare. tests/ is not here yet: the
 # suites load `sdlc` through importlib, so mypy sees a module of Any.
-files = ["sdlc", "validate", "scripts", "sdlc_jobs"]
+files = ["sdlc", "scripts", "sdlc_jobs"]
 
 # sdlc_jobs/_gatehouse_shim.py runs under gatehouse's own interpreter in the
 # image (/app/venv/bin/python), the only place gatehouse is installed.
@@ -88,7 +88,6 @@ max-complexity = 10
 # of them have no settings to read, and a signature that varies per target would
 # be worse than an unused parameter.
 "sdlc" = ["S404", "S108", "ARG001"]
-"validate" = ["S404"]
 # A test asserts. That is what it is for.
 # S302: test_pycache_prefix.py unmarshals bytecode to show what pytest's
 # assertion rewriter sees. The input is a .pyc that test compiled itself,
@@ -99,9 +98,6 @@ max-complexity = 10
 # Its fixtures are the fleet's files byte for byte, long lines included: the
 # script matches the pinned CI step exactly, so a wrapped copy tests nothing.
 "tests/test_convert_repo.py" = ["S101", "E501"]
-# The same fixtures, and counts asserted as the numbers they are.
-"tests/test_fleet_wave.py" = ["S101", "E501", "PLR2004"]
-"tests/test_cutover.py" = ["S101", "E501", "PLR2004"]
 # The sdlc_jobs suites assert counts as the numbers they are, and hand the jobs
 # fake credentials ("tok", a fake App key) so nothing real is ever near a test.
 "tests/test_event_*.py" = ["S101", "PLR2004", "S105", "S106"]

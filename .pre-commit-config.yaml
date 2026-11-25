@@ -15,18 +15,18 @@ repos:
   # bakes (Containerfile RUFF_VERSION and pyproject.toml target-version). The
   # repo had Python files and no ruff gate until Gourmand's IF001 said so.
   #
-  # `args` and `pass_filenames: false` because `sdlc` and `validate` have no
-  # .py extension, so ruff's default file selection does not see them.
+  # `args` and `pass_filenames: false` because `sdlc` has no
+  # .py extension, so ruff's default file selection does not see it.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.1
     hooks:
       - id: ruff-check
-        args: [--fix, sdlc, validate, tests, scripts, sdlc_jobs]
+        args: [--fix, sdlc, tests, scripts, sdlc_jobs]
         pass_filenames: false
         always_run: true
         stages: [pre-commit, pre-merge-commit]
       - id: ruff-format
-        args: [sdlc, validate, tests, scripts, sdlc_jobs]
+        args: [sdlc, tests, scripts, sdlc_jobs]
         pass_filenames: false
         always_run: true
         stages: [pre-commit, pre-merge-commit]

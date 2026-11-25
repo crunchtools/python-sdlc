@@ -545,7 +545,7 @@ def load_sdlc():
 CHECKER_EXIT = 7  # any code the checker returns is passed through unchanged
 
 
-def test_t_constitution_routes_by_manifest() -> None:
+def test_t_constitution_runs_the_checker() -> None:
     sdlc = load_sdlc()
     ran: list[list[str]] = []
 
@@ -558,9 +558,6 @@ def test_t_constitution_routes_by_manifest() -> None:
         sdlc.REPO = Path(tmp)
         assert sdlc.t_constitution({}) == CHECKER_EXIT, "the checker's exit code is the check's"
         assert ran[-1] == ["sdlc-constitution", "check", tmp], ran
-        write(".specify/memory/constitution.md", "# v1\n")(Path(tmp))
-        assert sdlc.t_constitution({}) == CHECKER_EXIT
-        assert ran[-1] == ["sdlc-validate", ".specify/memory/constitution.md"], ran
 
 
 def test_coverage_lists_every_principle() -> None:

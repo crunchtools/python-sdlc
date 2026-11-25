@@ -1,7 +1,1 @@
-[
-  {
-    "rule": "py/clear-text-logging-sensitive-data",
-    "path": "scripts/cutover.py",
-    "fingerprint": "d9ad5961442c1b06:1"
-  }
-]
+[]

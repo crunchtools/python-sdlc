@@ -434,9 +434,8 @@ RUN set -eu; \
 RUN rm -rf /tmp/* /tmp/.[!.]* 2>/dev/null || true
 
 COPY sdlc /usr/local/bin/sdlc
-COPY validate /usr/local/bin/sdlc-validate
 COPY bin/sdlc-constitution /usr/local/bin/sdlc-constitution
-RUN chmod 0755 /usr/local/bin/sdlc /usr/local/bin/sdlc-validate /usr/local/bin/sdlc-constitution
+RUN chmod 0755 /usr/local/bin/sdlc /usr/local/bin/sdlc-constitution
 
 # The host launcher rides in the image it starts, so a repo with no `rev:` gets
 # it with `sdlc launcher <ref>` (bin/sdlc-bootstrap) and it floats with the tag.
