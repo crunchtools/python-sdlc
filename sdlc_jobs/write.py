@@ -9,8 +9,9 @@ that step needs, and revoked after it:
   issues               applies triage (triage_apply.py) and opens the
                        ashigaru/issue-N pull request (publish.py)
   workflow_dispatch    with VERSION, opens the release pull request
-  push                 on a merge `check` planned as a release: verifies it
-                       from the API, tags it, publishes the GitHub Release
+  push                 on a merge `check` planned as a release, once `image`
+                       and `boot` passed: verifies it from the API, tags it,
+                       publishes the GitHub Release
   schedule             when `check` planned it: keeps the audit alert issue
 
 A dispatch carrying DIGEST is sdlc's rollback. `write` has nothing to do
@@ -58,6 +59,10 @@ AUDIT = {"issues": "write"}
 REVIEW_EVENTS = ("COMMENT", "REQUEST_CHANGES")
 COMMENT_KEYS = ("path", "line", "side", "start_line", "start_side", "body", "subject_type")
 MAX_ROUNDS = 5
+# What a release must pass before it is tagged: each job, by the env name ci.yml
+# hands its result on as. A fleet file older than a1667 maps neither, and runs
+# `write` beside them; there they stay unenforced, as promote treats SDLC_BOOT.
+GATES = (("image", "SDLC_IMAGE"), ("boot", "SDLC_BOOT"))
 
 
 @contract
@@ -113,6 +118,12 @@ class Job:
             return handler(event)
         plan = check_plan(self.env)
         if event_name == "push" and plan.get("release"):
+            failed = unpassed(self.env, plan)
+            if failed:
+                # Nothing is tagged: a vX.Y.Z and a GitHub Release without the
+                # image they name cannot be taken back, only superseded.
+                print(f"::error::{self.repo}: not tagged, {'; '.join(failed)}")
+                return FOUND
             return self.release(event, plan["release"])
         if event_name == "schedule" and plan.get("audit") is not None:
             return self.audit(plan["audit"])
@@ -391,6 +402,23 @@ def check_plan(env: Mapping[str, str]) -> dict[str, Any]:
     if not isinstance(plan, dict):
         raise CannotRunError("check's plan is not an object")
     return plan
+
+
+def unpassed(env: Mapping[str, str], plan: Mapping[str, Any]) -> list[str]:
+    """Each gate whose result ci.yml handed on and that neither succeeded nor was unplanned.
+
+    A skipped gate passes only when `check`'s plan did not ask for it; one the
+    plan wanted that was skipped, failed or cancelled holds the release back.
+    """
+    failed = []
+    for job, name in GATES:
+        if name not in env:
+            continue
+        result = env[name]
+        if result == "success" or (result == "skipped" and not plan.get(job)):
+            continue
+        failed.append(f"{job} {result or 'handed on no result'}")
+    return failed
 
 
 def clean_review(payload: Any, head: str) -> dict[str, Any]:

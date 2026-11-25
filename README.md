@@ -221,7 +221,7 @@ refused.
 
 | Check | Command | What it does |
 |---|---|---|
-| `containerfile-lint` | push, ci | hadolint over the Containerfile. Without a `.hadolint.yaml` the threshold is `error` and DL3007 (floating base tags) DL3041 (unpinned dnf) and SC1072 (raised on an exec-form `RUN ["python3", "-c", …]`) are ignored, as fleet conventions; warnings such as DL3002 are printed and do not fail. A repo's `.hadolint.yaml` replaces all of that. A Containerfile hadolint cannot parse (a `RUN` heredoc) is printed as ADVISORY and SKIPPED, not failed; `container-build` still builds it |
+| `containerfile-lint` | push, ci | hadolint over the Containerfile. Without a `.hadolint.yaml` the threshold is `error` and DL3007 (floating base tags) DL3041 (unpinned dnf) and SC1072 (raised on an exec-form `RUN ["python3", "-c", …]`) are ignored, as fleet conventions; warnings such as DL3002 are printed and do not fail. A repo's `.hadolint.yaml` replaces all of that. A Containerfile hadolint cannot parse (a `RUN` heredoc) cannot be linted, and that is a finding: it fails here and in the image job |
 | `container-build` | ci | `podman build`, at the tag the next two read |
 | `container-smoke` | ci | starts the built image detached, with no network and no capabilities, and reads its state from podman: still running after `seconds`, or exited 0, passes; any other exit, the OOM killer, or an entrypoint that cannot start (126/127) is a finding. **Advisory by default**: a finding is printed as `FOUND SOMETHING, ADVISORY` and does not fail the command; `gate = true` makes it gate. Exit 0 passes even when podman reports OOMKilled, which nested rootless podman does for any container; OOMKilled counts only beside a non-zero exit. Podman failing to create the container is still a 2. An image whose PID 1 is systemd (`/sbin/init`, `systemd`) is SKIPPED with its reason: systemd needs privileges the run withholds |
 | `container-scan` | ci | grype over the built image's filesystem, mounted read-only by podman; fails on a fixable Critical by default, and the repo's `.grype.yaml` applies |
@@ -370,8 +370,7 @@ $ jq -r '.checks[] | "\(.seconds)s \(.check) exit \(.exit)"' .git/sdlc/last-push
 
 A check's `exit` is its status: 0 passed, 1 found something, 2 could not run,
 3 deferred to CI, 4 SKIPPED -- reported only by `container-smoke`, for a
-systemd PID 1 it cannot boot, and `containerfile-lint`, for a Containerfile
-hadolint cannot parse -- and 5 an ADVISORY finding from an ungated
+systemd PID 1 it cannot boot -- and 5 an ADVISORY finding from an ungated
 `container-smoke`. A 4 or a 5 never decides the command's own exit.
 
 The checks appear in the order they **finished**, which with lanes is not the

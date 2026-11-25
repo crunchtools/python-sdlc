@@ -295,7 +295,7 @@ case "\$_last" in
   rc-three)    printf 'RAN rc-three\n'; exit 3 ;;
   exit-four)   printf 'RAN exit-four\n'; exit 4 ;;
   exit-five)   printf 'RAN exit-five\n'; exit 5 ;;
-  containerfile-lint) printf 'ADVISORY: hadolint could not parse\n'; exit 4 ;;
+  containerfile-lint) printf 'hadolint could not parse this Containerfile\n'; exit 4 ;;
   slow-rc-one) printf 'RAN slow-rc-one\n'; sleep 2; exit 1 ;;
   very-slow-rc-one) printf 'RAN very-slow-rc-one\n'; sleep 6; printf 'LAST LINE\n'; exit 1 ;;
   step-one) printf 'RAN step-one\n'; sleep 1 ;;
@@ -642,8 +642,8 @@ else
 fi
 rc=0
 PATH="$SHIM" sh bin/sdlc lint-unparsed > "$RUN/out" 2>&1 || rc=$?
-if [ "$rc" -eq 0 ] && grep -q '== containerfile-lint SKIPPED, not judged' "$RUN/out"; then
-  ok "containerfile-lint may report SKIPPED when hadolint cannot parse"
+if [ "$rc" -eq 1 ] && grep -q 'containerfile-lint FAILED' "$RUN/out" && ! grep -q SKIPPED "$RUN/out"; then
+  ok "a 4 from containerfile-lint (an older image) fails closed, never SKIPPED"
 else
   bad "lint-unparsed exited $rc: $(tail -2 "$RUN/out")"
 fi

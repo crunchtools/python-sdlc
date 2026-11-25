@@ -152,7 +152,7 @@ FOUND = 1
 CANNOT_RUN = 2
 DEFERRED = 3
 # Not judged, printed as SKIPPED and never the command's exit. bin/sdlc honours
-# it from containerfile-lint and the smoke run only; anywhere else it is a 1.
+# it from the smoke run only; anywhere else it is a 1.
 SKIPPED = 4
 
 
@@ -1559,7 +1559,8 @@ HOST_CHECKS = {
 # shell -- the form a stage with no /bin/sh has to use.
 HADOLINT_FLEET_IGNORES = ("DL3007", "DL3041", "SC1072")
 # hadolint's parse failure (DL1000) prints as file:line:column, which no rule
-# finding does. A Containerfile hadolint cannot read is not judged by it.
+# finding does. A Containerfile hadolint cannot read cannot be linted, and that
+# is a finding: the PR check and the image job both fail it.
 HADOLINT_PARSE_FAILURE = re.compile(r"^\S+:\d+:\d+ ", re.M)
 
 
@@ -1576,6 +1577,8 @@ def t_containerfile_lint(s: dict) -> int:
     fails on taste is a gate people skip. A repo with a config file sets its
     own rules there and gets none of these defaults, and `threshold` in this
     check's table beats both.
+
+    A Containerfile hadolint cannot parse is a finding (exit 1), not a skip.
     """
     files = names(s.get("containerfiles"), "containerfile-lint.containerfiles")
     if not files:
@@ -1601,12 +1604,12 @@ def t_containerfile_lint(s: dict) -> int:
         cannot(f"hadolint could not run (exit {rc})")
     if rc == FOUND and HADOLINT_PARSE_FAILURE.search(out):
         # A heredoc RUN, for one, which hadolint cannot parse though podman
-        # builds it. The build is the judge of that; this check says so.
+        # builds it. An unlinted Containerfile is not a clean one: say so, FOUND.
         print(
-            "ADVISORY: hadolint could not parse this Containerfile, so it is not "
-            "judged here; container-build still builds it"
+            "hadolint could not parse this Containerfile, so it cannot be linted: "
+            "rewrite what it cannot read (a RUN heredoc, for one)"
         )
-        return SKIPPED
+        return FOUND
     return rc
 
 

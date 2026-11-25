@@ -22,13 +22,18 @@ to review:
     `if:` that wants check and image to have succeeded and the plan to say `boot`
   - `promote` needs `boot`, its `if:` admits a boot that succeeded (or was skipped
     with none planned), and its env maps SDLC_BOOT
+  - `write` needs `image` and `boot`, maps their results, and its `if:` holds a
+    release back until each succeeded or was skipped with none planned, so no
+    vX.Y.Z is tagged without an image (a1667); sdlc's own `write` waits on its
+    `image`, its `image` no longer needs `write`, and its `sign` does
   - in sdlc's own file, `test` is the only job whose `if:` admits
     pull_request, with `permissions: { contents: read }`, no `environment` and
     no `container`; and sdlc's `check` does not admit pull_request and is
     named `sdlc / plan`, never the required `sdlc / check`
-  - `ai`, `write` and `gate` are byte for byte the same in both files, an
-    anchor's definition (`&boot {...}`) read as its alias (`*boot`): sdlc's
-    file defines them in a different first job. Parsed, they are equal too
+  - `ai` and `gate` are byte for byte the same in both files, an anchor's
+    definition (`&boot {...}`) read as its alias (`*boot`): sdlc's file
+    defines them in a different first job. Parsed, they are equal too. `write`
+    parses the same but for `needs`, `if` and `env`: sdlc has no `boot` job
   - and of the fleet file: no `uses:` at all, top-level `permissions: {}`,
     no environment but pypi's and renovate's (every secret is an org
     secret), and every job that holds a secret runs on
@@ -83,7 +88,9 @@ TOKEN_MINUTES = 55
 # The event literally, not pull_request_target or pull_request_review_comment.
 PULL_REQUEST = re.compile(r"""['"]pull_request['"]""")
 SECRET = re.compile(r"\$\{\{\s*secrets\.")
-SHARED = ("ai", "write", "gate")
+SHARED = ("ai", "gate")
+# What sdlc's own `write` may differ in: it waits on `image`, as there is no `boot`.
+WRITE_OWN_KEYS = ("needs", "if", "env")
 # Every job that holds a secret: Exedore's uncached class while the org variable
 # names exactly it, GitHub's otherwise and for a fork's pull_request_target.
 GUARDED_RUNNER = (
@@ -152,6 +159,7 @@ FUNCTIONS = {
     "contains": lambda haystack, needle: needle in haystack,
     "format": lambda fmt, *args: fmt.format(*args),
     "always": lambda: True,
+    "cancelled": lambda: False,
 }
 
 
@@ -188,6 +196,8 @@ WALKERS: dict[type, Callable[[Any, dict[str, object]], object]] = {
     ast.Expression: lambda node, ctx: walk(node.body, ctx),
     ast.Constant: lambda node, _ctx: node.value,
     ast.Subscript: lambda node, ctx: ctx.get(str(walk(node.slice, ctx)), ""),  # ctx["a.b"]
+    # fromJSON(...).key: an object's property, null when it has none.
+    ast.Attribute: lambda node, ctx: (walk(node.value, ctx) or {}).get(node.attr),
     ast.BoolOp: bool_op,
     ast.UnaryOp: unary,
     ast.Compare: compare,
@@ -306,6 +316,66 @@ check(
 check(
     "fleet: promote's env maps SDLC_BOOT",
     fleet["promote"]["env"].get("SDLC_BOOT") == "${{ needs.boot.result }}",
+)
+
+# a1667: write tags a release only after the gates. It needs image and boot, and
+# its if: holds a release back unless each succeeded or was skipped unplanned.
+write_job = fleet["write"]
+check("fleet: write needs image and boot", {"image", "boot"} <= set(write_job["needs"]))
+check(
+    "fleet: write's env maps SDLC_IMAGE and SDLC_BOOT",
+    write_job["env"].get("SDLC_IMAGE") == "${{ needs.image.result }}"
+    and write_job["env"].get("SDLC_BOOT") == "${{ needs.boot.result }}",
+)
+RELEASE = {"version": "1.2.3", "publish": ""}
+
+
+def runs_write(
+    job_if: str, name: str, plan: dict[str, Any], image: str, boot: str | None = None
+) -> bool:
+    """Whether `write` runs for `name` with `check`'s plan and the gates' results."""
+    ctx = event(
+        name,
+        **{
+            "needs.check.result": "success",
+            "needs.check.outputs.result": json.dumps(plan),
+            "needs.image.result": image,
+            "needs.boot.result": boot,
+        },
+    )
+    return bool(evaluate(job_if, ctx))
+
+
+GATED = {"write": True, "release": RELEASE, "image": True, "boot": True}
+for label, plan, image, boot, want in (
+    ("image and boot passed", GATED, "success", "success", True),
+    ("image failed", GATED, "failure", "skipped", False),
+    ("image was cancelled", GATED, "cancelled", "skipped", False),
+    ("a planned image was skipped", GATED, "skipped", "skipped", False),
+    ("boot failed", GATED, "success", "failure", False),
+    ("a planned boot was skipped", GATED, "success", "skipped", False),
+    ("image passed, no boot planned", {**GATED, "boot": False}, "success", "skipped", True),
+    (
+        "neither planned (a library)",
+        {"write": True, "release": RELEASE},
+        "skipped",
+        "skipped",
+        True,
+    ),
+):
+    check(
+        f"fleet: on a release push, write {'runs' if want else 'does not run'} when {label}",
+        runs_write(write_if, "push", plan, image, boot) is want,
+    )
+check(
+    "fleet: the weekly audit is not held back by a failed image",
+    runs_write(
+        write_if, "schedule", {"write": True, "audit": {}, "image": True}, "failure", "skipped"
+    ),
+)
+check(
+    "fleet: write still runs on pull_request_target with image and boot skipped",
+    runs_write(write_if, "pull_request_target", {}, "skipped", "skipped"),
 )
 
 check("fleet: no `uses:` anywhere", not re.search(r"^\s*-?\s*uses:", fleet_text, re.M))
@@ -546,6 +616,44 @@ else:
         check(
             "own: sign never runs a bootstrap on approve alone",
             "needs.approve.result == 'success' && !inputs.bootstrap" in str(sign["if"]),
+        )
+        own_write = own["write"]
+        check("own: write needs image", "image" in own_write["needs"])
+        check("own: image does not need write", "write" not in own["image"]["needs"])
+        check("own: sign needs write", "write" in own["sign"]["needs"])
+        check(
+            "own: write's env maps SDLC_IMAGE",
+            own_write["env"].get("SDLC_IMAGE") == "${{ needs.image.result }}",
+        )
+        own_plan = {"write": True, "release": RELEASE}
+        for result, want in (("success", True), ("failure", False), ("skipped", False)):
+            check(
+                f"own: on a release push, write {'runs' if want else 'skips'}: image {result}",
+                runs_write(own_write_if, "push", own_plan, result) is want,
+            )
+        sign_ctx = event(
+            "push", **{"needs.image.result": "success", "needs.approve.result": "skipped"}
+        )
+        for result, want in (("success", True), ("failure", False), ("skipped", False)):
+            check(
+                f"own: on a release push, sign {'runs' if want else 'skips'}: write {result}",
+                bool(evaluate(str(own["sign"]["if"]), {**sign_ctx, "needs.write.result": result}))
+                is want,
+            )
+        check(
+            "own: sign maps write's result and release",
+            own["sign"]["env"].get("SDLC_WRITE") == "${{ needs.write.result }}"
+            and own["sign"]["env"].get("SDLC_RELEASE") == "${{ needs.write.outputs.release }}",
+        )
+        check(
+            "own: write is the fleet file's but for needs, if and env",
+            {k: v for k, v in own_write.items() if k not in WRITE_OWN_KEYS}
+            == {k: v for k, v in fleet["write"].items() if k not in WRITE_OWN_KEYS},
+        )
+        check(
+            "own: write's env is the fleet file's without SDLC_BOOT",
+            own_write["env"]
+            == {k: v for k, v in fleet["write"]["env"].items() if k != "SDLC_BOOT"},
         )
         for job_id in SHARED:
             same = job_id in own and as_aliases(job_text(own_text, job_id)) == as_aliases(

@@ -317,44 +317,43 @@ if [ "$RC" -eq 0 ] && grep -qxF 'result={"write":false,"release":null}' "$W/out"
 else bad "dispatch: exit $RC"; dump; fi
 
 printf '\n%s\n' '-- image'
-img() { run image release GITHUB_EVENT_NAME=push SDLC_WRITE=success "$@"; }
-reset; img 'SDLC_RELEASE={"version":"0.13.0"}'
+# check's plan, never write's result: write tags only once this build has
+# passed (a1667), so image cannot wait on it.
+img() { run image release GITHUB_EVENT_NAME=push "$@"; }
+PLAN_R='SDLC_CHECK={"write":true,"release":{"version":"0.13.0","publish":"image"}}'
+reset; img "$PLAN_R"
 WANT="result={\"digest\":\"$D1\",\"version\":\"0.13.0\",\"boot\":\"$DB\"}"
 if [ "$RC" -eq 0 ] && grep -qxF "$WANT" "$W/out" && [ "$(cat "$W/login-stdin")" = p ] \
    && in_log "stub .*tests/contract.sh localhost/sdlc:$REV" \
    && in_log "^podman push .* docker://$A:gated-$REV\$" && in_log "^podman push .* docker://$B:gated-$REV\$" \
    && ! in_log ' sign --yes ' && ! in_log '^skopeo copy' && ! in_log 'u -p'; then
-  ok "release: a JSON object is accepted; candidates pushed gated, nothing signed or tagged"
-else bad "image object: exit $RC"; dump; cat "$W/out" 2> /dev/null || :; fi
-reset; img SDLC_RELEASE=0.13.0
+  ok "release: check's planned version builds before write runs; candidates pushed gated, nothing signed or tagged"
+else bad "image release: exit $RC"; dump; cat "$W/out" 2> /dev/null || :; fi
+reset; img SDLC_WRITE=failure "$PLAN_R"
 if [ "$RC" -eq 0 ] && grep -qxF "$WANT" "$W/out"; then
-  ok "release: a bare version is accepted"
-else bad "image bare version: exit $RC"; dump; fi
-reset; img 'SDLC_RELEASE="0.13.0"'
-if [ "$RC" -eq 0 ] && grep -qxF "$WANT" "$W/out"; then
-  ok "release: a JSON string is accepted"
-else bad "image JSON string: exit $RC"; dump; fi
-reset; run image release GITHUB_EVENT_NAME=push SDLC_WRITE=skipped 'SDLC_RELEASE={"version":"0.13.0"}'
-refused "release: a skipped write is a failure, not a skip" "write did not succeed"
-reset; run image release GITHUB_EVENT_NAME=push 'SDLC_RELEASE={"version":"0.13.0"}'
-refused "release: no write result is a failure" "write did not succeed"
+  ok "release: write's result plays no part in the build"
+else bad "image with a failed write: exit $RC"; dump; fi
+reset; img
+refused "release: no plan is a failure, not a skip" "check planned no release"
+reset; img 'SDLC_CHECK={"write":false,"release":null}'
+refused "release: a plan with no release builds nothing" "check planned no release"
 for v in 0.13 1.2.3.4 01.2.3 v0.13.0 0.13.0-rc.1 ''; do
-  reset; img "SDLC_RELEASE={\"version\":\"$v\"}"
-  refused "release: version '$v' is not X.Y.Z" "is not X.Y.Z"
+  reset; img "SDLC_CHECK={\"release\":{\"version\":\"$v\"}}"
+  refused "release: version '$v' is not X.Y.Z" "check planned no release"
 done
-reset; img 'SDLC_RELEASE={"version":'
-refused "release: output that is not JSON is refused" "is not"
-reset; img 'SDLC_RELEASE={"version":"0.14.0"}'
-refused "release: a version other than the tree's is refused" "the tree is 0.13.0, write released 0.14.0"
+reset; img 'SDLC_CHECK={"release":{"version":'
+refused "release: a plan that is not JSON is refused" "check planned no release"
+reset; img 'SDLC_CHECK={"release":{"version":"0.14.0"}}'
+refused "release: a version other than the tree's is refused" "the tree is 0.13.0, check planned 0.14.0"
 reset; sed -i 's/^version = .*/version = "1.0.0"/' "$W/repo/pyproject.toml"
-img 'SDLC_RELEASE={"version":"1.0.0"}'
+img 'SDLC_CHECK={"release":{"version":"1.0.0"}}'
 refused "release: a version of another major than boot/Containerfile is refused" "is not of major 0"
-reset; img 'SDLC_RELEASE={"version":"0.13.0"}' SDLC_QUAY_USERNAME=
+reset; img "$PLAN_R" SDLC_QUAY_USERNAME=
 refused "release: no SDLC_QUAY_USERNAME is refused before anything is built" "SDLC_QUAY_USERNAME"
 no_log_ok "  and nothing was called"
-reset; img 'SDLC_RELEASE={"version":"0.13.0"}' SDLC_QUAY_PASSWORD=
+reset; img "$PLAN_R" SDLC_QUAY_PASSWORD=
 refused "release: no SDLC_QUAY_PASSWORD is refused" "SDLC_QUAY_PASSWORD"
-reset; printf 'garbage' > "$W/digest-sdlc"; img 'SDLC_RELEASE={"version":"0.13.0"}'
+reset; printf 'garbage' > "$W/digest-sdlc"; img "$PLAN_R"
 check "release: a push that reports no digest fails" rc_is 1
 # weekly rebuilds the commit :0's revision label names, fetched from the fake
 # repo itself. No tag is fetched: a tag can be moved, the signed label cannot.
@@ -379,7 +378,7 @@ refused "weekly: no :0 means no release to rebuild" "does not exist"
 printf '\n%s\n' '-- sign: inputs, cosign and the key'
 BUILT_R="{\"digest\":\"$D1\",\"version\":\"0.13.0\",\"boot\":\"$DB\"}"
 rel_setup() { reset; reg_label "$A@$D1" 0.13.0; reg_label "$B@$DB" 0.13.0; }
-rel() { run sign release EVENT=push BUILT="$BUILT_R" "$@"; }
+rel() { run sign release EVENT=push BUILT="$BUILT_R" SDLC_WRITE=success SDLC_RELEASE='{"version":"0.13.0"}' "$@"; }
 rel_setup; rel SDLC_KEY=
 refused "a missing SDLC_KEY is refused" "no SDLC_KEY"
 no_log_ok "  before cosign ran"
@@ -453,6 +452,15 @@ rel_setup; run sign release EVENT=push BUILT='not json'
 refused "BUILT that is not JSON is refused" "names no sha256 digest"
 rel_setup; run sign release EVENT=push BUILT=
 refused "an empty BUILT is refused" "names no sha256 digest"
+# a1667: write tags after image, and sign signs only what write released.
+for wr in failure skipped cancelled ''; do
+  rel_setup; rel SDLC_WRITE="$wr"
+  refused "a release write did not tag ('$wr') signs nothing" "write did not succeed"
+done
+rel_setup; rel SDLC_RELEASE='{"version":"0.14.0"}'
+refused "a release write tagged as another version signs nothing" "write released '0.14.0', the image is 0.13.0"
+rel_setup; rel SDLC_RELEASE=
+refused "a release with no write output signs nothing" "write released '', the image is 0.13.0"
 rel_setup; reg_label "$A@$D1" 1.0.0; rel
 refused "a label of another major is refused" "is not of major 0"
 rel_setup; reg_label "$A@$D1" 0.14.0; rel

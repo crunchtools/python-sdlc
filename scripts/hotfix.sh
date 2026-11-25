@@ -83,18 +83,23 @@ mint() {
 export COSIGN_IMAGE=ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca
 export GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=crunchtools/sdlc
 
-GITHUB_JOB=image MODE=release GITHUB_EVENT_NAME=push SDLC_WRITE=success SDLC_RELEASE=$version \
+# image builds the version check would plan; write's verdict is sign's input.
+plan=$(jq -cn --arg v "$version" '{write: true, release: {version: $v, publish: "image"}}')
+GITHUB_JOB=image MODE=release GITHUB_EVENT_NAME=push SDLC_CHECK=$plan \
   GITHUB_OUTPUT=$work/out SDLC_KEY='' SDLC_KEY_PASSWORD='' "$here/scripts/self.sh"
 built=$(sed -n 's/^result=//p' "$work/out")
 [ -n "$built" ] || { echo "hotfix: the image step named no digest" >&2; exit 1; }
 
-# The tag before sign, as `write` tags before image and sign run. A re-run
-# finds its own tag and goes on.
+# The tag after the image step and its contract test, and before sign, as
+# `write` tags only once image has passed (a1667). A re-run finds its own tag
+# and goes on.
 token=$(mint) || { echo "hotfix: could not mint the App's TAG token" >&2; exit 1; }
 unset app_key
 printf '%s' "$token" | podman run --rm -i \
   --entrypoint /opt/constitution-venv/bin/python3 "localhost/sdlc:$sha" \
   -I -m sdlc_jobs._hotfix "$GITHUB_REPOSITORY" "$version" "$sha"
 
-GITHUB_JOB=sign MODE=release EVENT=push BUILT=$built "$here/scripts/self.sh"
+release=$(jq -cn --arg v "$version" --arg s "$sha" '{version: $v, sha: $s}')
+GITHUB_JOB=sign MODE=release EVENT=push BUILT=$built SDLC_WRITE=success SDLC_RELEASE=$release \
+  "$here/scripts/self.sh"
 echo "hotfix: $version is quay.io/crunchtools/sdlc:${version%%.*}"

@@ -76,17 +76,21 @@ jobs:
            RHSM_ACTIVATION_KEY: "${{ secrets.RHSM_ACTIVATION_KEY }}", RHSM_ORG_ID: "${{ secrets.RHSM_ORG_ID }}",
            REGISTRY_REDHAT_IO_USER: "${{ secrets.REGISTRY_REDHAT_IO_USER }}", REGISTRY_REDHAT_IO_PASSWORD: "${{ secrets.REGISTRY_REDHAT_IO_PASSWORD }}" }
     steps: *event
-  write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
-    needs: [check, ai]
+  write:  # the Ashigaru App key, no model: verifies and tags a release merge once image and boot pass; comments, labels, PRs, leased pushes
+    needs: [check, ai, image, boot]
     if: >-
       always() && !cancelled() && !inputs.digest
       && (github.event_name == 'pull_request_target' || github.event_name == 'issues'
-          || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
+          || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write)
+             && (!fromJSON(needs.check.outputs.result || '{}').release
+                 || (needs.image.result == 'success' || needs.image.result == 'skipped' && !fromJSON(needs.check.outputs.result || '{}').image)
+                    && (needs.boot.result == 'success' || needs.boot.result == 'skipped' && !fromJSON(needs.check.outputs.result || '{}').boot)))
     concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
     runs-on: *secret
     permissions: {}
     outputs: { release: "${{ steps.e.outputs.release }}" }
     env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
+           SDLC_IMAGE: "${{ needs.image.result }}", SDLC_BOOT: "${{ needs.boot.result }}",
            SDLC_AI: "${{ needs.ai.result }}", SDLC_AI_0: "${{ needs.ai.outputs.p0 }}", SDLC_AI_1: "${{ needs.ai.outputs.p1 }}", SDLC_AI_2: "${{ needs.ai.outputs.p2 }}", SDLC_AI_3: "${{ needs.ai.outputs.p3 }}" }
     steps: *event
   boot:  # no secret, a read token: a repo's boot-command and contract-test, shell run on the digest image pushed; promote needs it
@@ -392,10 +396,10 @@ a job that has nothing to take:
 - **`image`** builds **only releases**, so its `if:` keys on the plan's
   `release`, not on the `image` key the fleet's `image` job reads: sdlc's plan
   never reports `image`, because nothing but a release is ever built to quay.
-  On a push, that means the merge of a
-  release PR that `write` has verified with the full test (under "Releases run
-  from the merge"). The version comes from `write`'s output, which is read
-  from the tree. On the weekly schedule it means **the version `:<major>`
+  On a push, that means a merge `check` planned as a release; the version is
+  the plan's, which must be the tree's. `write` verifies it with the full test
+  (under "Releases run from the merge") and tags it only once `image` has
+  passed, and `sign` signs only what `write` released. On the weekly schedule it means **the version `:<major>`
   carries now**, read from that image's `version` annotation and label (which
   must agree), and rebuilt from the commit that image's
   `org.opencontainers.image.revision` label names: never from the default
@@ -428,8 +432,8 @@ a job that has nothing to take:
 
   **`:<major>` moves only forward on a release, or anywhere on an approved
   rollback.** The modes:
-  - **`release`:** a verified release-merge push. The version is `write`'s
-    output, and it must be newer than the one `:<major>` carries. It signs the
+  - **`release`:** a verified release-merge push. `write` must have succeeded,
+    its output's version must be the image's, and it must be newer than the one `:<major>` carries. It signs the
     built digest with `-a repo=crunchtools/sdlc -a version=X.Y.Z` and moves
     `X.Y.Z`, `<major>` and `latest`.
   - **`weekly`:** a rebuild of the version `:<major>` carries. The built
@@ -503,6 +507,12 @@ the new ruleset like any converted repo.
    - that `X.Y.Z` equals the version in the merged tree (`pyproject.toml` or
      the repo's version file, and the newest CHANGELOG heading).
 
+   **The gates first.** `write` needs `image` and `boot`, and on a release its
+   `if:` wants each to have succeeded, or to be skipped with none planned; it
+   also refuses in code when `SDLC_IMAGE` or `SDLC_BOOT` says otherwise. A
+   release whose image or boot proof fails is never tagged, so no `vX.Y.Z`
+   and no GitHub Release exist without an image (a1667).
+
    Only then does `write` tag `vX.Y.Z` on that commit with the App token,
    publish the GitHub Release, and output `release`.
 
@@ -522,7 +532,9 @@ the plan also requires `needs.check.result == 'success'` in its `if:`. A
 on it: `image`, `boot`, `write` (outside the triage events) and `pypi` all carry
 that test, and `promote` follows `image`. If the plan says a job was needed and
 its result is anything but `success` (`skipped`, `failure`, `cancelled`), the
-dependent job fails. Three cases:
+dependent job fails. The cases:
+- `write` on a release merge refuses unless `image` and `boot` succeeded or
+  were not planned.
 - `promote` fails if `check` planned `boot` and `boot` did not succeed.
 - `promote` on a release merge fails if `write` did not succeed.
 - `pypi` fails if `write` did not succeed.

@@ -804,13 +804,17 @@ def test_smoke_exit_0_early_passes_and_is_cleaned_up() -> None:
     assert smoke(SmokeTools("{}", state="false 1 false")) is False
 
 
-def test_lint_that_could_not_parse_is_refused_not_passed() -> None:
-    t = FakeTools()
-    t.lint_rc = 4
-    assert "nothing was judged" in refused(t, QUAY_PARENT)
+def test_lint_that_could_not_parse_is_a_finding_not_a_skip() -> None:
+    # `sdlc containerfile-lint` exits 1 for a Containerfile hadolint cannot
+    # parse, the same as the PR check: a finding, nothing pushed.
     t = FakeTools()
     t.lint_rc = 1
     assert go(t, QUAY_PARENT)[0] == 1 and not t.pushed()
+    # 4 is no longer lint's to give (an older image); like any other status
+    # that is not 0 or 1 it is the tool failing to run, never a pass.
+    t = FakeTools()
+    t.lint_rc = 4
+    assert "could not run (exit 4)" in refused(t, QUAY_PARENT)
 
 
 # ------------------------------------------------------------- [tool.sdlc.image]

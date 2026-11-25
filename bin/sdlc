@@ -1179,13 +1179,13 @@ run_step() {           # mode payload -> the step's exit status
   # Only a push may defer to CI. Anything else that reports 3 could not run.
   if [ "$_rs" -eq 3 ] && [ "${SDLC_TIER:-}" != push ]; then return 2; fi
   # Two statuses mean "not gating", and each comes from one place only:
-  #   4  SKIPPED, not judged: run_up for a systemd PID 1, and
-  #      containerfile-lint when hadolint cannot parse the Containerfile
+  #   4  SKIPPED, not judged: run_up for a systemd PID 1
   #   5  found something, ADVISORY: an advisory smoke run's finding
   # Anything else exiting 4 or 5 -- any tool in any other check -- found
-  # something, as it always has.
+  # something, as it always has: an older image's containerfile-lint that
+  # still exits 4 for an unparsable Containerfile fails closed as a 1.
   case "$_rs:$1:$2" in
-    4:host-up:*|4:host-up-advisory:*|4:image-ro:containerfile-lint) ;;
+    4:host-up:*|4:host-up-advisory:*) ;;
     1:host-up-advisory:*) return 5 ;;
     4:*|5:*) return 1 ;;
   esac

@@ -25,6 +25,7 @@ printf 'version = "1.2.3"\n' > "$TREE/pyproject.toml"
 cat > "$TREE/scripts/self.sh" <<'SHIM'
 #!/bin/sh
 echo "self job=$GITHUB_JOB sdlckey=${SDLC_KEY:+set}${SDLC_KEY:-empty} app=${ASHIGARU_APP_KEY+key}${ASHIGARU_CLIENT_ID+id}" >> "$LOG"
+echo "self-in job=$GITHUB_JOB check=${SDLC_CHECK:-} write=${SDLC_WRITE:-} release=${SDLC_RELEASE:-}" >> "$LOG"
 [ "$GITHUB_JOB" = image ] &&
   echo 'result={"digest":"sha256:abc","version":"1.2.3","boot":""}' >> "$GITHUB_OUTPUT"
 exit 0
@@ -118,6 +119,15 @@ if ! grep -E '^(self|podman-env) ' "$LOG" | grep -q 'app=.'; then ok "self.sh an
 else bad "App name in an environment: $(grep -E '^(self|podman-env) ' "$LOG")"; fi
 if has 'self job=image sdlckey=empty' && has 'self job=sign sdlckey=set'; then ok "image runs with an empty SDLC_KEY, sign with the real one"
 else bad "SDLC_KEY: $(grep '^self' "$LOG")"; fi
+
+# a1667: self.sh's image builds check's planned version without write, and its
+# sign wants write's success and release, which the tag before it stands for.
+if has 'self-in job=image check={"write":true,"release":{"version":"1.2.3","publish":"image"}} write= release='
+then ok "image is handed check's plan for 1.2.3 and nothing of write's"
+else bad "image inputs: $(grep '^self-in job=image' "$LOG")"; fi
+if has "self-in job=sign check= write=success release={\"version\":\"1.2.3\",\"sha\":\"$SHA\"}"
+then ok "sign is handed write's success and the release it tagged"
+else bad "sign inputs: $(grep '^self-in job=sign' "$LOG")"; fi
 
 for name in ASHIGARU_APP_KEY ASHIGARU_CLIENT_ID; do
   run "$(printf '%s' "$FULL" | jq -c --arg n "$name" 'del(.[$n])')"

@@ -628,15 +628,15 @@ else
   bad "containerfile-lint on an exec-form RUN exited $rc"
   printf '%s\n' "$out" | sed 's/^/       /' | tail -6
 fi
-# A RUN heredoc hadolint cannot parse: advisory, printed, not a finding.
+# A RUN heredoc hadolint cannot parse: a finding, printed, exit 1.
 printf 'FROM quay.io/hummingbird/python:3.14\nRUN python3 - <<'"'"'EOF'"'"'\nprint(1)\nEOF\nRUN true\n' \
   > "$CFIX/Containerfile"
 rc=0
 out=$(lint) || rc=$?
-if [ "$rc" -eq 4 ] && printf '%s' "$out" | grep -q 'ADVISORY: hadolint could not parse'; then
-  ok "a Containerfile hadolint cannot parse is advisory (exit 4, printed)"
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'hadolint could not parse this Containerfile'; then
+  ok "a Containerfile hadolint cannot parse is a finding (exit 1, printed)"
 else
-  bad "containerfile-lint on an unparsable Containerfile exited $rc, want 4"
+  bad "containerfile-lint on an unparsable Containerfile exited $rc, want 1"
   printf '%s\n' "$out" | sed 's/^/       /' | tail -6
 fi
 # A repo's own .hadolint.yaml takes the defaults away: here it asks for warnings.

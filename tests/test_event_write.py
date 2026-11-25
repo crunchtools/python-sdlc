@@ -10,6 +10,7 @@
     pending finding ids swapped for the real comment ids (or dropped)
   - issues apply triage, and publish code only when `ai` succeeded
   - dispatch, push and schedule do what `check` planned, and nothing else
+  - a release is tagged only once the image and boot it planned passed
 
 Every token is minted by a fake that records the permissions asked for and
 that it was released; nothing here touches the network or runs a tool.
@@ -833,6 +834,42 @@ for label, text in (("not JSON", "{oops"), ("a list", "[1]"), ("a string", '"x"'
     why = refusal(rig.job({**push_env, "SDLC_CHECK": text}).route, "push", push_event)
     check(f"push: a plan that is {label} is CannotRunError", why is not None and "plan" in why)
 check("push: and a bad plan publishes nothing", not mock_publish.called)
+
+# a1667: a release is tagged only once the image and boot jobs it planned passed.
+gated = {"release": planned, "image": True, "boot": True}
+for label, plan, results in (
+    ("image failed", gated, {"SDLC_IMAGE": "failure", "SDLC_BOOT": "skipped"}),
+    ("image was cancelled", gated, {"SDLC_IMAGE": "cancelled", "SDLC_BOOT": "skipped"}),
+    ("a planned image was skipped", gated, {"SDLC_IMAGE": "skipped", "SDLC_BOOT": "skipped"}),
+    ("boot failed", gated, {"SDLC_IMAGE": "success", "SDLC_BOOT": "failure"}),
+    ("a planned boot was skipped", gated, {"SDLC_IMAGE": "success", "SDLC_BOOT": "skipped"}),
+    ("image's result is empty", gated, {"SDLC_IMAGE": "", "SDLC_BOOT": "success"}),
+):
+    mock_publish.reset_mock()
+    rig = Rig()
+    code = rig.route("push", push_event, {**push_env, "SDLC_CHECK": json.dumps(plan), **results})
+    check(
+        f"push: not tagged when {label}",
+        code == 1 and not mock_publish.called and rig.minter.perms == [],
+    )
+for label, plan, results in (
+    ("image and boot passed", gated, {"SDLC_IMAGE": "success", "SDLC_BOOT": "success"}),
+    (
+        "neither was planned (a library)",
+        {"release": planned},
+        {"SDLC_IMAGE": "skipped", "SDLC_BOOT": "skipped"},
+    ),
+    (
+        "image passed and no boot was planned",
+        {"release": planned, "image": True},
+        {"SDLC_IMAGE": "success", "SDLC_BOOT": "skipped"},
+    ),
+    ("a fleet file older than a1667 maps neither", gated, {}),
+):
+    mock_publish.reset_mock()
+    rig = Rig()
+    code = rig.route("push", push_event, {**push_env, "SDLC_CHECK": json.dumps(plan), **results})
+    check(f"push: tagged when {label}", code == 0 and mock_publish.call_count == 1)
 publish_patch.stop()
 
 # --- schedule: the audit issue ----------------------------------------------
