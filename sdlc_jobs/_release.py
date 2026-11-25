@@ -205,14 +205,28 @@ def _lock_to(api: Api, repo: str, branch: str, sha: str, version: str) -> str | 
 
 
 def _tree_version(api: Api, repo: str, sha: str) -> str | bool | None:
-    """The `[project].version` of pyproject.toml at `sha`; False when there is no such file."""
+    """The version the tree at `sha` states; False when it states none anywhere.
+
+    pyproject.toml's `[project].version` is the Python package's. A pyproject
+    with no `[project]` table only configures tools (rotv's carries just
+    `[tool.sdlc]`), so the version is package.json's, as a Node repo keeps it.
+    A file that names a version table but holds no string version is None.
+    """
     got = _file_at(api, repo, "pyproject.toml", sha)
-    if got is None:
-        return False
+    if got is not None:
+        try:
+            project = tomllib.loads(base64.b64decode(got["content"]).decode()).get("project")
+        except _UNREADABLE:
+            return None
+        if project is not None:
+            found = project.get("version") if isinstance(project, dict) else None
+            return found if isinstance(found, str) else None
+    node = _file_at(api, repo, "package.json", sha)
+    if node is None:
+        return False if got is None else None
     try:
-        text = base64.b64decode(got["content"]).decode()
-        found = tomllib.loads(text).get("project", {}).get("version")
-    except _UNREADABLE:
+        found = json.loads(base64.b64decode(node["content"]).decode()).get("version")
+    except (*_UNREADABLE, AttributeError):
         return None
     return found if isinstance(found, str) else None
 

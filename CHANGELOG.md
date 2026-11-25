@@ -24,6 +24,9 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `write` verifies a release against package.json's version when pyproject.toml
+  has no `[project]` table (rotv keeps only `[tool.sdlc]` there), instead of
+  refusing every release of a Node repo as "at None".
 - `container-smoke` reports "killed for memory" only for exit 137. Nested
   rootless podman sets OOMKilled on an image that simply exits 1, so a crashing
   image was blamed on memory instead of its own exit code, and self.sh failed.
