@@ -1259,6 +1259,11 @@ if grep -q -- "-v $SARIF_HOST:/sarif:rw,z" "$RUN/podman.log" \
 else
   bad "sarif did not mount SDLC_HOST_SARIF: $(grep -c . "$RUN/podman.log") podman calls"
 fi
+if [ -s "$RUN/podman.log" ] && ! grep -q -- ':/cache' "$RUN/podman.log"; then
+  ok "sarif gets no cache volume: every other target, the repo's code among them, writes it"
+else
+  bad "sarif was given the cache volume"
+fi
 # pytest and a repo's own `command` check are the targets that run repo code.
 for target in ci push commit mypy pytest repo-command tiers codeql-baseline; do
   sarif_run "$target"
