@@ -6,6 +6,22 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-25
+
+### Added
+
+- scripts/local-release.sh: release a fleet repo's default-branch commit from
+  Exedore with Actions off, by running the fleet file's check, image, boot and
+  promote jobs through the pinned sdlc-bootstrap on a podman service of its
+  own, then verifying the pushed digest against the fleet key. Secrets arrive
+  on stdin from scripts/local-release-secrets.sh (OpenBao on Gloval) (a1551)
+
+### Fixed
+
+- promote leaves `latest` alone for a newer version only when that version is a
+  release of this repo: a `latest` labelled with its base's version (Hummingbird
+  python's 3.14.x) no longer holds `latest` back from every release (a1551)
+
 ## [0.16.1] - 2026-11-25
 
 ### Security

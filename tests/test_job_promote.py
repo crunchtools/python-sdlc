@@ -299,10 +299,21 @@ def test_latest_not_moved_backwards() -> None:
     t = FakeTools()
     t.tags["latest"] = OLD
     t.labels[OLD] = {"org.opencontainers.image.version": "2.0.0"}
+    t.release_tags["2.0.0"] = OTHER_SHA
     t.labels[NEW] = built_labels("1.9.1")
     assert go(t, release="1.9.1") == 0
     assert t.tags["latest"] == OLD and t.tags["1.9.1"] == NEW
     assert "rollback-latest" not in t.copies()
+
+
+def test_latest_labelled_with_its_base_version_still_moves() -> None:
+    # Hummingbird's python labels 3.14.10; latest inherited it, and it is no release here.
+    t = FakeTools()
+    t.tags["latest"] = OLD
+    t.labels[OLD] = {"org.opencontainers.image.version": "3.14.10", "version": "0.8.2"}
+    t.labels[NEW] = built_labels("0.9.0")
+    assert go(t, release="0.9.0") == 0
+    assert t.tags["latest"] == NEW and t.tags["rollback-latest"] == OLD
 
 
 def test_release_moves_latest_forward_and_keeps_rollback() -> None:
@@ -437,6 +448,7 @@ def test_stale_rebuild_does_not_move_latest_back() -> None:
     t = FakeTools()
     t.tags["latest"] = OLD
     t.labels[OLD] = {"org.opencontainers.image.version": "2.0.0"}
+    t.release_tags["2.0.0"] = OTHER_SHA
     assert go(t) == 0
     assert t.tags["latest"] == OLD
 
