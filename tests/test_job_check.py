@@ -79,6 +79,8 @@ class FakeTools(Tools):
         self.jobs: list[dict] = []  # the jobs of the merged PR head's ci.yml run
         self.head_repo = ""  # a pull request's head repo, in the event
         self.private = False  # the event's repository.private
+        self.tags = f"{SHA}\trefs/tags/v1.2.3\n"  # `git ls-remote --tags origin`: a release here
+        self.pr_files: list[dict] | None = [{"filename": "src/x.py"}]  # None: the API refuses
 
     def run(
         self,
@@ -111,6 +113,8 @@ class FakeTools(Tools):
 
     def tool(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         """The image's other tools: git's fetch, and skopeo reading the parent."""
+        if argv[:2] == ["git", "ls-remote"]:
+            return cp(0, self.tags)
         if argv[0] == "git":
             return cp(0)
         if argv[:2] == ["skopeo", "inspect"]:
@@ -132,6 +136,9 @@ class FakeTools(Tools):
     ) -> Response:
         path = url.removeprefix("https://api.github.com")
         self.calls.append((method, path, payload))
+        if method == "GET" and "/pulls/1/files?" in path:
+            listed = None if self.pr_files is None else json.dumps(self.pr_files).encode()
+            return Response(403, b"") if listed is None else Response(200, listed)
         if method == "GET" and path.endswith("/pulls"):
             return Response(200, json.dumps(self.prs).encode())
         if method == "GET" and "/git/commits/" in path:
@@ -184,8 +191,9 @@ def go(
             **tools.env,
         }
         event = dict(EVENT)
-        if tools.head_repo:
-            event["pull_request"] = {"head": {"repo": {"full_name": tools.head_repo}}}
+        if event_name == "pull_request":
+            head = {"repo": {"full_name": tools.head_repo or REPO}}
+            event["pull_request"] = {"number": 1, "head": head}
             event["repository"] = {**event.get("repository", {}), "private": tools.private}
         if cron:
             event["schedule"] = cron
@@ -225,35 +233,46 @@ def test_pull_request() -> None:
     t = FakeTools()
     rc, plan = go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
     assert rc == 0 and plan["image"] is False and plan["release"] is None
-    assert plan["write"] is False and gated(t)
-    assert not t.calls
+    assert plan["write"] is False and gated(t) and "candidate" not in plan
+    assert [c[1] for c in t.calls] == [f"/repos/{REPO}/pulls/1/files?per_page=100&page=1"]
 
 
-def test_same_repo_pull_request_plans_a_candidate_and_leaves_the_container_gates_to_it() -> None:
+def skipped(t: FakeTools) -> set[str]:
+    return set(t.launched[0][1].get("SDLC_SKIP", "").split(",")) - {""}
+
+
+def test_pull_request_test_builds_only_when_the_image_inputs_change() -> None:
     t = FakeTools()
-    t.head_repo = REPO
-    rc, plan = go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
-    assert rc == 0 and plan["candidate"] is True and gated(t)
-    skip = t.launched[0][1].get("SDLC_SKIP", "").split(",")
-    assert set(check.CONTAINER_GATES) <= set(skip), skip
-
-
-def test_no_candidate_for_a_private_repo() -> None:
-    t = FakeTools()
-    t.head_repo, t.private = REPO, True
-    rc, plan = go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
-    assert rc == 0 and plan["candidate"] is False
-    assert "SDLC_SKIP" not in t.launched[0][1]
-
-
-def test_no_candidate_for_a_fork_or_rhsm_or_no_image() -> None:
-    rhsm = {**IMAGE, "pyproject.toml": "[tool.sdlc.image]\nrhsm = true\n"}
-    for files, head in ((IMAGE, "fork/demo"), (rhsm, REPO), ({}, REPO)):
+    go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
+    assert set(check.CONTAINER_GATES) <= skipped(t), "a code-only PR built the image"
+    for name in (
+        "Containerfile",
+        "images/Containerfile.base",
+        "Dockerfile",
+        ".containerignore",
+        "uv.lock",
+        "web/package-lock.json",
+        "requirements-dev.txt",
+    ):
         t = FakeTools()
-        t.head_repo = head
-        rc, plan = go("pull_request", t, files=files, ref="refs/pull/1/merge")
-        assert rc == 0 and plan["candidate"] is False, (files, head)
-        assert "SDLC_SKIP" not in t.launched[0][1], (files, head)
+        t.pr_files = [{"filename": "README.md"}, {"filename": name}]
+        go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
+        assert not skipped(t), name
+    t = FakeTools()
+    t.pr_files = [{"filename": "new/Containerfile", "previous_filename": "Containerfile"}]
+    go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
+    assert not skipped(t), "a renamed Containerfile is a change to it"
+
+
+def test_pull_request_whose_files_cannot_be_read_test_builds() -> None:
+    t = FakeTools()
+    t.pr_files = None
+    go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
+    assert not skipped(t)
+    t = FakeTools()
+    t.pr_files = [{"filename": f"src/{n}.py"} for n in range(100)]  # a full page, then none
+    go("pull_request", t, files=IMAGE, ref="refs/pull/1/merge")
+    assert not skipped(t), "only a short page ends the listing"
 
 
 def merged(head_tree: str, conclusion: str = "success") -> FakeTools:
@@ -268,7 +287,7 @@ def merged(head_tree: str, conclusion: str = "success") -> FakeTools:
 def test_push_of_a_tree_its_pr_passed_runs_no_gates() -> None:
     t = merged("c" * 40)
     rc, plan = go("push", t, files=IMAGE)
-    assert rc == 0 and plan["image"] is True and not gated(t)
+    assert rc == 0 and plan["image"] is False and not gated(t)
 
 
 def test_push_gates_when_the_tree_or_the_check_differs() -> None:
@@ -277,9 +296,23 @@ def test_push_gates_when_the_tree_or_the_check_differs() -> None:
         assert rc == 0 and gated(t)
 
 
-def test_push_image_repo() -> None:
+def test_push_image_repo_builds_only_a_release() -> None:
     rc, plan = go("push", FakeTools(), files=IMAGE)
-    assert rc == 0 and plan["image"] is True and plan["release"] is None and not plan["write"]
+    assert rc == 0 and plan["image"] is False and plan["release"] is None and not plan["write"]
+    rc, plan = go("push", FakeTools(prs=[pr()]), files=IMAGE)
+    assert rc == 0 and plan["image"] is True and plan["release"]["version"] == "1.2.3"
+
+
+def test_rebuilds_publish_only_a_release_commit() -> None:
+    for cron in (check.WEEKLY, check.POLL):
+        for tags in ("", f"{'f' * 40}\trefs/tags/v1.2.3\n", f"{SHA}\trefs/tags/nightly\n"):
+            t = FakeTools()
+            t.tags, t.base = tags, DIGEST_B
+            plan = go("schedule", t, files=IMAGE, cron=cron)[1]
+            assert plan["image"] is False, (cron, tags)
+        t = FakeTools()
+        t.tags, t.base = f"{'f' * 40}\trefs/tags/v1.2.3\n{SHA}\trefs/tags/v1.2.3^{{}}\n", DIGEST_B
+        assert go("schedule", t, files=IMAGE, cron=cron)[1]["image"] is True, "an annotated tag"
 
 
 def test_push_no_containerfile() -> None:
@@ -564,14 +597,9 @@ MANY = {
 }
 
 
-def test_publish_false_plans_no_image_and_no_candidate_and_keeps_the_container_gates() -> None:
-    rc, plan = go("push", FakeTools(), files=OPT_OUT)
+def test_publish_false_plans_no_image() -> None:
+    rc, plan = go("push", FakeTools(prs=[pr()]), files=OPT_OUT)
     assert rc == 0 and plan["image"] is False
-    t = FakeTools()
-    t.head_repo = REPO
-    rc, plan = go("pull_request", t, files=OPT_OUT, ref="refs/pull/1/merge")
-    assert rc == 0 and plan["candidate"] is False and gated(t)
-    assert "SDLC_SKIP" not in t.launched[0][1]
     t = FakeTools()
     t.base = DIGEST_B
     assert go("schedule", t, files=OPT_OUT, cron=check.POLL)[1]["image"] is False
@@ -580,17 +608,12 @@ def test_publish_false_plans_no_image_and_no_candidate_and_keeps_the_container_g
     assert plan["image"] is False
 
 
-def test_publish_false_with_an_extra_image_still_plans_it_but_gates_the_root_here() -> None:
+def test_publish_false_with_an_extra_image_still_plans_it() -> None:
     files = {
         **MANY,
         "pyproject.toml": "[tool.sdlc.image]\npublish = false\n" + MANY["pyproject.toml"],
     }
-    assert go("push", FakeTools(), files=files)[1]["image"] is True
-    t = FakeTools()
-    t.head_repo = REPO
-    rc, plan = go("pull_request", t, files=files, ref="refs/pull/1/merge")
-    assert rc == 0 and plan["candidate"] is True
-    assert "SDLC_SKIP" not in t.launched[0][1], "the root's gates must run here"
+    assert go("push", FakeTools(prs=[pr()]), files=files)[1]["image"] is True
 
 
 def test_many_images_poll_each_parent() -> None:
@@ -605,14 +628,6 @@ def test_many_images_poll_each_parent() -> None:
     t = FakeTools()
     t.base = DIGEST_B
     assert go("schedule", t, files=MANY, cron=check.POLL)[1]["image"] is True
-
-
-def test_no_candidate_when_any_image_needs_rhsm() -> None:
-    files = {**MANY, "pyproject.toml": MANY["pyproject.toml"] + "rhsm = true\n"}
-    t = FakeTools()
-    t.head_repo = REPO
-    rc, plan = go("pull_request", t, files=files, ref="refs/pull/1/merge")
-    assert rc == 0 and plan["candidate"] is False
 
 
 def test_poll_reads_the_parent_build_args_choose() -> None:

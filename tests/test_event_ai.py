@@ -546,6 +546,10 @@ check(
     genv["GITHUB_STEP_SUMMARY"] == "/run/summary.md",
 )
 check("gatehouse: stdin is the diff", stdin == "THE DIFF")
+check(
+    "gatehouse: the PR is fetched as its net diff, never per-commit patches",
+    (f"/repos/{REPO}/pulls/7", "application/vnd.github.diff") in rig.api.accepts,
+)
 
 rig = Rig()
 rig.go("pull_request_target", pr_event("synchronize"))

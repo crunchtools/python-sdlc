@@ -54,7 +54,6 @@ from sdlc_jobs._github import (
 )
 from sdlc_jobs._handoff import NAMES, TooLargeError, encode
 
-PATCH = "application/vnd.github.patch"
 RAW = "application/vnd.github.raw"
 REQUIRED_LOW_AGENTS = ",".join(_findings.REQUIRED_LOW_AGENTS)
 COMPLETE = "<!-- gatehouse review complete -->"
@@ -243,9 +242,15 @@ class Job:
         return done.stdout.split(" ", 1)[0].strip() if done.returncode == 0 else ""
 
     def diff(self, number: int) -> str:
-        """The PR as a patch, or rebuilt from its file list past the diff endpoint's 300 files."""
+        """The PR's net diff, or rebuilt from its file list past the diff endpoint's 300 files.
+
+        Never the patch media type: that is one patch per commit, so a file one
+        commit adds and a later one removes, and every intermediate line, look
+        like part of the PR, and GitHub refuses the whole review when a comment
+        is anchored to one ("Line could not be resolved", gatehouse#173).
+        """
         try:
-            return str(self.api.request("GET", f"/repos/{self.repo}/pulls/{number}", accept=PATCH))
+            return str(self.api.request("GET", f"/repos/{self.repo}/pulls/{number}", accept=DIFF))
         except ApiError as err:
             return self.rebuilt_diff(number, err)
 

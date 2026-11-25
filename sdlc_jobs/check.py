@@ -16,11 +16,12 @@ It does four things, in this order, because a failed check still prints its plan
 3. Upload SARIF on a default-branch push.
 4. The weekly run also audits dependencies and keeps the schedule alive.
 
-Build once (sdlc_jobs/_candidate.py): on a same-repo pull request of an image repo the
-plan says `candidate`, `image` builds, gates and pushes the release image, and the
-container gates are skipped here so the pull request builds it once. A default-branch
-push whose tree is the tree its merged pull request passed `check` on runs no gates: they
-already judged these exact bytes, and `image` adopts the candidate.
+One build per release: the plan says `image` on the release merge, and on the weekly
+or parent rebuild only when a release tagged the commit being rebuilt, so unreleased
+code is never published. A pull request runs the container gates only when it changes
+a Containerfile or a lockfile (IMAGE_INPUTS); its other changes wait for the release
+build. A default-branch push whose tree is the tree its merged pull request passed
+`check` on runs no gates: they already judged these exact bytes.
 
 An exit that is not a verdict (the launcher's 2 or 3, an unreadable digest, an API
 that refused) is a 2. A 3 is "CI will judge it", and here we are CI.
@@ -31,14 +32,13 @@ from __future__ import annotations
 import base64
 import gzip
 import json
+import re
 import subprocess
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from sdlc_jobs._candidate import CHECK_JOB as REQUIRED_CHECK
-from sdlc_jobs._candidate import merged_head, pr_job, tree_of
 from sdlc_jobs._core import (
     CANNOT_RUN,
     CLEAN,
@@ -61,7 +61,9 @@ from sdlc_jobs._core import (
     tool_sdlc,
     workspace,
 )
-from sdlc_jobs._tools import safe_directory
+from sdlc_jobs._prs import CHECK_JOB as REQUIRED_CHECK
+from sdlc_jobs._prs import merged_head, pr_job, tree_of
+from sdlc_jobs._tools import git_env, safe_directory
 
 SDLC = "sdlc"  # this image's own in-image half, found on PATH
 ACCEPTED = 202
@@ -73,6 +75,15 @@ EVENTS = ("pull_request", "push", "schedule", "workflow_dispatch")
 PLAN_LIMIT = 900_000
 RELEASE_REF = "ashigaru/release-"
 CONTAINER_GATES = ("container-build", "container-smoke", "container-scan", "bootc-lint")
+# A pull request that changes one of these builds the image as a test (never pushed).
+IMAGE_INPUTS = re.compile(
+    r"(^|/)(Containerfile|Dockerfile)(\.[^/]*)?$|(^|/)\.(container|docker)ignore$"
+    r"|(^|/)(uv\.lock|poetry\.lock|Pipfile\.lock|package-lock\.json|Cargo\.lock|go\.sum)$"
+    r"|(^|/)requirements[^/]*\.txt$"
+)
+PR_FILES_PAGES = 30  # GitHub lists at most 3,000 files of a pull request
+PER_PAGE = 100
+OK = 200
 # The line `sdlc pip-audit -- --report` prints its JSON report on; the same in `sdlc`.
 AUDIT_REPORT = "SDLC-AUDIT-REPORT "
 BASE_LABEL = "org.opencontainers.image.base.digest"  # what the image job stamps on a build
@@ -101,22 +112,17 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         f"refs/heads/{(event.get('repository') or {}).get('default_branch', '')}"
     )
     cron = event.get("schedule") if event_name == "schedule" else None
-    head = ((event.get("pull_request") or {}).get("head") or {}).get("repo") or {}
-    same_repo = event_name == "pull_request" and head.get("full_name") == repo
-    # candidates is a public repository: a private repo's build would leak there.
-    public = (event.get("repository") or {}).get("private") is False
     made = make_plan(tools, env, root, default_push, cron)
-    made["candidate"] = same_repo and public and candidate_repo(root, repo)
     set_output(env, "result", fit(made))
 
     if event_name == "schedule":
         return CLEAN
     if default_push and gated_on_pr(tools, env, repo):
         return CLEAN
-    # The image job gates the root image only when it publishes it: `publish = false`
-    # keeps the container gates here, in `sdlc ci`.
-    root_in_image = made["candidate"] and any(i.root for i in images(root, repo))
-    rc = gates(tools, env, root, skip=CONTAINER_GATES if root_in_image else ())
+    skip: tuple[str, ...] = ()
+    if event_name == "pull_request" and not touches_image(tools, env, repo, event):
+        skip = CONTAINER_GATES
+    rc = gates(tools, env, root, skip=skip)
     if default_push:
         upload_sarif(tools, env, repo)
     return rc
@@ -133,7 +139,6 @@ def make_plan(
     repo = env.get("GITHUB_REPOSITORY", "")
     out: dict[str, Any] = {
         "image": False,
-        "candidate": False,
         "release": None,
         "write": False,
         "weekly": cron == WEEKLY,
@@ -141,27 +146,60 @@ def make_plan(
     }
     has_image = bool(images(root, repo))
     if default_push:
-        out["image"] = has_image
         out["release"] = release_plan(tools, env, root, repo)
+        out["image"] = has_image and out["release"] is not None
     elif out["weekly"]:
-        out["image"] = has_image
+        out["image"] = has_image and released_here(tools, env, root)
         step("weekly: audit and keepalive")
         out["audit"] = audit(tools, env, root)
         api(tools, env, "PUT", f"/repos/{repo}/actions/workflows/ci.yml/enable")
     elif cron == POLL and has_image:
-        out["image"] = parent_moved(tools, root, repo)
+        out["image"] = released_here(tools, env, root) and parent_moved(tools, root, repo)
     # A clean report goes to `write` too: it is what closes the alert issue.
     out["write"] = bool(out["release"]) or out["audit"] is not None
     return out
 
 
-def candidate_repo(root: Path, repo: str) -> bool:
-    """Images a pull request can build: some, and none needs an RHSM or registry.redhat.io
-    secret (a sibling built FROM one could not be built either)."""
-    imgs = images(root, repo)
-    return bool(imgs) and not any(
-        i.settings.get("rhsm") or i.settings.get("redhat-registry") for i in imgs
+def released_here(tools: Tools, env: Mapping[str, str], root: Path) -> bool:
+    """Does a release tag (vX.Y.Z) name this very commit? A rebuild publishes only a release."""
+    sha = env.get("GITHUB_SHA", "")
+    genv = {**env, **git_env(root, env.get("GITHUB_TOKEN", ""), env)}
+    out = must(
+        tools, ["git", "ls-remote", "--tags", "origin", "refs/tags/v*"], cwd=str(root), env=genv
     )
+    for line in out.splitlines():
+        commit, _, ref = line.partition("\t")
+        name = ref.removeprefix("refs/tags/").removesuffix("^{}")
+        if commit == sha and SEMVER.fullmatch(name.removeprefix("v")):
+            return True
+    print("rebuild: no release tags this commit; the next release takes the new parent")
+    return False
+
+
+def touches_image(tools: Tools, env: Mapping[str, str], repo: str, event: dict) -> bool:
+    """Does this pull request change a Containerfile or a lockfile (IMAGE_INPUTS)?
+
+    Unreadable, or more files than GitHub lists, is "yes": the gates run.
+    """
+    number = (event.get("pull_request") or {}).get("number")
+    if not isinstance(number, int):
+        return True
+    for page in range(1, PR_FILES_PAGES + 1):
+        path = f"/repos/{repo}/pulls/{number}/files?per_page={PER_PAGE}&page={page}"
+        resp = call(tools, env, "GET", path)
+        files = resp.json() if resp.status == OK else None
+        if not isinstance(files, list):
+            return True
+        names = [str(f.get("filename", "")) for f in files] + [
+            str(f.get("previous_filename", "")) for f in files if f.get("previous_filename")
+        ]
+        if any(IMAGE_INPUTS.search(n) for n in names):
+            print("gates: this pull request changes the image's inputs: test-building it")
+            return True
+        if len(files) < PER_PAGE:
+            print("gates: no Containerfile or lockfile changed: the image builds at release")
+            return False
+    return True
 
 
 def fit(plan: dict[str, Any]) -> str:
@@ -246,7 +284,7 @@ def gated_on_pr(tools: Tools, env: Mapping[str, str], repo: str) -> bool:
     """Did the pull request this push merges pass `check` on this very tree?
 
     Its head's tree must be this commit's tree, so the gates judged these exact files,
-    and the pass must be a job GitHub ran from ci.yml (sdlc_jobs/_candidate.pr_job), not
+    and the pass must be a job GitHub ran from ci.yml (sdlc_jobs/_prs.pr_job), not
     a check run anything could post. Anything less and the push runs the gates itself.
     Main's code scanning is then the pull request's: no SARIF is uploaded from here.
     """

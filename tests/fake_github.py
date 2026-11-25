@@ -33,9 +33,12 @@ class FakeGitHub:
     def __init__(self, routes: Mapping[tuple[str, str], Route] | None = None) -> None:
         self.routes: dict[tuple[str, str], Route] = dict(routes or {})
         self.calls: list[tuple[str, str, Any]] = []
+        self.accepts: list[tuple[str, str]] = []
 
     def request(self, method: str, path: str, body: Any = None, *, accept: str = JSON) -> Any:
-        del accept  # every fake answer is already in the shape the caller asked for
+        # Every fake answer is already in the shape the caller asked for; the
+        # media type is only recorded.
+        self.accepts.append((path, accept))
         self.calls.append((method, path, body))
         bare = path.split("?", 1)[0]
         for (known, pattern), found in self.routes.items():

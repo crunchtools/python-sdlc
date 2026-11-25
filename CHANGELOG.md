@@ -6,10 +6,80 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-11-25
+
 ### Fixed
 
+- The ai job reviews a pull request's net diff, not its per-commit patches. In
+  the patch form, a file one commit adds and a later one removes, and every
+  intermediate line number, look like part of the PR; Gatehouse anchored
+  findings there and GitHub refused the whole review ("Line could not be
+  resolved", gatehouse#173), so the write job failed and the gate held the PR.
 - `bin/sdlc-bootstrap` reports a failed `podman image inspect` with podman's own
   error, instead of "has no sha256 digest to verify". It still fails closed.
+
+## [0.15.6] - 2026-11-25
+
+### Fixed
+
+- The image installs nodejs24-full-i18n. Hummingbird's node ships without full
+  ICU data, and without it `new Intl.Segmenter()` segfaults node, which crashed
+  vitest workers in the node stack's npm-test. The build now proves Segmenter works.
+
+## [0.15.5] - 2026-11-25
+
+### Fixed
+
+- The gate container marks /repo safe for git. On a CI runner the checkout belongs to
+  the runner's user, not the container's, so a test that runs git failed with
+  "dubious ownership" (exit 128).
+
+## [0.15.4] - 2026-11-25
+
+### Fixed
+
+- Gate containers run AppArmor-unconfined where podman reports AppArmor. Ubuntu
+  26.04 labels crun's processes `//&crun`, and the default container profile then
+  refuses signals between a container's own processes, so a test that kills a
+  child it spawned failed with EPERM.
+
+## [0.15.3] - 2026-11-25
+
+### Changed
+
+- One image build per release. A merge to the default branch builds no image unless
+  it is a release merge; the weekly and parent rebuilds run only when a release tag
+  names the commit, so unreleased code is never published. A pull request runs the
+  container gates (a throwaway build, never pushed) only when it changes a
+  Containerfile, a `.containerignore` or a lockfile; other pull requests skip them.
+- The fleet file runs sdlc on the runner's own podman: no `container:` job, no
+  Docker. Each job starts the runner's rootful podman socket and runs sdlc-bootstrap
+  with the job's work directory mounted at the same path, so GitHub's runners and
+  Exedore's run the same engine the same way.
+
+### Removed
+
+- Build-once candidates: `quay.io/crunchtools/candidates`, the OIDC-federated robot,
+  the pull request's image job and the merge's adoption of its digest. quay.io offers
+  no robot federation to this org, so no candidate was ever pushed.
+
+## [0.15.2] - 2026-11-25
+
+### Fixed
+
+- The fleet file's gates run on runners whose engine is podman behind a Docker
+  API (the Exedore runner VMs). boot's sibling of the job container lists no
+  mounts of its own there, only `HostConfig.VolumesFrom`, so the workspace is
+  now mapped through the job container's mounts; and podman records the tag,
+  not the digest, as the image name, so the launcher's image is pinned again
+  from `ImageDigest`. Before, every `sdlc / check` there stopped with "the
+  workspace ... is not a mount of this container" or "not pinned by digest".
+
+### Added
+
+- `scripts/hotfix.sh`: release a pushed, version-bumped tree from a host in
+  minutes, by running `self.sh`'s own image and sign steps with sdlc's key and
+  robot read from stdin. Every check of the pipeline's release still applies.
 
 ## [0.15.1] - 2026-11-25
 

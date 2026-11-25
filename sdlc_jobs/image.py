@@ -1,13 +1,11 @@
 """The `image` job: verify the parent, build FROM its digest, gate, push `gated-<sha>`.
 
 It holds the registry secrets (quay, RHSM, registry.redhat.io) and the runner's
-container socket, never the cosign key. It runs on a default-branch push, the
-schedule or a dispatch. On a same-repo pull request it holds no secret at all: it
-builds and gates the same way and pushes a candidate to `quay.io/crunchtools/candidates`
-with an OIDC-federated robot (sdlc_jobs/_candidate.py), and a default-branch push whose
-tree has a candidate adopts that digest instead of building again. A repo that builds
-with RHSM or registry.redhat.io has no candidate yet: those need secrets a pull request
-does not get. Any other event is a 2 here, the second guard behind the workflow's `if:`.
+container socket, never the cosign key. It builds once per release: on the release
+merge `check` plans, on the weekly or parent rebuild of the commit a release tagged, or
+a dispatch. A pull request builds nothing here (`check` runs the container gates when
+the Containerfile or a lockfile changed). Any other event is a 2 here, the second guard
+behind the workflow's `if:`.
 
 `check`'s plan only says this job runs. Every registry FROM, a builder stage's as much
 as the final one's, is resolved and verified here:
@@ -50,7 +48,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sdlc_jobs import _candidate
+from sdlc_jobs import _prs
 from sdlc_jobs._boot import Boot, boot_gate, boot_settings
 from sdlc_jobs._core import (
     CLEAN,
@@ -119,7 +117,7 @@ RUN_VALUED = (
     "--entrypoint",
     "--tmpfs",
 )
-EVENTS = ("pull_request", "push", "schedule", "workflow_dispatch")  # the workflow's `if:`
+EVENTS = ("push", "schedule", "workflow_dispatch")  # the workflow's `if:`
 PLAN_FIELDS = 4  # name, stage, mode, argv
 STATE_FIELDS = 3  # running, exit code, OOM-killed
 HADOLINT_UNPARSED = 4  # containerfile-lint: hadolint could not parse the file
@@ -147,8 +145,7 @@ class Job:
     built: dict[str, Parent] = field(default_factory=dict)  # name -> pushed this run
     results: list[dict] = field(default_factory=list)  # what promote takes, per image
     bootc: bool = False  # the plan has bootc-lint: build OCI
-    tree: str = ""  # the git tree of `sha`: what a candidate is keyed by
-    resume: str = ""  # a pull request's stop-commands token; workflow commands are off
+    tree: str = ""  # the git tree of `sha`, stamped as a label
     event: str = ""
 
     def run(
@@ -220,10 +217,6 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     job.event = event_name
     try:
         job.tree = job.must(["git", "rev-parse", "HEAD^{tree}"]).strip()
-        if event_name == "pull_request":
-            if not candidate_possible(job):
-                return CLEAN
-            job.resume = _candidate.stop_commands()  # repo code runs from here on
         return build_and_push(job)
     finally:
         job.run([*job.podman, "volume", "rm", "-f", job.volume])
@@ -231,26 +224,16 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
 
 
 def build_and_push(job: Job) -> int:
-    """Each image in build order: adopt its candidate or build, gate and push it.
+    """Each image in build order: build, gate and push it.
 
-    An image built FROM a sibling this run pushed builds on that digest. One FROM a
-    sibling this run rebuilt is never adopted: its candidate's layers are the old
-    parent's. A gate that finds something stops the run there: nothing after it is
-    built or pushed.
+    An image built FROM a sibling this run pushed builds on that digest. A gate that
+    finds something stops the run there: nothing after it is built or pushed.
     """
     login(job)
     plan: dict[str, tuple[str, str]] | None = None
     found = False
-    rebuilt: set[str] = set()  # built here, not adopted
     for img in job.images:
         job.settings, job.boot = img.settings, boot_settings(img.settings)
-        fresh = sorted(job.needs.get(img.name, set()) & rebuilt)
-        if fresh and job.event == "push":
-            print(
-                f"image: {img.name} is FROM {', '.join(fresh)}, rebuilt here: building", flush=True
-            )
-        elif job.event == "push" and adopt(job, img):
-            continue
         if plan is None:
             step("map the workspace and plan the gates")
             job.host_root, job.image_id = host_mount(job.tools, job.env, job.root)
@@ -259,22 +242,16 @@ def build_and_push(job: Job) -> int:
             found = lint(job)
         if build_one(job, img, plan, found) == FOUND:
             return FOUND
-        rebuilt.add(img.name)
     hand_on(job)
     return CLEAN
 
 
 def hand_on(job: Job) -> None:
-    """Record what was pushed: a pull request's annotations, then `result` for promote.
+    """Record what was pushed as `result` for promote.
 
     One image that is the repo's own keeps the shape promote has always read; more, or
     another, is `{"images": [...]}`.
     """
-    if job.event == "pull_request":
-        _candidate.resume(job.resume)  # repo code is done running: every image is built
-        for result in job.results:
-            repo = job.env["GITHUB_REPOSITORY"]
-            _candidate.annotate(repo, job.tree, result["digest"], result["name"])
     if len(job.results) == 1 and job.images[0].root:
         out: dict = {k: v for k, v in job.results[0].items() if k != "name"}
     else:
@@ -399,30 +376,8 @@ def build_order(root: Path, imgs: list[Image]) -> tuple[list[Image], dict[str, s
     return out, needs
 
 
-def candidate_possible(job: Job) -> bool:
-    """Can this pull request build a candidate? Said aloud when it cannot."""
-    why = (
-        "it builds with RHSM or registry.redhat.io, whose secrets a pull request lacks"
-        if any(i.settings.get("rhsm") or i.settings.get("redhat-registry") for i in job.images)
-        else "this job has no OIDC token (a fork's pull request)"
-        if not job.env.get("ACTIONS_ID_TOKEN_REQUEST_URL")
-        else ""
-    )
-    if why:
-        print(f"image: no candidate: {why}; the merge builds", flush=True)
-    return not why
-
-
 def login(job: Job) -> None:
     """One auth file for skopeo and the remote podman, in this job's temp directory."""
-    if job.event == "pull_request":
-        jwt = _candidate.oidc_token(job.tools, job.env)
-        if jwt is None:
-            cannot("this pull request has no OIDC token to push a candidate with")
-        token = _candidate.robot_token(job.tools, jwt)
-        argv = ["skopeo", "login", "--authfile", str(job.auth), "-u", _candidate.ROBOT]
-        job.must([*argv, "--password-stdin", QUAY], input=token)
-        return
     for host, user, password in (
         (QUAY, "QUAY_USERNAME", "QUAY_PASSWORD"),
         ("registry.redhat.io", "REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"),
@@ -605,7 +560,7 @@ def labels(job: Job, parent: Parent | None) -> dict[str, str]:
         "com.crunchtools.build.builder": workflow,
         "com.crunchtools.build.workflow": workflow,
         "com.crunchtools.build.commit": job.sha,
-        _candidate.TREE_LABEL: job.tree,
+        _prs.TREE_LABEL: job.tree,
     }
 
 
@@ -869,59 +824,9 @@ def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: in
 # ------------------------------------------------------------------ push
 
 
-def adopt(job: Job, img: Image) -> bool:
-    """Promote-ready without a build: the pull request's candidate for this tree, by digest.
-
-    Copied to `<ref>:gated-<sha>` with its digest preserved, so `promote` finds what it
-    always finds. False is "no candidate to adopt": build as before.
-    """
-    found = _candidate.find(job.tools, job.env, job.child_env, job.tree, img.name)
-    if found is None:
-        return False
-    digest, labels = found
-    ref = img.ref
-    gated = f"gated-{job.sha}"
-    source = f"{_candidate.CANDIDATES}@{digest}"
-    step(f"adopt {source} as {ref}:{gated}")
-    argv = ["skopeo", "copy", "--all", "--preserve-digests", "--authfile", str(job.auth)]
-    job.must([*argv, f"docker://{source}", f"docker://{ref}:{gated}"])
-    landed = job.must(
-        [
-            "skopeo",
-            "inspect",
-            "--authfile",
-            str(job.auth),
-            "--format",
-            "{{.Digest}}",
-            f"docker://{ref}:{gated}",
-        ]
-    ).strip()
-    if landed != digest:
-        cannot(f"{ref}:{gated} is {landed!r} after the copy, not the candidate's {digest}")
-    parent = labels.get("org.opencontainers.image.base.name", "")
-    job.built[f"{ORG}/{img.name}"] = Parent(-1, ref, f"{ref}@{digest}", digest)
-    job.results.append(
-        {
-            "name": img.name,
-            "ref": ref,
-            "digest": digest,
-            "sha": job.sha,
-            "tag": gated,
-            "parent": f"{parent}@{labels.get('org.opencontainers.image.base.digest', '')}"
-            if parent
-            else "",
-            "candidate": source,
-        }
-    )
-    print(f"built once, on the pull request: {ref}@{digest} ({gated})", flush=True)
-    return True
-
-
 def push(job: Job, img: Image, tag: str, parent: Parent | None) -> int:
     ref = img.ref
     gated = f"gated-{job.sha}"
-    if job.event == "pull_request":
-        ref, _, gated = _candidate.tag(img.name, job.tree).partition(":")
     step(f"push {ref}:{gated}")
     # The digest podman reports for what it pushed, not whatever the tag names later.
     digestfile = job.scratch / f"pushed-{img.name}.digest"

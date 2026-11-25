@@ -106,7 +106,7 @@ LABEL description="Every CrunchTools SDLC check in one image: ruff, mypy, pytest
 LABEL org.opencontainers.image.source="https://github.com/crunchtools/sdlc"
 LABEL org.opencontainers.image.description="Every CrunchTools SDLC check in one image, for Python, container, node, bootc and docs repos, with the clients a runner job needs."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
-LABEL version="0.15.1"
+LABEL version="0.15.7"
 
 # What the image carries, readable without starting anything. `sdlc versions`
 # prints these and a consuming repo's CI pins them.
@@ -220,11 +220,16 @@ RUN dnf install -y git-core tar zstd which jq gawk podman-remote skopeo \
 # not applied to the line above, where it could also skip a missing toolbox
 # package, and the version checks below fail the build if either binary is not
 # there afterwards.
-RUN dnf install -y --no-best "nodejs${NODE_MAJOR}" "nodejs${NODE_MAJOR}-npm" \
+#
+# nodejs24-full-i18n is the ICU data Hummingbird's node ships without: lacking
+# it, `new Intl.Segmenter()` segfaults node outright, which took down rotv's
+# vitest workers. The last check below proves the build has it.
+RUN dnf install -y --no-best "nodejs${NODE_MAJOR}" "nodejs${NODE_MAJOR}-npm" "nodejs${NODE_MAJOR}-full-i18n" \
  && dnf clean all \
  && rm -rf /var/cache/dnf \
  && node --version | grep -q "^v${NODE_MAJOR}\." \
- && npm --version
+ && npm --version \
+ && node -e 'process.exit([...new Intl.Segmenter().segment("a\u{1F600}b")].length === 3 ? 0 : 1)'
 
 COPY --from=uv /uv /uvx /usr/local/bin/
 

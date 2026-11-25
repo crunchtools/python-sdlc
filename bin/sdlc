@@ -346,6 +346,17 @@ if [ -z "${SDLC_MEMORY:-}" ] && [ "${MEM_AVAILABLE:-0}" -gt 0 ] \
   GATE_MEMORY=${MEM_AVAILABLE}m
 fi
 
+# Ubuntu 26.04's AppArmor gives every process crun starts a stacked
+# `//&crun` label, and the default container profile then refuses signals
+# between a container's OWN processes: a test that kills the child it spawned
+# fails with EPERM (data-collector, josui, claude-agent). Where podman reports
+# AppArmor, the gate containers run unconfined by it; cap-drop=all,
+# no-new-privileges and the user namespace still hold. Elsewhere (SELinux) the
+# option is never passed.
+APPARMOR=
+[ "$(podman info --format '{{.Host.Security.AppArmorEnabled}}' 2>/dev/null)" = true ] \
+  && APPARMOR=apparmor=unconfined
+
 CACHE_VOLUME=${SDLC_CACHE_VOLUME:-crunchtools-hook-cache}
 
 need_volume() {
@@ -452,10 +463,14 @@ run_in_image() {
   # `Z` relabels the tree EXCLUSIVELY, taking it out from under whichever
   # container started first (gates.sh:157-161). Those two run one at a time and
   # never hit it.
+  #
+  # The GIT_CONFIG_* trio marks /repo, and only /repo, safe: on a CI runner the checkout belongs
+  # to the runner's user, not the container's, and git refuses a repository it
+  # does not own (exit 128), as a repo command's env does in sdlc's own runner.
   set -- \
     --events-backend=none run --rm --log-driver=none \
     ${PULL_NEWER:+--pull=newer} \
-    --cap-drop=all --security-opt=no-new-privileges \
+    --cap-drop=all --security-opt=no-new-privileges ${APPARMOR:+--security-opt "$APPARMOR"} \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     -v "$HOST_REPO:/repo:$_mode,z" -w /repo \
     -v "$CACHE_VOLUME:/cache" \
@@ -463,6 +478,7 @@ run_in_image() {
     --tmpfs /tmp:rw,exec,size=4g,mode=1777 \
     -e HOME=/tmp \
     -e PYTHONPYCACHEPREFIX=/tmp/pycache \
+    -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo \
     -e SEMGREP_SETTINGS_FILE=/tmp/semgrep.yml \
     -e "SDLC_PROJECT=$PROJECT" \
     ${SDLC_CONFIG_IMAGE:+-e SDLC_CONFIG_IMAGE} \
@@ -902,7 +918,7 @@ run_up() {             # seconds run-args -> the smoke verdict
   _cname=$(unique_name sdlc-smoke)
   _uprc=0
   podman --events-backend=none run -d --name "$_cname" --log-driver=k8s-file \
-    --cap-drop=all --security-opt=no-new-privileges \
+    --cap-drop=all --security-opt=no-new-privileges ${APPARMOR:+--security-opt "$APPARMOR"} \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     "$@" </dev/null >/dev/null || _uprc=$?
   case "$_uprc" in
@@ -1059,7 +1075,7 @@ run_systemd() {        # timeout payload -> the step's verdict
   SD_LIVE=$_sdname
   podman --events-backend=none run -d --rm --name "$_sdname" --log-driver=k8s-file \
     --systemd=always --timeout "$SYSTEMD_LIFETIME" \
-    --cap-drop=all --cap-add="$SYSTEMD_CAPS" --security-opt=no-new-privileges \
+    --cap-drop=all --cap-add="$SYSTEMD_CAPS" --security-opt=no-new-privileges ${APPARMOR:+--security-opt "$APPARMOR"} \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     "$@" </dev/null >/dev/null || _sdrc=$?
   case "$_sdrc" in
@@ -1177,7 +1193,7 @@ run_host() {           # argv [seconds] -> the step's verdict
                         --memory "$GATE_MEMORY" "$@" ;;
     run)   check_image_word "$@"
            set -- --events-backend=none run --log-driver=none \
-                        --cap-drop=all --security-opt=no-new-privileges \
+                        --cap-drop=all --security-opt=no-new-privileges ${APPARMOR:+--security-opt "$APPARMOR"} \
                         --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 "$@" ;;
     *)     die "a host step may only build or run; refused: podman $_sub" ;;
   esac
