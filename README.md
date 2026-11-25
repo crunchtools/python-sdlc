@@ -96,11 +96,24 @@ verify-attestation --insecure-ignore-tlog --type spdxjson` (or
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
 `language: system` hooks, `.sdlc/bin/sdlc commit` and `.sdlc/bin/sdlc push`.
 CI is [`examples/ci.yml`](examples/ci.yml), the fleet file: copied into
-every repo byte for byte, no `uses:` of any kind, seven jobs that are seven
+every repo byte for byte, no `uses:` of any kind, nine jobs that are nine
 trust levels, each running `sdlc event` in the digest-pinned `sdlc-bootstrap`
 image (design: `docs/marketplace-free-ci.md`). Its two required checks are
 `sdlc / check (pull_request)` and `sdlc / gate (pull_request_target)`.
-`tests/test_workflows.py` pins its guards.
+`tests/test_workflows.py` pins its guards. Its `boot` job runs a repo's
+`boot-command` and `contract-test` shell (and `free-disk`) on the pushed digest
+with no secret, so `promote` signs nothing whose boot proof failed; `image`
+pushes `gated-<sha>` before `boot` judges it, so for a repo that sets those keys
+the registry can hold an ungated digest. The shell runs in a sibling container of
+the job's own image, started through the runner's socket: the workspace is at its
+runner path, `TMPDIR` is under it, and the socket and the runner's network are
+there, so a `-v` source, `mktemp` and `127.0.0.1` mean what they did under
+container-release. Through the socket the shell can exec into the job's own
+container and read its `GITHUB_TOKEN` (`contents: read`) and
+`ACTIONS_RUNTIME_TOKEN`, which is why the job holds no secret and runs only where
+the secret jobs run: each crunchtools-uncached runner is an ephemeral VM with its
+own engine, running one job. Every runner's socket is its host podman's, a
+GitHub-hosted one included, so the shell's container goes through podman-remote.
 
 `scripts/convert_repo.py <checkout>` converts a repo and prints the diff;
 `--apply` writes it. It floats the hooks onto `.sdlc/bin/sdlc`, writes the

@@ -795,8 +795,8 @@ check(
 # turn a converted repo's first image run into a 2.
 check(
     "container-release: every key written is one the image job reads",
-    set(image) <= _core.IMAGE_ENFORCED | _core.IMAGE_NOT_ENFORCED,
-    str(sorted(set(image) - _core.IMAGE_ENFORCED - _core.IMAGE_NOT_ENFORCED)),
+    set(image) <= _core.IMAGE_ENFORCED | _core.BOOT_JOB,
+    str(sorted(set(image) - _core.IMAGE_ENFORCED - _core.BOOT_JOB)),
 )
 dry = convert(make_repo({**HOOKED, WF + "container.yml": CONTAINER_CALL}))
 check(

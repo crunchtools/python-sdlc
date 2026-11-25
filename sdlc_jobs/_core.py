@@ -352,9 +352,9 @@ def tool_sdlc(root: Path) -> dict:
 
 # A container-release call's inputs, which scripts/convert_repo.py moves into
 # [tool.sdlc.image]. The image job enforces the first group (the boot keys through
-# sdlc_jobs/_boot.py). The second is shell, or the host's disk, which a job that
-# holds the registry secrets and the socket cannot run: accepted so a converted
-# repo is not refused, and printed as not enforced (crunchtools/sdlc#118).
+# sdlc_jobs/_boot.py). The second is repo shell, or the runner's disk, which a job
+# that holds the registry secrets and the socket must not run: the `boot` job, which
+# holds no secret, runs them against the gated image (sdlc_jobs/boot.py, #118).
 IMAGE_ENFORCED = {
     "image",
     "publish",
@@ -375,7 +375,7 @@ IMAGE_ENFORCED = {
     "boot-none-reason",
     "pr-build-paths",
 }
-IMAGE_NOT_ENFORCED = {"boot-command", "contract-test", "free-disk"}
+BOOT_JOB = {"boot-command", "contract-test", "free-disk"}
 
 
 def image_settings(root: Path, repo: str) -> dict:
@@ -388,7 +388,7 @@ def image_settings(root: Path, repo: str) -> dict:
     """
     given = tool_sdlc(root).get("image", {})
     s = dict(given) if isinstance(given, dict) else {}
-    stray = sorted(set(s) - IMAGE_ENFORCED - IMAGE_NOT_ENFORCED)
+    stray = sorted(set(s) - IMAGE_ENFORCED - BOOT_JOB)
     if stray:
         cannot(f"[tool.sdlc.image] has {', '.join(stray)}, which is no setting of the image job")
     own = f"quay.io/crunchtools/{repo.rpartition('/')[2]}"
@@ -468,7 +468,7 @@ EXTRA_IMAGES: dict[str, tuple[str, ...]] = {
 }
 # An extra image's entry: where it is built from, plus the image job's own settings.
 # `image` and `publish` are the root image's: an entry's name is its image.
-IMAGE_ENTRY_KEYS = (IMAGE_ENFORCED | IMAGE_NOT_ENFORCED | {"name"}) - {
+IMAGE_ENTRY_KEYS = (IMAGE_ENFORCED | BOOT_JOB | {"name"}) - {
     "image",
     "publish",
     "pr-build-paths",  # the repo's pull requests, not an image's
@@ -580,6 +580,8 @@ def plan(env: Mapping[str, str]) -> dict:
 
         image    bool  image and promote run (default-branch push of an image
                        repo, the weekly rebuild, or a moved parent digest)
+        boot     bool  boot runs after image: an image sets boot-command,
+                       contract-test or free-disk, the boot job's keys
         release  null, or {"version": "X.Y.Z", "publish": "pypi" | "", "pr": N}
                  on the push that merges an App-authored ashigaru/release-X.Y.Z
         write    bool  write runs outside its own events: a release merge, or

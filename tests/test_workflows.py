@@ -17,6 +17,11 @@ to review:
     `needs.check.result == 'success'` itself
   - `image`'s env maps REGISTRY_REDHAT_IO_USER and REGISTRY_REDHAT_IO_PASSWORD;
     image never runs on a PR
+  - `boot` holds no secret: no `secrets.` in it, `permissions: { contents: read }`,
+    an env of GITHUB_TOKEN and `image`'s result alone, `check`'s runner, and an
+    `if:` that wants check and image to have succeeded and the plan to say `boot`
+  - `promote` needs `boot`, its `if:` admits a boot that succeeded (or was skipped
+    with none planned), and its env maps SDLC_BOOT
   - in sdlc's own file, `test` is the only job whose `if:` admits
     pull_request, with `permissions: { contents: read }`, no `environment` and
     no `container`; and sdlc's `check` does not admit pull_request and is
@@ -259,6 +264,49 @@ image_env = fleet["image"]["env"]
 for name in ("REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"):
     want = f"${{{{ secrets.{name} }}}}"
     check(f"fleet: image's env maps {name}; image never runs on a PR", image_env.get(name) == want)
+
+boot_job = fleet["boot"]
+boot_if = str(boot_job["if"])
+check("fleet: boot holds no secret", "secrets." not in job_text(fleet_text, "boot"))
+check(
+    "fleet: boot has permissions { contents: read }",
+    boot_job.get("permissions") == {"contents": "read"},
+)
+check(
+    "fleet: boot runs where the secret jobs run, the socket being its credential",
+    boot_job["runs-on"] == GUARDED_RUNNER,
+    str(boot_job["runs-on"]),
+)
+check("fleet: boot needs exactly check and image", sorted(boot_job["needs"]) == ["check", "image"])
+check(
+    "fleet: boot's if: wants check and image to have succeeded and the plan's boot",
+    CHECK_OK in boot_if
+    and "needs.image.result == 'success'" in boot_if
+    and "fromJSON(needs.check.outputs.result || '{}').boot" in boot_if,
+    boot_if,
+)
+check(
+    "fleet: boot's env is GITHUB_TOKEN and image's result alone",
+    boot_job["env"]
+    == {
+        "GITHUB_TOKEN": "${{ github.token }}",
+        "SDLC_IMAGE_RESULT": "${{ needs.image.outputs.result }}",
+    },
+    str(boot_job["env"]),
+)
+promote_if = str(fleet["promote"]["if"])
+check("fleet: promote needs boot", "boot" in fleet["promote"]["needs"])
+check(
+    "fleet: promote's if: wants boot to have succeeded, or none planned",
+    "needs.boot.result == 'success'" in promote_if
+    and "needs.boot.result == 'skipped' && !fromJSON(needs.check.outputs.result || '{}').boot"
+    in promote_if,
+    promote_if,
+)
+check(
+    "fleet: promote's env maps SDLC_BOOT",
+    fleet["promote"]["env"].get("SDLC_BOOT") == "${{ needs.boot.result }}",
+)
 
 check("fleet: no `uses:` anywhere", not re.search(r"^\s*-?\s*uses:", fleet_text, re.M))
 check("fleet: top-level permissions are {}", parsed.get("permissions") == {})

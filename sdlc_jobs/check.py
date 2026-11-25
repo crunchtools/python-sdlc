@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from sdlc_jobs._core import (
+    BOOT_JOB,
     CANNOT_RUN,
     CLEAN,
     FOUND,
@@ -149,12 +150,15 @@ def make_plan(
     repo = env.get("GITHUB_REPOSITORY", "")
     out: dict[str, Any] = {
         "image": False,
+        "boot": False,
         "release": None,
         "write": False,
         "weekly": cron == WEEKLY,
         "audit": None,
     }
-    has_image = bool(images(root, repo))
+    own = images(root, repo)
+    has_image = bool(own)
+    out["boot"] = any(img.settings.get(key) for img in own for key in BOOT_JOB)
     if default_push:
         out["release"] = release_plan(tools, env, root, repo)
         out["image"] = has_image and out["release"] is not None

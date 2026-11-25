@@ -218,6 +218,27 @@ def refused(
     raise AssertionError("expected a refusal (exit 2)")
 
 
+def test_a_planned_boot_must_have_succeeded() -> None:
+    planned = json.dumps({"image": True, "boot": True, "release": None})
+    for result in ("failure", "skipped", "cancelled", ""):
+        t = FakeTools()
+        assert "`boot` was needed" in refused(t, SDLC_CHECK=planned, SDLC_BOOT=result), result
+    t = FakeTools()
+    assert go(t, SDLC_CHECK=planned, SDLC_BOOT="success") == 0 and t.signs()
+    t = FakeTools()  # no boot planned: a skipped boot, or none at all, is no objection
+    assert go(t, SDLC_BOOT="skipped") == 0 and go(FakeTools()) == 0
+
+
+def test_a_planned_boot_with_no_boot_result_proceeds_for_the_old_fleet_file() -> None:
+    planned = json.dumps({"image": True, "boot": True, "release": None})
+    t = FakeTools()  # a fleet file older than the boot job maps no SDLC_BOOT at all
+    assert go(t, SDLC_CHECK=planned) == 0 and t.signs()
+    t = FakeTools()
+    assert "`boot` was needed" in refused(t, SDLC_CHECK=planned, SDLC_BOOT="failure")
+    t = FakeTools()
+    assert go(t, SDLC_CHECK=planned, SDLC_BOOT="success") == 0 and t.signs()
+
+
 def test_bad_digest_wrong_repo_wrong_sha_refused() -> None:
     good = {"ref": REF, "digest": NEW, "sha": SHA}
     for bad in (
