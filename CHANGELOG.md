@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-25
+
 ### Added
 
 - scripts/local-release.sh: release a fleet repo's default-branch commit from
