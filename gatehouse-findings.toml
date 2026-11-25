@@ -183,3 +183,83 @@ reason = """
 Main's script, from #106 (ee239e1), reviewed and merged there; it reaches \
 this branch only through the merge of main. Its test coverage is #106's.
 """
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "tests/test_workflows.py"
+evidence = "\"${RUNNER_WORKSPACE%/*}:${RUNNER_WORKSPACE%/*}\"]"
+status = "not-a-bug"
+reason = """
+The launch runs the bootstrap with `--security-opt label=disable`, so SELinux \
+labelling is off for that container and no mount is relabelled: `:z` would do \
+nothing there except, on a runner with labels on, relabel the runner's whole \
+work tree (`${RUNNER_WORKSPACE%/*}`) under every job. The constitution's `:z` \
+rule (profiles/web-application.md) is for host units that mount a shared data \
+directory, where a private `:Z` label would lock the other container out. \
+tests/test_workflows.py pins this mount exactly as shipped (#178, #184).
+"""
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = ".github/workflows/ci.yml"
+evidence = "-v \"${RUNNER_WORKSPACE%/*}:${RUNNER_WORKSPACE%/*}\""
+status = "not-a-bug"
+reason = """
+The launch runs the bootstrap with `--security-opt label=disable`, so SELinux \
+labelling is off for that container and no mount is relabelled: `:z` would do \
+nothing there except, on a runner with labels on, relabel the runner's whole \
+work tree (`${RUNNER_WORKSPACE%/*}`) under every job. The constitution's `:z` \
+rule (profiles/web-application.md) is for host units that mount a shared data \
+directory, where a private `:Z` label would lock the other container out. \
+tests/test_workflows.py pins this mount exactly as shipped (#178, #184).
+"""
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "examples/ci.yml"
+evidence = "-v \"${RUNNER_WORKSPACE%/*}:${RUNNER_WORKSPACE%/*}\""
+status = "not-a-bug"
+reason = """
+The launch runs the bootstrap with `--security-opt label=disable`, so SELinux \
+labelling is off for that container and no mount is relabelled: `:z` would do \
+nothing there except, on a runner with labels on, relabel the runner's whole \
+work tree (`${RUNNER_WORKSPACE%/*}`) under every job. The constitution's `:z` \
+rule (profiles/web-application.md) is for host units that mount a shared data \
+directory, where a private `:Z` label would lock the other container out. \
+tests/test_workflows.py pins this mount exactly as shipped (#178, #184).
+"""
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "examples/sdlc-ci.yml"
+evidence = "-v \"${RUNNER_WORKSPACE%/*}:${RUNNER_WORKSPACE%/*}\""
+status = "not-a-bug"
+reason = """
+The launch runs the bootstrap with `--security-opt label=disable`, so SELinux \
+labelling is off for that container and no mount is relabelled: `:z` would do \
+nothing there except, on a runner with labels on, relabel the runner's whole \
+work tree (`${RUNNER_WORKSPACE%/*}`) under every job. The constitution's `:z` \
+rule (profiles/web-application.md) is for host units that mount a shared data \
+directory, where a private `:Z` label would lock the other container out. \
+tests/test_workflows.py pins this mount exactly as shipped (#178, #184).
+"""
+
+[[findings]]
+agent = "constitution"
+category = "constitution"
+file = "docs/marketplace-free-ci.md"
+evidence = "-v \"${RUNNER_WORKSPACE%/*}:${RUNNER_WORKSPACE%/*}\""
+status = "not-a-bug"
+reason = """
+The launch runs the bootstrap with `--security-opt label=disable`, so SELinux \
+labelling is off for that container and no mount is relabelled: `:z` would do \
+nothing there except, on a runner with labels on, relabel the runner's whole \
+work tree (`${RUNNER_WORKSPACE%/*}`) under every job. The constitution's `:z` \
+rule (profiles/web-application.md) is for host units that mount a shared data \
+directory, where a private `:Z` label would lock the other container out. \
+tests/test_workflows.py pins this mount exactly as shipped (#178, #184).
+"""
