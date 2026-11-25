@@ -77,6 +77,7 @@ PYTHON_PUSH = [
     "mypy",
     "pytest",
     "gourmand",
+    "secret-scan",
     "gatehouse",
     "semgrep",
     "pip-audit",
@@ -666,13 +667,14 @@ check(
 check(
     "the container stack alone pushes hadolint and the common checks",
     S.resolve(empty, "push", ("container",))
-    == ["containerfile-lint", "gourmand", "gatehouse", "constitution"],
+    == ["containerfile-lint", "gourmand", "secret-scan", "gatehouse", "constitution"],
 )
 check(
     "the container stack builds, smokes and scans in ci, after push's checks",
     S.resolve(empty, "ci", ("container",))
     == [
         "containerfile-lint",
+        "secret-scan",
         "constitution",
         "container-build",
         "container-smoke",
@@ -745,11 +747,20 @@ check(
 check(
     "the node stack alone pushes lint, test, the reviewers, the audit, the constitution",
     S.resolve(empty, "push", ("node",))
-    == ["npm-lint", "npm-test", "gourmand", "gatehouse", "npm-audit", "constitution"],
+    == [
+        "npm-lint",
+        "npm-test",
+        "gourmand",
+        "secret-scan",
+        "gatehouse",
+        "npm-audit",
+        "constitution",
+    ],
 )
 check(
     "ci runs the node checks and leaves the two reviewers to CI's own jobs",
-    S.resolve(empty, "ci", ("node",)) == ["npm-lint", "npm-test", "npm-audit", "constitution"],
+    S.resolve(empty, "ci", ("node",))
+    == ["npm-lint", "npm-test", "secret-scan", "npm-audit", "constitution"],
 )
 check(
     "commit has no node check: an install is not seconds, offline or free",
@@ -1579,13 +1590,20 @@ BOOTC_CF = "FROM quay.io/fedora/fedora-bootc:42\n"
 check(
     "the bootc stack pushes hadolint and the common checks",
     S.resolve(empty, "push", ("bootc",))
-    == ["containerfile-lint", "gourmand", "gatehouse", "constitution"],
+    == ["containerfile-lint", "gourmand", "secret-scan", "gatehouse", "constitution"],
 )
 bootc_ci = S.resolve(empty, "ci", ("bootc",))
 check(
     "the bootc stack builds, lints and scans in ci, and never smoke-runs",
     bootc_ci
-    == ["containerfile-lint", "constitution", "container-build", "bootc-lint", "container-scan"],
+    == [
+        "containerfile-lint",
+        "secret-scan",
+        "constitution",
+        "container-build",
+        "bootc-lint",
+        "container-scan",
+    ],
     str(bootc_ci),
 )
 rows = container_plan("ci", cf=BOOTC_CF)
@@ -1698,12 +1716,13 @@ check("image: a launcher tag beside the table is refused", msg is not None, str(
 check(
     "the docs stack pushes markdown-lint, the common checks, then link-check",
     S.resolve(empty, "push", ("docs",))
-    == ["markdown-lint", "gourmand", "gatehouse", "link-check", "constitution"],
+    == ["markdown-lint", "gourmand", "secret-scan", "gatehouse", "link-check", "constitution"],
     str(S.resolve(empty, "push", ("docs",))),
 )
 check(
     "ci is the docs push minus the reviewers",
-    S.resolve(empty, "ci", ("docs",)) == ["markdown-lint", "link-check", "constitution"],
+    S.resolve(empty, "ci", ("docs",))
+    == ["markdown-lint", "secret-scan", "link-check", "constitution"],
     str(S.resolve(empty, "ci", ("docs",))),
 )
 check(

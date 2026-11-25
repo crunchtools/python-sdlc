@@ -195,8 +195,8 @@ Gatehouse takes its settings from `~/.config/mcp-env/gatehouse.env` (or
 the same path, so the key stays a file and never enters the container's
 environment.
 
-Gourmand, Gatehouse, the constitution validator and `hooks-installed` belong to
-no stack and run everywhere. A repo can add or drop a stack, and nothing more:
+Gourmand, `secret-scan`, Gatehouse, the constitution validator and
+`hooks-installed` belong to no stack and run everywhere. A repo can add or drop a stack, and nothing more:
 
 ```toml
 [tool.sdlc]
@@ -278,13 +278,20 @@ runs at commit.
 | Command | Runs |
 |---|---|
 | `commit` | ruff-check, ruff-format, gourmand, hooks-installed |
-| `push` | lint, mypy, pytest, gourmand, gatehouse, semgrep, pip-audit, constitution, codeql |
-| `ci` | lint, mypy, pytest, semgrep, pip-audit, constitution, codeql |
+| `push` | lint, mypy, pytest, gourmand, secret-scan, gatehouse, semgrep, pip-audit, constitution, codeql |
+| `ci` | lint, mypy, pytest, secret-scan, semgrep, pip-audit, constitution, codeql |
 
 `ruff-check` and `ruff-format` fix what they find, so they pass on anything
 fixable. `lint` is the same two tools as a verdict — `ruff check --no-fix` and
 `ruff format --check`, changing nothing — and it is the only ruff that push
 and ci run.
+
+`secret-scan` refuses a change that adds a plaintext secret (constitution
+XVII): a vendor credential shape (`ghp_`, `github_pat_`, `sk-ant-`, `AKIA`, ...)
+or a secret-named key given a literal. It reads only the lines added since the
+branch left the default branch; in CI, since the pull request's base or the
+push's `before`. A named literal in a test or doc file only warns, and a line
+carrying `gatehouse: allow-secret` is a fixture and is skipped.
 
 `sdlc tiers` prints what each command runs in the repo you are in, and which
 lane each check runs in.
@@ -428,7 +435,7 @@ tests = ["tests/image/"]
 | `semgrep` | `config` (default `.semgrep`), `tests` (default `.semgrep/run-tests.sh`), `paths` (default `["."]`) |
 | `codeql` | `config` (default `.github/codeql/codeql-config.yml`), `baseline` (default `.sdlc/codeql-baseline.json`) |
 | `constitution` | `manifest` (default `.specify/memory/constitution.md`) |
-| `ruff-check`, `ruff-format`, `lint`, `mypy`, `gourmand`, `gatehouse`, `pip-audit`, `hooks-installed` | none |
+| `ruff-check`, `ruff-format`, `lint`, `mypy`, `gourmand`, `secret-scan`, `gatehouse`, `pip-audit`, `hooks-installed` | none |
 | `containerfile-lint` | `containerfiles` (default: the root Containerfile or Dockerfile and every `[[tool.sdlc.images]]` one), `threshold` |
 | `container-build` | the `image-build` kind's settings; `containerfile` defaults to the root one |
 | `container-smoke` | `gate` (default `false`: findings are advisory), `seconds` (default 10), `args`, `env`, `network` (default `false`), `image` |

@@ -6,6 +6,16 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Security
+
+- `secret-scan`, a check in push and ci for every repo, restores the
+  plaintext-secret refusal the fleet lost when ci.yml replaced gatehouse's
+  `gourmand.yml` (#213): `bin/sdlc-secret-scan` is that workflow's `Refuse
+  plaintext secrets` step, rules and `gatehouse: allow-secret` opt-out
+  unchanged, and its 90 cases plus planted `ghp_`/`github_pat_` tokens. The
+  check job fetches the pull request's base, or the push's `before`, and hands
+  it in as `SDLC_DIFF_BASE`.
+
 ## [0.16.0] - 2026-11-25
 
 ### Removed

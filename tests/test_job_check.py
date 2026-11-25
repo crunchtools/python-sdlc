@@ -40,6 +40,8 @@ _core.own_container_id = no_container_id
 
 REPO = "crunchtools/demo"
 SHA = "0123456789abcdef0123456789abcdef01234567"
+BASE_SHA = "b" * 40
+DEFAULT_TIP = "d" * 40
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 EVENT = {"repository": {"default_branch": "main"}}
@@ -80,6 +82,8 @@ class FakeTools(Tools):
         self.env: dict[str, str] = {}  # added to the job's environment
         self.trees: dict[str, str] = {}  # commit -> tree, for gated_on_pr
         self.jobs: list[dict] = []  # the jobs of the merged PR head's ci.yml run
+        self.pr_base = BASE_SHA  # the pull request's base.sha, in the event
+        self.before: str | None = None  # a push's `before`, in the event
         self.head_repo = ""  # a pull request's head repo, in the event
         self.private = False  # the event's repository.private
         self.tags = f"{SHA}\trefs/tags/v1.2.3\n"  # `git ls-remote --tags origin`: a release here
@@ -145,6 +149,8 @@ class FakeTools(Tools):
         """The image's other tools: git's fetch, and skopeo reading the parent."""
         if argv[:2] == ["git", "ls-remote"]:
             return cp(0, self.tags)
+        if argv[:3] == ["git", "rev-parse", "FETCH_HEAD"]:
+            return cp(0, DEFAULT_TIP + "\n")
         if argv[0] == "git":
             return cp(0)
         if argv[:2] == ["skopeo", "inspect"]:
@@ -229,8 +235,10 @@ def go(
         event = dict(EVENT)
         if event_name == "pull_request":
             head = {"repo": {"full_name": tools.head_repo or REPO}}
-            event["pull_request"] = {"number": 1, "head": head}
+            event["pull_request"] = {"number": 1, "head": head, "base": {"sha": tools.pr_base}}
             event["repository"] = {**event.get("repository", {}), "private": tools.private}
+        if tools.before is not None:
+            event["before"] = tools.before
         if cron:
             event["schedule"] = cron
         rc = check.run(event_name, event, env, tools)
@@ -881,7 +889,10 @@ def test_fetch_tree_checks_out_the_event_commit() -> None:
 def test_fetch_tree_leaves_an_existing_tree() -> None:
     t = FakeTools()
     go("pull_request", t, files={".git/HEAD": "ref: refs/heads/main\n"})
-    assert not [a for a in t.argvs if a[0] == "git"], "fetched over an existing tree"
+    # The secret scan's base fetch (--no-tags) is not fetch_tree's.
+    assert not [a for a in t.argvs if a[0] == "git" and "--no-tags" not in a], (
+        "fetched over an existing tree"
+    )
 
 
 def test_fetch_tree_needs_the_commit() -> None:
@@ -1025,7 +1036,7 @@ def test_fetch_tree_trusts_only_the_workspace_and_keeps_git_config() -> None:
     }
     go("pull_request", t)
     fetched = [e for a, e in zip(t.argvs, t.envs, strict=True) if a[:1] == ["git"]]
-    assert [a[:2] for a in t.argvs if a[:1] == ["git"]] == [
+    assert [a[:2] for a in t.argvs if a[:1] == ["git"] and "--no-tags" not in a] == [
         ["git", "init"],
         ["git", "remote"],
         ["git", "fetch"],
@@ -1037,3 +1048,47 @@ def test_fetch_tree_trusts_only_the_workspace_and_keeps_git_config() -> None:
         assert env["GIT_CONFIG_KEY_1"] == "http.https://github.com/.extraheader"
         assert env["GIT_CONFIG_KEY_2"] == "safe.directory"
         assert Path(env["GIT_CONFIG_VALUE_2"]).name == "ws"  # the workspace, never `*`
+
+
+def fetches(t: FakeTools) -> list[list[str]]:
+    return [a for a in t.argvs if a[:2] == ["git", "fetch"] and "--no-tags" in a]
+
+
+def test_a_pull_request_diffs_against_its_base() -> None:
+    t = FakeTools()
+    go("pull_request", t, ref="refs/pull/1/merge")
+    assert ["git", "fetch", "-q", "--no-tags", "--depth=1", "origin", BASE_SHA] in fetches(t)
+    (_, ci_env), _ = t.launched[0], t.launched[1]
+    assert ci_env["SDLC_DIFF_BASE"] == BASE_SHA
+    assert all("SDLC_DIFF_BASE" not in e for c, e in t.launched if c != "ci")
+
+
+def test_a_push_diffs_against_what_it_moved_from() -> None:
+    t = FakeTools()
+    t.before = "e" * 40
+    go("push", t, ref="refs/heads/topic")
+    assert ["git", "fetch", "-q", "--no-tags", "--depth=1", "origin", "e" * 40] in fetches(t)
+    assert t.launched[0][1]["SDLC_DIFF_BASE"] == "e" * 40
+
+
+def test_a_new_branch_diffs_against_the_default_branch_tip() -> None:
+    for before in (None, "0" * 40):
+        t = FakeTools()
+        t.before = before
+        go("push", t, ref="refs/heads/topic")
+        assert ["git", "fetch", "-q", "--no-tags", "--depth=1", "origin", "main"] in fetches(t)
+        assert t.launched[0][1]["SDLC_DIFF_BASE"] == DEFAULT_TIP
+
+
+def test_a_dispatch_has_no_base() -> None:
+    t = FakeTools()
+    go("workflow_dispatch", t)
+    assert not fetches(t) and "SDLC_DIFF_BASE" not in t.launched[0][1]
+
+
+def test_a_malformed_base_cannot_run() -> None:
+    for bad in ("--upload-pack=x", "ABCDEF" * 7, "abc123"):
+        t = FakeTools()
+        t.pr_base = bad
+        assert "not a commit sha" in refusal("pull_request", t, ref="refs/pull/1/merge")
+        assert not fetches(t) and not t.launched

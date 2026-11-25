@@ -230,6 +230,25 @@ else
   bad "an unknown target exits $rc, should be 2"
 fi
 
+# The secret scan's script is in the image and refuses a planted token: the
+# `secret-scan` target with no base passes without running it, so the
+# dispatch loop above proves nothing about the script itself (#213).
+rc=0
+inside sh -c '
+  set -e
+  cd /tmp && git init -q s && cd s
+  g() { git -c user.name=t -c user.email=t@t -c init.defaultBranch=main "$@"; }
+  echo base > README.md && g add . && g commit -qm base
+  printf "KEY = \"ghp_%s\"\n" "$(printf "a%.0s" $(seq 36))" > app.py
+  g add . && g commit -qm change
+  sdlc-secret-scan HEAD~1
+' >/dev/null 2>&1 || rc=$?
+if [ "$rc" -eq 1 ]; then
+  ok "sdlc-secret-scan refuses a planted token inside the image"
+else
+  bad "sdlc-secret-scan on a planted token exits $rc, should be 1"
+fi
+
 # ---------------------------- Renovate's token is out of its children's reach
 #
 # sdlc#121. Dependency code that Renovate's package managers run (an sdist's
@@ -401,7 +420,7 @@ fi
 # reads and the shell that acts on it, so it is checked on the real image.
 plan=$(podman run --rm -v "$FIXTURE:/repo:ro,z" -w /repo --entrypoint="" \
          "$IMAGE" sdlc plan push 2>&1 | cut -f1 | tr '\n' ' ')
-want="lint mypy pytest gourmand gatehouse semgrep pip-audit constitution codeql "
+want="lint mypy pytest gourmand secret-scan gatehouse semgrep pip-audit constitution codeql "
 if [ "$plan" = "$want" ]; then
   ok "sdlc plan push lists the push defaults in order"
 else
