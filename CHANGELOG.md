@@ -122,6 +122,19 @@ Until step 2 the image job says the three keys are not enforced.
   is a re-run, one at another commit a refusal. The stdin JSON now also
   carries `ASHIGARU_CLIENT_ID` and `ASHIGARU_APP_KEY`, and the host needs
   openssl and curl.
+
+- `write` no longer runs Ashigaru's relock in its own process (#195). uv
+  executes the interpreter a branch's .python-version names, so `uv lock
+  --no-build` ran branch content beside the runner's socket and
+  ASHIGARU_APP_KEY. The scripts' PATH now starts with sdlc's `uv`, which locks
+  in a sibling on the job's image by digest: no socket, no secret, all
+  capabilities dropped, CPU, memory and process limits, a read-only root, its
+  own network, the checkout read-only and copied without .git. Only uv.lock
+  comes back, and only when it parses as a uv lock. Before anything runs it
+  refuses a staged .python-version, uv.toml, pyproject `[tool.uv]` or mode
+  change, and any command but `lock --no-build`. write's scratch dir moves
+  under RUNNER_TEMP so the sibling can mount it.
+
 - Gourmand runs in the fleet again (#177). The cutover deleted every repo's
   `gourmand.yml`, and `sdlc ci` leaves Gourmand out (constitution XII), so
   nothing ran it. The `check` job now runs the launcher's `gourmand` after
