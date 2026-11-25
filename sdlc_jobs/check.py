@@ -14,7 +14,9 @@ It does four things, in this order, because a failed check still prints its plan
    fleet's `sdlc ci` -- ruff, mypy, pytest, semgrep, pip-audit, CodeQL, the
    constitution validator, and the container build, smoke and scan for an image repo.
    Then Gourmand (`review`), which `sdlc ci` leaves out and this job runs beside it.
-3. Upload SARIF on a default-branch push.
+3. Scan for code scanning on a default-branch push and the weekly run: `sdlc sarif`
+   reruns CodeQL and semgrep with an output directory mounted, and this job uploads
+   what they wrote (see `scan`).
 4. The weekly run also audits dependencies and keeps the schedule alive.
 
 One build per release: the plan says `image` on the release merge, and on the weekly
@@ -34,6 +36,7 @@ import base64
 import gzip
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -71,6 +74,7 @@ from sdlc_jobs._tools import git_env, safe_directory
 
 SDLC = "sdlc"  # this image's own in-image half, found on PATH
 ACCEPTED = 202
+FORBIDDEN = 403
 WEEKLY = "17 6 * * 1"
 POLL = "47 */6 * * *"
 # The events ci.yml's `check` job runs on (its `if:`); anything else is not this job's.
@@ -96,10 +100,20 @@ OK = 200
 # The line `sdlc pip-audit -- --report` prints its JSON report on; the same in `sdlc`.
 AUDIT_REPORT = "SDLC-AUDIT-REPORT "
 BASE_LABEL = "org.opencontainers.image.base.digest"  # what the image job stamps on a build
-# Where a gate leaves SARIF, as category -> file name. CodeQL writes
-# codeql-results.sarif to the temp dir inside its nested container, which is gone when it exits, and
-# nothing runs zizmor yet: until they land here, there is nothing to upload.
-SARIF_FILES = {"/language:python": "codeql-results.sarif", "zizmor": "zizmor.sarif"}
+# What `sdlc sarif` leaves in its output directory, as code-scanning category -> file.
+# check -> (code-scanning category, the file `sdlc sarif` writes for it)
+SARIF_FILES = {
+    "codeql": ("/language:python", "codeql-results.sarif"),
+    "semgrep": ("semgrep", "semgrep.sarif"),
+}
+SARIF_PLANNED = "planned"  # the planner's list of the checks the scan ran
+# The one refusal that is not a failure: code scanning is not offered here at all
+# (a private repo without Advanced Security). Anything else refused is.
+NO_CODE_SCANNING = re.compile(
+    r"(Advanced|Code) Security must be enabled|code scanning is not enabled", re.IGNORECASE
+)
+SARIF_DIR = "sdlc-sarif"  # under RUNNER_TEMP, which the runner's engine can mount
+SARIF_LIMIT = 10_000_000  # bytes, gzipped: GitHub refuses a larger upload
 
 
 def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> int:
@@ -125,8 +139,13 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     set_output(env, "result", fit(made))
 
     if event_name == "schedule":
-        return CLEAN
+        # The weekly run rescans what is already on the default branch: new queries
+        # and new semgrep rules find old code, which no pull request will revisit.
+        return scan(tools, env, root, repo, strict=True) if made["weekly"] else CLEAN
     if default_push and gated_on_pr(tools, env, repo):
+        # The pull request's gates judged this tree; the scan only keeps the Security
+        # tab current, so nothing it says, a 2 included, holds the release (see `rescan`).
+        rescan(tools, env, root, repo)
         return CLEAN
     skip: tuple[str, ...] = ()
     if event_name == "pull_request":
@@ -135,8 +154,25 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
             skip = CONTAINER_GATES
     rc = max(gates(tools, env, root, skip=skip), review(tools, env, root))
     if default_push:
-        upload_sarif(tools, env, repo)
+        rescan(tools, env, root, repo)
     return rc
+
+
+def rescan(tools: Tools, env: Mapping[str, str], root: Path, repo: str) -> None:
+    """`scan` on a default-branch push, where it is a report and not a gate.
+
+    CodeQL and semgrep already judged this tree, in `sdlc ci` here or on its pull
+    request. A scan that could not run, or that left a planned check's SARIF out, is
+    an error annotation on the run, never the job's 2: that would hold `image` and
+    `promote` for a report about code that has passed. A refused upload is a warning.
+    The weekly run is where the scan is the verdict, and its 2 stands.
+    """
+    if scan(tools, env, root, repo, strict=False) == CANNOT_RUN:
+        print(
+            "::error::the code-scanning scan did not complete; the Security tab is not "
+            "current for this commit, and the gates are unaffected",
+            flush=True,
+        )
 
 
 def make_plan(
@@ -420,10 +456,62 @@ def moved(tools: Tools, root: Path, img: Image) -> bool:
     return str(built_on) != now
 
 
-def upload_sarif(tools: Tools, env: Mapping[str, str], repo: str) -> None:
-    """Send each SARIF the gates left to the Security tab, under its own category."""
-    root = Path(env.get("SDLC_SARIF_DIR") or tempfile.gettempdir())
-    for category, fname in SARIF_FILES.items():
+def scan(tools: Tools, env: Mapping[str, str], root: Path, repo: str, *, strict: bool) -> int:
+    """`sdlc sarif` for this tree, then its SARIF to code scanning; the scan's verdict.
+
+    Only `sdlc sarif` gets a writable directory the upload reads. It runs CodeQL and
+    semgrep, which read the tree and execute none of it; `sdlc ci` runs the repo's
+    own code (pytest, conftest, a Containerfile) and is never given one, so nothing
+    the repo runs can write what is uploaded. The directory is emptied first, so a
+    file left by an earlier run on a reused runner is not sent as this commit's.
+    The token stays in this job: the launcher passes nested containers no token.
+
+    `strict` is the weekly run, where the scan IS the verdict: a planned check with
+    no SARIF, or SARIF that did not reach code scanning, is a 2. Off it, only the
+    missing SARIF is (an error annotation, from `rescan`); a refusal only warns.
+    """
+    step("scan: sdlc sarif")
+    out = Path(env.get("RUNNER_TEMP") or tempfile.gettempdir()) / SARIF_DIR
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
+    host = host_mount(tools, env, out)[0]
+    proc = launch(tools, {**env, "SDLC_HOST_SARIF": host}, root, "sarif", stream=True)
+    rc = proc.returncode if proc.returncode in (CLEAN, FOUND) else CANNOT_RUN
+    if rc != CLEAN:
+        print(f"scan: sdlc sarif exited {proc.returncode}", flush=True)
+    # A scan that could not run says why itself; one that did must account for
+    # every check it planned.
+    missing = expected_missing(out) if rc != CANNOT_RUN else False
+    refused = upload_sarif(tools, env, repo, out, strict=strict)
+    return CANNOT_RUN if missing or (strict and refused) else rc
+
+
+def expected_missing(out: Path) -> bool:
+    """Did a check the planner listed leave no SARIF? Each one is an error annotation."""
+    try:
+        planned = (out / SARIF_PLANNED).read_text(encoding="utf-8").split()
+    except OSError:
+        print("::error::sdlc sarif wrote no list of what it planned", flush=True)
+        return True
+    missing = [c for c in planned if c in SARIF_FILES and not (out / SARIF_FILES[c][1]).is_file()]
+    for c in missing:
+        print(f"::error::{c} ran under sdlc sarif and wrote no {SARIF_FILES[c][1]}", flush=True)
+    return bool(missing)
+
+
+def upload_sarif(
+    tools: Tools, env: Mapping[str, str], repo: str, root: Path, *, strict: bool
+) -> bool:
+    """Send each SARIF the scan left to the Security tab, under its own category.
+
+    True when any did not get there: unreadable, too big, or refused. `strict`
+    makes each an error annotation, a warning otherwise. A repo where code scanning
+    is not offered at all (a private one on GitHub Free answers 403 and says so)
+    is not a failure in either: nothing it could fix would get the upload in.
+    """
+    level = "error" if strict else "warning"
+    failed = False
+    for category, fname in SARIF_FILES.values():
         path = root / fname
         if not path.is_file():
             print(f"no {fname}: nothing to upload for {category}", flush=True)
@@ -431,15 +519,39 @@ def upload_sarif(tools: Tools, env: Mapping[str, str], repo: str) -> None:
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            cannot(f"{path} is not readable SARIF: {exc}")
-        for r in doc.get("runs", []):
+            print(f"::{level}::{fname} is not readable SARIF, not uploaded: {exc}", flush=True)
+            failed = True
+            continue
+        runs = doc.get("runs") if isinstance(doc, dict) else None
+        if not isinstance(runs, list) or not all(isinstance(r, dict) for r in runs):
+            print(f"::{level}::{fname} has no SARIF runs, not uploaded", flush=True)
+            failed = True
+            continue
+        for r in runs:
             r.setdefault("automationDetails", {})["id"] = f"{category}/"
         packed = gzip.compress(json.dumps(doc).encode())
+        if len(packed) > SARIF_LIMIT:
+            print(
+                f"::{level}::{fname} is {len(packed)} bytes gzipped, over GitHub's limit",
+                flush=True,
+            )
+            failed = True
+            continue
         body = {
             "commit_sha": env.get("GITHUB_SHA", ""),
             "ref": env.get("GITHUB_REF", ""),
             "sarif": base64.b64encode(packed).decode(),
         }
         resp = call(tools, env, "POST", f"/repos/{repo}/code-scanning/sarifs", body)
-        if resp.status not in (200, 201, ACCEPTED):
-            cannot(f"uploading {fname} answered {resp.status}: {resp.body[:300]!r}")
+        if resp.status in (200, 201, ACCEPTED):
+            print(f"uploaded {fname} as {category}", flush=True)
+            continue
+        said = resp.body.decode(errors="replace")
+        if resp.status == FORBIDDEN and NO_CODE_SCANNING.search(said):
+            print(f"::warning::code scanning is not offered here; {fname} not uploaded", flush=True)
+            continue
+        print(
+            f"::{level}::uploading {fname} answered {resp.status}: {resp.body[:300]!r}", flush=True
+        )
+        failed = True
+    return failed

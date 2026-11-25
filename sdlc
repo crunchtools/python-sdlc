@@ -232,6 +232,18 @@ def config_document() -> dict:
 
 COMMANDS = ("commit", "push", "ci")
 
+# `sdlc sarif` is a TARGET, not a command: it plans a subset of what `ci` runs,
+# so it is deliberately not in COMMANDS. Everything that iterates COMMANDS --
+# the [tool.sdlc.<command>] blocks the config accepts, `tiers`, the reserved
+# words -- would otherwise grow a `[tool.sdlc.sarif]` that nothing reads.
+#
+# The checks that can hand code scanning a SARIF file. The fleet's `check` job
+# runs `sdlc sarif` after `sdlc ci` to get them out of the gate's nested
+# container; ci's own verdict is still the one that gates.
+SARIF_CHECKS = ("codeql", "semgrep")
+SARIF_TARGET = "sarif"
+SARIF_PLANNED = "planned"  # in SDLC_SARIF_DIR: the checks the scan ran, one per line
+
 DEFAULTS = {
     # Seconds, offline, free: what rewrites your code, the structural review
     # that is cheap enough to sit beside it, plus the one check that notices the
@@ -537,6 +549,7 @@ WRITES_TREE = ("ruff-check", "ruff-format", "gourmand")
 # Words that are commands of this script, so no check may be named one.
 RESERVED = (
     *COMMANDS,
+    SARIF_TARGET,
     "plan",
     "event",
     "tiers",
@@ -948,10 +961,24 @@ def builds_first(cfg: dict, checks: list[str]) -> list[str]:
 def t_plan(target: str) -> int:
     cfg = sdlc_config()
     stacks = active_stacks(cfg)
-    checks = resolve(cfg, target, stacks) if target in COMMANDS else [target]
+    if target == SARIF_TARGET:
+        # ci's own answer, narrowed: the same skips, repo-added checks and lanes
+        # apply, and a repo that runs neither check plans nothing (an empty
+        # plan, which the launcher treats as nothing to upload).
+        checks = [c for c in resolve(cfg, "ci", stacks) if c in SARIF_CHECKS]
+    else:
+        checks = resolve(cfg, target, stacks) if target in COMMANDS else [target]
     for check in checks:
         if check not in BUILTINS and kind_of(cfg, check) is None:
             cannot(f"unknown check: {check}")
+    sarif_dir = sarif_dir_from_env() if target == SARIF_TARGET else None
+    if sarif_dir is not None:
+        # What the check job expects back: a planned check that leaves no SARIF
+        # is a scan that did not report, not a clean one.
+        try:
+            (sarif_dir / SARIF_PLANNED).write_text("".join(f"{c}\n" for c in checks))
+        except OSError as exc:
+            cannot(f"cannot list the planned checks in {sarif_dir}: {exc}")
     # stderr, because stdout is the plan the launcher parses.
     line = push_skip_line(cfg, stacks) if target == "ci" else None
     if line:
@@ -2843,7 +2870,11 @@ def t_semgrep(s: dict) -> int:
     if not (REPO / config).exists():
         cannot(f"semgrep config {config} does not exist; set config in its table, or skip it")
     tests = str(s.get("tests", ".semgrep/run-tests.sh"))
-    if (REPO / tests).is_file():
+    sarif_dir = sarif_dir_from_env()
+    # The rule tests are the repo's own shell. Under `sdlc sarif` they would run
+    # with the uploader's directory mounted writable, free to plant or replace
+    # what goes to code scanning; `sdlc ci` has already run them on this tree.
+    if sarif_dir is None and (REPO / tests).is_file():
         step(f"semgrep rule tests ({tests})")
         rc, _ = run(["sh", tests], env=project_env())
         if rc != 0:
@@ -2853,10 +2884,25 @@ def t_semgrep(s: dict) -> int:
     if missing:
         cannot(f"semgrep paths do not exist: {', '.join(missing)}")
     step(f"semgrep scan --config {config}")
-    return run(
-        ["semgrep", "scan", "--config", config, "--error", "--metrics=off", *paths],
-        env=project_env(),
-    )[0]
+    argv = ["semgrep", "scan", "--config", config, "--error", "--metrics=off"]
+    # `sdlc sarif` mounts a directory for the check job's uploader. The flag
+    # writes a COPY of the SARIF beside the normal output, so what is printed
+    # and the exit status (--error) are the same with or without it.
+    if sarif_dir is not None:
+        argv.append(f"--sarif-output={sarif_dir / 'semgrep.sarif'}")
+    return run([*argv, *paths], env=project_env())[0]
+
+
+def sarif_dir_from_env() -> Path | None:
+    """`SDLC_SARIF_DIR`, when it names a directory; None leaves a check unchanged.
+
+    Set only by the launcher's `sarif` target, which mounts the check job's
+    directory there. A value that is not a directory is ignored rather than
+    created: the mount is the job's decision, and a check must not invent a
+    path the uploader never reads.
+    """
+    raw = os.environ.get("SDLC_SARIF_DIR", "")
+    return Path(raw) if raw and Path(raw).is_dir() else None
 
 
 # pip-audit's own --timeout is pip's 15s socket default. On a runner whose cores
@@ -3106,7 +3152,13 @@ def t_codeql(s: dict) -> int:
     # suite; that is not a missing path.
     if config != default_config and not (REPO / config).is_file():
         cannot(f"codeql config {config} does not exist")
-    db = CACHE / "codeql" / project_name()
+    sarif_dir = sarif_dir_from_env()
+    # `sdlc sarif` keeps nothing on the cache volume. `sdlc ci` ran the repo's
+    # own code (pytest, conftest) with that volume writable just before, so a
+    # compiled query plan there could be the repo's, and what this run uploads
+    # must not rest on it. A cold compile is the price: 1-3 minutes.
+    work = CACHE if sarif_dir is None else Path("/tmp/codeql-sarif")
+    db = work / "codeql" / project_name()
     # Held until this process exits. The database directory is named for the
     # worktree's basename, so two checkouts that share one -- or a push retried
     # while the last is still running -- used ONE directory: each deleted the
@@ -3120,7 +3172,7 @@ def t_codeql(s: dict) -> int:
     # every repo on the volume, which is the point -- the standard packs are the
     # same bytes everywhere -- and keyed by CodeQL on each query's own hash, so
     # a changed query recompiles and nothing stale is reused.
-    caches = CACHE / "codeql-common"
+    caches = work / "codeql-common"
     sarif = Path("/tmp/codeql-results.sarif")
     clear_database(db)
     # An unwritable cache is a 2, not a traceback and not a 1. The same bug in
@@ -3171,6 +3223,8 @@ def t_codeql(s: dict) -> int:
     queries, ignores = read_codeql_config(REPO / config)
     analyze += queries or ["python-security-extended.qls"]
     run_codeql(create, analyze, sarif)
+    if sarif_dir is not None:
+        export_sarif(sarif, ignores, sarif_dir / "codeql-results.sarif")
     return report_sarif(sarif, ignores, baseline_path(s))
 
 
@@ -3536,17 +3590,63 @@ def baseline_path(s: dict) -> Path:
     return REPO / str(s.get("baseline", ".sdlc/codeql-baseline.json"))
 
 
-def sarif_findings(sarif: Path, ignores: list[str]) -> list[dict]:
-    """Every result outside `paths-ignore`, with the key a baseline matches on."""
+def result_uri(result: dict) -> str:
+    """The artifact a SARIF result points at, or `?` when it names none."""
+    phys = ((result.get("locations") or [{}])[0]).get("physicalLocation") or {}
+    return (phys.get("artifactLocation") or {}).get("uri", "?")
+
+
+def read_sarif(sarif: Path) -> dict:
+    """CodeQL's SARIF, held to the shape the filters walk: an object whose runs are objects."""
     try:
         data = json.loads(sarif.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         cannot(f"codeql wrote no readable SARIF: {exc}")
+    runs = data.get("runs", []) if isinstance(data, dict) else None
+    if not isinstance(runs, list) or not all(isinstance(r, dict) for r in runs):
+        cannot(f"codeql wrote SARIF without a list of runs: {sarif}")
+    data["runs"] = runs
+    for run_ in runs:
+        results = run_.get("results", [])
+        if not isinstance(results, list) or not all(isinstance(r, dict) for r in results):
+            cannot(f"codeql wrote a SARIF run whose results are not objects: {sarif}")
+        run_["results"] = results
+    return data
+
+
+def export_sarif(sarif: Path, ignores: list[str], dest: Path) -> None:
+    """Write CodeQL's SARIF to `dest` without the results under `paths-ignore`.
+
+    The code-scanning Action honours `paths-ignore` itself; the CLI does not, so
+    uploading the raw file would put a repo's deliberately vulnerable fixtures
+    in the Security tab -- the same findings the local gate already filters.
+    The BASELINE is not applied: it is a gating decision ("a person has looked
+    at this"), and an alert the Security tab shows is how it is triaged there.
+
+    Written to a temp file and renamed, so the uploader never reads half a file.
+    """
+    data = read_sarif(sarif)
+    for run_ in data["runs"]:
+        run_["results"] = [
+            r for r in run_.get("results", []) if not path_ignored(result_uri(r), ignores)
+        ]
+    tmp = dest.with_name(f".{dest.name}.tmp")
+    try:
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(dest)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        cannot(f"cannot write the SARIF to {dest}: {exc}")
+
+
+def sarif_findings(sarif: Path, ignores: list[str]) -> list[dict]:
+    """Every result outside `paths-ignore`, with the key a baseline matches on."""
+    data = read_sarif(sarif)
     out = []
-    for run_ in data.get("runs", []):
+    for run_ in data["runs"]:
         for result in run_.get("results", []):
             phys = ((result.get("locations") or [{}])[0]).get("physicalLocation") or {}
-            uri = (phys.get("artifactLocation") or {}).get("uri", "?")
+            uri = result_uri(result)
             if path_ignored(uri, ignores):
                 continue
             line = (phys.get("region") or {}).get("startLine", "?")
@@ -3789,7 +3889,7 @@ def main() -> int:
         "and is never to be worked around.",
     )
     ap.add_argument("what", help="a check name, or plan/tiers/list/versions")
-    ap.add_argument("arg", nargs="?", help="for plan: commit, push, ci or a check name")
+    ap.add_argument("arg", nargs="?", help="for plan: commit, push, ci, sarif or a check name")
     args = ap.parse_args()
 
     if args.what == "event":
@@ -3800,7 +3900,7 @@ def main() -> int:
         return t_npm_install(args.arg)
     if args.what == "plan":
         if not args.arg:
-            cannot("plan needs commit, push, ci or a check name")
+            cannot("plan needs commit, push, ci, sarif or a check name")
         return t_plan(args.arg)
     tool = TOOL_COMMANDS.get(args.what)
     if tool is not None:

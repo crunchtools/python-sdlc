@@ -2116,6 +2116,246 @@ finally:
     S.LAUNCHER = _launcher_saved
 check("launcher is a reserved name", "launcher" in S.RESERVED)
 
+# ------------------------------------------------------------ sdlc sarif
+#
+# `sdlc sarif` is ci's CodeQL and semgrep, narrowed, so the check job can lift
+# their SARIF out of the gate container. It is a target, not a config block.
+
+PY_ONLY = '[project]\nname = "x"\n'
+check(
+    "sarif plans ci's codeql and semgrep, in ci's order",
+    [c for c in S.resolve(empty, "ci") if c in S.SARIF_CHECKS] == ["semgrep", "codeql"]
+    and [r[0] for r in plan_of("sarif", PY_ONLY)] == ["semgrep", "codeql"],
+    str(plan_of("sarif", PY_ONLY)),
+)
+check("sarif is not a config block", "sarif" not in S.COMMANDS and "sarif" in S.RESERVED)
+msg = config_error(PY_ONLY + "[tool.sdlc.sarif]\nskip = []\n")
+check("[tool.sdlc.sarif] is still a stray key", msg is not None and "sarif" in msg, str(msg))
+check(
+    "sarif keeps a repo's push skip of codeql",
+    [r[0] for r in plan_of("sarif", PY_ONLY + '[tool.sdlc.push]\nskip = ["codeql"]\n')]
+    == ["semgrep"],
+)
+check(
+    "a repo that runs neither gets an empty plan",
+    plan_of("sarif", PY_ONLY + '[tool.sdlc.push]\nskip = ["codeql", "semgrep"]\n') == [],
+)
+check(
+    "sarif does not drag in a check ci runs for other reasons",
+    {r[0] for r in plan_of("sarif", PY_ONLY + '[tool.sdlc.push]\nskip = ["codeql"]\n')}
+    <= set(S.SARIF_CHECKS),
+)
+err, out = stderr_and_stdout(S.t_plan, "sarif", SKIPS)
+check("sarif prints no ci skip line", err == "", err)
+# The check job holds the scan to what it planned, so the planner lists it, and
+# only into the job's directory: no other target, and nothing without one.
+with tempfile.TemporaryDirectory() as listed:
+    plan_of("sarif", PY_ONLY, SDLC_SARIF_DIR=listed)
+    check(
+        "sarif lists what it planned in SDLC_SARIF_DIR",
+        Path(listed, S.SARIF_PLANNED).read_text().split() == ["semgrep", "codeql"],
+    )
+    Path(listed, S.SARIF_PLANNED).unlink()
+    plan_of(
+        "sarif", PY_ONLY + '[tool.sdlc.push]\nskip = ["codeql", "semgrep"]\n', SDLC_SARIF_DIR=listed
+    )
+    check(
+        "an empty sarif plan lists nothing, and says so",
+        Path(listed, S.SARIF_PLANNED).read_text() == "",
+    )
+    Path(listed, S.SARIF_PLANNED).unlink()
+    plan_of("ci", PY_ONLY, SDLC_SARIF_DIR=listed)
+    check("no other target writes the list", not any(Path(listed).iterdir()))
+    real_write = Path.write_text
+    Path.write_text = lambda self, *a, **k: (
+        (_ for _ in ()).throw(OSError("read-only"))
+        if self.name == S.SARIF_PLANNED
+        else real_write(self, *a, **k)
+    )
+    try:
+        msg = cannot_run(lambda: plan_of("sarif", PY_ONLY, SDLC_SARIF_DIR=listed))
+    finally:
+        Path.write_text = real_write
+    check("a list it cannot write is a 2, not a crash", bool(msg) and "read-only" in msg, str(msg))
+
+# The SARIF a check hands the job: codeql's minus `paths-ignore`, baseline kept.
+with tempfile.TemporaryDirectory() as root:
+    S.REPO = Path(root)
+    raw = Path(root, "raw.sarif")
+    keep, fixture, baselined = (
+        ("py/a", "src/a.py", "h1"),
+        ("py/b", "tests/fx/b.py", "h2"),
+        ("py/c", "src/c.py", "h3"),
+    )
+    raw.write_text(json.dumps(sarif([keep, fixture, baselined])))
+    exported = Path(root, "exported")
+    exported.mkdir()
+    S.export_sarif(raw, ["tests/fx"], exported / "codeql-results.sarif")
+    got = json.loads((exported / "codeql-results.sarif").read_text())
+    ids = [r["ruleId"] for r in got["runs"][0]["results"]]
+    check("export drops a paths-ignore result, keeps the rest", ids == ["py/a", "py/c"], str(ids))
+    check(
+        "export leaves no temp file behind",
+        [p.name for p in exported.iterdir()] == ["codeql-results.sarif"],
+    )
+    check(
+        "export does not touch the SARIF it read",
+        len(json.loads(raw.read_text())["runs"][0]["results"]) == len([keep, fixture, baselined]),
+    )
+    # A SARIF that cannot be read, or a write that fails, is a 2, and leaves no
+    # half file for the uploader to send.
+    bad = Path(root, "bad.sarif")
+    bad.write_text("{not json")
+    dest = exported / "codeql-results.sarif"
+    msg = cannot_run(S.export_sarif, bad, [], dest)
+    check("export of unreadable SARIF cannot run", bool(msg) and "readable" in msg, str(msg))
+    for shape in ("[]", '{"runs": {}}', '{"runs": [1]}', '{"runs": [{"results": [2]}]}'):
+        bad.write_text(shape)
+        msg = cannot_run(S.export_sarif, bad, [], dest)
+        check(f"export of SARIF shaped {shape} cannot run", bool(msg) and "codeql wrote" in msg)
+        msg = cannot_run(S.sarif_findings, bad, [])
+        check(f"findings of SARIF shaped {shape} cannot run", bool(msg) and "codeql wrote" in msg)
+    msg = cannot_run(S.export_sarif, Path(root, "absent.sarif"), [], dest)
+    check("export of absent SARIF cannot run", bool(msg) and "readable" in msg, str(msg))
+    msg = cannot_run(S.export_sarif, raw, [], Path(root, "no-such-dir", "out.sarif"))
+    check("a failed export write cannot run", bool(msg) and "cannot write" in msg, str(msg))
+    real_replace = Path.replace
+    Path.replace = lambda *_: (_ for _ in ()).throw(OSError("refused"))
+    try:
+        msg = cannot_run(S.export_sarif, raw, [], dest)
+    finally:
+        Path.replace = real_replace
+    check(
+        "a failed rename cannot run and removes its temp file",
+        bool(msg) and "refused" in msg and not Path(exported, ".codeql-results.sarif.tmp").exists(),
+        str(msg),
+    )
+
+    # t_codeql end to end, with CodeQL itself stubbed to write `raw`'s content.
+    base = Path(root, ".sdlc", "codeql-baseline.json")
+    base.parent.mkdir()
+    base.write_text(json.dumps([{"rule": "py/c", "path": "src/c.py", "fingerprint": "h3"}]))
+    cfgdir = Path(root, ".github", "codeql")
+    cfgdir.mkdir(parents=True)
+    Path(cfgdir, "codeql-config.yml").write_text("paths-ignore:\n  - tests/fx\n")
+    outdir = Path(root, "out")
+    outdir.mkdir()
+    saved = (S.CACHE, S.run_codeql, S.lock_codeql, S.clear_database, S.codeql_ram_mb)
+    S.CACHE = Path(root, "cache")
+    ran: list[list[str]] = []
+    locked: list[Path] = []
+    S.run_codeql = lambda create, analyze, dest: (
+        ran.append([*create, *analyze]),
+        dest.write_text(raw.read_text()),
+    )
+    S.lock_codeql = locked.append
+    S.clear_database = lambda _db: None
+    S.codeql_ram_mb = lambda: 1024
+    saved_env = dict(os.environ)
+    try:
+        os.environ.pop("SDLC_SARIF_DIR", None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc_off = S.t_codeql({})
+        check(
+            "no SDLC_SARIF_DIR: codeql writes nothing for the job",
+            list(outdir.iterdir()) == [] and rc_off == S.FOUND,
+            str(list(outdir.iterdir())),
+        )
+        on_volume = [a for a in ran[-1] if a.startswith("--common-caches=")]
+        check(
+            "ci's codeql keeps its database and query cache on the cache volume",
+            locked[-1].is_relative_to(S.CACHE)
+            and on_volume
+            and all(Path(a.split("=", 1)[1]).is_relative_to(S.CACHE) for a in on_volume),
+            f"{locked[-1]} {on_volume}",
+        )
+        os.environ["SDLC_SARIF_DIR"] = str(outdir)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc_on = S.t_codeql({})
+        fresh = [a for a in ran[-1] if a.startswith("--common-caches=")]
+        check(
+            "sarif's codeql uses nothing on the cache volume ci just ran repo code with",
+            not locked[-1].is_relative_to(S.CACHE)
+            and locked[-1].parts[:2] == ("/", "tmp")
+            and fresh
+            and not any(Path(a.split("=", 1)[1]).is_relative_to(S.CACHE) for a in fresh)
+            and not any(a.startswith(str(S.CACHE)) for a in ran[-1]),
+            f"{locked[-1]} {fresh}",
+        )
+        written = json.loads((outdir / "codeql-results.sarif").read_text())
+        ids = [r["ruleId"] for r in written["runs"][0]["results"]]
+        check(
+            "SDLC_SARIF_DIR: paths-ignore dropped, baselined kept, verdict unchanged",
+            ids == ["py/a", "py/c"] and rc_on == rc_off,
+            f"{ids} {rc_on} {rc_off}",
+        )
+        os.environ["SDLC_SARIF_DIR"] = str(Path(root, "no-such-dir"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            S.t_codeql({})
+        check(
+            "a SDLC_SARIF_DIR that is not a directory is ignored",
+            not Path(root, "no-such-dir").exists(),
+        )
+    finally:
+        S.CACHE, S.run_codeql, S.lock_codeql, S.clear_database, S.codeql_ram_mb = saved
+        os.environ.clear()
+        os.environ.update(saved_env)
+
+
+def semgrep_runs(rule_tests: bool = False, **env) -> list[list[str]]:
+    """Every command t_semgrep ran, with the temp root written as @ROOT@."""
+    seen: list[list[str]] = []
+    saved = (S.REPO, S.run)
+    saved_env = dict(os.environ)
+    with tempfile.TemporaryDirectory() as root:
+        Path(root, "pyproject.toml").write_text(PY_ONLY)
+        Path(root, ".semgrep").mkdir()
+        if rule_tests:
+            Path(root, ".semgrep", "run-tests.sh").write_text("exit 0\n")
+        S.REPO = Path(root)
+        S.run = lambda cmd, **_: (seen.append(cmd), (0, ""))[1]
+        os.environ.pop("SDLC_SARIF_DIR", None)
+        os.environ.update({k: v.replace("@ROOT@", root) for k, v in env.items()})
+        if "SDLC_SARIF_DIR" in env:
+            Path(root, "sarif").mkdir()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                S.t_semgrep({} if rule_tests else {"tests": "none"})
+        finally:
+            S.REPO, S.run = saved
+            os.environ.clear()
+            os.environ.update(saved_env)
+    return [[a.replace(root, "@ROOT@") for a in cmd] for cmd in seen]
+
+
+def semgrep_argv(**env) -> list[str]:
+    return semgrep_runs(**env)[-1]
+
+
+plain_argv = semgrep_argv()
+check(
+    "no SDLC_SARIF_DIR: the semgrep argv is exactly what it was",
+    plain_argv == ["semgrep", "scan", "--config", ".semgrep", "--error", "--metrics=off", "."],
+    str(plain_argv),
+)
+sarif_argv = semgrep_argv(SDLC_SARIF_DIR="@ROOT@/sarif")
+check(
+    "SDLC_SARIF_DIR adds --sarif-output before the paths, nothing else",
+    sarif_argv == [*plain_argv[:-1], "--sarif-output=@ROOT@/sarif/semgrep.sarif", "."],
+    str(sarif_argv),
+)
+
+rule_tests = ["sh", ".semgrep/run-tests.sh"]
+check(
+    "ci runs the repo's semgrep rule tests before the scan",
+    [c[:2] for c in semgrep_runs(rule_tests=True)] == [rule_tests, ["semgrep", "scan"]],
+)
+check(
+    "sarif never runs the rule tests: they are repo shell, and /sarif is writable",
+    [c[:2] for c in semgrep_runs(rule_tests=True, SDLC_SARIF_DIR="@ROOT@/sarif")]
+    == [["semgrep", "scan"]],
+)
+
 
 def main() -> int:
     print()

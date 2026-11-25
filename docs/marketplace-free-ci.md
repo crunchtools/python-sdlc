@@ -749,13 +749,14 @@ split stays at four chunks.
 
 This is sdlc's routing table, not the file's. It is listed by job, then event.
 Tool and category names are kept, so the Security tab's history carries over:
-CodeQL uploads as `/language:python`, and zizmor as `zizmor`.
+CodeQL uploads as `/language:python` and semgrep as `semgrep`; zizmor, which no
+check runs yet, would upload as `zizmor`.
 
 | Job | Event | Runs | Was |
 |---|---|---|---|
-| check | pull_request, push | `ci` with CodeQL (SARIF uploaded on the default branch), `gourmand`, `constitution` with zizmor (SARIF uploaded); an image repo also builds and gates the PR's Containerfile in a nested container, nothing pushed | ci.yml, constitution.yml, security.yml CodeQL, container-release on a PR |
+| check | pull_request, push | `ci`, `gourmand`, `constitution`; on a default-branch push, then `sarif` (CodeQL and semgrep again, with an output directory mounted, no repo shell, CodeQL cold under `/tmp`) and its SARIF uploaded, a report only (a scan that could not run is an `::error::`), even when the merged PR's gates stand; an image repo also builds and gates the PR's Containerfile in a nested container, nothing pushed | ci.yml, constitution.yml, security.yml CodeQL, container-release on a PR |
 | check | push | plans `image`, and `release` on the merge of an App-authored `ashigaru/release-X.Y.Z` PR | container.yml `resolve` |
-| check | schedule `17 6 * * 1` | `audit`, plans the weekly rebuild | dependency-audit.yml, weekly rebuild |
+| check | schedule `17 6 * * 1` | `audit`, plans the weekly rebuild, and `sarif` (CodeQL and semgrep on the default branch, SARIF uploaded): the scan's verdict is the run's | dependency-audit.yml, weekly rebuild, security.yml's weekly CodeQL |
 | check | schedule `47 */6 * * *` | plans a rebuild only when the parent image's digest moved | repository_dispatch `parent-image-updated` |
 | ai | pull_request_target | Gatehouse review of the head SHA's diff, read through the API; on an `ashigaru/` branch in this repo also Ashigaru `fix`, five rounds at most | review.yml, fix.yml agent |
 | ai | issues | Ashigaru `triage`, then `code` when the verdict is ready-to-code | triage.yml, code.yml agent |
