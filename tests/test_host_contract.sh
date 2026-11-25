@@ -148,6 +148,9 @@ case " \$* " in
     exit 0 ;;
 esac
 case " \$* " in
+  *" plan sarif "*)
+    # A repo that runs neither CodeQL nor semgrep plans nothing.
+    [ -f "$SHIM/sarif-empty" ] || printf 'codeql${TAB}main${TAB}image-ro${TAB}tick-sarif\n' ;;
   *" plan gatehouse-direct "*)
     printf 'gatehouse${TAB}main${TAB}local${TAB}gatehouse\n' ;;
   *" plan evil "*)
@@ -1232,6 +1235,59 @@ if ! grep -q -- '-e SDLC_ARGS' "$RUN/podman.log"; then
 else
   bad "a tier forwarded SDLC_ARGS from the environment"
 fi
+
+printf '\n== sdlc sarif\n\n'
+
+# The check job names a HOST directory in SDLC_HOST_SARIF and the launcher turns
+# it into a mount and SDLC_SARIF_DIR for the one target that writes SARIF. A
+# `sdlc ci` runs the repo's own code (pytest, conftest) in the same image, so
+# for any other target the path must be dropped, however it got into the
+# environment.
+args_case 2 sarif -- -x
+args_case 2 sarif x
+SARIF_HOST=$RUN/sarif-out
+mkdir -p "$SARIF_HOST"
+sarif_run() {          # target [args...]: the podman argv, SDLC_HOST_SARIF set
+  log_mark
+  PATH="$SHIM" SDLC_HOST_SARIF="$SARIF_HOST" sh bin/sdlc "$@" >/dev/null 2>&1 || true
+  log_since
+}
+sarif_run sarif
+if grep -q -- "-v $SARIF_HOST:/sarif:rw,z" "$RUN/podman.log" \
+   && grep -q -- '-e SDLC_SARIF_DIR=/sarif' "$RUN/podman.log"; then
+  ok "sarif mounts SDLC_HOST_SARIF at /sarif and says so"
+else
+  bad "sarif did not mount SDLC_HOST_SARIF: $(grep -c . "$RUN/podman.log") podman calls"
+fi
+# pytest and a repo's own `command` check are the targets that run repo code.
+for target in ci push commit mypy pytest repo-command tiers codeql-baseline; do
+  sarif_run "$target"
+  if [ -s "$RUN/podman.log" ] && ! grep -q -- '/sarif\|SDLC_SARIF_DIR\|SDLC_HOST_SARIF' "$RUN/podman.log"; then
+    ok "$target never gets the sarif mount, even when SDLC_HOST_SARIF is exported"
+  else
+    bad "$target was given the sarif mount"
+  fi
+done
+log_mark
+PATH="$SHIM" sh bin/sdlc sarif >/dev/null 2>&1 || true
+log_since
+if [ -s "$RUN/podman.log" ] && ! grep -q -- '/sarif\|SDLC_SARIF_DIR' "$RUN/podman.log"; then
+  ok "with SDLC_HOST_SARIF unset nothing changes: no mount, no env"
+else
+  bad "sarif mounted something with SDLC_HOST_SARIF unset"
+fi
+# An empty plan is not a gate that could not run.
+: > "$SHIM/sarif-empty"
+log_mark
+PATH="$SHIM" sh bin/sdlc sarif >/dev/null 2>&1 && rc=0 || rc=$?
+log_since
+rm -f "$SHIM/sarif-empty"
+if [ "$rc" -eq 0 ] && ! grep -q 'tick-sarif' "$RUN/podman.log"; then
+  ok "an empty sarif plan exits 0 and runs nothing"
+else
+  bad "an empty sarif plan exited $rc or ran a step"
+fi
+args_case 0 sarif
 
 printf '\n== an image other than the pinned release\n\n'
 

@@ -363,6 +363,7 @@ NNP=--security-opt=no-new-privileges
 CACHE_VOLUME=${SDLC_CACHE_VOLUME:-crunchtools-hook-cache}
 
 need_volume() {
+  [ -n "$1" ] || return 0   # `sarif` runs without the cache volume
   podman volume exists "$1" 2>/dev/null && return 0
   podman volume create "$1" >/dev/null 2>&1 && return 0
   # Two lanes reach this at the same moment on a cold machine and one of them
@@ -476,7 +477,7 @@ run_in_image() {
     --cap-drop=all ${NNP:+"$NNP"} \
     --cpus "$GATE_CPUS" --memory "$GATE_MEMORY" --cpu-shares 256 \
     -v "$HOST_REPO:/repo:$_mode,z" -w /repo \
-    -v "$CACHE_VOLUME:/cache" \
+    ${CACHE_VOLUME:+-v "$CACHE_VOLUME:/cache"} \
     ${CONSTITUTION_MOUNT:+-v "$CONSTITUTION_MOUNT"} \
     --tmpfs /tmp:rw,exec,size=4g,mode=1777 \
     -e HOME=/tmp \
@@ -487,10 +488,12 @@ run_in_image() {
     ${SDLC_CONFIG_IMAGE:+-e SDLC_CONFIG_IMAGE} \
     -e "SDLC_JOBS=$GATE_CPUS" \
     -e "SDLC_MEMORY=$GATE_MEMORY" \
+    ${SDLC_HOST_SARIF:+-v "$SDLC_HOST_SARIF:/sarif:rw,z"} \
+    ${SDLC_HOST_SARIF:+-e SDLC_SARIF_DIR=/sarif} \
     -e "SDLC_DEFAULT_BRANCH=$(default_branch 2>/dev/null || :)" \
     ${SDLC_TIER:+-e SDLC_TIER} \
     -e "SDLC_HOST_REPO=$HOST_REPO" \
-    -e "SDLC_CACHE_VOLUME=$CACHE_VOLUME" \
+    ${CACHE_VOLUME:+-e "SDLC_CACHE_VOLUME=$CACHE_VOLUME"} \
     ${SDLC_SKIP:+-e SDLC_SKIP} \
     ${SDLC_ARGS:+-e SDLC_ARGS} \
     ${SDLC_GATEHOUSE_SAMPLES:+-e SDLC_GATEHOUSE_SAMPLES} \
@@ -1720,7 +1723,16 @@ run_plan() {           # commit | push | ci | <check>
   export SDLC_TIER
   _plan=$(run_in_image ro nostdin "$IMAGE" plan "$1") \
     || die "the image could not plan '$1'; nothing was checked"
-  [ -n "$_plan" ] || die "the image planned nothing for '$1'"
+  if [ -z "$_plan" ]; then
+    # `sarif` on a repo that runs neither CodeQL nor semgrep: nothing to
+    # upload is an answer, not a gate that could not run. Any other target
+    # planning nothing still is one.
+    if [ "$1" = sarif ]; then
+      printf '%s: no SARIF-producing check runs in this repo; nothing to do\n' "$ME"
+      return 0
+    fi
+    die "the image planned nothing for '$1'"
+  fi
 
   state_init "$1"
   # However this ends -- a step's `die`, a signal -- the record is rendered from
@@ -1763,6 +1775,19 @@ run_plan() {           # commit | push | ci | <check>
 
 # ---------------------------------------------------------------------- dispatch
 
+# The one writable path the check job's uploader reads is for `sarif` alone.
+# `sdlc ci` runs the repo's own code (pytest, conftest) in this same image, so
+# every other target drops it, whoever exported it; run_in_image mounts it only
+# while it is still set.
+[ "${1:-}" = sarif ] || SDLC_HOST_SARIF=
+# Nor does `sarif` get the cache volume: every other target writes it, with the
+# repo's own code among them, so nothing on it is trusted next to that
+# directory, and the scanners need none of it (CodeQL builds under /tmp).
+if [ "${1:-}" = sarif ]; then
+  CACHE_VOLUME=
+  CONSTITUTION_MOUNT=
+fi
+
 case "${1:---help}" in
   -h|--help|help)
     # Asked of git rather than written as `.git/sdlc`: in a linked worktree the
@@ -1770,12 +1795,14 @@ case "${1:---help}" in
     STATE_HINT=$(git rev-parse --git-path sdlc 2>/dev/null) || STATE_HINT=
     [ -n "$STATE_HINT" ] || STATE_HINT='<git-dir>/sdlc'
     cat <<EOF
-usage: $ME commit | push | ci | <check> | tiers | stacks | list | versions | codeql-baseline
+usage: $ME commit | push | ci | sarif | <check> | tiers | stacks | list | versions | codeql-baseline
 
   commit            the pre-commit hook: seconds, offline, free
   push              the pre-push hook: every verdict, no container builds
   ci                what CI runs: push's checks except the two reviewers,
                     plus the repo's own
+  sarif             ci's CodeQL and semgrep, writing SARIF to the directory
+                    SDLC_HOST_SARIF names, for the check job to upload
   <check>           one check by name -- the inner loop
   <check> -- <args> one check, with arguments for the tool itself, as:
                       $ME pytest -- tests/test_x.py::test_y -n0
@@ -1825,7 +1852,7 @@ EOF
     # forge a line into this shell's argv. This goes the other way and lands in
     # a Python argv list, with no shell between here and the tool.
     case "$_target" in
-      commit|push|ci)
+      commit|push|ci|sarif)
         # A tier is several checks; arguments for "the check" have no meaning.
         # Cleared rather than refused when it merely arrives in the
         # environment, so an exported SDLC_ARGS cannot reach a tier's pytest.

@@ -108,7 +108,8 @@ So `sdlc` reads the config itself and applies it in two parts:
   local query pack and is passed through. trentina's config yields both, and its
   `trentina-queries` pack does run locally — `ToolArgToLog` and
   `ToolArgToHttpClientWithoutEgressCheck` both appear in the evaluation list.
-- **`paths-ignore:`** filters the SARIF after the fact.
+- **`paths-ignore:`** filters the SARIF after the fact, both for the verdict
+  and for the copy `sdlc sarif` hands to code scanning.
 
 That second part matters more than it looks. trentina's `paths-ignore` excludes
 `tests/fixtures/boundary-review`, which holds **deliberately vulnerable code**

@@ -12,7 +12,9 @@ Run: tests/test_job_check.py   (needs python3 only)
 from __future__ import annotations
 
 import base64
+import contextlib
 import gzip
+import io
 import json
 import subprocess
 import sys
@@ -82,6 +84,11 @@ class FakeTools(Tools):
         self.private = False  # the event's repository.private
         self.tags = f"{SHA}\trefs/tags/v1.2.3\n"  # `git ls-remote --tags origin`: a release here
         self.pr_files: list[dict] | None = [{"filename": "src/x.py"}]  # None: the API refuses
+        self.sarif: dict[str, str] = {}  # what `sdlc sarif` writes, file name -> text
+        self.sarif_rc = 0
+        self.planned: list[str] | None = None  # the planner's list; None: what `sarif` names
+        self.upload_status = 202
+        self.upload_body = b'{"message": "refused"}'
 
     def run(
         self,
@@ -105,15 +112,34 @@ class FakeTools(Tools):
         if argv == [check.SDLC, "launcher", self.image]:
             return cp(0, "#!/bin/sh\n")
         if ran_launcher(argv):
-            self.launched.append((argv[1], dict(env or {})))
-            if argv[1] == "ci":
-                return cp(self.gate_rc)
-            if argv[1] == check.REVIEW:
-                assert argv[2:] == [], argv
-                return cp(self.review_rc)
-            assert argv[2:] == ["--", "--report"], argv
-            return cp(self.audit_rc, self.report() if self.audit_out is None else self.audit_out)
+            return self.launcher(argv, env)
         return self.tool(argv)
+
+    def launcher(
+        self, argv: list[str], env: Mapping[str, str] | None
+    ) -> subprocess.CompletedProcess[str]:
+        """The launcher's targets: the gates, Gourmand, the SARIF scan, the audit."""
+        self.launched.append((argv[1], dict(env or {})))
+        if argv[1] == "ci":
+            return cp(self.gate_rc)
+        if argv[1] == check.REVIEW:
+            assert argv[2:] == [], argv
+            return cp(self.review_rc)
+        if argv[1] == "sarif":
+            # The launcher mounts the host path; this container sees it under its temp.
+            host = (env or {})["SDLC_HOST_SARIF"]
+            out = Path(tempfile.gettempdir()) / Path(host).relative_to("/host/tmp")
+            for name, text in self.sarif.items():
+                (out / name).write_text(text)
+            files = {f: c for c, (_, f) in check.SARIF_FILES.items()}
+            planned = self.planned
+            if planned is None:
+                planned = [files[name] for name in self.sarif]
+            if planned != ["-"]:  # "-": the planner wrote no list
+                (out / check.SARIF_PLANNED).write_text("".join(f"{c}\n" for c in planned))
+            return cp(self.sarif_rc)
+        assert argv[2:] == ["--", "--report"], argv
+        return cp(self.audit_rc, self.report() if self.audit_out is None else self.audit_out)
 
     def tool(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         """The image's other tools: git's fetch, and skopeo reading the parent."""
@@ -157,6 +183,12 @@ class FakeTools(Tools):
             return Response(200, json.dumps({"workflow_runs": [run]}).encode())
         if method == "GET" and path.endswith("/actions/runs/9/jobs"):
             return Response(200, json.dumps({"jobs": self.jobs}).encode())
+        return self.write(method, path)
+
+    def write(self, method: str, path: str) -> Response:
+        """A POST or PUT: the SARIF upload answers `upload_status`, the rest succeed."""
+        if method == "POST" and path.endswith("/code-scanning/sarifs"):
+            return Response(self.upload_status, self.upload_body)
         return Response(204 if method == "PUT" else 201, b"")
 
 
@@ -191,7 +223,7 @@ def go(
             "GITHUB_REPOSITORY": REPO,
             "GITHUB_SHA": SHA,
             "GITHUB_REF": ref,
-            "SDLC_SARIF_DIR": str(ws / "sarif"),
+            "RUNNER_TEMP": str(Path(tmp) / "runner-temp"),
             **tools.env,
         }
         event = dict(EVENT)
@@ -209,7 +241,7 @@ def go(
 
 
 IMAGE = {"Containerfile": "FROM quay.io/ubi/ubi10:latest\nRUN true\n"}
-SARIF = {"sarif/codeql-results.sarif": '{"runs": [{}]}'}  # what the CodeQL gate leaves
+SARIF = {"codeql-results.sarif": '{"runs": [{}]}', "semgrep.sarif": '{"runs": [{}]}'}
 PYPI = {"pyproject.toml": '[tool.sdlc]\npublish = "pypi"\n'}
 
 
@@ -570,7 +602,8 @@ def test_gourmand_runs_wherever_the_gates_run() -> None:
     ):
         t = FakeTools()
         go(name, t, ref=ref)
-        assert launched(t) == ["ci", check.REVIEW], (name, ref)
+        scan = ["sarif"] if ref == "refs/heads/main" and name == "push" else []
+        assert launched(t) == ["ci", check.REVIEW, *scan], (name, ref)
 
 
 def test_no_gates_no_gourmand() -> None:
@@ -602,22 +635,207 @@ def test_a_repo_that_skips_gourmand_on_push_is_not_reviewed() -> None:
     assert launched(t) == ["ci", check.REVIEW]
 
 
-def test_sarif_only_on_default_push() -> None:
+def sent_categories(tools: FakeTools) -> list[str]:
+    """The category each upload carries, in upload order."""
+    out = []
+    for _, _, payload in uploads(tools):
+        body = json.loads(payload or b"")
+        assert body["commit_sha"] == SHA and body["ref"] == "refs/heads/main"
+        doc = json.loads(gzip.decompress(base64.b64decode(body["sarif"])))
+        out += [r["automationDetails"]["id"] for r in doc["runs"]]
+    return out
+
+
+def scanned(tools: FakeTools) -> bool:
+    return gated(tools, "sarif")
+
+
+def test_sarif_on_default_push_after_the_gates() -> None:
     t = FakeTools()
-    go("push", t, files=SARIF)
-    sent = uploads(t)
-    assert len(sent) == 1
-    body = json.loads(sent[0][2] or b"")
-    assert body["commit_sha"] == SHA and body["ref"] == "refs/heads/main"
-    doc = json.loads(gzip.decompress(base64.b64decode(body["sarif"])))
-    assert doc["runs"][0]["automationDetails"]["id"] == "/language:python/"
+    t.sarif = SARIF
+    rc, _ = go("push", t)
+    assert rc == 0 and gated(t) and scanned(t)
+    assert launched(t) == ["ci", check.REVIEW, "sarif"]
+    assert sent_categories(t) == ["/language:python/", "semgrep/"]
+
+
+def test_no_scan_off_the_default_branch() -> None:
     for name, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/topic")):
         t = FakeTools()
-        go(name, t, files=SARIF, ref=ref)
-        assert not uploads(t), name
+        t.sarif = SARIF
+        go(name, t, ref=ref)
+        assert not scanned(t) and not uploads(t), name
+
+
+def test_only_the_scan_gets_the_sarif_mount() -> None:
+    """`sdlc ci` runs the repo's code; only `sdlc sarif`, which runs none, may write the upload."""
     t = FakeTools()
-    go("push", t)  # no file, nothing to upload
-    assert not uploads(t)
+    go("push", t)
+    mounts = {command: child.get("SDLC_HOST_SARIF") for command, child in t.launched}
+    assert mounts["ci"] is None
+    assert mounts["sarif"].startswith("/host/tmp/") and mounts["sarif"].endswith(check.SARIF_DIR)
+
+
+def test_a_push_its_pr_gated_still_scans_and_its_findings_do_not_fail_it() -> None:
+    t = merged("c" * 40)
+    t.sarif, t.sarif_rc = SARIF, 1
+    rc, _ = go("push", t)
+    assert rc == 0 and not gated(t) and scanned(t)
+    assert sent_categories(t) == ["/language:python/", "semgrep/"]
+
+
+def test_a_scan_that_could_not_run_is_an_error_annotation_on_a_push() -> None:
+    """The gates already judged the tree: a broken scan is reported, not a held release."""
+    for t in (merged("c" * 40), FakeTools()):
+        t.sarif_rc = 3
+        rc, out = printed("push", t)
+        assert rc == check.CLEAN and scanned(t)
+        assert "::error::the code-scanning scan did not complete" in out
+
+
+def test_a_push_whose_gates_found_still_fails_whatever_the_scan() -> None:
+    t = FakeTools(gate_rc=1)
+    t.sarif_rc = 3
+    assert printed("push", t)[0] == check.FOUND
+
+
+def test_weekly_scans_and_its_verdict_is_the_scan() -> None:
+    for scan_rc, want in ((0, 0), (1, 1), (3, 2)):
+        t = FakeTools()
+        t.sarif, t.sarif_rc = SARIF, scan_rc
+        rc, _ = go("schedule", t, files=PYPI, cron=check.WEEKLY)
+        assert rc == want and scanned(t) and not gated(t), scan_rc
+        assert sent_categories(t) == ["/language:python/", "semgrep/"]
+
+
+def test_the_parent_poll_does_not_scan() -> None:
+    t = FakeTools()
+    go("schedule", t, files=IMAGE, cron=check.POLL)
+    assert not scanned(t) and not uploads(t)
+
+
+def test_nothing_written_is_nothing_uploaded() -> None:
+    t = FakeTools()
+    go("push", t)
+    assert scanned(t) and not uploads(t)
+
+
+def test_a_file_from_an_earlier_run_is_not_uploaded() -> None:
+    t = FakeTools()
+    with tempfile.TemporaryDirectory() as tmp:
+        stale = Path(tmp) / check.SARIF_DIR
+        stale.mkdir()
+        (stale / "codeql-results.sarif").write_text('{"runs": [{}]}')
+        t.env = {"RUNNER_TEMP": tmp}
+        go("push", t)
+    assert scanned(t) and not uploads(t)
+
+
+def printed(event_name: str, tools: FakeTools) -> tuple[int, str]:
+    """`go`, with what the job printed."""
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc, _ = go(event_name, tools)
+    return rc, out.getvalue()
+
+
+def test_a_refused_upload_is_a_warning_not_a_failure() -> None:
+    t = FakeTools()
+    t.sarif, t.upload_status = SARIF, 403
+    rc, out = printed("push", t)
+    assert rc == 0 and len(uploads(t)) == len(SARIF)
+    assert "::warning::uploading codeql-results.sarif answered 403" in out
+
+
+def weekly_printed(tools: FakeTools) -> tuple[int, str]:
+    """The weekly run, with what the job printed."""
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        rc, _ = go("schedule", tools, files=PYPI, cron=check.WEEKLY)
+    return rc, out.getvalue()
+
+
+def test_a_refused_upload_fails_the_weekly_run() -> None:
+    """The weekly scan is the verdict, and a scan nobody received did not report."""
+    for status in (403, 422, 500):
+        t = FakeTools()
+        t.sarif, t.upload_status = SARIF, status
+        rc, out = weekly_printed(t)
+        assert rc == check.CANNOT_RUN and len(uploads(t)) == len(SARIF), status
+        assert f"::error::uploading codeql-results.sarif answered {status}" in out
+
+
+def test_code_scanning_not_offered_is_not_a_weekly_failure() -> None:
+    """A private repo without Advanced Security has nowhere to send it; nothing to fix."""
+    for said in (
+        b'{"message": "Advanced Security must be enabled for this repository to use code '
+        b'scanning."}',
+        b'{"message": "Code Security must be enabled for this repository to use code scanning."}',
+    ):
+        t = FakeTools()
+        t.sarif, t.upload_status, t.upload_body = SARIF, 403, said
+        rc, out = weekly_printed(t)
+        assert rc == check.CLEAN and "::warning::code scanning is not offered here" in out
+        assert "::error::" not in out
+
+
+def test_unreadable_sarif_fails_the_weekly_run() -> None:
+    t = FakeTools()
+    t.sarif = {"codeql-results.sarif": "not json", "semgrep.sarif": '{"runs": [{}]}'}
+    rc, out = weekly_printed(t)
+    assert rc == check.CANNOT_RUN and sent_categories(t) == ["semgrep/"]
+    assert "::error::codeql-results.sarif is not readable SARIF" in out
+
+
+def test_a_planned_check_with_no_sarif_fails_the_weekly_run() -> None:
+    for scan_rc in (0, 1):
+        t = FakeTools()
+        t.sarif, t.sarif_rc = {"semgrep.sarif": '{"runs": [{}]}'}, scan_rc
+        t.planned = ["codeql", "semgrep"]
+        rc, out = weekly_printed(t)
+        assert rc == check.CANNOT_RUN and sent_categories(t) == ["semgrep/"], scan_rc
+        assert "::error::codeql ran under sdlc sarif and wrote no codeql-results.sarif" in out
+
+
+def test_a_planned_check_with_no_sarif_is_an_error_annotation_on_a_push() -> None:
+    t = FakeTools()
+    t.sarif, t.planned = {}, ["codeql"]
+    rc, out = printed("push", t)
+    assert rc == check.CLEAN
+    assert "::error::codeql ran under sdlc sarif and wrote no codeql-results.sarif" in out
+    assert "::error::the code-scanning scan did not complete" in out
+
+
+def test_no_list_of_what_was_planned_fails_the_weekly_run() -> None:
+    t = FakeTools()
+    t.sarif, t.planned = SARIF, ["-"]
+    rc, out = weekly_printed(t)
+    assert rc == check.CANNOT_RUN and "::error::sdlc sarif wrote no list" in out
+
+
+def test_a_scan_that_could_not_run_is_not_asked_for_its_files() -> None:
+    t = FakeTools()
+    t.sarif_rc, t.planned = 3, ["codeql"]
+    rc, out = weekly_printed(t)
+    assert rc == check.CANNOT_RUN and "wrote no codeql-results.sarif" not in out
+
+
+def test_unreadable_or_runless_sarif_is_skipped_and_the_rest_sent() -> None:
+    for bad in ("not json", '{"runs": "x"}', "[]"):
+        t = FakeTools()
+        t.sarif = {"codeql-results.sarif": bad, "semgrep.sarif": '{"runs": [{}]}'}
+        rc, out = printed("push", t)
+        assert rc == 0 and sent_categories(t) == ["semgrep/"], bad
+        assert "::warning::codeql-results.sarif" in out, bad
+
+
+def test_an_oversized_sarif_is_not_sent() -> None:
+    t = FakeTools()
+    t.sarif = SARIF
+    limit, check.SARIF_LIMIT = check.SARIF_LIMIT, 10
+    try:
+        rc, out = printed("push", t)
+    finally:
+        check.SARIF_LIMIT = limit
+    assert rc == 0 and not uploads(t) and "over GitHub's limit" in out
 
 
 def test_launcher_is_pinned_and_mounts_the_host_path() -> None:
@@ -669,6 +887,7 @@ def test_fetch_tree_needs_the_commit() -> None:
 
 def test_launcher_cache_without_runner_temp_is_unmapped() -> None:
     t = FakeTools()
+    t.env = {"RUNNER_TEMP": ""}
     go("pull_request", t)
     _command, child = t.launched[0]
     assert "SDLC_HOST_CACHE" not in child, "a cache mapped without RUNNER_TEMP"

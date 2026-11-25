@@ -40,6 +40,21 @@ All notable changes to this project are documented here, following
   `tests/test_job_boot.py` and `tests/test_workflows.py` pin it. `boot-command`
   under a `boot` other than `command` is no longer a 2: it prints a warning and
   is not run; `boot = "command"` without `boot-command` is still a 2.
+- `sdlc sarif`: the ci checks that write SARIF (CodeQL, semgrep), run with an
+  output directory the CI job mounts (`SDLC_HOST_SARIF`, `/sarif` inside). The
+  fleet ci.yml's `check` runs it on every default-branch push and on the weekly
+  schedule, and uploads what it wrote to code scanning: the Security tab updates
+  again, and the weekly run rescans CodeQL and semgrep as security.yml did (its
+  verdict is the weekly run's). `sdlc ci`, which runs the repo's own code, never
+  gets the mount, and no token reaches a nested container. Under `sdlc sarif`
+  the semgrep rule tests (repo shell) do not run, and the run gets no cache
+  volume: CodeQL builds its database and compiles its queries under `/tmp`. The
+  planner lists the checks it ran, and a planned check that wrote no SARIF is a
+  scan that did not complete. On the weekly run that, or an upload code scanning
+  refused, is the job's 2. On a push, a scan that did not complete is an
+  `::error::`, not the job's 2, so a report cannot hold a release the gates
+  passed, and a refused upload is a warning. A repo where code scanning is not
+  offered at all (a private one without it answers 403) only warns, on either.
 
 ### Rollout
 
