@@ -34,8 +34,7 @@ kills_child() {
   # shellcheck disable=SC2086,SC2016
   $T $PODMAN --events-backend=none run --rm --log-driver=none --network=none "$@" "$IMG" sh -c '
     sleep 30 & p=$!
-    if kill "$p" 2>/tmp/e; then echo KILL_OK; else echo "KILL_FAIL $(cat /tmp/e)"; fi
-    wait "$p" 2>/dev/null; :' 2>&1 | tail -1
+    if kill "$p" 2>/tmp/e; then echo KILL_OK; else echo "KILL_FAIL $(cat /tmp/e)"; fi' 2>&1 | tail -1
 }
 
 # Prints the system state and a stopped unit's state: systemd as PID 1 boots
@@ -44,7 +43,9 @@ systemd_stops() {
   _c=sdlc-apparmor-$$
   # shellcheck disable=SC2086
   $T $PODMAN --events-backend=none run -d --rm --name "$_c" --systemd=always \
-    --network=none "$@" "$SDIMG" >/dev/null 2>&1 || { echo "no-start"; return; }
+    --network=none "$@" "$SDIMG" >/dev/null 2>"/tmp/sdlc-apparmor-$$.err" \
+    || { echo "no-start: $(tail -1 "/tmp/sdlc-apparmor-$$.err")"; rm -f "/tmp/sdlc-apparmor-$$.err"; return; }
+  rm -f "/tmp/sdlc-apparmor-$$.err"
   _st=
   for _ in $(seq 1 30); do
     # shellcheck disable=SC2086
@@ -65,8 +66,10 @@ systemd_stops() {
     sleep 1
   done
   # shellcheck disable=SC2086
+  _res=$($T $PODMAN exec "$_c" systemctl show -p Result --value sdlc-probe 2>/dev/null)
+  # shellcheck disable=SC2086
   $T $PODMAN rm -f -t 0 "$_c" >/dev/null 2>&1 || :
-  echo "$_st $_after"
+  echo "$_st $_after (result ${_res:-unknown})"
 }
 
 # One podman, by the label it is reported under.
@@ -89,7 +92,7 @@ check() {
   $T $PODMAN pull -q "$SDIMG" >/dev/null 2>&1 || cannot "$_who podman could not pull $SDIMG"
   _r=$(systemd_stops --cap-drop=all --cap-add="$SYSTEMD_CAPS")
   case "$_r" in
-    "running inactive"|"degraded inactive") ok "$_who: systemd boots ($_r) and stops a unit" ;;
+    "running inactive "*|"degraded inactive "*) ok "$_who: systemd boots ($_r) and stops a unit" ;;
     *) bad "$_who: systemd as PID 1 did not boot and stop a unit: $_r" ;;
   esac
   _r=$(kills_child --cap-drop=all --security-opt=no-new-privileges)
