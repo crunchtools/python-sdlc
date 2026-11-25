@@ -26,6 +26,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 import sdlc_root
 from fake_github import check, finish
@@ -282,6 +284,56 @@ check(
     and target.read_text() == "untouched"
     and not (out / "dest").is_symlink()
     and (out / "dest").read_text() == LOCK,
+)
+
+
+# -- the sibling's lifecycle and where it can mount from ----------------------------------------
+
+timeout_work = TMP / "timeout"
+(timeout_work / "pr").mkdir(parents=True)
+seen: list[list[str]] = []
+
+
+def stalls(argv: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
+    """The engine: a sibling that never finishes, and a removal that works."""
+    seen.append(argv)
+    if "run" in argv:
+        raise subprocess.TimeoutExpired(argv, _relock.SECONDS + _relock.GRACE)
+    return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+code = _relock.lock_beside({}, IMAGE, (timeout_work, "/host/work"), timeout_work / "pr", stalls)
+check(
+    "timeout: a sibling past its time is refused, and still removed by name",
+    code == _relock.REFUSED
+    and any(c[-4:-1] == ["rm", "-f", "--ignore"] and c[-1].startswith("sdlc-relock-") for c in seen)
+    and seen[0][seen[0].index("--name") + 1] == seen[-1][-1],
+)
+check(
+    "timeout: the sibling's mounts are the host's paths, mapped from write's scratch dir",
+    "/host/work/pr:/src:ro" in seen[0],
+)
+
+runner_temp = TMP / "runner-temp"
+runner_temp.mkdir()
+works: list[Path] = []
+
+
+class Recorded:
+    """write's Job, recording where its scratch dir is."""
+
+    def __init__(self, site: Site) -> None:
+        works.append(site.work)
+
+    def route(self, *_args: object) -> int:
+        return 0
+
+
+with mock.patch.object(write, "Job", Recorded):
+    write.main("push", {}, {"GITHUB_REPOSITORY": "o/r", "RUNNER_TEMP": str(runner_temp)})
+check(
+    "scratch: write's scratch dir is under RUNNER_TEMP, which the sibling can mount",
+    len(works) == 1 and works[0].parent == runner_temp,
 )
 
 check("install: the shim imports this checkout's sdlc_jobs", _relock.ROOT == sdlc_root.ROOT)
