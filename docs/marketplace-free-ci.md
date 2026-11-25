@@ -478,7 +478,9 @@ the new ruleset like any converted repo.
 ## Releases run from the merge, and every job checks what it needs
 
 1. **Open.** `workflow_dispatch` with `version` makes `write` open
-   `ashigaru/release-X.Y.Z` from `chore/release-X.Y.Z`. This is unchanged.
+   `ashigaru/release-X.Y.Z` from `chore/release-X.Y.Z`, with one commit of its
+   own when uv.lock's root package (`source = { editable = "." }` or
+   `{ virtual = "." }`) is not yet at the version (#187).
 2. **Publish.** The push to the default branch that merges that PR carries the
    release.
 
