@@ -244,6 +244,10 @@ def check_files(root: Path, kinds: list[Kind], report: Report) -> None:
     for pattern, principle in required.items():
         if not any(root.glob(pattern)):
             report.add(principle, f"nothing matches `{pattern}`")
+    lock = root / "uv.lock"
+    own_lock = "uv.lock" in required and lock.is_file() and not lock.is_symlink()
+    if own_lock and not rules.committed(root, "uv.lock"):
+        report.add("S1", "`uv.lock` is not committed: git does not track it")
     for k in kinds:
         for pattern in k.forbid:
             for found in sorted(root.glob(pattern)):

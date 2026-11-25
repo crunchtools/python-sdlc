@@ -30,6 +30,12 @@ All notable changes to this project are documented here, following
 - This repo's pre-commit passes again: Gourmand's CH012 hits in
   scripts/convert_repo.py and sdlc_jobs/promote.py are path-scoped exceptions
   in gourmand-exceptions.toml, with what each pairs and why it stays.
+- The v2 constitution checks close three gaps from #203. K11 catches a vendor
+  token (`ghp_`, `github_pat_`, `sk-ant-`, AWS keys, ...) or a private key's
+  PEM header in a SKILL.md whatever it is assigned to, using
+  `sdlc-secret-scan`'s shapes. S1 requires git to track `uv.lock`, not just
+  find it in the checkout. K1 flags a server that turns its HTTP timeout off,
+  or uses `requests`/`urllib.request` without ever setting one.
 
 - sdlc-bootstrap (`boot/sdlc`) resolves `:<major>` in the registry, in the same
   `cosign verify` that checks it, and runs the digest from the verified

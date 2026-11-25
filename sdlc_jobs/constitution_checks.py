@@ -17,6 +17,7 @@ import json
 import os
 import posixpath
 import re
+import subprocess
 from pathlib import Path
 from typing import Protocol
 
@@ -44,6 +45,31 @@ def _own_file(root: Path, path: Path) -> bool:
     )
 
 
+def committed(root: Path, name: str) -> bool:
+    """Whether `name` is the repo's own file and git tracks it.
+
+    A lock that exists but is gitignored or untracked is not what CI builds
+    from. Outside a git work tree (a bare tree, a fixture) existence is all
+    there is to ask.
+    """
+    if not _own_file(root, root / name):
+        return False
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", name],
+            capture_output=True,
+            check=False,
+        )
+        inside = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:  # no git at all
+        return True
+    return tracked.returncode == 0 or inside.returncode != 0
+
+
 def _files(root: Path, pattern: str) -> list[Path]:
     # Pruned while walking, so a `node_modules` or `.venv` is never descended.
     found = []
@@ -56,7 +82,7 @@ def _files(root: Path, pattern: str) -> list[Path]:
     return sorted(found)
 
 
-# -- K1: an MCP server bounds every request in size --------------------------------
+# -- K1: an MCP server bounds every request in size and in time ---------------------
 
 # Only a server that speaks HTTP itself is judged. `urllib.request` is here
 # because a survey that greps only for the third-party clients misses it.
@@ -77,6 +103,13 @@ CEILING_COMPARE = re.compile(
 # is what holds the behaviour.
 OVERSIZE_TEST = re.compile(r"too.?large|too.?big|oversiz|MAX_RESPONSE", re.IGNORECASE)
 _FUNC_START = re.compile(r"^(?=[ \t]*(?:async[ \t]+)?def[ \t])", re.MULTILINE)
+# Time: `requests` and `urllib.request` wait forever unless told otherwise;
+# httpx and aiohttp carry a default that `timeout=None` throws away.
+NO_DEFAULT_TIMEOUT = re.compile(
+    r"^\s*(?:import|from)\s+(?:requests|urllib\.request)\b", re.MULTILINE
+)
+TIMEOUT_SET = re.compile(r"\btimeout\s*=|\bTimeout\(|\bClientTimeout\(")
+TIMEOUT_NONE = re.compile(r"\btimeout\s*=\s*None\b|\bTimeout\(\s*None\b|\bClientTimeout\(\s*\)")
 
 
 _FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -132,10 +165,21 @@ def _server_sources(root: Path) -> list[str]:
 
 
 def check_http_bounds(root: Path, report: Findings) -> None:
-    """K1: a server that makes HTTP requests bounds what it reads, and a test proves it."""
+    """K1: a server that makes HTTP requests bounds what it reads and how long it
+    waits, and a test proves the size bound."""
     sources = _server_sources(root)
     if not any(HTTP_IMPORT.search(t) for t in sources):
         return
+    if any(TIMEOUT_NONE.search(t) for t in sources):
+        report.add("K1", "the server turns its HTTP timeout off (`timeout=None`)")
+    elif any(NO_DEFAULT_TIMEOUT.search(t) for t in sources) and not any(
+        TIMEOUT_SET.search(t) for t in sources
+    ):
+        report.add(
+            "K1",
+            "the server uses `requests` or `urllib.request`, which wait forever by default, "
+            "and never sets a `timeout=`",
+        )
     if not any(BOUNDED_READ.search(t) for t in sources):
         report.add(
             "K1",
@@ -312,7 +356,7 @@ def check_locked_install(root: Path, report: Findings) -> None:
     Copying uv.lock in proves nothing on its own. A finding names the line,
     never the command, which may carry an index credential.
     """
-    has_lock = _own_file(root, root / "uv.lock")
+    has_lock = committed(root, "uv.lock")
     for path in _files(root, "Containerfile*"):
         commands = _containerfile_commands(path.read_text(errors="ignore"))
         any_resolving = any_locked = False
@@ -409,6 +453,16 @@ def check_renovate_overrides(root: Path, report: Findings) -> None:
 
 # -- K11: a skill carries no credentials ---------------------------------------------
 
+# A vendor credential by its shape, whatever it is assigned to. The shapes are
+# bin/sdlc-secret-scan's (a test holds them equal), plus a private key's PEM header.
+_SECRET_SHAPE = re.compile(
+    r"AIza[0-9A-Za-z_-]{35}|sk-ant-[A-Za-z0-9_-]{20,}|sk-or-v1-[0-9a-f]{32,}"
+    r"|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|glpat-[A-Za-z0-9_-]{20,}"
+    r"|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r"|-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"
+)
+
 # A literal assigned to a credential name, as shell (`TOKEN=...`), code
 # (`api_key = "..."`) or YAML (`password: ...`). A value that starts with `$`,
 # `<` or `{` is an expansion or a placeholder (`TOKEN="$(gh auth token)"`), not
@@ -423,7 +477,7 @@ _CREDENTIAL = re.compile(
 
 
 def check_skills(root: Path, report: Findings) -> None:
-    """K11: no SKILL.md assigns a credential literal.
+    """K11: no SKILL.md assigns a credential literal or carries a vendor token.
 
     Fixtures under a top-level test*/ directory are skipped: a checker's own
     broken examples are not skills it ships.
@@ -432,5 +486,8 @@ def check_skills(root: Path, report: Findings) -> None:
         name = path.relative_to(root)
         if name.parts[0].startswith("test"):
             continue
-        if _CREDENTIAL.search(path.read_text(errors="ignore")):
+        text = path.read_text(errors="ignore")
+        if _CREDENTIAL.search(text):
             report.add("K11", f"{name} assigns what looks like a credential literal")
+        if _SECRET_SHAPE.search(text):
+            report.add("K11", f"{name} carries what looks like a vendor credential or private key")
