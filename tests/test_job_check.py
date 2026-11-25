@@ -268,6 +268,50 @@ def test_pull_request_test_builds_only_when_the_image_inputs_change() -> None:
     assert not skipped(t), "a renamed Containerfile is a change to it"
 
 
+def pr_build_paths(*globs: str) -> dict[str, str]:
+    """The IMAGE repo, with [tool.sdlc.image] pr-build-paths in its sdlc.toml."""
+    listed = ", ".join(f'"{g}"' for g in globs)
+    return {**IMAGE, "sdlc.toml": f"[tool.sdlc.image]\npr-build-paths = [{listed}]\n"}
+
+
+def test_pr_build_paths_add_to_the_image_inputs() -> None:
+    """#186: an image that copies deps/ in test-builds on a deps/-only pull request,
+    but only when the repo says so; the default inputs still count."""
+    for files, changed, builds in (
+        (IMAGE, "deps/openbao.tgz", False),
+        (pr_build_paths("deps/**", "rootfs/**"), "deps/openbao.tgz", True),
+        (pr_build_paths("deps/**", "rootfs/**"), "rootfs/etc/.hidden", True),
+        (pr_build_paths("deps/**", "rootfs/**"), "src/deps/a.py", False),
+        (pr_build_paths("deps/**", "rootfs/**"), "src/app.py", False),
+        (pr_build_paths("scripts/*.sh"), "scripts/build.sh", True),
+        (pr_build_paths("scripts/*.sh"), "scripts/lib/x.sh", False),
+        (pr_build_paths("deps/**"), "uv.lock", True),
+    ):
+        t = FakeTools()
+        t.pr_files = [{"filename": "README.md"}, {"filename": changed}]
+        go("pull_request", t, files=files, ref="refs/pull/1/merge")
+        assert (not skipped(t)) is builds, (changed, files.get("sdlc.toml"))
+    t = FakeTools()
+    t.pr_files = [{"filename": "vendor/x", "previous_filename": "deps/x"}]
+    go("pull_request", t, files=pr_build_paths("deps/**"), ref="refs/pull/1/merge")
+    assert not skipped(t), "a file renamed out of deps/ is a change to deps/"
+
+
+def test_pr_build_paths_must_be_globs_inside_the_repo() -> None:
+    for toml in (
+        'pr-build-paths = "deps/**"',
+        "pr-build-paths = [1]",
+        'pr-build-paths = [""]',
+        'pr-build-paths = ["/etc/**"]',
+        'pr-build-paths = ["../other/**"]',
+        'pr-build-paths = ["deps/../../x"]',
+        'pr-build-paths = ["deps\\\\x"]',
+        "pr-build-paths = [" + ", ".join(f'"d{n}/**"' for n in range(51)) + "]",
+    ):
+        files = {**IMAGE, "sdlc.toml": f"[tool.sdlc.image]\n{toml}\n"}
+        assert "pr-build-paths" in refusal("pull_request", FakeTools(), files=files), toml
+
+
 def test_pull_request_whose_files_cannot_be_read_test_builds() -> None:
     t = FakeTools()
     t.pr_files = None

@@ -36,7 +36,7 @@ import json
 import re
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -55,8 +55,10 @@ from sdlc_jobs._core import (
     fetch_tree,
     final_stage,
     host_mount,
+    image_settings,
     images,
     must,
+    pr_build_paths,
     set_output,
     step,
     tool_sdlc,
@@ -126,8 +128,10 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     if default_push and gated_on_pr(tools, env, repo):
         return CLEAN
     skip: tuple[str, ...] = ()
-    if event_name == "pull_request" and not touches_image(tools, env, repo, event):
-        skip = CONTAINER_GATES
+    if event_name == "pull_request":
+        extra = pr_build_paths(image_settings(root, repo))
+        if not touches_image(tools, env, repo, event, extra):
+            skip = CONTAINER_GATES
     rc = max(gates(tools, env, root, skip=skip), review(tools, env, root))
     if default_push:
         upload_sarif(tools, env, repo)
@@ -182,8 +186,15 @@ def released_here(tools: Tools, env: Mapping[str, str], root: Path) -> bool:
     return False
 
 
-def touches_image(tools: Tools, env: Mapping[str, str], repo: str, event: dict) -> bool:
-    """Does this pull request change a Containerfile or a lockfile (IMAGE_INPUTS)?
+def touches_image(
+    tools: Tools,
+    env: Mapping[str, str],
+    repo: str,
+    event: dict,
+    extra: Sequence[re.Pattern[str]] = (),
+) -> bool:
+    """Does this pull request change a Containerfile or a lockfile (IMAGE_INPUTS), or a
+    path the repo's [tool.sdlc.image] pr-build-paths names (`extra`)?
 
     Unreadable, or more files than GitHub lists, is "yes": the gates run.
     """
@@ -199,11 +210,11 @@ def touches_image(tools: Tools, env: Mapping[str, str], repo: str, event: dict) 
         names = [str(f.get("filename", "")) for f in files] + [
             str(f.get("previous_filename", "")) for f in files if f.get("previous_filename")
         ]
-        if any(IMAGE_INPUTS.search(n) for n in names):
+        if any(IMAGE_INPUTS.search(n) or any(p.match(n) for p in extra) for n in names):
             print("gates: this pull request changes the image's inputs: test-building it")
             return True
         if len(files) < PER_PAGE:
-            print("gates: no Containerfile or lockfile changed: the image builds at release")
+            print("gates: no image input changed: the image builds at release")
             return False
     return True
 
