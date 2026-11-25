@@ -12,6 +12,8 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import io
+import re
+import subprocess
 import sys
 import tempfile
 from contextlib import redirect_stdout
@@ -427,6 +429,16 @@ def test_skill() -> None:
     for vendored in ("node_modules", ".venv"):
         got = findings(skill, write(f"{vendored}/x/SKILL.md", 'password = "hunter2"\n'))
         assert got == [], (vendored, got)
+    # A vendor token or a private key is caught by its shape, whatever holds it.
+    shapes = (
+        "export GH=ghp_" + "a" * 36,
+        "use github_pat_" + "A1" * 20,
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "key AKIA" + "ABCDEFGHIJKLMNOP",
+    )
+    for leak in shapes:
+        got = findings(skill, write("skills/leak/SKILL.md", f"---\nname: leak\n---\n{leak}\n"))
+        assert any("vendor credential" in f for f in got), (leak, got)
     # The credential rule is K11's: the same file in an mcp-server repo is P3's scan, not this.
     assert findings(mcp_server, write("skills/leak/SKILL.md", 'password = "hunter2"\n')) == []
 
@@ -580,6 +592,45 @@ def test_coverage_lists_every_principle() -> None:
 def test_every_kind_has_its_own_id() -> None:
     ids = [k.id for k in c.KINDS.values()]
     assert sorted(ids, key=lambda i: int(i[1:])) == [f"K{n}" for n in range(1, 16)], ids
+
+
+def test_k11_shapes_match_the_secret_scan() -> None:
+    script = (Path(__file__).resolve().parent.parent / "bin" / "sdlc-secret-scan").read_text()
+    shapes = re.search(r"^shapes='([^']+)'", script, re.MULTILINE)
+    assert shapes, "bin/sdlc-secret-scan no longer sets shapes="
+    ours = c.rules._SECRET_SHAPE.pattern
+    assert ours.startswith(shapes.group(1) + "|"), (shapes.group(1), ours)
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+
+
+def test_s1_lock_must_be_tracked() -> None:
+    install = write("Containerfile", LOCKED_INSTALL)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mcp_server(root)
+        install(root)
+        _git(root, "init", "-q")
+        _git(root, "add", "--", ".", ":!uv.lock")
+        got = c.check(root).findings
+        assert "S1: `uv.lock` is not committed: git does not track it" in got, got
+        _git(root, "add", "uv.lock")
+        assert c.check(root).findings == [], c.check(root).findings
+
+
+def test_k1_time_bounds() -> None:
+    no_timeout = CLIENT.replace("import httpx", "import requests\nimport httpx")
+    timed = no_timeout + "\n\ndef get(u):\n    return requests.get(u, timeout=10)\n"
+    off = CLIENT + "\n\nCLIENT = httpx.AsyncClient(timeout=None)\n"
+    cases = [(no_timeout, "wait forever"), (off, "turns its HTTP timeout off"), (timed, None)]
+    for source, finding in cases:
+        got = findings(mcp_server, write("src/x/client.py", source))
+        if finding is None:
+            assert got == [], got
+        else:
+            assert any(f.startswith("K1:") and finding in f for f in got), (finding, got)
 
 
 if __name__ == "__main__":
