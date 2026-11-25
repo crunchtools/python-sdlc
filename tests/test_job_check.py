@@ -785,6 +785,15 @@ def test_unreadable_sarif_fails_the_weekly_run() -> None:
     assert "::error::codeql-results.sarif is not readable SARIF" in out
 
 
+def test_sarif_without_a_list_of_run_objects_fails_the_weekly_run() -> None:
+    for shape in ("[]", '{"runs": {}}', '{"runs": [1]}', '{"runs": [{}, "x"]}'):
+        t = FakeTools()
+        t.sarif = {"codeql-results.sarif": shape, "semgrep.sarif": '{"runs": [{}]}'}
+        rc, out = weekly_printed(t)
+        assert rc == check.CANNOT_RUN and sent_categories(t) == ["semgrep/"], shape
+        assert "::error::codeql-results.sarif has no SARIF runs, not uploaded" in out, shape
+
+
 def test_a_planned_check_with_no_sarif_fails_the_weekly_run() -> None:
     for scan_rc in (0, 1):
         t = FakeTools()
