@@ -513,6 +513,19 @@ def test_final_stage_not_first_is_rewritten() -> None:
     assert lines[2] == f"FROM quay.io/crunchtools/ubi10-core@{PARENT}"
 
 
+def test_a_continued_line_that_starts_with_from_is_not_rewritten() -> None:
+    t = FakeTools()
+    cf = (
+        "FROM quay.io/crunchtools/builder:1 AS b\n"
+        'RUN python -c "\\\nfrom tools.deps import missing; \\\nprint(missing)"\n'
+        "FROM quay.io/crunchtools/ubi10-core:latest\nCOPY --from=b /a /a\n"
+    )
+    go(t, cf)
+    lines = t.built_file.splitlines()
+    assert lines[2] == "from tools.deps import missing; \\"
+    assert lines[4] == f"FROM quay.io/crunchtools/ubi10-core@{PARENT}"
+
+
 def test_builder_stage_is_verified_and_pinned() -> None:
     t = FakeTools()
     cf = (
