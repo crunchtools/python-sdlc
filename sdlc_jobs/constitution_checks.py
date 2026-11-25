@@ -36,6 +36,14 @@ class Findings(Protocol):
 SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__"})
 
 
+def _own_file(root: Path, path: Path) -> bool:
+    # A committed symlink, or a path through a symlinked directory, can point
+    # out of the repo; is_file() follows it, so neither is read.
+    return (
+        not path.is_symlink() and path.is_file() and path.resolve().is_relative_to(root.resolve())
+    )
+
+
 def _files(root: Path, pattern: str) -> list[Path]:
     # Pruned while walking, so a `node_modules` or `.venv` is never descended.
     found = []
@@ -43,7 +51,7 @@ def _files(root: Path, pattern: str) -> list[Path]:
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for name in names:
             path = Path(top, name)
-            if path.relative_to(root).full_match(pattern) and path.is_file():
+            if path.relative_to(root).full_match(pattern) and _own_file(root, path):
                 found.append(path)
     return sorted(found)
 
@@ -304,7 +312,7 @@ def check_locked_install(root: Path, report: Findings) -> None:
     Copying uv.lock in proves nothing on its own. A finding names the line,
     never the command, which may carry an index credential.
     """
-    has_lock = (root / "uv.lock").is_file()
+    has_lock = _own_file(root, root / "uv.lock")
     for path in _files(root, "Containerfile*"):
         commands = containerfile_commands(path.read_text(errors="ignore"))
         any_resolving = any_locked = False
@@ -374,7 +382,7 @@ def check_renovate_overrides(root: Path, report: Findings) -> None:
     """
     for name in RENOVATE_CONFIG_FILES:
         path = root / name
-        if not path.is_file():
+        if not _own_file(root, path):
             continue
         try:
             text = _renovate_text(name, path.read_text(errors="ignore"))

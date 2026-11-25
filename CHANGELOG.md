@@ -32,6 +32,7 @@ All notable changes to this project are documented here, following
   pieces against a named ceiling, and a test rejects an oversized body. K11
   (kind `claude-skill`): no `SKILL.md` assigns a credential literal. Each
   finding cites its principle; the rest of K1, S2 and K11 stays with review.
+  A file committed as a symlink, or reached through one, is never read.
 - tests/test_workflows.py pins the bootstrap's launch line in the fleet file
   and in sdlc's own (or the file it is given): the socket's mode and owner,
   `--user 0` and `label=disable`, the mounts, the exact `--env` list, no other

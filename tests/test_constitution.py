@@ -305,6 +305,64 @@ def test_s1_names_the_line_not_the_command() -> None:
     assert any("Containerfile:4 " in f for f in s1), s1
 
 
+def test_s1_lock_committed_but_never_used() -> None:
+    # Every install takes --no-deps, yet none reads the lock: only the file-level finding.
+    unused = 'FROM x\nLABEL version="1.2.0"\nCOPY uv.lock ./\nRUN pip install --no-deps .\n'
+    got = findings(mcp_server, write("Containerfile", unused))
+    assert got == [
+        "S1: Containerfile resolves Python dependencies but never installs from uv.lock "
+        "(`uv export --frozen` to a file it installs, or `uv sync --frozen`)"
+    ], got
+    # With no lock committed there is nothing to install from (S1 still asks for one).
+    got = findings(mcp_server, write("Containerfile", unused), drop("uv.lock"))
+    assert not any("never installs" in f for f in got), got
+
+
+def link(name, outside: Path, text: str):
+    """Commit `name` as a symlink to a file outside the repo holding `text`."""
+
+    def go(root: Path) -> None:
+        target = outside / name.replace("/", "_")
+        target.write_text(text)
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).unlink(missing_ok=True)
+        (root / name).symlink_to(target)
+
+    return go
+
+
+def test_symlinked_files_are_not_read() -> None:
+    # is_file() follows a link, so a committed symlink would be judged by a file
+    # outside the repo. Each case fails as a real file and is ignored as a link.
+    unlocked = 'FROM x\nLABEL version="1.2.0"\nRUN pip install .\n'
+    cooldown = '{"minimumReleaseAge": "1 day"}'
+    leak = '---\nname: leak\n---\npassword = "hunter2"\n'
+    cases = [
+        ("S1", mcp_server, "Containerfile", unlocked),
+        ("S2", mcp_server, "renovate.json", cooldown),
+        ("S2", mcp_server, ".github/renovate.json", cooldown),
+        ("K11", skill, "skills/leak/SKILL.md", leak),
+    ]
+    for principle, setup, name, text in cases:
+        assert any(f.startswith(f"{principle}:") for f in findings(setup, write(name, text))), name
+        with tempfile.TemporaryDirectory() as outside:
+            got = findings(setup, link(name, Path(outside), text))
+        assert not any(f.startswith(f"{principle}:") for f in got), (name, got)
+    # A path through a symlinked directory leaves the repo just the same.
+    with tempfile.TemporaryDirectory() as outside:
+        (Path(outside) / "renovate.json").write_text(cooldown)
+        got = findings(mcp_server, lambda root: (root / ".github").symlink_to(outside))
+    assert not any(f.startswith("S2:") for f in got), got
+    # A symlinked uv.lock is no committed lock, so an install that skips it is fine.
+    with tempfile.TemporaryDirectory() as outside:
+        got = findings(
+            mcp_server,
+            link("uv.lock", Path(outside), "version = 1\n"),
+            write("Containerfile", 'FROM x\nLABEL version="1.2.0"\nRUN pip install --no-deps .\n'),
+        )
+    assert not any(f.startswith("S1:") for f in got), got
+
+
 def test_s2_unreadable_package_json() -> None:
     got = findings(mcp_server, write("package.json", '{"renovate": {'))
     assert any(f.startswith("S2:") and "package.json" in f for f in got), got
