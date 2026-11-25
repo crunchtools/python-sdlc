@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.15.9] - 2026-11-25
+
 ### Fixed
 
 - `gourmand` keeps its cache outside a tree it cannot write. 0.15.8 runs
