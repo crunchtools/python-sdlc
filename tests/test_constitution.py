@@ -365,6 +365,10 @@ def test_skill() -> None:
     for line in fine:
         got = findings(skill, write("skills/fine/SKILL.md", f"---\nname: fine\n---\n{line}\n"))
         assert got == [], (line, got)
+    # A vendored tree is not the repo's own source, and is never walked.
+    for vendored in ("node_modules", ".venv"):
+        got = findings(skill, write(f"{vendored}/x/SKILL.md", 'password = "hunter2"\n'))
+        assert got == [], (vendored, got)
     # The credential rule is K11's: the same file in an mcp-server repo is P3's scan, not this.
     assert findings(mcp_server, write("skills/leak/SKILL.md", 'password = "hunter2"\n')) == []
 

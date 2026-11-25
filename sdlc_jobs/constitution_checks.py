@@ -14,6 +14,7 @@ from __future__ import annotations
 import ast
 import fnmatch
 import json
+import os
 import posixpath
 import re
 from pathlib import Path
@@ -36,11 +37,15 @@ SKIP_DIRS = frozenset({".git", "node_modules", ".venv", "venv", "__pycache__"})
 
 
 def _files(root: Path, pattern: str) -> list[Path]:
-    return [
-        p
-        for p in sorted(root.glob(pattern))
-        if p.is_file() and not SKIP_DIRS.intersection(p.relative_to(root).parts)
-    ]
+    # Pruned while walking, so a `node_modules` or `.venv` is never descended.
+    found = []
+    for top, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for name in names:
+            path = Path(top, name)
+            if path.relative_to(root).full_match(pattern) and path.is_file():
+                found.append(path)
+    return sorted(found)
 
 
 # -- K1: an MCP server bounds every request in size --------------------------------
