@@ -45,7 +45,8 @@ DENIED_NAMES = frozenset({".python-version", ".python-versions", "uv.toml"})
 RAW = ("--no-renames", "--no-abbrev", "--no-ext-diff", "--no-textconv")
 GONE = "000000"  # git's mode for a side that does not exist
 REFUSED = 2  # relock.py hands over on any nonzero; 2 says the lock could not run
-SECONDS = 540  # inside relock.py's 600, so this shim, not relock, removes the sibling
+SECONDS = 540  # podman's --timeout on the sibling: inside relock.py's 600
+GRACE = 30  # the client's wait past that, so this shim and not relock removes the sibling
 ENGINE_FAILED = (125, 126, 127)  # podman's own: the sibling never ran uv
 MAX_LOCK = 50 * 1024 * 1024
 SCRATCH = "/scratch"  # the sibling's only writable path but OUT: a tmpfs, its HOME and TMPDIR
@@ -120,19 +121,17 @@ def lock_beside(
     work, host = mount
 
     def on_host(path: Path) -> str:
-        return host + str(path)[len(str(work)) :]
+        return str(Path(host) / path.relative_to(work))
 
     out = Path(tempfile.mkdtemp(prefix="relock-", dir=work))
     name = f"sdlc-relock-{secrets.token_hex(6)}"
     argv = sibling(env, name, image, on_host(checkout), on_host(out))
     try:
-        done = run(argv, capture_output=True, text=True, timeout=SECONDS, check=False)
+        done = run(argv, capture_output=True, text=True, timeout=SECONDS + GRACE, check=False)
     except subprocess.TimeoutExpired:
         return refuse(f"the lock ran past {SECONDS}s")
     finally:
-        run(
-            [*core.podman(env), "rm", "--force", "--ignore", name], capture_output=True, check=False
-        )
+        remove(env, name, run)
     sys.stderr.write(done.stdout + done.stderr)
     if done.returncode in ENGINE_FAILED:
         return refuse(f"podman could not start the sibling (exit {done.returncode})")
@@ -140,6 +139,14 @@ def lock_beside(
         return refuse(f"`uv lock --no-build` exited {done.returncode} in the sibling")
     why = take(out / "uv.lock", checkout / "uv.lock")
     return refuse(why) if why else 0
+
+
+def remove(env: Mapping[str, str], name: str, run: Run) -> None:
+    """`podman rm -f` of the sibling, as ai removes its model's; gone already is fine."""
+    argv = [*core.podman(env), "rm", "-f", "--ignore", name]
+    done = run(argv, capture_output=True, text=True, timeout=SECONDS, check=False)
+    if done.returncode != 0:
+        print(f"::warning::could not remove {name}: {(done.stderr or done.stdout).strip()}")
 
 
 def sibling(env: Mapping[str, str], name: str, image: str, src: str, out: str) -> list[str]:
@@ -150,6 +157,8 @@ def sibling(env: Mapping[str, str], name: str, image: str, src: str, out: str) -
         "--rm",
         "--name",
         name,
+        "--timeout",
+        str(SECONDS),
         "--pull=never",
         "--user",
         "0",

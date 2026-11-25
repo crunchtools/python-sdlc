@@ -195,8 +195,9 @@ check(
     and not any(v in " ".join(argv) for v in [*SECRETS.values(), "x-access-token"]),
 )
 check(
-    "sibling: removed by name after the run",
-    any("rm" in c and argv[argv.index("--name") + 1] in c for c in s.calls()),
+    "sibling: named, timed out by podman, and removed by name after the run",
+    argv[argv.index("--timeout") + 1] == str(_relock.SECONDS)
+    and any("rm" in c and argv[argv.index("--name") + 1] in c for c in s.calls()),
 )
 
 # -- what the shim refuses before anything runs ------------------------------------------------
