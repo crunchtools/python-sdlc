@@ -144,8 +144,9 @@ case $status in identical|ahead) ;; *) die "$sha is not on $repo's $default ($st
 # podman.socket and its configuration are left as they are.
 sock=$work/podman.sock
 printf '[containers]\nlabel = false\n' > "$work/containers.conf"
+# podman itself, not the pod function: $! must be the service, for cleanup to stop it.
 CONTAINERS_CONF_OVERRIDE=$work/containers.conf TMPDIR=$store/tmp \
-  pod system service --time=0 "unix://$sock" &
+  podman --root "$store/storage" --runroot /run/sdlc-release/runroot system service --time=0 "unix://$sock" &
 service=$!
 tries=0
 until [ -S "$sock" ]; do
