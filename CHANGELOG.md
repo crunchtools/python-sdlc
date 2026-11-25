@@ -6,12 +6,6 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
-### Fixed
-
-- image no longer pins a digest into a line that continues a RUN: a
-  `python -c "...` line starting `from x import y` matched the FROM rewrite
-  (hermes 1.2.0) (a1551)
-
 ## [0.16.3] - 2026-11-25
 
 ### Added
@@ -32,6 +26,9 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- image no longer pins a digest into a line that continues a RUN: a
+  `python -c "...` line starting `from x import y` matched the FROM rewrite
+  (hermes 1.2.0) (a1551)
 - The image carries Ashigaru at 044cdff: publish arms auto-merge only on a base
   branch that requires checks (ashigaru#257), and the staged guard refuses
   .python-version, uv.toml, `[tool.uv]` and mode changes (ashigaru#263).
