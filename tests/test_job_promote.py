@@ -531,6 +531,86 @@ def test_provenance_refuses_malformed_or_mismatched_labels() -> None:
     assert promote.provenance({}, REPO) is None
 
 
+# ------------------------------------------------------------------ local release
+
+LOCAL = f"https://github.com/crunchtools/sdlc/blob/{'c' * 40}/scripts/local-release.sh"
+LOCAL_ENV = {
+    "SDLC_LOCAL_BUILDER": LOCAL,
+    "GITHUB_RUN_ATTEMPT": "42",
+    "GITHUB_REF": "refs/heads/main",
+}
+
+
+def local_labels() -> dict[str, str]:
+    """What image labels a scripts/local-release.sh build: no run id, the run's attempt."""
+    return {
+        **built_labels(),
+        "com.crunchtools.build.run": f"https://github.com/{REPO}/actions/runs//attempts/42",
+        "com.crunchtools.build.builder": "",
+        "com.crunchtools.build.workflow": "",
+    }
+
+
+def local_job(labels: dict[str, str], **env: str) -> promote.Job:
+    full = {"GITHUB_SHA": SHA, **LOCAL_ENV, **env}
+    return promote.Job(FakeTools(), full, REPO, REF, NEW, Path("."), labels)
+
+
+def test_a_local_release_build_is_attested_with_provenance() -> None:
+    t = FakeTools()
+    t.labels[NEW] = local_labels()
+    assert go(t, **LOCAL_ENV) == 0
+    assert t.attested == {(NEW, "spdxjson"), (NEW, "slsaprovenance1")}
+
+
+def test_local_provenance_names_the_script_and_this_run() -> None:
+    p = promote.local_provenance(local_job(local_labels()))
+    assert p is not None
+    source = f"https://github.com/{REPO}"
+    assert p["buildDefinition"]["buildType"] == promote.BUILD_TYPE
+    assert p["buildDefinition"]["externalParameters"]["workflow"] == {
+        "ref": "refs/heads/main",
+        "repository": source,
+        "path": ".github/workflows/ci.yml",
+    }
+    assert p["buildDefinition"]["resolvedDependencies"] == [
+        {"uri": f"git+{source}", "digest": {"gitCommit": SHA}}
+    ]
+    assert p["runDetails"]["builder"]["id"] == LOCAL
+    assert p["runDetails"]["metadata"]["invocationId"] == f"{LOCAL}#attempt-42"
+
+
+def test_local_provenance_only_for_this_local_runs_own_build() -> None:
+    assert promote.local_provenance(local_job(local_labels(), SDLC_LOCAL_BUILDER="")) is None
+    bad_env: list[dict[str, str]] = [
+        {"SDLC_LOCAL_BUILDER": LOCAL.replace("c" * 40, "main")},
+        {"SDLC_LOCAL_BUILDER": LOCAL.replace("crunchtools/sdlc", "someone/sdlc")},
+        {"GITHUB_RUN_ID": "7"},
+        {"GITHUB_RUN_ATTEMPT": "43"},
+        {"GITHUB_RUN_ATTEMPT": ""},
+        {"GITHUB_REF": "refs/tags/v1.2.3"},
+        {"GITHUB_SHA": OTHER_SHA},
+    ]
+    for change in bad_env:
+        assert promote.local_provenance(local_job(local_labels(), **change)) is None, change
+    bad_labels: list[dict[str, str]] = [
+        {"com.crunchtools.build.run": RUN},
+        {"com.crunchtools.build.builder": WORKFLOW},
+        {"com.crunchtools.build.workflow": WORKFLOW},
+        {"com.crunchtools.build.commit": OTHER_SHA},
+        {"org.opencontainers.image.revision": OTHER_SHA},
+    ]
+    for change in bad_labels:
+        assert promote.local_provenance(local_job({**local_labels(), **change})) is None, change
+
+
+def test_a_ci_build_keeps_its_own_provenance_under_a_local_promote() -> None:
+    job = local_job(built_labels())
+    assert promote.local_provenance(job) is None
+    p = promote.provenance(job.labels, REPO)
+    assert p is not None and p["runDetails"]["metadata"]["invocationId"] == RUN
+
+
 # ------------------------------------------------------------------ many images
 
 _core.EXTRA_IMAGES[REPO] = ("demo-base",)  # what sdlc would review

@@ -28,8 +28,9 @@
 # Release (only the App may create v* tags); promote then moves X.Y.Z with
 # `latest`. Any other commit moves `latest` alone. Like CI, check runs no
 # gates when the merged pull request's check passed on the same tree; image's
-# container gates always run. The image records no Actions run, so it
-# gets an SBOM and no SLSA provenance rather than a provenance that lies.
+# container gates always run. The image records no Actions run, so its SLSA
+# provenance names this script, at the sdlc commit it ran from, as the builder
+# (promote's local_provenance), never a workflow run that did not happen.
 #
 # Usage: <secrets.json scripts/local-release.sh <owner/repo> <40-hex commit>
 set -eu
@@ -43,12 +44,24 @@ case $repo in */*/*|/*|*/|*[!A-Za-z0-9._/-]*) die "$repo is not owner/name" ;; *
 case $sha in *[!0-9a-f]*) die "$sha is not a 40-hex commit" ;; esac
 [ "${#sha}" -eq 40 ] || die "$sha is not a 40-hex commit"
 [ "$(id -u)" -eq 0 ] || die "run as root: the jobs drive the host's podman socket"
-for tool in podman skopeo jq curl openssl unshare; do
+for tool in podman skopeo jq curl openssl unshare flock git; do
   command -v "$tool" > /dev/null || die "$tool is not on PATH"
 done
 
 project=${repo#*/}
 here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+# One run of a project at a time: cleanup removes the images this commit labels
+# and every localhost/<project> image, which a second run of it is still using.
+# By project, not owner/name, because the launcher names its image by project.
+# Taken before the cleanup trap, so a run that waits here removes nothing.
+mkdir -p /run/lock/sdlc-local-release
+exec 8> "/run/lock/sdlc-local-release/$project.lock"
+flock -n 8 || { say "waiting for the other run of $project"; flock 8; }
+# The builder promote's provenance names: this script at the commit it ran from.
+rev=$(git -C "$here" rev-parse HEAD 2> /dev/null) || die "$here is not a git checkout of sdlc"
+[ -z "$(git -C "$here" status --porcelain -- scripts sdlc_jobs bin examples)" ] \
+  || die "$here has uncommitted changes: the provenance would name a commit that did not run"
+SDLC_LOCAL_BUILDER=https://github.com/crunchtools/sdlc/blob/$rev/scripts/local-release.sh
 # The fleet file's own pins, read out of it so this loop cannot drift from CI.
 bootstrap=$(grep -o 'quay\.io/crunchtools/sdlc-bootstrap@sha256:[0-9a-f]\{64\}' "$here/examples/ci.yml" | head -1)
 [ -n "$bootstrap" ] || die "examples/ci.yml pins no sdlc-bootstrap digest"
@@ -157,7 +170,7 @@ CONTAINERS_CONF_OVERRIDE=$work/containers.conf TMPDIR=$store/tmp \
   unshare -m --propagation private sh -c \
     'mount --bind "$1" /usr/share/rhel/secrets 2> /dev/null || [ ! -d /usr/share/rhel/secrets ] || exit 1; shift; exec "$@"' \
     sh "$work/no-secrets" podman --root "$store/storage" --runroot /run/sdlc-release/runroot \
-      system service --time=0 "unix://$sock" &
+      system service --time=0 "unix://$sock" 8>&- &
 service=$!
 tries=0
 until [ -S "$sock" ]; do
@@ -169,9 +182,9 @@ jq -n --arg r "$repo" --arg d "$default" --arg s "$sha" \
   '{repository: {full_name: $r, default_branch: $d}, ref: ("refs/heads/" + $d), after: $s, head_commit: {id: $s}}' \
   > "$work/event.json"
 
-# No Actions run exists, so none is named (and no provenance follows); the
-# attempt alone is set, unique, because image names its cache volume by it and
-# runs here can overlap.
+# No Actions run exists, so none is named; the attempt alone is set, unique,
+# because image names its cache volume by it and runs here can overlap, and
+# promote's local provenance holds the image's run label to this attempt.
 attempt=$(date +%s)$$
 # The bootstrap verifies the FIRST of sdlc:<major>'s RepoDigests. An image
 # re-pushed under a new manifest (a hotfix's unsigned push, then its signed
@@ -268,7 +281,9 @@ if printf '%s' "$plan" | jq -e '.boot' > /dev/null; then
 fi
 
 SDLC_CHECK=$plan SDLC_IMAGE_RESULT=$built SDLC_BOOT=$boot SDLC_WRITE=$write SDLC_RELEASE=$release \
+  SDLC_LOCAL_BUILDER=$SDLC_LOCAL_BUILDER \
   job promote -e SDLC_CHECK -e SDLC_IMAGE_RESULT -e SDLC_BOOT -e SDLC_WRITE -e SDLC_RELEASE \
+    -e SDLC_LOCAL_BUILDER \
     -e QUAY_USERNAME -e QUAY_PASSWORD -e COSIGN_PRIVATE_KEY -e COSIGN_PASSWORD
 
 # ------------------------------------------------------------------ verify
