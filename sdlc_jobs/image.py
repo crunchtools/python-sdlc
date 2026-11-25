@@ -91,6 +91,7 @@ RH_REKOR = "/etc/pki/sigstore/REKOR-signing-key"
 US = "\x1f"  # the plan's argv separator
 SHA = re.compile(r"[0-9a-f]{40}")
 GATES = ("container-smoke", "container-scan", "bootc-lint")
+IMAGE_CHECKS = ("container-build", "container-smoke", "container-scan")
 SECRETS = (
     "QUAY_USERNAME",
     "QUAY_PASSWORD",
@@ -624,10 +625,14 @@ def gate_plan(job: Job) -> dict[str, tuple[str, str]]:
         parts = line.split("\t", PLAN_FIELDS - 1)
         if len(parts) == PLAN_FIELDS:
             plan.setdefault(parts[0], (parts[2], parts[3]))
-    if "container-build" not in plan:
-        # ci skips the build where the check job cannot do it (an RHSM build, which
-        # needs secrets only this job holds). Planned by name, it ignores that skip.
-        for line in job.must(["sdlc", "plan", "container-build"]).splitlines():
+    # ci leaves the image's own checks out where the check job cannot run them (an
+    # RHSM build, which needs secrets only this job holds) or where a python repo
+    # names no container stack. The image is still built and gated here: planned by
+    # name, a check ignores ci's skip and stacks.
+    for check in IMAGE_CHECKS:
+        if check in plan:
+            continue
+        for line in job.must(["sdlc", "plan", check]).splitlines():
             parts = line.split("\t", PLAN_FIELDS - 1)
             if len(parts) == PLAN_FIELDS:
                 plan.setdefault(parts[0], (parts[2], parts[3]))

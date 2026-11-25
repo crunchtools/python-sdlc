@@ -444,12 +444,31 @@ def test_push_builds_when_the_pull_request_recorded_no_candidate_for_this_tree()
         assert not any(a[:2] == ["skopeo", "copy"] for a in t.argvs)
 
 
-def test_a_build_ci_skips_is_still_built_and_pushed() -> None:
+def test_image_checks_ci_leaves_out_are_still_run_here() -> None:
+    names = ("container-build", "container-smoke", "container-scan")
+    # An RHSM build skips all three in ci; a python repo with no stacks plans none.
     t = FakeTools()
-    t.ci_skip = {"container-build"}  # an RHSM build: the check job cannot do it
+    t.ci_skip = set(names)
     rc, _ = go(t, QUAY_PARENT)
     assert rc == 0 and t.built() and t.pushed(), t.log
-    assert ["sdlc", "plan", "container-build"] in t.argvs
+    for name in names:
+        assert ["sdlc", "plan", name] in t.argvs, name
+    assert any("scan-rootfs" in a for a in t.argvs), "the scan ran"
+
+
+def test_an_image_check_ci_plans_is_not_planned_again() -> None:
+    t = FakeTools()
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc == 0, t.log
+    assert not any(a[:2] == ["sdlc", "plan"] and a[2] in ("container-build", "container-smoke") for a in t.argvs)
+
+
+def test_a_scan_finding_on_a_check_ci_left_out_stops_the_push() -> None:
+    t = FakeTools()
+    t.ci_skip = {"container-build", "container-smoke", "container-scan"}
+    t.scan_rc = 1
+    rc, _ = go(t, QUAY_PARENT)
+    assert rc != 0 and not t.pushed(), t.log
 
 
 def test_a_recorded_candidate_that_does_not_check_out_is_refused() -> None:

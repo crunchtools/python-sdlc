@@ -13,9 +13,11 @@ All notable changes to this project are documented here, following
   every git call sdlc makes there (fetch, clone, `rev-parse`, and the launcher's
   git) marks that one tree as a `safe.directory` through the environment, never
   `*` (#157).
-- `image` builds and publishes a repo whose `[tool.sdlc.ci]` skips
-  `container-build` (an RHSM build the check job cannot do): it plans the build by
-  name, which ignores ci's skip, instead of failing with "plans no container-build".
+- `image` builds, smoke-tests and scans an image whose checks `sdlc plan ci`
+  leaves out: an RHSM build (skipped in ci, where there are no subscription
+  secrets) or a python repo naming no container stack. It plans
+  `container-build`, `container-smoke` and `container-scan` by name, which ignores
+  ci's skip and stacks, instead of failing with "plans no container-build".
 
 ## [0.15.0] - 2026-11-24
 
