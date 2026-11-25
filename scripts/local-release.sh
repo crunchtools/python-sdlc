@@ -144,9 +144,14 @@ case $status in identical|ahead) ;; *) die "$sha is not on $repo's $default ($st
 # podman.socket and its configuration are left as they are.
 sock=$work/podman.sock
 printf '[containers]\nlabel = false\n' > "$work/containers.conf"
+# No default mounts: on a RHEL host podman puts the host's entitlement in every
+# container's /run/secrets, and subscription-manager then refuses to register in
+# a build's RHSM step ("operating in container mode"). A runner VM mounts none.
+: > "$work/mounts.conf"
 # podman itself, not the pod function: $! must be the service, for cleanup to stop it.
 CONTAINERS_CONF_OVERRIDE=$work/containers.conf TMPDIR=$store/tmp \
-  podman --root "$store/storage" --runroot /run/sdlc-release/runroot system service --time=0 "unix://$sock" &
+  podman --root "$store/storage" --runroot /run/sdlc-release/runroot \
+    --default-mounts-file "$work/mounts.conf" system service --time=0 "unix://$sock" &
 service=$!
 tries=0
 until [ -S "$sock" ]; do
