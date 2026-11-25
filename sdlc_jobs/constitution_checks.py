@@ -243,7 +243,7 @@ def _locked_paths(commands: list[tuple[int, str]]) -> list[tuple[str, set[str]]]
     carried such a file to a new path (the fleet exports in one stage and
     installs in the next). Relative paths are taken against WORKDIR.
     """
-    cwd, locked = "/", set()
+    cwd, locked = "/", set[str]()
     seen: list[tuple[str, set[str]]] = []
     for _, command in commands:
         seen.append((cwd, set(locked)))
