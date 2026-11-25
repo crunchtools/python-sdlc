@@ -33,6 +33,13 @@ to review:
   - `renovate` runs only in crunchtools/constitution, on the weekly cron or a
     bare default-branch dispatch, within its token's hour, and holds the
     Renovate App key alone: no GITHUB_TOKEN, `permissions: {}`
+  - every bootstrap step, in the fleet file and in `ai`, `write` and `gate`
+    of sdlc's own, runs one launch line: podman.socket started, /run/podman
+    0711, the socket chowned to the job user and never world-writable; a
+    `podman --remote` run as `--user 0` with `label=disable`, the socket at
+    /var/run/docker.sock and the workspace's parent mounted, exactly the fixed
+    `--env` names, and no other option; the bootstrap pinned by sha256 digest,
+    given `event`
 
 sdlc's own ci.yml and `sdlc event` land in their own pull requests; until
 each exists, the checks that read it are reported as skipped, not passed.
@@ -48,6 +55,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable
@@ -497,6 +505,140 @@ else:
             )
             check(f"own: {job_id} is byte for byte the fleet file's", same)
             check(f"own: {job_id} parses as the fleet file's", own.get(job_id) == fleet[job_id])
+
+# ------------------------------------------------------------ the launch step
+
+SOCKET = "/run/podman/podman.sock"
+# The commands before `podman run`, in order: /run/podman can be traversed but
+# not listed, and the socket is the job user's alone, never 0666.
+LAUNCH_PRELUDE = [
+    ["sudo", "systemctl", "start", "podman.socket"],
+    ["sudo", "chmod", "0711", "/run/podman"],
+    ["sudo", "chown", "$(id -u)", SOCKET],
+]
+LAUNCH_REMOTE = ["podman", "--remote", "--url", f"unix://{SOCKET}", "run", "--rm"]
+LAUNCH_MOUNTS = [f"{SOCKET}:/var/run/docker.sock", "${RUNNER_WORKSPACE%/*}:${RUNNER_WORKSPACE%/*}"]
+# Every name the bootstrap reads; anything else stays on the runner.
+LAUNCH_ENV = [
+    "GITHUB_*", "RUNNER_*", "ACTIONS_*", "CI", "SDLC_*", "VERSION", "DIGEST",
+    "QUAY_*", "RHSM_*", "REGISTRY_REDHAT_IO_*", "COSIGN_*", "ASHIGARU_*",
+    "RENOVATE_*", "CLAUDE_CODE_OAUTH_TOKEN", "OPENROUTER_API_KEY",
+]  # fmt: skip
+LAUNCH_OPTIONS = [
+    ("--user", "0"),
+    ("--security-opt", "label=disable"),
+    *(("-v", mount) for mount in LAUNCH_MOUNTS),
+    ("-w", "$GITHUB_WORKSPACE"),
+    *(("--env", name) for name in LAUNCH_ENV),
+]
+BOOTSTRAP = re.compile(r"quay\.io/crunchtools/sdlc-bootstrap@sha256:[0-9a-f]{64}")
+# A chmod mode clause that grants write to others: `o+w`, `a=rw`, a bare `+w`.
+SYMBOLIC = re.compile(r"(?P<who>[ugoa]*)(?P<op>[-+=])(?P<perms>[rwxXst]*)")
+
+
+def world_writable(mode: str) -> bool:
+    """Whether a chmod mode, octal or symbolic, lets anyone write."""
+    if mode.isdigit():
+        return bool(int(mode, 8) & 0o002)
+    return any(
+        (m := SYMBOLIC.fullmatch(clause))
+        and m["op"] != "-"
+        and "w" in m["perms"]
+        and (not m["who"] or set(m["who"]) & {"o", "a"})
+        for clause in mode.split(",")
+    )
+
+
+def launch_checks(label: str, jobs: dict, job_ids: list[str]) -> None:
+    """The bootstrap's `run:` line in each of job_ids, one command at a time."""
+    runs = {
+        job_id: [
+            step["run"]
+            for step in (jobs.get(job_id) or {}).get("steps") or []
+            if "sdlc-bootstrap" in str(step.get("run", ""))
+        ]
+        for job_id in job_ids
+    }
+    check(
+        f"{label}: {', '.join(job_ids)} each run the bootstrap once",
+        all(len(lines) == 1 for lines in runs.values()),
+        str({job_id: len(lines) for job_id, lines in runs.items()}),
+    )
+    launches = {line for lines in runs.values() for line in lines}
+    check(f"{label}: they share one launch line", len(launches) == 1)
+    if not launches:
+        return
+    words = shlex.split(launches.pop())
+    commands: list[list[str]] = [[]]
+    for word in words:
+        if word == "&&":
+            commands.append([])
+        else:
+            commands[-1].append(word)
+    *prelude, podman = commands
+    check(
+        f"{label}: the launch starts podman.socket, 0711 /run/podman, chowns the socket",
+        prelude == LAUNCH_PRELUDE,
+        str(prelude),
+    )
+    loose = [
+        " ".join(c)
+        for c in commands
+        if "chmod" in c[:-1] and world_writable(c[c.index("chmod") + 1])
+    ]
+    check(f"{label}: nothing in the launch is made world-writable", not loose, str(loose))
+    check(
+        f"{label}: the bootstrap runs on the host's podman, removed after",
+        podman[: len(LAUNCH_REMOTE)] == LAUNCH_REMOTE,
+        " ".join(podman[: len(LAUNCH_REMOTE)]),
+    )
+    rest = podman[len(LAUNCH_REMOTE) :]
+    options: list[tuple[str, str]] = []
+    while len(rest) > 1 and rest[0].startswith("-"):
+        options.append((rest[0], rest[1]))
+        rest = rest[2:]
+    check(
+        f"{label}: as root in the container, SELinux labels off",
+        ("--user", "0") in options and ("--security-opt", "label=disable") in options,
+    )
+    mounts = [value for flag, value in options if flag in ("-v", "--volume")]
+    check(
+        f"{label}: mounts the socket as docker.sock and the workspace's parent",
+        mounts == LAUNCH_MOUNTS,
+        str(mounts),
+    )
+    env = [value for flag, value in options if flag in ("--env", "-e")]
+    check(
+        f"{label}: forwards exactly the fixed --env names",
+        env == LAUNCH_ENV,
+        f"missing {sorted(set(LAUNCH_ENV) - set(env))}, extra {sorted(set(env) - set(LAUNCH_ENV))}",
+    )
+    check(
+        f"{label}: no option but those",
+        options == LAUNCH_OPTIONS,
+        f"missing {[o for o in LAUNCH_OPTIONS if o not in options]},"
+        f" extra {[o for o in options if o not in LAUNCH_OPTIONS]}",
+    )
+    check(
+        f"{label}: runs the bootstrap pinned by digest, with `event`",
+        rest[1:] == ["event"] and bool(BOOTSTRAP.fullmatch(rest[0])),
+        " ".join(rest),
+    )
+
+
+for mode, loose in (
+    *((mode, True) for mode in ("0666", "0777", "0002", "o+w", "a=rw", "+w", "u+x,o+w")),
+    *((mode, False) for mode in ("0711", "0755", "0600", "g+w", "o-w", "u=rwx", "a+x")),
+):
+    check(
+        f"launch: chmod {mode} {'is' if loose else 'is not'} world-writable",
+        world_writable(mode) is loose,
+    )
+launch_checks("fleet", fleet, list(fleet))
+if OWN.is_file() and "test" in (own_jobs := jobs_of(OWN.read_text())):
+    launch_checks("own", own_jobs, list(SHARED))
+else:
+    skip("own: the launch step", f"{OWN} is not the new file yet")
 
 # -------------------------------------------- the dispatcher's own guard
 

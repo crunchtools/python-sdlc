@@ -6,6 +6,13 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- tests/test_workflows.py pins the bootstrap's launch line in the fleet file
+  and in sdlc's own (or the file it is given): the socket's mode and owner,
+  `--user 0` and `label=disable`, the mounts, the exact `--env` list, no other
+  option, and the bootstrap by digest with `event` (#178)
+
 ### Fixed
 
 - Gourmand runs in the fleet again (#177). The cutover deleted every repo's
