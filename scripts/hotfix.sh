@@ -29,6 +29,9 @@ for tool in jq openssl curl podman; do
   command -v "$tool" > /dev/null || { echo "hotfix: needs $tool" >&2; exit 1; }
 done
 
+# A caller's own app_key or token would stay exported to every child after the
+# assignments below (POSIX sh); drop them before anything is assigned.
+unset app_key token app_id
 secrets=$(cat)
 field() {
   printf '%s' "$secrets" | jq -er --arg n "$1" '.[$n] // empty' \
@@ -69,8 +72,10 @@ mint() {
   _head=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
   _claims=$(jq -cn --arg iss "$app_id" --argjson t "$_now" '{iat: ($t - 60), exp: ($t + 540), iss: $iss}' | b64url)
   printf '%s.%s' "$_head" "$_claims" > "$work/jwt"
-  printf '%s\n' "$app_key" | openssl dgst -sha256 -sign /dev/stdin -out "$work/sig" "$work/jwt" || return 1
-  _jwt=$_head.$_claims.$(b64url < "$work/sig")
+  # The signature stays in the pipe; a failed openssl leaves it empty.
+  _sig=$(printf '%s\n' "$app_key" | openssl dgst -sha256 -sign /dev/stdin "$work/jwt" | b64url)
+  [ -n "$_sig" ] || return 1
+  _jwt=$_head.$_claims.$_sig
   _inst=$(api "$_jwt" "$API/repos/$GITHUB_REPOSITORY/installation" | jq -er .id) || return 1
   api "$_jwt" -X POST -d "$TAG_BODY" "$API/app/installations/$_inst/access_tokens" | jq -er .token
 }
