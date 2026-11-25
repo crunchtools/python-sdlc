@@ -69,7 +69,7 @@ tree_version() {
 # ------------------------------------------------------------- building/testing
 
 SHELL_FILES='bin/sdlc bin/sdlc-bootstrap boot/sdlc scripts/self.sh scripts/release-version.sh
-  scripts/revision-of.sh scripts/sign-digest.sh scripts/attest-digest.sh tests/contract.sh
+  scripts/hotfix.sh scripts/revision-of.sh scripts/sign-digest.sh scripts/attest-digest.sh tests/contract.sh
   tests/test_host_contract.sh tests/test_container_stack.sh tests/test_node_stack.sh
   tests/test_bootc_stack.sh tests/test_docs_stack.sh tests/test_revision_of.sh
   tests/test_bootstrap.sh tests/test_sign_digest.sh tests/test_attest_digest.sh

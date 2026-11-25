@@ -18,6 +18,12 @@ All notable changes to this project are documented here, following
   from `ImageDigest`. Before, every `sdlc / check` there stopped with "the
   workspace ... is not a mount of this container" or "not pinned by digest".
 
+### Added
+
+- `scripts/hotfix.sh`: release a pushed, version-bumped tree from a host in
+  minutes, by running `self.sh`'s own image and sign steps with sdlc's key and
+  robot read from stdin. Every check of the pipeline's release still applies.
+
 ## [0.15.1] - 2026-11-25
 
 ### Fixed
