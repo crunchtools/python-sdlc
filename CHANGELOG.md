@@ -6,6 +6,21 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- **`boot` pulls the gated digest under a policy of its own (a1688).** A host
+  whose policy.json requires a fleet signature for every quay.io/crunchtools
+  image refuses the engine's pull of `gated-<sha>`, which promote signs only
+  after boot: "Source image rejected: A signature was required" on Exedore's
+  rhel10-bootc-* releases, and on every repo once rhel10-bootc-server 1.8.x
+  lands. podman-remote cannot hand the engine a policy, so skopeo, in the job,
+  copies `ref@digest` under a policy that rejects everything but that one
+  digest, keeping the manifest so the digest is unchanged, and the engine loads
+  the archive as `ref:gated-<sha>`. A tag, another digest or another repository
+  is refused by that policy; nothing is signed before promote, and the host's
+  policy is untouched. local-release.sh needs no change: its service only
+  loads the archive.
+
 ## [0.16.7] - 2026-11-26
 
 ### Fixed
