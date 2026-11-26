@@ -94,11 +94,13 @@ jobs:
             tests/test_bootc_stack.sh tests/test_docs_stack.sh scripts/release-version.sh \
             scripts/revision-of.sh tests/test_revision_of.sh bin/sdlc-bootstrap \
             tests/test_bootstrap.sh scripts/sign-digest.sh tests/test_sign_digest.sh \
+            scripts/mirror-parent.sh tests/test_mirror_parent.sh \
             scripts/attest-digest.sh tests/test_attest_digest.sh .semgrep/run-tests.sh \
             boot/sdlc tests/test_boot.sh scripts/self.sh tests/test_self.sh
           tests/test_host_contract.sh
           tests/test_bootstrap.sh
           tests/test_sign_digest.sh
+          tests/test_mirror_parent.sh
           tests/test_attest_digest.sh
           tests/test_provenance.py
           tests/test_revision_of.sh
