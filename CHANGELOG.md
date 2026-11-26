@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.8] - 2026-11-26
+
 ### Fixed
 
 - **`boot` pulls the gated digest under a policy of its own (a1688).** A host
