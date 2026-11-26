@@ -17,6 +17,14 @@ All notable changes to this project are documented here, following
   ids (`activation_key`) never collided. CI was not affected: a runner's podman
   holds no secret.
 
+- **A local release's image earns SLSA provenance (a1683).** image left an
+  empty label off the build, so a build by scripts/local-release.sh, which has
+  no workflow ref, inherited its parent's `com.crunchtools.build.builder` and
+  `.workflow`: rt 1.0.5 and ubi10-httpd-perl-mariadb carried ubi10-httpd's
+  `ci.yml@refs/heads/main`, and promote's `local_provenance`, which wants both
+  empty, attested none. image now writes every label, empty ones included,
+  overriding what the parent stamped. No condition in promote changed.
+
 ## [0.16.6] - 2026-11-25
 
 ### Changed
