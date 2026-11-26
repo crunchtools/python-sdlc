@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,7 +55,8 @@ class FakeTools(Tools):
         self.pulls = pulls
         self.default = default
         self.argvs: list[list[str]] = []
-        self.envs: list[dict[str, str]] = []
+        self.envs: list[dict[str, str] | None] = []
+        self.inherited: list[bool] = []  # the token in os.environ when each argv ran
         self.urls: list[str] = []
         self.dist = [f"mcp_example-{VERSION}.tar.gz", f"mcp_example-{VERSION}-py3-none-any.whl"]
         self.head = SHA
@@ -70,7 +73,8 @@ class FakeTools(Tools):
         if argv[:3] == ["podman", "--remote", "--url"]:
             argv = ["podman", *argv[4:]]
         self.argvs.append(argv)
-        self.envs.append(dict(env or {}))
+        self.envs.append(None if env is None else dict(env))
+        self.inherited.append("UV_PUBLISH_TOKEN" in os.environ)
         out = ""
         if argv[:2] == ["podman", "inspect"]:
             out = json.dumps(
@@ -104,7 +108,16 @@ class FakeTools(Tools):
         return Response(404, b"{}")
 
     def verbs(self) -> list[str]:
-        return [" ".join(a[:2]) for a in self.argvs]
+        return [" ".join(a[:3:2] if a[:2] == ["uv", "--no-config"] else a[:2]) for a in self.argvs]
+
+    def call(self, *head: str) -> int:
+        """The index of the one argv starting with `head`."""
+        found = [i for i, a in enumerate(self.argvs) if a[: len(head)] == list(head)]
+        assert len(found) == 1, f"{head}: {found}"
+        return found[0]
+
+    def publish(self) -> int:
+        return self.call("uv", "--no-config", "publish")
 
 
 def make(
@@ -184,10 +197,17 @@ def test_happy_path() -> None:
         assert "--entrypoint" in build and "imgid" in build
         assert not any(a.startswith("-e") and "TOKEN" in a for a in build)
         assert "/var/run/docker.sock" not in " ".join(build)
-        publish = next(a for a in tools.argvs if a[:2] == ["uv", "publish"])
-        assert publish[2:4] == ["--trusted-publishing", "always"]
+        i = tools.publish()
+        publish = tools.argvs[i]
+        assert publish[3:5] == ["--trusted-publishing", "always"]
+        assert publish[publish.index("--publish-url") + 1] == pypi.UPLOAD
         assert "--check-url" in publish
         assert {Path(p).name for p in publish if p.endswith((".whl", ".gz"))} == set(tools.dist)
+        upload = tools.envs[i]
+        assert upload is not None and upload["ACTIONS_ID_TOKEN_REQUEST_URL"]
+        assert "UV_PUBLISH_TOKEN" not in upload
+        b = tools.call("podman", "run")
+        assert tools.envs[b] is not None and tools.envs[b]["GITHUB_REPOSITORY"] == REPO
 
 
 def test_not_a_push() -> None:
@@ -328,16 +348,71 @@ def test_token_publishes_without_oidc() -> None:
     tools, env, tmp = make()
     with tmp:
         assert pypi.run("push", {}, token_env(env), tools) == 0
-        i = next(i for i, a in enumerate(tools.argvs) if a[:2] == ["uv", "publish"])
-        assert tools.argvs[i][2:4] == ["--trusted-publishing", "never"]
+        i = tools.publish()
+        assert tools.argvs[i][3:5] == ["--trusted-publishing", "never"]
+        assert tools.argvs[i][tools.argvs[i].index("--publish-url") + 1] == pypi.UPLOAD
         assert "--check-url" in tools.argvs[i]
         assert tools.envs[i]["UV_PUBLISH_TOKEN"] == FAKE_KEY
         assert not any(FAKE_KEY in " ".join(a) for a in tools.argvs), "the token on an argv"
-        others = [e for j, e in enumerate(tools.envs) if j != i]
+        others = [e or {} for j, e in enumerate(tools.envs) if j != i]
         assert others and not any(FAKE_KEY in e.values() for e in others), "the token left uv"
-        build = next(j for j, a in enumerate(tools.argvs) if a[:2] == ["podman", "run"])
+        build = tools.call("podman", "run")
+        assert tools.envs[build] is not None, "the build inherits os.environ"
         assert "UV_PUBLISH_TOKEN" not in tools.envs[build]
         assert not any("UV_PUBLISH" in a for a in tools.argvs[build])
+
+
+def test_token_leaves_os_environ_before_the_first_step() -> None:
+    """Shared helpers run podman with env=None, which inherits os.environ."""
+    tools, env, tmp = make()
+    with tmp:
+        os.environ["UV_PUBLISH_TOKEN"] = FAKE_KEY
+        try:
+            assert pypi.run("push", {}, token_env(env), tools) == 0
+            assert tools.inherited and not any(tools.inherited)
+            assert "UV_PUBLISH_TOKEN" not in os.environ
+        finally:
+            os.environ.pop("UV_PUBLISH_TOKEN", None)
+
+
+def test_a_planted_uv_toml_cannot_move_the_upload() -> None:
+    """The job's own upload argv, run by the real uv as a dry run in a checkout that
+    names another index in uv.toml and [tool.uv]: uv still names PyPI."""
+    uv = shutil.which("uv")
+    if uv is None:
+        print("skip: no uv on PATH")
+        return
+    tools, env, tmp = make()
+    with tmp:
+        assert pypi.run("push", {}, token_env(env), tools) == 0
+        argv = list(tools.argvs[tools.publish()])
+        root = tools.root
+        evil = "http://127.0.0.1:9/evil/"
+        (root / "uv.toml").write_text(f'publish-url = "{evil}"\n')
+        argv[argv.index("publish") + 1 : argv.index("publish") + 1] = ["--dry-run"]
+        at = argv.index("--check-url")  # dry run: no index to ask
+        del argv[at : at + 2]
+        proc = subprocess.run(
+            [uv, *argv[1:]],
+            cwd=root,
+            env={"PATH": os.environ.get("PATH", ""), "HOME": str(root), "UV_PUBLISH_TOKEN": "x"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        out = proc.stdout + proc.stderr
+        assert f"against {pypi.UPLOAD}" in out and evil not in out, out
+        # and without the job's flags, the plant would have won: the test can see it
+        bare = [uv, "publish", "--dry-run", "--trusted-publishing", "never", *argv[-2:]]
+        proc = subprocess.run(
+            bare,
+            cwd=root,
+            env={"PATH": os.environ.get("PATH", ""), "HOME": str(root), "UV_PUBLISH_TOKEN": "x"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert evil in proc.stdout + proc.stderr
 
 
 def test_oidc_and_a_token_is_a_refusal() -> None:

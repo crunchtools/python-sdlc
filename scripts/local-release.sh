@@ -45,6 +45,10 @@
 # on PyPI with the same hash are skipped.
 #
 # Usage: <secrets.json scripts/local-release.sh [--pypi] <owner/repo> <40-hex commit>
+#
+# SDLC_LOCAL_RELEASE_ROOT, unset on Exedore, roots the host paths below (the
+# locks, the release storage, the workspace) somewhere else: the suite runs this
+# script there, unprivileged, with every tool stubbed.
 set -eu
 
 usage='usage: <secrets.json scripts/local-release.sh [--pypi] <owner/repo> <40-hex commit>'
@@ -52,7 +56,9 @@ mode=release
 [ "${1:-}" != --pypi ] || { mode=pypi; shift; }
 repo=${1:?$usage}
 sha=${2:?$usage}
-die() { printf 'local-release: %s\n' "$*" >&2; exit 1; }
+# A die after the release is tagged and promoted says so, and how to finish it.
+hint=''
+die() { printf 'local-release: %s\n' "$*" >&2; [ -z "$hint" ] || printf 'local-release: %s\n' "$hint" >&2; exit 1; }
 say() { printf 'local-release: %s\n' "$*"; }
 case $repo in */*/*|/*|*/|*[!A-Za-z0-9._/-]*) die "$repo is not owner/name" ;; */*) ;; *) die "$repo is not owner/name" ;; esac
 case $sha in *[!0-9a-f]*) die "$sha is not a 40-hex commit" ;; esac
@@ -63,13 +69,14 @@ for tool in podman skopeo jq curl openssl unshare flock git; do
 done
 
 project=${repo#*/}
+at=${SDLC_LOCAL_RELEASE_ROOT:-}
 here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 # One run of a project at a time: cleanup removes the images this commit labels
 # and every localhost/<project> image, which a second run of it is still using.
 # By project, not owner/name, because the launcher names its image by project.
 # Taken before the cleanup trap, so a run that waits here removes nothing.
-mkdir -p /run/lock/sdlc-local-release
-exec 8> "/run/lock/sdlc-local-release/$project.lock"
+mkdir -p "$at/run/lock/sdlc-local-release"
+exec 8> "$at/run/lock/sdlc-local-release/$project.lock"
 flock -n 8 || { say "waiting for the other run of $project"; flock 8; }
 # The builder promote's provenance names: this script at the commit it ran from.
 rev=$(git -C "$here" rev-parse HEAD 2> /dev/null) || die "$here is not a git checkout of sdlc"
@@ -102,7 +109,8 @@ pypi_token=$(printf '%s' "$secrets" | jq -r '.PYPI_API_TOKEN // empty')
 unset secrets value
 
 umask 022
-work=$(mktemp -d /var/tmp/sdlc-local.XXXXXX)
+mkdir -p "$at/var/tmp"
+work=$(mktemp -d "$at/var/tmp/sdlc-local.XXXXXX")
 # World-readable, as a runner workspace is: the gates run in containers of their
 # own, and the tree, the event and the outputs hold no secret.
 chmod 0755 "$work"
@@ -111,10 +119,11 @@ GITHUB_TOKEN='' service=''
 # disk, not root's graphroot on /var: a release build is tens of GB. One storage
 # and one runroot for every run, so overlapping runs share them under podman's
 # own locks. Root's own podman is left as it is.
-store=/var/mnt/onsite/sdlc-release
+store=$at/var/mnt/onsite/sdlc-release
+runroot=$at/run/sdlc-release/runroot
 [ -d "${store%/*}" ] || die "${store%/*} is not mounted: the release storage lives there"
-mkdir -p "$store/storage" "$store/tmp" /run/sdlc-release/runroot
-pod() { podman --root "$store/storage" --runroot /run/sdlc-release/runroot "$@"; }
+mkdir -p "$store/storage" "$store/tmp" "$runroot"
+pod() { podman --root "$store/storage" --runroot "$runroot" "$@"; }
 cleanup() {
   [ -z "$service" ] || kill "$service" 2> /dev/null || :
   [ -z "$GITHUB_TOKEN" ] || ghapi "$GITHUB_TOKEN" DELETE /installation/token > /dev/null 2>&1 \
@@ -194,7 +203,7 @@ CONTAINERS_CONF_OVERRIDE=$work/containers.conf TMPDIR=$store/tmp \
     -u REGISTRY_REDHAT_IO_PASSWORD -u GITHUB_TOKEN -u PYPI_API_TOKEN -u UV_PUBLISH_TOKEN \
   unshare -m --propagation private sh -c \
     'mount --bind "$1" /usr/share/rhel/secrets 2> /dev/null || [ ! -d /usr/share/rhel/secrets ] || exit 1; shift; exec "$@"' \
-    sh "$work/no-secrets" podman --root "$store/storage" --runroot /run/sdlc-release/runroot \
+    sh "$work/no-secrets" podman --root "$store/storage" --runroot "$runroot" \
       system service --time=0 "unix://$sock" 8>&- &
 service=$!
 tries=0
@@ -225,7 +234,7 @@ held() {
     | grep '^quay\.io/crunchtools/sdlc@' || :
 }
 # One run at a time: two runs untagging and pulling at once undo each other.
-exec 9> /run/lock/sdlc-local-release-sdlc0.lock
+exec 9> "$at/run/lock/sdlc-local-release-sdlc0.lock"
 flock 9
 if [ "$(held)" != "quay.io/crunchtools/sdlc@$current" ]; then
   # A new image: untagging the old one (which a container may still hold) is enough.
@@ -278,17 +287,30 @@ output() {
 # ci.yml's pypi job, last: the token by name and nothing else of this run's
 # secrets, with write's result and release for the job's own refusal.
 pypi() {
+  _v=$(printf '%s' "$1" | jq -r .version)
+  hint="v$_v of $repo is tagged and its image promoted; only PyPI is missing. Publish it with:
+  <secrets.json scripts/local-release.sh --pypi $repo $sha"
   export UV_PUBLISH_TOKEN="$pypi_token"
   SDLC_WRITE=success SDLC_RELEASE=$1 job pypi -e UV_PUBLISH_TOKEN -e SDLC_WRITE -e SDLC_RELEASE
   unset UV_PUBLISH_TOKEN
-  say "published $repo $(printf '%s' "$1" | jq -r .version) to PyPI"
+  hint=''
+  say "published $repo $_v to PyPI"
 }
 
 if [ "$mode" = pypi ]; then
-  # Only the App may create v* tags, so a tag is write's: its version, for this commit.
-  version=$(ghapi "$GITHUB_TOKEN" GET "/repos/$repo/tags?per_page=100" | jq -er --arg s "$sha" \
-    '[.[] | select(.commit.sha == $s) | .name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))]
-     | if length == 1 then .[0][1:] else error("tags") end') \
+  # Only the App may create v* tags, so a tag is write's: its version, for this
+  # commit. Every page of the repo's tags, newest first, until an empty one.
+  page=1
+  : > "$work/tags"
+  while :; do
+    ghapi "$GITHUB_TOKEN" GET "/repos/$repo/tags?per_page=100&page=$page" > "$work/page" \
+      || die "$repo's tags could not be read"
+    [ "$(jq length "$work/page")" -gt 0 ] || break
+    jq -r --arg s "$sha" '.[] | select(.commit.sha == $s) | .name' "$work/page" >> "$work/tags"
+    page=$((page + 1))
+  done
+  version=$(jq -Rner '[inputs | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))]
+      | if length == 1 then .[0][1:] else error("tags") end' "$work/tags") \
     || die "$sha is not the commit of exactly one vX.Y.Z tag of $repo"
   pypi "$(jq -cn --arg v "$version" --arg s "$sha" '{version: $v, sha: $s}')"
   exit 0

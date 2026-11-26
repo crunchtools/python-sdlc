@@ -10,13 +10,15 @@ runs in a nested container (no token, no capabilities, no socket) and only the
 
 With no OIDC request variables, as under scripts/local-release.sh where no
 Actions run exists, a PyPI API token in UV_PUBLISH_TOKEN publishes instead. It
-is taken out of the environment every other step sees and handed to the
-`uv publish` process alone, by its environment, never argv.
+is taken out of this process's environment before the first step, so no
+subprocess inherits it, and handed to the `uv publish` process alone, by its
+environment, never argv.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import tomllib
 from collections.abc import Mapping
@@ -40,6 +42,10 @@ from sdlc_jobs._tools import safe_directory
 from sdlc_jobs._verify_release import verify_release
 
 INDEX_CHECK = "https://pypi.org/simple/"
+# Named on the command line, with --no-config: uv runs in the checkout, where a
+# committed uv.toml or [tool.uv] publish-url, or one the build wrote, would
+# otherwise choose where the files and the credential go.
+UPLOAD = "https://upload.pypi.org/legacy/"
 PUBLISH_ENV = "UV_PUBLISH_TOKEN"
 # What Actions sets for a job with `id-token: write`: uv mints its OIDC token from them.
 OIDC = ("ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
@@ -146,7 +152,9 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         cannot(f"pypi runs on {', '.join(EVENTS)}, not {event_name!r}")
     needed("write", env.get("SDLC_WRITE"))
     how, token = credential(env)
-    env = {k: v for k, v in env.items() if k != PUBLISH_ENV}  # every step but the upload
+    # Out of os.environ too: shared helpers run podman with the inherited environment.
+    os.environ.pop(PUBLISH_ENV, None)
+    env = {k: v for k, v in env.items() if k != PUBLISH_ENV}
     release = parse_release(env.get("SDLC_RELEASE"))
     sha = env.get("GITHUB_SHA", "")
     root = workspace(env)
@@ -172,16 +180,14 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
 
     # --check-url makes a re-run succeed: files already on PyPI with the same
     # hash are skipped, and a same-named file with different bytes is an error.
-    argv = ["--check-url", INDEX_CHECK, *(str(p) for p in files)]
+    argv = ["--publish-url", UPLOAD, "--check-url", INDEX_CHECK, *(str(p) for p in files)]
     if how == "oidc":
         step(f"pypi: publish {len(files)} files by trusted publishing")
-        must(tools, ["uv", "publish", "--trusted-publishing", "always", *argv], cwd=str(root))
+        argv = ["--trusted-publishing", "always", *argv]
+        upload_env = env
     else:
         step(f"pypi: publish {len(files)} files with an API token")
-        must(
-            tools,
-            ["uv", "publish", "--trusted-publishing", "never", *argv],
-            cwd=str(root),
-            env={**env, PUBLISH_ENV: str(token)},
-        )
+        argv = ["--trusted-publishing", "never", *argv]
+        upload_env = {**env, PUBLISH_ENV: str(token)}
+    must(tools, ["uv", "--no-config", "publish", *argv], cwd=str(root), env=upload_env)
     return CLEAN
