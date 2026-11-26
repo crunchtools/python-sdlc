@@ -702,9 +702,11 @@ def build(
     argv += ["--authfile", str(job.auth)]
     for kv in build_args(job.settings):
         argv += ["--build-arg", kv]
+    # Every label, empty ones too: a label left off is inherited from the parent, and
+    # a local build's empty builder and workflow would then name the parent's CI run
+    # (rt 1.0.5 carried ubi10-httpd's), which promote's local_provenance refuses (a1683).
     for key, value in labels(job, parent).items():
-        if value:
-            argv += ["--label", f"{key}={value}"]
+        argv += ["--label", f"{key}={value}"]
     key, org = job.env.get("RHSM_ACTIVATION_KEY", ""), job.env.get("RHSM_ORG_ID", "")
     if job.settings.get("rhsm") and not (key and org):
         cannot("[tool.sdlc.image] rhsm is true but RHSM_ACTIVATION_KEY or RHSM_ORG_ID is not set")

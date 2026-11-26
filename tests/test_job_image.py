@@ -23,7 +23,7 @@ from typing import Unpack
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sdlc_jobs import _boot, _core, image
+from sdlc_jobs import _boot, _core, image, promote
 from sdlc_jobs._core import CannotRunError, Response, RunOptions, Tools
 
 REPO = "crunchtools/demo"
@@ -282,7 +282,7 @@ def go(
     containerfile: str,
     *,
     event: str = "push",
-    extra: dict[str, str] | None = None,
+    extra: Mapping[str, str | None] | None = None,  # None unsets the variable
     files: dict[str, str] | None = None,
 ) -> tuple[int, dict | None]:
     with tempfile.TemporaryDirectory() as tmp:
@@ -297,7 +297,7 @@ def go(
             else:
                 (ws / name).write_text(text)
         out = Path(tmp) / "out"
-        env = {
+        env: dict[str, str | None] = {
             "GITHUB_WORKSPACE": str(ws),
             "GITHUB_OUTPUT": str(out),
             "GITHUB_REPOSITORY": REPO,
@@ -314,7 +314,9 @@ def go(
         log = io.StringIO()
         try:
             with contextlib.redirect_stdout(log):
-                rc = image.run(event, {}, env, tools=tools)
+                rc = image.run(
+                    event, {}, {k: v for k, v in env.items() if v is not None}, tools=tools
+                )
         finally:
             tools.log = log.getvalue()
         text = out.read_text() if out.exists() else ""
@@ -411,6 +413,41 @@ def test_crunchtools_parent_verified() -> None:
     pinned = f"quay.io/crunchtools/ubi10-core@{PARENT}"
     assert verify[-1] == pinned and "--insecure-ignore-tlog" in verify
     assert verify[verify.index("-a") + 1] == "repo=crunchtools/ubi10-core"
+
+
+def test_a_local_release_build_overrides_its_parents_run_and_earns_provenance() -> None:
+    """local-release.sh's image env (no run id, no workflow ref) labels a build whose
+    inherited labels then pass promote's local_provenance, as rt 1.0.5's did not (a1683)."""
+    attempt = "17956508812018433"
+    ci = {
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_RUN_ATTEMPT": attempt,
+        "GITHUB_SERVER_URL": "https://github.com",
+    }
+    t = FakeTools()
+    t.plan = plan_text().replace("sdlc-cache-7-1", f"sdlc-cache-0-{attempt}")  # no run id
+    unset: dict[str, str | None] = {"GITHUB_RUN_ID": None, "GITHUB_WORKFLOW_REF": None}
+    rc, _ = go(t, QUAY_PARENT, extra={**ci, **unset})
+    assert rc == 0
+    argv = t.build_argv()
+    written = dict(argv[i + 1].split("=", 1) for i, word in enumerate(argv) if word == "--label")
+    # What the parent's own CI build stamped, which a label left off inherits.
+    parent_ci = "crunchtools/ubi10-httpd/.github/workflows/ci.yml@refs/heads/main"
+    inherited = {
+        "com.crunchtools.build.run": "https://github.com/crunchtools/ubi10-httpd/actions/runs/9/attempts/1",
+        "com.crunchtools.build.builder": parent_ci,
+        "com.crunchtools.build.workflow": parent_ci,
+        "com.crunchtools.build.commit": "e" * 40,
+        "org.opencontainers.image.revision": "e" * 40,
+    }
+    labels = {**inherited, **written}
+    builder = f"https://github.com/crunchtools/sdlc/blob/{'d' * 40}/scripts/local-release.sh"
+    env = {**ci, "GITHUB_SHA": SHA, "SDLC_LOCAL_BUILDER": builder}
+    job = promote.Job(t, env, REPO, OWN, PUSHED, Path("."), labels)
+    assert promote.provenance(labels, REPO) is None
+    p = promote.local_provenance(job)
+    assert p is not None, labels
+    assert p["runDetails"]["metadata"]["invocationId"] == f"{builder}#attempt-{attempt}"
 
 
 def test_red_hat_parent_verified() -> None:
