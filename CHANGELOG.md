@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-26
+
 ### Added
 
 - `scripts/mirror-parent.sh` mirrors one upstream parent, pinned by digest,
