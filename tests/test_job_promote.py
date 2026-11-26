@@ -226,6 +226,16 @@ def test_every_cosign_reads_large_attachments() -> None:
     assert cosigns and all(e.get("COSIGN_MAX_ATTACHMENT_SIZE") == "512MiB" for e in cosigns)
 
 
+def test_every_signature_is_written_in_the_legacy_format() -> None:
+    # cosign v3's default bundle is an OCI referrer podman and bootc cannot read (a1751).
+    t = FakeTools()
+    assert go(t) == 0
+    writes = [a for a in t.argvs if a[:2] in (["cosign", "sign"], ["cosign", "attest"])]
+    assert writes and all(
+        "--use-signing-config=false" in a and "--new-bundle-format=false" in a for a in writes
+    )
+
+
 def test_a_planned_boot_must_have_succeeded() -> None:
     planned = json.dumps({"image": True, "boot": True, "release": None})
     for result in ("failure", "skipped", "cancelled", ""):

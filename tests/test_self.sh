@@ -26,7 +26,7 @@ hex() { printf 'sha256:%s' "$(printf '%064d' 0 | tr 0 "$1")"; }
 D1=$(hex a) D0=$(hex b) DB=$(hex c) D2=$(hex d)
 A=quay.io/crunchtools/sdlc
 B=quay.io/crunchtools/sdlc-bootstrap
-CI=ghcr.io/sigstore/cosign/cosign@$(hex e)
+CI=registry.access.redhat.com/hi/cosign@$(hex e)
 
 # Fakes, steered by files in $W. All of them append their argv to $W/log.
 # podman: `login` keeps stdin and writes --authfile 0600, as podman does;
@@ -382,8 +382,8 @@ rel() { run sign release EVENT=push BUILT="$BUILT_R" SDLC_WRITE=success SDLC_REL
 rel_setup; rel SDLC_KEY=
 refused "a missing SDLC_KEY is refused" "no SDLC_KEY"
 no_log_ok "  before cosign ran"
-for ci in "ghcr.io/sigstore/cosign/cosign:v2.6.5" "quay.io/crunchtools/sdlc@$(hex e)" \
-          "ghcr.io/sigstore/cosign/cosign@sha256:abc" "ghcr.io/sigstore/cosign/cosign@$(hex G)" ''; do
+for ci in "registry.access.redhat.com/hi/cosign:3.1.6" "quay.io/crunchtools/sdlc@$(hex e)" \
+          "registry.access.redhat.com/hi/cosign@sha256:abc" "registry.access.redhat.com/hi/cosign@$(hex G)" ''; do
   rel_setup; rel COSIGN_IMAGE="$ci"
   refused "COSIGN_IMAGE '$ci' is refused" "COSIGN_IMAGE"
   no_log_ok "  before anything ran"

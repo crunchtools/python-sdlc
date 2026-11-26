@@ -21,7 +21,7 @@ FROM docker.io/library/docker:${DOCKER_CLI_VERSION}-cli@sha256:5a7af0dcb0e46c803
 
 FROM quay.io/hummingbird/core-runtime:2-builder@${BOOT_BASE_DIGEST}
 
-ARG COSIGN_VERSION=2.6.5
+ARG COSIGN_VERSION=3.1.6
 ARG DOCKER_CLI_VERSION=29.9.3
 ARG SDLC_MAJOR=0
 ARG SDLC_MIN_VERSION=0.12.0
@@ -36,10 +36,9 @@ USER root
 # coreutils and the CA bundle come with the base.
 RUN dnf install -y jq && dnf clean all && rm -rf /var/cache/dnf /var/cache/libdnf5 /var/lib/dnf/history* /tmp/*
 
-# cosign v2.6.5, the signer's version, as bin/sdlc-bootstrap: v3 keeps
-# signatures where podman and bootc cannot read them. The index digest, so
+# cosign 3.1.6 from Hummingbird, as bin/sdlc-bootstrap. The index digest, so
 # every architecture gets it.
-COPY --from=ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca /ko-app/cosign /usr/local/bin/cosign
+COPY --from=registry.access.redhat.com/hi/cosign@sha256:a64a815e27be23817d46425c97cb93db9e70b8bb2d4170e7d6b015d82b1576b8 /usr/bin/cosign /usr/local/bin/cosign
 COPY --from=docker /usr/local/bin/docker /usr/local/bin/docker
 
 COPY boot/keys/ /etc/sdlc-bootstrap/keys/

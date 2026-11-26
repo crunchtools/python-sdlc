@@ -225,9 +225,9 @@ load_keys() {
 # The key reaches it only through `key`, and only as the env names cosign reads.
 cosign_image() {
   case ${COSIGN_IMAGE:-} in
-    ghcr.io/sigstore/cosign/cosign@sha256:*) digest_ok "${COSIGN_IMAGE#*@}" && return ;;
+    registry.access.redhat.com/hi/cosign@sha256:*) digest_ok "${COSIGN_IMAGE#*@}" && return ;;
   esac
-  die "COSIGN_IMAGE '${COSIGN_IMAGE:-}' is not ghcr.io/sigstore/cosign/cosign@sha256:<64 hex>"
+  die "COSIGN_IMAGE '${COSIGN_IMAGE:-}' is not registry.access.redhat.com/hi/cosign@sha256:<64 hex>"
 }
 cosign() {
   podman run --rm --cap-drop=all --security-opt=no-new-privileges --read-only \

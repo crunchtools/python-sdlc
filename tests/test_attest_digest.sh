@@ -121,7 +121,7 @@ fi
 ALL=1
 for r in "$A" "$B"; do
   for t in spdxjson slsaprovenance1; do
-    grep -q -- "^attest --yes --tlog-upload=false --type $t --predicate .* --key env://COSIGN_PRIVATE_KEY $r@$D\$" "$W/log" || ALL=0
+    grep -q -- "^attest --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false --type $t --predicate .* --key env://COSIGN_PRIVATE_KEY $r@$D\$" "$W/log" || ALL=0
     # the verify that follows the attest is the line right after it
     grep -A1 -- "^attest .* --type $t .* $r@$D\$" "$W/log" \
       | grep -q -- "^verify-attestation --insecure-ignore-tlog --type $t --key .*/fleet.pub $r@$D\$" || ALL=0

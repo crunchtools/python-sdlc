@@ -9,7 +9,7 @@
 # repository it was made in, and skopeo copy does not carry it across, so
 # each repository is signed on its own.
 #
-# Needs cosign v2 on PATH, logged in to the registry, and COSIGN_PRIVATE_KEY
+# Needs cosign (v2.6.5, or v3 in the legacy format the flags below keep) on PATH, logged in to the registry, and COSIGN_PRIVATE_KEY
 # (with COSIGN_PASSWORD) in the environment.
 #
 # Usage: scripts/sign-digest.sh <sha256:digest> <registry/repo>...
@@ -41,7 +41,8 @@ for repo in "$@"; do
   if cosign verify --insecure-ignore-tlog --key "$pub" "$repo@$digest" > /dev/null 2>&1; then
     echo "$repo@$digest is already signed"
   else
-    cosign sign --yes --tlog-upload=false --key env://COSIGN_PRIVATE_KEY "$repo@$digest"
+    cosign sign --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false \
+      --key env://COSIGN_PRIVATE_KEY "$repo@$digest"
   fi
   cosign verify --insecure-ignore-tlog --key "$pub" "$repo@$digest" > /dev/null
   echo "signed $repo@$digest"

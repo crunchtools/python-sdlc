@@ -6,6 +6,25 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Changed
+
+- cosign and grype come from Hummingbird (`registry.access.redhat.com/hi/cosign`
+  and `hi/grype`, pinned by index digest), not ghcr.io and docker.io: seats and
+  builds pull only from quay.io, Red Hat's registries and Fedora's (a1751).
+  grype moves 0.121.0 to 0.122.1, with the same findings, table columns and
+  exit codes on the same rootfs. cosign moves 2.6.5 to 3.1.6 everywhere sdlc
+  runs it: the image, the bootstrap's verify, `COSIGN_IMAGE` in `ci.yml`, the
+  examples and `hotfix.sh`.
+- Every `cosign sign` and `cosign attest` (promote, `sign-digest.sh`,
+  `attest-digest.sh`) passes `--use-signing-config=false
+  --new-bundle-format=false`. v3 otherwise writes a protobuf bundle as an OCI
+  referrer, which podman and bootc cannot read, and it refuses
+  `--tlog-upload=false` outright. With the flags, v3 writes the same `.sig` and
+  `.att` tags v2 did. v2 and v3 verify each other's signatures and
+  attestations, and podman's `sigstoreSigned` policy accepts them. cosign
+  2.6.5 accepts the flags, so container.yml's downloaded v2 binary keeps
+  working.
+
 ## [0.17.1] - 2026-11-26
 
 ### Fixed

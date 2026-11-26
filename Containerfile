@@ -19,10 +19,10 @@ ARG GOURMAND_VERSION=1.1.0
 ARG GATEHOUSE_VERSION=0.33.0
 ARG UV_VERSION=0.13.7
 ARG HADOLINT_VERSION=2.14.0
-ARG GRYPE_VERSION=0.121.0
+ARG GRYPE_VERSION=0.122.1
 ARG LYCHEE_VERSION=0.24.2
 ARG DOCKER_CLI_VERSION=29.9.3
-ARG COSIGN_VERSION=2.6.5
+ARG COSIGN_VERSION=3.1.6
 ARG SYFT_VERSION=1.57.0
 
 FROM quay.io/crunchtools/gourmand:${GOURMAND_VERSION} AS gourmand
@@ -33,7 +33,7 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 # Pinned by digest as well as tag: the digest is what is fetched, the tag says
 # which release it is, and the contract test asserts the two agree.
 FROM ghcr.io/hadolint/hadolint:v${HADOLINT_VERSION}@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e AS hadolint
-FROM docker.io/anchore/grype:v${GRYPE_VERSION}@sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea AS grype
+FROM registry.access.redhat.com/hi/grype:${GRYPE_VERSION}@sha256:8086dbeeca918cdf5677d5a506c783b52bb93eab7336f94733442bc90e69d0b1 AS grype
 # The docs stack's link checker, a static Rust binary, the same way.
 FROM docker.io/lycheeverse/lychee:${LYCHEE_VERSION}@sha256:e2d19e57cf6ab037026f20b8e449a1f30d9d7f81eef4194763aab2eab20bd28d AS lychee
 # The runner's socket is driven, never an engine run, so the image carries
@@ -41,10 +41,10 @@ FROM docker.io/lycheeverse/lychee:${LYCHEE_VERSION}@sha256:e2d19e57cf6ab037026f2
 # socket is dockerd, whose API podman-remote cannot drive (it speaks libpod
 # endpoints); the docker CLI speaks dockerd and podman's compat API alike.
 FROM docker.io/library/docker:${DOCKER_CLI_VERSION}-cli@sha256:5a7af0dcb0e46c803efe9b45371dd21cb500e5b4453250394ac6f06d49b6e6f1 AS docker
-# cosign is v2 on purpose: v3 stores signatures where podman and bootc cannot
-# read them (see bin/sdlc-bootstrap). syft is for `sdlc image promote`, which
+# cosign is Hummingbird's v3 build, run in the legacy format: v3's default
+# bundle lands where podman and bootc cannot read it (sdlc_jobs/promote.py). syft is for `sdlc image promote`, which
 # does what scripts/attest-digest.sh does.
-FROM ghcr.io/sigstore/cosign/cosign:v${COSIGN_VERSION}@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca AS cosign
+FROM registry.access.redhat.com/hi/cosign:${COSIGN_VERSION}@sha256:a64a815e27be23817d46425c97cb93db9e70b8bb2d4170e7d6b015d82b1576b8 AS cosign
 FROM docker.io/anchore/syft:v${SYFT_VERSION}@sha256:3c70e6d5979364cefdc22b51617a78fd264574d3bd6b4f84a351204147025e2a AS syft
 
 FROM quay.io/hummingbird/python:3.14-builder
@@ -54,7 +54,7 @@ ARG GOURMAND_VERSION=1.1.0
 ARG GATEHOUSE_VERSION=0.33.0
 ARG UV_VERSION=0.13.7
 ARG HADOLINT_VERSION=2.14.0
-ARG GRYPE_VERSION=0.121.0
+ARG GRYPE_VERSION=0.122.1
 ARG LYCHEE_VERSION=0.24.2
 ARG RUFF_VERSION=0.17.1
 ARG SEMGREP_VERSION=1.177.0
@@ -73,7 +73,7 @@ ARG CODEQL_SHA256=d862cb11aff035988f178703b69751be072f2aa7e76616f16bb725a207b50b
 ARG NODE_MAJOR=24
 ARG MARKDOWNLINT_CLI2_VERSION=0.24.2
 ARG DOCKER_CLI_VERSION=29.9.3
-ARG COSIGN_VERSION=2.6.5
+ARG COSIGN_VERSION=3.1.6
 ARG SYFT_VERSION=1.57.0
 ARG ZIZMOR_VERSION=1.32.0
 ARG CLAUDE_CODE_VERSION=2.1.323
@@ -273,7 +273,7 @@ COPY --from=gourmand /usr/local/sbin/gourmand /usr/local/bin/gourmand
 # mounts read-only with `podman run --mount type=image`, so neither needs a
 # container engine in here.
 COPY --from=hadolint /bin/hadolint /usr/local/bin/hadolint
-COPY --from=grype /grype /usr/local/bin/grype
+COPY --from=grype /usr/bin/grype /usr/local/bin/grype
 
 # The docs stack. markdownlint-cli2 is installed from npm at an EXACT version
 # into a prefix of its own, so it shares nothing with a repo's node_modules and
@@ -298,7 +298,7 @@ COPY --from=lychee /usr/local/bin/lychee /usr/local/bin/lychee
 # running here rather than trusted.
 COPY --from=docker /usr/local/bin/docker /usr/local/bin/docker
 COPY bin/podman-shim /usr/local/bin/podman
-COPY --from=cosign /ko-app/cosign /usr/local/bin/cosign
+COPY --from=cosign /usr/bin/cosign /usr/local/bin/cosign
 COPY --from=syft /syft /usr/local/bin/syft
 
 # The claude CLI, from npm at an exact version, in a prefix of its own exactly
