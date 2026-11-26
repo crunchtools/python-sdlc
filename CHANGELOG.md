@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-26
+
 ### Added
 
 - `scripts/local-release.sh` runs ci.yml's `pypi` job after promote when the
