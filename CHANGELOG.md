@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-26
+
 ### Fixed
 
 - The `pypi` job no longer refuses every build: `uv build` writes a
