@@ -89,7 +89,7 @@ jobs:
         run: |
           set -eu
           podman run --rm -v "$PWD:/mnt:ro,z" -w /mnt \
-            docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d bin/sdlc tests/contract.sh \
+            quay.io/crunchtools/shellcheck:latest@sha256:65e4e24aa913e454914cd7588b2df676beac5ad2a9e82a8fc900e9388121a719 bin/sdlc tests/contract.sh \
             tests/test_host_contract.sh tests/test_container_stack.sh tests/test_node_stack.sh \
             tests/test_bootc_stack.sh tests/test_docs_stack.sh scripts/release-version.sh \
             scripts/revision-of.sh tests/test_revision_of.sh bin/sdlc-bootstrap \

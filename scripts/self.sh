@@ -74,7 +74,7 @@ SHELL_FILES='bin/sdlc bin/sdlc-bootstrap boot/sdlc scripts/self.sh scripts/relea
   tests/test_bootc_stack.sh tests/test_docs_stack.sh tests/test_revision_of.sh
   tests/test_bootstrap.sh tests/test_sign_digest.sh tests/test_attest_digest.sh
   tests/test_boot.sh tests/test_self.sh tests/test_hotfix.sh tests/test_apparmor.sh .semgrep/run-tests.sh'
-SHELLCHECK=docker.io/koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+SHELLCHECK=quay.io/crunchtools/shellcheck:latest@sha256:65e4e24aa913e454914cd7588b2df676beac5ad2a9e82a8fc900e9388121a719
 
 # Builds the tree in $1 as sdlc and sdlc-bootstrap, tagged $2 and $3. A run no
 # commit triggered must not reuse a cached `dnf install`, or it ships no errata.
