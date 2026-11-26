@@ -23,15 +23,6 @@ All notable changes to this project are documented here, following
   step's environment, the nested build included, and off argv; OIDC stays the
   CI path, and a job holding both refuses (a1738).
 
-### Security
-
-- `pypi` uploads with `uv --no-config publish --publish-url
-  https://upload.pypi.org/legacy/`, on the OIDC path too. uv ran in the
-  checkout, so a committed `uv.toml` or `[tool.uv] publish-url`, or one the
-  nested build wrote into the read-write workspace, chose where the files and
-  the credential went. The token also leaves `os.environ` before the first
-  step, so the shared helpers' podman calls do not inherit it (a1738).
-
 ### Fixed
 
 - `tests/test_job_pypi.py` ran its `safe.directory` test only under pytest: it
@@ -41,6 +32,22 @@ All notable changes to this project are documented here, following
   asserts what each job was handed. It was regexes over the source with no
   `test_` function, so pytest collected nothing and moved or deleted lines
   passed.
+
+### Fixed
+
+- The image installs `libzstd` with `zstd`. Hummingbird's zstd 1.6.0 does not
+  require the libzstd it links against, the base keeps libzstd 1.5.7, and
+  `unzstd` failed on an undefined `ZSTD_isDeterministicBuild` while unpacking
+  the CodeQL bundle, failing the build (a1745).
+
+### Security
+
+- `pypi` uploads with `uv --no-config publish --publish-url
+  https://upload.pypi.org/legacy/`, on the OIDC path too. uv ran in the
+  checkout, so a committed `uv.toml` or `[tool.uv] publish-url`, or one the
+  nested build wrote into the read-write workspace, chose where the files and
+  the credential went. The token also leaves `os.environ` before the first
+  step, so the shared helpers' podman calls do not inherit it (a1738).
 
 ## [0.16.9] - 2026-11-26
 
