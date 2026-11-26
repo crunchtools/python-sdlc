@@ -86,7 +86,7 @@ SDLC_LOCAL_BUILDER=https://github.com/crunchtools/sdlc/blob/$rev/scripts/local-r
 # The fleet file's own pins, read out of it so this loop cannot drift from CI.
 bootstrap=$(grep -o 'quay\.io/crunchtools/sdlc-bootstrap@sha256:[0-9a-f]\{64\}' "$here/examples/ci.yml" | head -1)
 [ -n "$bootstrap" ] || die "examples/ci.yml pins no sdlc-bootstrap digest"
-COSIGN_IMAGE=$(sed -n 's/.*COSIGN_IMAGE: "\(ghcr\.io\/sigstore\/cosign\/cosign@sha256:[0-9a-f]\{64\}\)".*/\1/p' \
+COSIGN_IMAGE=$(sed -n 's/.*COSIGN_IMAGE: "\(registry\.access\.redhat\.com\/hi\/cosign@sha256:[0-9a-f]\{64\}\)".*/\1/p' \
   "$here/.github/workflows/ci.yml" | head -1)
 [ -n "$COSIGN_IMAGE" ] || die ".github/workflows/ci.yml pins no cosign digest"
 # Ashigaru's client id is public (any comment it makes names it); the key is not.
