@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.9] - 2026-11-26
+
 ### Fixed
 
 - `promote` reads cosign attachments up to 512 MiB. cosign uploads an

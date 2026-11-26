@@ -486,7 +486,7 @@ wheels = [
 
 [[package]]
 name = "sdlc"
-version = "0.16.8"
+version = "0.16.9"
 source = { virtual = "." }
 
 [package.dev-dependencies]
