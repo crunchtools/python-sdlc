@@ -178,7 +178,10 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
     DISABLE_AUTOUPDATER=1
 
 # git-core, not git: no perl, no tk, and nothing here runs `git send-email`.
-# tar and zstd are for the CodeQL bundle below.
+# tar and zstd are for the CodeQL bundle below. libzstd is named beside zstd
+# because Hummingbird's zstd 1.6.0 does not require the libzstd it was built
+# against, and the base keeps libzstd 1.5.7: unzstd then dies on an undefined
+# ZSTD_isDeterministicBuild (a1745).
 #
 # `which` is not optional despite looking it: CodeQL's own
 # python/tools/autobuild.sh runs `which python3` to locate an interpreter, and
@@ -211,7 +214,7 @@ ENV SDLC_GOURMAND_VERSION=${GOURMAND_VERSION} \
 # here. Without that line this list becomes a host-tools grab bag, one repo at
 # a time. tests/contract.sh asserts the toolbox, so it is a tested property
 # rather than an accident of the base image.
-RUN dnf install -y git-core tar zstd which jq gawk podman-remote skopeo \
+RUN dnf install -y git-core tar zstd libzstd which jq gawk podman-remote skopeo \
  && dnf clean all \
  && rm -rf /var/cache/dnf
 
