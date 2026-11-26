@@ -6,6 +6,25 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/local-release.sh` runs ci.yml's `pypi` job after promote when the
+  release publishes to PyPI, so fleet releases reach PyPI again while org
+  Actions are off. `local-release-secrets.sh` emits `PYPI_API_TOKEN` from
+  `kv/gloval/crunchtools`; the script hands it to the pypi job alone, as
+  `UV_PUBLISH_TOKEN`, and stops before image when a PyPI release has no token.
+  `--pypi <owner/repo> <sha>` publishes a release already tagged that missed
+  PyPI (a1738).
+- The `pypi` job publishes with an API token in `UV_PUBLISH_TOKEN` when no
+  OIDC request variables are present. The token is kept out of every other
+  step's environment, the nested build included, and off argv; OIDC stays the
+  CI path, and a job holding both refuses (a1738).
+
+### Fixed
+
+- `tests/test_job_pypi.py` ran its `safe.directory` test only under pytest: it
+  was defined after the script's `main()` call.
+
 ## [0.16.9] - 2026-11-26
 
 ### Fixed

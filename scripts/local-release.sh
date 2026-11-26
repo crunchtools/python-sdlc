@@ -1,6 +1,6 @@
 #!/bin/sh
 # Release one fleet repo's commit from a host, without GitHub Actions: the
-# fleet ci.yml's check, image, boot, write and promote jobs, run in that order by the
+# fleet ci.yml's check, image, boot, write, promote and pypi jobs, run in that order by the
 # same pinned sdlc-bootstrap the workflow runs, on this host's podman socket,
 # with the environment the workflow would give each. Nothing here re-implements
 # a job: check gates the commit (`sdlc ci`), image verifies every parent and
@@ -15,7 +15,7 @@
 # the ones its ci.yml job holds, by name:
 #   {"COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD", "QUAY_USERNAME", "QUAY_PASSWORD",
 #    "ASHIGARU_APP_KEY", and optionally "RHSM_ACTIVATION_KEY", "RHSM_ORG_ID",
-#    "REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD"}
+#    "REGISTRY_REDHAT_IO_USER", "REGISTRY_REDHAT_IO_PASSWORD", "PYPI_API_TOKEN"}
 # scripts/local-release-secrets.sh writes exactly that from OpenBao on Gloval.
 #
 # The jobs' GITHUB_TOKEN is an Ashigaru App token minted here for this one
@@ -33,10 +33,23 @@
 # provenance names this script, at the sdlc commit it ran from, as the builder
 # (promote's local_provenance), never a workflow run that did not happen.
 #
-# Usage: <secrets.json scripts/local-release.sh <owner/repo> <40-hex commit>
+# Last, when check's plan says the release publishes to PyPI, ci.yml's `pypi`
+# job runs. No Actions run means no OIDC token, so it publishes with the PyPI
+# API token from stdin, PYPI_API_TOKEN, handed to that job alone as
+# UV_PUBLISH_TOKEN; the job keeps it out of its nested build. A run whose plan
+# publishes to PyPI and whose stdin holds no token stops before image.
+#
+# --pypi publishes a release already tagged that never reached PyPI: the commit
+# is the one tag vX.Y.Z names, and only the pypi job runs, which re-derives the
+# release from the API as it does after write. A re-run is safe: files already
+# on PyPI with the same hash are skipped.
+#
+# Usage: <secrets.json scripts/local-release.sh [--pypi] <owner/repo> <40-hex commit>
 set -eu
 
-usage='usage: <secrets.json scripts/local-release.sh <owner/repo> <40-hex commit>'
+usage='usage: <secrets.json scripts/local-release.sh [--pypi] <owner/repo> <40-hex commit>'
+mode=release
+[ "${1:-}" != --pypi ] || { mode=pypi; shift; }
 repo=${1:?$usage}
 sha=${2:?$usage}
 die() { printf 'local-release: %s\n' "$*" >&2; exit 1; }
@@ -83,6 +96,9 @@ for name in RHSM_ACTIVATION_KEY RHSM_ORG_ID REGISTRY_REDHAT_IO_USER REGISTRY_RED
   value=$(printf '%s' "$secrets" | jq -r --arg n "$name" '.[$n] // empty')
   [ -z "$value" ] || export "$name=$value"
 done
+# Not exported: it reaches the pypi job alone, as UV_PUBLISH_TOKEN, and only then.
+pypi_token=$(printf '%s' "$secrets" | jq -r '.PYPI_API_TOKEN // empty')
+[ "$mode" != pypi ] || [ -n "$pypi_token" ] || die "PYPI_API_TOKEN is missing from stdin"
 unset secrets value
 
 umask 022
@@ -175,7 +191,7 @@ mkdir "$work/no-secrets"
 CONTAINERS_CONF_OVERRIDE=$work/containers.conf TMPDIR=$store/tmp \
   env -u COSIGN_PRIVATE_KEY -u COSIGN_PASSWORD -u QUAY_USERNAME -u QUAY_PASSWORD \
     -u ASHIGARU_APP_KEY -u RHSM_ACTIVATION_KEY -u RHSM_ORG_ID -u REGISTRY_REDHAT_IO_USER \
-    -u REGISTRY_REDHAT_IO_PASSWORD -u GITHUB_TOKEN \
+    -u REGISTRY_REDHAT_IO_PASSWORD -u GITHUB_TOKEN -u PYPI_API_TOKEN -u UV_PUBLISH_TOKEN \
   unshare -m --propagation private sh -c \
     'mount --bind "$1" /usr/share/rhel/secrets 2> /dev/null || [ ! -d /usr/share/rhel/secrets ] || exit 1; shift; exec "$@"' \
     sh "$work/no-secrets" podman --root "$store/storage" --runroot /run/sdlc-release/runroot \
@@ -259,9 +275,32 @@ output() {
     END { printf "%s", out }' "$work/$1/output"
 }
 
+# ci.yml's pypi job, last: the token by name and nothing else of this run's
+# secrets, with write's result and release for the job's own refusal.
+pypi() {
+  export UV_PUBLISH_TOKEN="$pypi_token"
+  SDLC_WRITE=success SDLC_RELEASE=$1 job pypi -e UV_PUBLISH_TOKEN -e SDLC_WRITE -e SDLC_RELEASE
+  unset UV_PUBLISH_TOKEN
+  say "published $repo $(printf '%s' "$1" | jq -r .version) to PyPI"
+}
+
+if [ "$mode" = pypi ]; then
+  # Only the App may create v* tags, so a tag is write's: its version, for this commit.
+  version=$(ghapi "$GITHUB_TOKEN" GET "/repos/$repo/tags?per_page=100" | jq -er --arg s "$sha" \
+    '[.[] | select(.commit.sha == $s) | .name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))]
+     | if length == 1 then .[0][1:] else error("tags") end') \
+    || die "$sha is not the commit of exactly one vX.Y.Z tag of $repo"
+  pypi "$(jq -cn --arg v "$version" --arg s "$sha" '{version: $v, sha: $s}')"
+  exit 0
+fi
+
 job check
 plan=$(output check result)
 printf '%s' "$plan" | jq -e 'type == "object"' > /dev/null || die "check wrote no plan"
+# Before image, so a release that cannot reach PyPI is never tagged.
+publish=$(printf '%s' "$plan" | jq -r '.release.publish // empty')
+[ "$publish" != pypi ] || [ -n "$pypi_token" ] \
+  || die "the release publishes to PyPI and PYPI_API_TOKEN is missing from stdin"
 
 registry='-e QUAY_USERNAME -e QUAY_PASSWORD'
 for name in RHSM_ACTIVATION_KEY RHSM_ORG_ID REGISTRY_REDHAT_IO_USER REGISTRY_REDHAT_IO_PASSWORD; do
@@ -310,3 +349,5 @@ printf '%s' "$built" | jq -r 'if .images then .images[] else . end | "\(.ref)@\(
         || die "$pinned does not verify against the fleet key"
       say "released $pinned (signed by the fleet key)"
     done
+
+[ "$publish" != pypi ] || pypi "$release"

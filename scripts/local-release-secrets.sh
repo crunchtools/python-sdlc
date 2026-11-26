@@ -7,7 +7,8 @@
 #
 # kv/gloval/crunchtools is the mirror of the org secrets ci.yml's image and promote
 # jobs hold: the fleet cosign key, RHSM and registry.redhat.io, and the Ashigaru
-# App key local-release.sh mints its read token from. The quay robot is
+# App key local-release.sh mints its read token from, and the PyPI API token
+# its pypi job publishes with (PYPI_API_TOKEN). The quay robot is
 # kv/gloval/crunchtools-sdlc-quay's (crunchtools+sdlc).
 #
 # Usage (from a seat that reaches both hosts):
@@ -38,5 +39,6 @@ github=$(read_kv crunchtools)
 quay=$(read_kv crunchtools-sdlc-quay)
 printf '%s\n%s\n' "$github" "$quay" | jq -cse '.[0] as $g | .[1] as $q
   | $g | {COSIGN_PRIVATE_KEY, COSIGN_PASSWORD, ASHIGARU_APP_KEY,
-          RHSM_ACTIVATION_KEY, RHSM_ORG_ID, REGISTRY_REDHAT_IO_USER, REGISTRY_REDHAT_IO_PASSWORD}
+          RHSM_ACTIVATION_KEY, RHSM_ORG_ID, REGISTRY_REDHAT_IO_USER, REGISTRY_REDHAT_IO_PASSWORD,
+          PYPI_API_TOKEN}
   + {QUAY_USERNAME: $q.USERNAME, QUAY_PASSWORD: $q.PASSWORD}'

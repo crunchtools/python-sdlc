@@ -1,12 +1,17 @@
-"""`pypi`: publish a merged release to PyPI by OIDC trusted publishing.
+"""`pypi`: publish a merged release to PyPI by OIDC trusted publishing, or a token.
 
 Runs on the default-branch push that merges an Ashigaru release PR, in the
-`pypi` environment with `id-token: write` and a read-only GITHUB_TOKEN. It holds
-no secret. The plan (`SDLC_CHECK`) only decides that this job runs: it
+`pypi` environment with `id-token: write` and a read-only GITHUB_TOKEN. In CI it
+holds no secret. The plan (`SDLC_CHECK`) only decides that this job runs: it
 refuses unless `write` succeeded, the tree asks for PyPI, and the API agrees
 with `write` about the release. The build backend is repo code, so `uv build`
 runs in a nested container (no token, no capabilities, no socket) and only the
 `uv publish` of the finished files runs here, where the OIDC request variables are.
+
+With no OIDC request variables, as under scripts/local-release.sh where no
+Actions run exists, a PyPI API token in UV_PUBLISH_TOKEN publishes instead. It
+is taken out of the environment every other step sees and handed to the
+`uv publish` process alone, by its environment, never argv.
 """
 
 from __future__ import annotations
@@ -35,6 +40,9 @@ from sdlc_jobs._tools import safe_directory
 from sdlc_jobs._verify_release import verify_release
 
 INDEX_CHECK = "https://pypi.org/simple/"
+PUBLISH_ENV = "UV_PUBLISH_TOKEN"
+# What Actions sets for a job with `id-token: write`: uv mints its OIDC token from them.
+OIDC = ("ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
 EVENTS = ("push",)  # ci.yml's `pypi` job runs on a push and nothing else
 
 
@@ -60,6 +68,19 @@ def project_name(root: Path) -> str:
     if not isinstance(name, str) or not name:
         cannot("pyproject.toml has no [project].name to publish")
     return name
+
+
+def credential(env: Mapping[str, str]) -> tuple[str, str | None]:
+    """("oidc", None) or ("token", the token): one way to publish, never both or neither."""
+    oidc = all(env.get(k) for k in OIDC)
+    token = env.get(PUBLISH_ENV) or None
+    if oidc and token:
+        cannot(
+            f"both OIDC and {PUBLISH_ENV} are set; a job publishes one way, and CI holds no token"
+        )
+    if not oidc and not token:
+        cannot(f"no OIDC request variables and no {PUBLISH_ENV}: nothing to publish with")
+    return ("oidc", None) if oidc else ("token", token)
 
 
 def build(tools: Tools, env: Mapping[str, str], root: Path, version: str, name: str) -> list[Path]:
@@ -94,6 +115,7 @@ def build(tools: Tools, env: Mapping[str, str], root: Path, version: str, name: 
             "--out-dir",
             "dist",
         ],
+        env=env,
     )
     return dist_files(out, name, version)
 
@@ -113,7 +135,8 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     """Re-verify the release `write` made and publish it to PyPI by OIDC; 0 published.
 
     `event_name` must be one of `EVENTS`. `env` carries SDLC_RELEASE ({version, sha} from
-    `write`), GITHUB_REPOSITORY and the OIDC request variables. `tools` runs
+    `write`), GITHUB_REPOSITORY and the OIDC request variables, or with none of
+    them UV_PUBLISH_TOKEN. `tools` runs
     the GitHub API, the build and the upload (a fake in the suites). Raises
     CannotRunError, exit 2, when the release does not verify from the API or
     a step fails.
@@ -122,6 +145,8 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     if event_name not in EVENTS:
         cannot(f"pypi runs on {', '.join(EVENTS)}, not {event_name!r}")
     needed("write", env.get("SDLC_WRITE"))
+    how, token = credential(env)
+    env = {k: v for k, v in env.items() if k != PUBLISH_ENV}  # every step but the upload
     release = parse_release(env.get("SDLC_RELEASE"))
     sha = env.get("GITHUB_SHA", "")
     root = workspace(env)
@@ -145,13 +170,18 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     step(f"pypi: build {verified['version']} in a nested container")
     files = build(tools, env, root, verified["version"], name)
 
-    step(f"pypi: publish {len(files)} files by trusted publishing")
     # --check-url makes a re-run succeed: files already on PyPI with the same
     # hash are skipped, and a same-named file with different bytes is an error.
-    must(
-        tools,
-        ["uv", "publish", "--trusted-publishing", "always", "--check-url", INDEX_CHECK]
-        + [str(p) for p in files],
-        cwd=str(root),
-    )
+    argv = ["--check-url", INDEX_CHECK, *(str(p) for p in files)]
+    if how == "oidc":
+        step(f"pypi: publish {len(files)} files by trusted publishing")
+        must(tools, ["uv", "publish", "--trusted-publishing", "always", *argv], cwd=str(root))
+    else:
+        step(f"pypi: publish {len(files)} files with an API token")
+        must(
+            tools,
+            ["uv", "publish", "--trusted-publishing", "never", *argv],
+            cwd=str(root),
+            env={**env, PUBLISH_ENV: str(token)},
+        )
     return CLEAN

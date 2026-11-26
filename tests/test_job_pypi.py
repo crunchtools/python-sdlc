@@ -5,7 +5,8 @@ Drives `pypi.run` with a fake Tools that records every argv and answers the
 GitHub API from a script. Asserts the happy path (nested build, then trusted
 publishing from the job itself), each of the seven release tests failing alone,
 and the refusals before them: not a push, `write` skipped, the tree not asking
-for PyPI, and a release that disagrees with `write`.
+for PyPI, and a release that disagrees with `write`. Without OIDC, an API token
+in UV_PUBLISH_TOKEN publishes, reaching the `uv publish` process alone.
 
 Run: tests/test_job_pypi.py   (needs python3 only)
 """
@@ -30,6 +31,7 @@ REPO = "crunchtools/mcp-example"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 VERSION = "1.2.3"
 BOT = "ashigaru-crunchtools-com[bot]"
+FAKE_KEY = "pypi-AgEIcHlwaS5vcmcTOKENVALUE"  # not a real one
 
 PULL = {
     "number": 7,
@@ -130,8 +132,17 @@ def make(
         "HOSTNAME": "jobctr",
         "SDLC_WRITE": "success",
         "SDLC_RELEASE": json.dumps({"version": VERSION, "sha": SHA}),
+        "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.example/req",
+        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "oidc-req",
     }
     return tools, env, tmp
+
+
+def token_env(env: dict[str, str]) -> dict[str, str]:
+    """As scripts/local-release.sh runs the job: no Actions run, so no OIDC; a token."""
+    env = {k: v for k, v in env.items() if not k.startswith("ACTIONS_ID_TOKEN_")}
+    env["UV_PUBLISH_TOKEN"] = FAKE_KEY
+    return env
 
 
 def refusal(tools: FakeTools, env: dict[str, str], event: str = "push") -> str:
@@ -301,6 +312,59 @@ def test_checkout_not_at_sha() -> None:
         assert "checkout" in msg
 
 
+def test_rev_parse_trusts_the_mounted_workspace() -> None:
+    """The workspace is owned by another uid than the container's git (#157)."""
+    tools, env, tmp = make()
+    with tmp:
+        assert pypi.run("push", {}, env, tools) == 0
+    i = next(i for i, a in enumerate(tools.argvs) if a[:2] == ["git", "rev-parse"])
+    genv = tools.envs[i]
+    n = int(genv["GIT_CONFIG_COUNT"]) - 1
+    assert genv[f"GIT_CONFIG_KEY_{n}"] == "safe.directory"
+    assert genv[f"GIT_CONFIG_VALUE_{n}"] == str(tools.root.resolve())  # never `*`
+
+
+def test_token_publishes_without_oidc() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        assert pypi.run("push", {}, token_env(env), tools) == 0
+        i = next(i for i, a in enumerate(tools.argvs) if a[:2] == ["uv", "publish"])
+        assert tools.argvs[i][2:4] == ["--trusted-publishing", "never"]
+        assert "--check-url" in tools.argvs[i]
+        assert tools.envs[i]["UV_PUBLISH_TOKEN"] == FAKE_KEY
+        assert not any(FAKE_KEY in " ".join(a) for a in tools.argvs), "the token on an argv"
+        others = [e for j, e in enumerate(tools.envs) if j != i]
+        assert others and not any(FAKE_KEY in e.values() for e in others), "the token left uv"
+        build = next(j for j, a in enumerate(tools.argvs) if a[:2] == ["podman", "run"])
+        assert "UV_PUBLISH_TOKEN" not in tools.envs[build]
+        assert not any("UV_PUBLISH" in a for a in tools.argvs[build])
+
+
+def test_oidc_and_a_token_is_a_refusal() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        env["UV_PUBLISH_TOKEN"] = FAKE_KEY
+        msg = refusal(tools, env)
+        assert "both OIDC and UV_PUBLISH_TOKEN" in msg and FAKE_KEY not in msg
+        assert not tools.argvs
+
+
+def test_no_credential_is_a_refusal() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        env = token_env(env)
+        del env["UV_PUBLISH_TOKEN"]
+        assert "nothing to publish with" in refusal(tools, env)
+        assert not tools.argvs
+
+
+def test_half_an_oidc_pair_is_not_oidc() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        del env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+        assert "nothing to publish with" in refusal(tools, env)
+
+
 def main() -> int:
     failed = 0
     for name, fn in sorted(globals().items()):
@@ -317,15 +381,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
-def test_rev_parse_trusts_the_mounted_workspace() -> None:
-    """The workspace is owned by another uid than the container's git (#157)."""
-    tools, env, tmp = make()
-    with tmp:
-        assert pypi.run("push", {}, env, tools) == 0
-    i = next(i for i, a in enumerate(tools.argvs) if a[:2] == ["git", "rev-parse"])
-    genv = tools.envs[i]
-    n = int(genv["GIT_CONFIG_COUNT"]) - 1
-    assert genv[f"GIT_CONFIG_KEY_{n}"] == "safe.directory"
-    assert genv[f"GIT_CONFIG_VALUE_{n}"] == str(tools.root.resolve())  # never `*`

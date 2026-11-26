@@ -682,6 +682,19 @@ at `GITHUB_EVENT_PATH` and the environment. A job with no module is a 2 that
 names it, and `write` with `DIGEST` set (sdlc's own rollback dispatch) exits 0
 having done nothing. It is not for a laptop: outside a workflow it is a 2.
 
+While org Actions are off, `scripts/local-release.sh` runs the same jobs on
+Exedore with secrets piped from `scripts/local-release-secrets.sh` (OpenBao on
+Gloval): check, image, boot, write, promote, then `pypi` when the release
+publishes to PyPI. With no OIDC there, `pypi` publishes with `PYPI_API_TOKEN`
+from `kv/gloval/crunchtools`, handed to that job alone as `UV_PUBLISH_TOKEN`.
+A release tagged without reaching PyPI is published with `--pypi` and the
+commit its `vX.Y.Z` tag names:
+
+```
+ssh gloval 'sh -s' < scripts/local-release-secrets.sh \
+  | ssh exedore '<sdlc checkout>/scripts/local-release.sh --pypi <owner/repo> <sha>'
+```
+
 ## Exit codes
 
 ```
