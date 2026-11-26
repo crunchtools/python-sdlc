@@ -12,7 +12,10 @@
 # safe: an already signed digest is left as it is.
 #
 # Refresh: Renovate cannot run this (it holds no key). When a repo wants a newer
-# parent, run this for the new upstream digest, then move that repo's FROM.
+# parent, run this for the new upstream digest and tag. A FROM written as
+# quay.io/crunchtools/<name>:<tag>@<digest> lets Renovate's dockerfile manager
+# propose the move once the newer tag is mirrored; it watches the mirror, not
+# upstream.
 #
 # Run as root on Exedore, secrets on stdin exactly as local-release.sh takes
 # them (it reads COSIGN_PRIVATE_KEY, COSIGN_PASSWORD, QUAY_USERNAME and
