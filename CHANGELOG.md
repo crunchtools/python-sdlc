@@ -32,9 +32,6 @@ All notable changes to this project are documented here, following
   asserts what each job was handed. It was regexes over the source with no
   `test_` function, so pytest collected nothing and moved or deleted lines
   passed.
-
-### Fixed
-
 - The image installs `libzstd` with `zstd`. Hummingbird's zstd 1.6.0 does not
   require the libzstd it links against, the base keeps libzstd 1.5.7, and
   `unzstd` failed on an undefined `ZSTD_isDeterministicBuild` while unpacking
