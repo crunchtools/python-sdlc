@@ -282,6 +282,13 @@ def verifies(job: Job, *extra: str, kind: str = "verify") -> bool:
     return job.run(argv).returncode == 0
 
 
+# cosign v3 signs into a protobuf bundle stored as an OCI referrer, which podman
+# and bootc cannot read, and refuses --tlog-upload=false under its default
+# signing config. These two keep v3 writing the .sig/.att tags v2 did, which
+# every verifier in the fleet reads; cosign v2.6.5 accepts them too (a1751).
+LEGACY_FORMAT = ["--use-signing-config=false", "--new-bundle-format=false"]
+
+
 def sign(job: Job, version: str | None) -> None:
     step(f"sign {job.at}")
     if not job.env.get("COSIGN_PRIVATE_KEY"):
@@ -294,7 +301,15 @@ def sign(job: Job, version: str | None) -> None:
     if verifies(job, *flags):
         print(f"{job.at} is already signed", flush=True)
         return
-    base = ["cosign", "sign", "--yes", "--tlog-upload=false", "--key", "env://COSIGN_PRIVATE_KEY"]
+    base = [
+        "cosign",
+        "sign",
+        "--yes",
+        "--tlog-upload=false",
+        *LEGACY_FORMAT,
+        "--key",
+        "env://COSIGN_PRIVATE_KEY",
+    ]
     job.must([*base, *flags, job.at], key=True)
     if not verifies(job, *flags):
         cannot(f"{job.at} does not verify after signing")
@@ -323,7 +338,7 @@ def attest(job: Job) -> None:
 
 
 def attest_one(job: Job, kind: str, predicate: Path) -> None:
-    argv = ["cosign", "attest", "--yes", "--tlog-upload=false", "--type", kind]
+    argv = ["cosign", "attest", "--yes", "--tlog-upload=false", *LEGACY_FORMAT, "--type", kind]
     job.must(
         [*argv, "--predicate", str(predicate), "--key", "env://COSIGN_PRIVATE_KEY", job.at],
         key=True,

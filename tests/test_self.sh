@@ -26,7 +26,7 @@ hex() { printf 'sha256:%s' "$(printf '%064d' 0 | tr 0 "$1")"; }
 D1=$(hex a) D0=$(hex b) DB=$(hex c) D2=$(hex d)
 A=quay.io/crunchtools/sdlc
 B=quay.io/crunchtools/sdlc-bootstrap
-CI=ghcr.io/sigstore/cosign/cosign@$(hex e)
+CI=registry.access.redhat.com/hi/cosign@$(hex e)
 
 # Fakes, steered by files in $W. All of them append their argv to $W/log.
 # podman: `login` keeps stdin and writes --authfile 0600, as podman does;
@@ -199,6 +199,8 @@ run() {              # job mode [VAR=value...]: sets RC and OUT
 dump() { printf '%s\n' "$OUT" | tail -4 | sed 's/^/     | /'; }
 in_log() { grep -q -- "$1" "$W/log" 2> /dev/null; }
 n_log()  { grep -c -- "$1" "$W/log" 2> /dev/null || :; }
+# A sign in cosign's legacy format, the only one podman and bootc read (a1751).
+SIGNED=' sign --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false --key env://SDLC_KEY '
 untouched() {        # nothing signed, pushed or tagged
   ! in_log ' sign --yes ' && ! in_log '^skopeo copy' && ! in_log '^podman push'
 }
@@ -382,8 +384,8 @@ rel() { run sign release EVENT=push BUILT="$BUILT_R" SDLC_WRITE=success SDLC_REL
 rel_setup; rel SDLC_KEY=
 refused "a missing SDLC_KEY is refused" "no SDLC_KEY"
 no_log_ok "  before cosign ran"
-for ci in "ghcr.io/sigstore/cosign/cosign:v2.6.5" "quay.io/crunchtools/sdlc@$(hex e)" \
-          "ghcr.io/sigstore/cosign/cosign@sha256:abc" "ghcr.io/sigstore/cosign/cosign@$(hex G)" ''; do
+for ci in "registry.access.redhat.com/hi/cosign:3.1.6" "quay.io/crunchtools/sdlc@$(hex e)" \
+          "registry.access.redhat.com/hi/cosign@sha256:abc" "registry.access.redhat.com/hi/cosign@$(hex G)" ''; do
   rel_setup; rel COSIGN_IMAGE="$ci"
   refused "COSIGN_IMAGE '$ci' is refused" "COSIGN_IMAGE"
   no_log_ok "  before anything ran"
@@ -404,7 +406,7 @@ else bad "authmode"; grep '^authmode' "$W/log" | sed 's/^/     | /'; fi
 if [ "$RC" -eq 0 ] \
    && in_log "-a repo=crunchtools/sdlc -a version=0.13.0 $A@$D1\$" \
    && in_log "-a repo=crunchtools/sdlc-bootstrap -a version=0.13.0 $B@$DB\$" \
-   && [ "$(n_log ' sign --yes ')" -eq 2 ] \
+   && [ "$(n_log "$SIGNED")" -eq 2 ] \
    && [ "$(tag_of "$A:0.13.0")" = "$D1" ] && [ "$(tag_of "$A:0")" = "$D1" ] \
    && [ "$(tag_of "$A:latest")" = "$D1" ] && [ "$(tag_of "$B:0.13.0")" = "$DB" ] \
    && [ "$(n_log '^skopeo copy')" -eq 4 ] && ! in_log "^skopeo copy.*$B:0\$" && ! in_log "^skopeo copy.*$B:latest"; then
@@ -517,7 +519,7 @@ wk_setup; touch "$W/rev-fails"; wk
 refused "a revision label sign cannot read is refused" "cannot read the revision label"
 wk_setup; wk
 if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0.13.0")" = "$D1" ] && [ "$(tag_of "$A:0")" = "$D1" ] \
-   && [ -z "$(tag_of "$A:latest")" ] && [ "$(n_log ' sign --yes ')" -eq 1 ] \
+   && [ -z "$(tag_of "$A:latest")" ] && [ "$(n_log "$SIGNED")" -eq 1 ] \
    && in_log "-a repo=crunchtools/sdlc -a version=0.13.0 $A@$D1\$" && ! in_log "$B" \
    && [ "$(n_log '^skopeo copy')" -eq 2 ]; then
   ok "happy path: signs the rebuild, moves X.Y.Z and :0, not latest, touches no sdlc-bootstrap"
@@ -600,7 +602,7 @@ bsetup() { bs_setup; reg_label "$A@$D1" 0.13.0; reg_label "$B@$DB" 0.13.0; }
 # shellcheck disable=SC2086
 bsign() { run sign bootstrap $SRVENV EVENT=workflow_dispatch VERSION=0.13.0 APPROVED=success BUILT="$BUILT_R" "$@"; }
 bsetup; bsign
-if [ "$RC" -eq 0 ] && [ "$(n_log ' sign --yes ')" -eq 2 ] \
+if [ "$RC" -eq 0 ] && [ "$(n_log "$SIGNED")" -eq 2 ] \
    && in_log "-a repo=crunchtools/sdlc-bootstrap -a version=0.13.0 $B@$DB\$" \
    && [ "$(tag_of "$A:0.13.0")" = "$D1" ] && [ "$(tag_of "$A:0")" = "$D1" ] \
    && [ "$(tag_of "$A:latest")" = "$D1" ] && [ "$(tag_of "$B:0.13.0")" = "$DB" ]; then

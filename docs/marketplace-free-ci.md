@@ -286,7 +286,7 @@ on:
       version: { type: string, default: "" }  # alone: open the release PR; with digest: roll :<major> back to it
       digest: { type: string, default: "" }
 permissions: {}
-env: { COSIGN_IMAGE: "ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca" }  # v2.6.5
+env: { COSIGN_IMAGE: "registry.access.redhat.com/hi/cosign@sha256:a64a815e27be23817d46425c97cb93db9e70b8bb2d4170e7d6b015d82b1576b8" }  # v3.1.6
 jobs:
   test:  # the PR's own sdlc code, and nothing to steal: read-only contents, no secret, GitHub's machine
     name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
@@ -1081,7 +1081,7 @@ in favour of Renovate `customManagers` on the `ARG` lines.
   spike #103 found `podman --remote` fails against the Docker 29 socket on
   GitHub-hosted runners, while the docker CLI drives both that and
   gha-runner's podman API.
-- **cosign v2.6.5** (copied from its digest-pinned image), and **syft**: for
+- **cosign 3.1.6** (copied from Hummingbird's digest-pinned image, signing in the legacy format), and **syft**: for
   `sdlc image promote`. They do what `scripts/sign-digest.sh` and
   `scripts/attest-digest.sh` already do in sdlc's own `container.yml`.
 - **zizmor**: today it is installed by hash in the constitution's

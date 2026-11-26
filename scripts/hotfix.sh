@@ -80,7 +80,7 @@ mint() {
   api "$_jwt" -X POST -d "$TAG_BODY" "$API/app/installations/$_inst/access_tokens" | jq -er .token
 }
 
-export COSIGN_IMAGE=ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca
+export COSIGN_IMAGE=registry.access.redhat.com/hi/cosign@sha256:a64a815e27be23817d46425c97cb93db9e70b8bb2d4170e7d6b015d82b1576b8
 export GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=crunchtools/sdlc
 
 # image builds the version check would plan; write's verdict is sign's input.

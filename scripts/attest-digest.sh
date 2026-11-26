@@ -14,7 +14,7 @@
 #           every repository that lacks it, and verify each.
 #
 # The SBOM is scanned and the predicate written ONCE, from the first
-# repository, and the same bytes attested in each: cosign v2 keeps an
+# repository, and the same bytes attested in each: cosign (v2, or v3 in legacy format) keeps an
 # attestation as a .att object in the repository it was made in, and skopeo
 # copy does not carry it across, so each repository is attested on its own,
 # as it is signed. A digest whose labels record no build run (built before
@@ -24,8 +24,8 @@
 # The key checks are sign-digest.sh's: the public key is the one
 # bin/sdlc-bootstrap trusts, and the private key must be its other half.
 #
-# write needs cosign v2, syft, skopeo and python3 on PATH; attest needs cosign
-# v2 and COSIGN_PRIVATE_KEY (with COSIGN_PASSWORD). Both need the registry login.
+# write needs cosign, syft, skopeo and python3 on PATH; attest needs cosign
+# and COSIGN_PRIVATE_KEY (with COSIGN_PASSWORD). Both need the registry login.
 #
 # Usage: scripts/attest-digest.sh write|attest <dir> <sha256:digest> <registry/repo>...
 set -eu
@@ -92,7 +92,7 @@ for repo in "$@"; do
     echo "$repo@$digest already carries an SBOM"
   else
     [ -s "$sbom" ] || { echo "$repo@$digest lacks an SBOM and the write step left none in $dir" >&2; exit 1; }
-    cosign attest --yes --tlog-upload=false --type spdxjson \
+    cosign attest --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false --type spdxjson \
       --predicate "$sbom" --key env://COSIGN_PRIVATE_KEY "$repo@$digest"
   fi
   cosign verify-attestation --insecure-ignore-tlog --type spdxjson --key "$pub" "$repo@$digest" > /dev/null
@@ -101,7 +101,7 @@ for repo in "$@"; do
   if attested slsaprovenance1 "$repo"; then
     echo "$repo@$digest already carries provenance"
   elif [ -e "$prov" ]; then
-    cosign attest --yes --tlog-upload=false --type slsaprovenance1 \
+    cosign attest --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false --type slsaprovenance1 \
       --predicate "$prov" --key env://COSIGN_PRIVATE_KEY "$repo@$digest"
   else
     continue

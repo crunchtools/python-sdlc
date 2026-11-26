@@ -73,9 +73,9 @@ SDLC_KEY_ID=06d55be78e4b1bac
 # private half promote signs with (ci.yml's promote job, via sdlc event). It
 # still signs :main (container.yml) and signed the releases up to 0.15.1.
 FLEET_KEY_ID=9c300eea7ce2867d
-# cosign v2.6.5, the signer's version: v3 keeps signatures where podman and
-# bootc cannot read them. The index digest, so every architecture gets it.
-COSIGN=ghcr.io/sigstore/cosign/cosign@sha256:ad281047f85c5e1fc6ffbc30c2b55be3b07b4032bef715a12122ce5829619aca
+# cosign 3.1.6 from Hummingbird; it verifies the .sig tags the signer writes in
+# cosign's legacy format. The index digest, so every architecture gets it.
+COSIGN=registry.access.redhat.com/hi/cosign@sha256:a64a815e27be23817d46425c97cb93db9e70b8bb2d4170e7d6b015d82b1576b8
 
 dir=$(mktemp -d) || exit 2
 trap 'rm -rf "$dir"' EXIT

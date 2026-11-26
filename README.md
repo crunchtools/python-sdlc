@@ -81,8 +81,8 @@ together on `:latest`, for the laptop and CI both, and a release reaches every
 repo without a pull request.
 
 Before it runs anything from the image, the bootstrap checks that the digest
-the tag resolves to is signed by a key it carries inline, using cosign v2
-from a digest-pinned image. Then it runs the launcher and every check by that
+the tag resolves to is signed by a key it carries inline, using cosign
+from a digest-pinned Hummingbird image. Then it runs the launcher and every check by that
 digest. An unsigned image is a 2, GATE CANNOT RUN. A release (`:latest`,
 `X.Y.Z`) must be signed by sdlc's own key (`boot/keys/sdlc.pub`), which has
 signed every release since 0.15.2. `:main` and an `@sha256` digest may carry

@@ -51,8 +51,8 @@ run() {              # args...: set RC and OUT
 reset
 run "$D" "$A" "$B"
 if [ "$RC" -eq 0 ] && [ "$(grep -c '^sign ' "$W/log")" -eq 2 ] \
-   && grep -q -- "^sign --yes --tlog-upload=false --key env://COSIGN_PRIVATE_KEY $A@$D\$" "$W/log" \
-   && grep -q -- "^sign --yes --tlog-upload=false --key env://COSIGN_PRIVATE_KEY $B@$D\$" "$W/log"; then
+   && grep -q -- "^sign --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false --key env://COSIGN_PRIVATE_KEY $A@$D\$" "$W/log" \
+   && grep -q -- "^sign --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false --key env://COSIGN_PRIVATE_KEY $B@$D\$" "$W/log"; then
   ok "an unsigned digest is signed by digest in both repositories"
 else
   bad "signing both: exit $RC"; cat "$W/log"; printf '%s\n' "$OUT"

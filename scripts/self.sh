@@ -225,9 +225,9 @@ load_keys() {
 # The key reaches it only through `key`, and only as the env names cosign reads.
 cosign_image() {
   case ${COSIGN_IMAGE:-} in
-    ghcr.io/sigstore/cosign/cosign@sha256:*) digest_ok "${COSIGN_IMAGE#*@}" && return ;;
+    registry.access.redhat.com/hi/cosign@sha256:*) digest_ok "${COSIGN_IMAGE#*@}" && return ;;
   esac
-  die "COSIGN_IMAGE '${COSIGN_IMAGE:-}' is not ghcr.io/sigstore/cosign/cosign@sha256:<64 hex>"
+  die "COSIGN_IMAGE '${COSIGN_IMAGE:-}' is not registry.access.redhat.com/hi/cosign@sha256:<64 hex>"
 }
 cosign() {
   podman run --rm --cap-drop=all --security-opt=no-new-privileges --read-only \
@@ -402,7 +402,11 @@ sign_one() {
   _have=$(signed_version "$1@$2" "$3") \
     || die "$1@$2 carries an ambiguous sdlc signature; refusing to add another"
   if [ -z "$_have" ]; then
-    cosign_key sign --yes --tlog-upload=false --key env://SDLC_KEY \
+    # The legacy format, as promote.py's LEGACY_FORMAT: cosign v3's default
+    # bundle is an OCI referrer podman and bootc cannot read, and v3 refuses
+    # --tlog-upload=false without --use-signing-config=false (a1751).
+    cosign_key sign --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false \
+      --key env://SDLC_KEY \
       -a "repo=$3" -a "version=$4" "$1@$2"
     _have=$(signed_version "$1@$2" "$3") || die "$1@$2 is ambiguous after signing"
   fi
