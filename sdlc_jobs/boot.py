@@ -13,13 +13,16 @@ whose boot proof fails is never signed or tagged.
 The image is the one `image` pushed, `gated-<sha>`; `image` never runs on a pull
 request, so neither does this job. Its result is re-validated here as `promote`
 validates it, then each image is pulled anonymously by digest, so what is booted
-is exactly what is promoted. That costs the "no ungated digest in the registry" property for a repo
+is exactly what is promoted. The pull is skopeo's, here, under a policy that accepts
+that one digest unsigned, and the engine loads it: a host that requires a signature
+for the namespace refuses its own pull of a digest promote has not yet signed. That
+costs the "no ungated digest in the registry" property for a repo
 that sets these keys: its `gated-<sha>` is pushed before this job judges it.
 
 `free-disk` removes a GitHub-hosted runner's preinstalled SDKs before the pull, the
 directories container-release removed, so a multi-GB image fits; our own runners carry
 no SDKs and the step says so. Every runner's socket is its host podman's, the fleet
-file's launch, so the pull and the shell's container go through podman-remote. The
+file's launch, so the load and the shell's container go through podman-remote. The
 shell's output runs with workflow commands stopped. Its container is given PASSED and
 nothing else of this job's environment, but it holds the socket, and through it can
 exec into this job's own container and read GITHUB_TOKEN (contents: read) and
@@ -32,6 +35,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +85,7 @@ PASSED = (
     "RUNNER_OS",
 )
 SOCKET_PATH = "/var/run/docker.sock"  # where the fleet file mounts the runner's socket
+PULL = ".sdlc-boot-pull"  # under the workspace: the pull's policy and archive, gone after
 TMP = ".sdlc-boot-tmp"  # under the workspace: the shell's TMPDIR and HOME, on the runner
 # container-release's free-disk list, on a GitHub-hosted runner.
 EMPTY = "find /free -mindepth 2 -maxdepth 2 -exec rm -rf {} +"
@@ -207,7 +212,7 @@ def boot_image(ctx: Ctx, img: Image, image: str) -> int:
     if img.settings.get("free-disk"):
         free_disk(ctx)
     step(f"pull {image}")
-    must(ctx.tools, [*ctx.engine, "pull", "--quiet", image], env=dict(ctx.env))
+    pull(ctx, image)
     spec = boot_settings(img.settings)
     timeout = spec.timeout if spec is not None else TIMEOUT
     (ctx.root / TMP).mkdir(exist_ok=True)
@@ -232,6 +237,59 @@ def boot_image(ctx: Ctx, img: Image, image: str) -> int:
             return FOUND
         print(f"{what}: passed", flush=True)
     return CLEAN
+
+
+def pull(ctx: Ctx, image: str) -> None:
+    """Put `image` (`ref@digest`) in the runner's engine, taken under a policy of this job's own.
+
+    A host may require a fleet signature for every quay.io/crunchtools image, and the
+    gated digest is unsigned until promote signs it, after this job; the engine's own
+    pull is refused there, and podman-remote cannot hand the engine a policy. So
+    skopeo, here, copies the digest under policy() and nothing else, keeping the
+    manifest so the digest stays the same, and the engine loads that archive. A tag,
+    another digest or another repository is refused by that policy. The archive's
+    tag is `gated-<sha>`, the registry's own for this digest; without a name the
+    engine cannot find `ref@digest`, which is checked last.
+    """
+    ref, _, digest = image.partition("@")
+    where = ctx.root / PULL
+    shutil.rmtree(where, ignore_errors=True)
+    where.mkdir()
+    (where / "policy.json").write_text(json.dumps(policy(image)))
+    archive = where / "image.tar"
+    try:
+        must(
+            ctx.tools,
+            [
+                *["skopeo", "--tmpdir", str(where), "copy", "--quiet", "--src-no-creds"],
+                *["--preserve-digests", "--policy", str(where / "policy.json")],
+                *[
+                    f"docker://{image}",
+                    f"oci-archive:{archive}:{ref}:gated-{ctx.env['GITHUB_SHA']}",
+                ],
+            ],
+            env=dict(ctx.env),
+        )
+        must(
+            ctx.tools, [*ctx.engine, "load", "--quiet", "--input", str(archive)], env=dict(ctx.env)
+        )
+    finally:
+        shutil.rmtree(where, ignore_errors=True)
+    inspect = [*ctx.engine, "image", "inspect", "--format", "{{.Digest}}", image]
+    if (got := must(ctx.tools, inspect, env=dict(ctx.env)).strip()) != digest:
+        cannot(f"the engine loaded {image} as {got or 'nothing'}, not {digest}")
+
+
+def policy(image: str) -> dict:
+    """The pull's signature policy: `image` (`ref@digest`) is accepted, and nothing else.
+
+    The digest pins the bytes and the `image` job produced them, so no signature is
+    asked of it; promote's is the signature that says every gate passed.
+    """
+    return {
+        "default": [{"type": "reject"}],
+        "transports": {"docker": {image: [{"type": "insecureAcceptAnything"}]}},
+    }
 
 
 def stop_commands() -> str:

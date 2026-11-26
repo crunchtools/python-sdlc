@@ -69,6 +69,8 @@ class FakeTools(Tools):
         self.log = io.StringIO()  # what the job printed, in order with the argvs
         self.marks: list[tuple[int, str]] = []  # (argv count, printed text) at each shell
         self.apparmor = ""  # what `podman info` says of .Host.Security.AppArmorEnabled
+        self.policies: list[dict] = []  # the policy each skopeo copy was given, read at the call
+        self.loaded = DIGEST  # the digest the engine reports for the loaded image
 
     def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
         env, stream, timeout = kw.get("env"), kw.get("stream"), kw.get("timeout")
@@ -80,6 +82,8 @@ class FakeTools(Tools):
             self.marks.append((len(self.argvs), cast(io.StringIO, sys.stdout).getvalue()))
             assert stream, "repo shell must stream to the job log"
             return cp(self.shell(argv[-1]))
+        if (pulled := self.pull(argv)) is not None:
+            return pulled
         sock = {"Source": SOCKET, "Destination": boot.SOCKET_PATH}
         if argv[-2:] == ["inspect", "job-ctr"]:
             mounts = [{"Source": HOST, "Destination": self.workspace}]
@@ -96,10 +100,22 @@ class FakeTools(Tools):
             return cp(0, self.apparmor + "\n")
         return cp(0)
 
+    def pull(self, argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+        """skopeo's copy, its policy read while it exists, and the loaded digest; else None."""
+        if argv[0] == "skopeo":
+            self.policies.append(json.loads(Path(argv[argv.index("--policy") + 1]).read_text()))
+            return cp(0)
+        if argv[-4:-1] == ["inspect", "--format", "{{.Digest}}"]:
+            return cp(0, self.loaded + "\n")
+        return None
+
     def verbs(self) -> list[str]:
-        """Each engine call as `podman pull`, `podman run`, `podman image prune`, in order."""
+        """Each engine call as `podman load`, `podman run`, `podman image prune`, in order;
+        the pull as `skopeo copy`."""
         out = []
         for a in self.argvs:
+            if a[0] == "skopeo":
+                out.append("skopeo copy")
             if a[0] == "podman":
                 rest = [w for w in a[1:] if w not in ("--remote",)]
                 rest = rest[2:] if rest[:1] == ["--url"] else rest
@@ -264,13 +280,15 @@ def test_free_disk_empties_the_sdks_and_prunes_before_the_pull_on_github_hosted(
     t = FakeTools()
     rc, _, _ = go(t, toml(free_disk=True), RUNNER_ENVIRONMENT="github-hosted")
     want = ["podman inspect"] * 2 + ["podman info", "podman run", "podman image prune"]
-    assert rc == 0 and t.verbs() == [*want, "podman pull"], t.verbs()
+    assert rc == 0 and t.verbs() == [*want, "skopeo copy", "podman load", "podman image inspect"], (
+        t.verbs()
+    )
     run = t.argvs[3]
     for d in boot.SDK_DIRS:
         assert any(w.startswith(f"{d}:/free/") for w in run), (d, run)
     assert SELF in run and "--network=none" in run and run[-1] == boot.EMPTY
     assert t.argvs[4][4:] == ["image", "prune", "--all", "--force"]
-    assert t.argvs[5][-1] == f"{REF}@{DIGEST}"
+    assert t.argvs[5][0] == "skopeo" and t.argvs[5][-2] == f"docker://{REF}@{DIGEST}"
 
 
 def test_free_disk_with_no_known_image_of_the_job_is_a_2() -> None:
@@ -284,9 +302,12 @@ def test_free_disk_is_a_no_op_off_github_hosted_and_says_so() -> None:
     for runner in ({}, {"RUNNER_ENVIRONMENT": "self-hosted"}):
         t = FakeTools()
         rc, out, _ = go(t, toml(free_disk=True), **runner)
-        assert rc == 0 and t.verbs() == ["podman inspect"] * 2 + ["podman info", "podman pull"], (
-            t.verbs()
-        )
+        assert rc == 0 and t.verbs() == ["podman inspect"] * 2 + [
+            "podman info",
+            "skopeo copy",
+            "podman load",
+            "podman image inspect",
+        ], t.verbs()
         assert "free-disk: not a GitHub-hosted runner" in out, out
     t = FakeTools()
     rc, out, _ = go(t, toml(free_disk=False))
@@ -389,11 +410,17 @@ def test_the_container_is_removed_after_a_failure_and_after_a_timeout() -> None:
         assert t.argvs[-1][4:] == ["rm", "--force", name], t.argvs[-1]
 
 
-def test_on_github_hosted_the_pull_and_the_run_use_podman_too() -> None:
+def test_on_github_hosted_the_load_and_the_run_use_podman_too() -> None:
     t = FakeTools()
     rc, _, _ = go(t, COMMAND, RUNNER_ENVIRONMENT="github-hosted")
     assert rc == 0
-    assert t.verbs()[-3:] == ["podman pull", "podman run", "podman rm"], t.verbs()
+    assert t.verbs()[-5:] == [
+        "skopeo copy",
+        "podman load",
+        "podman image inspect",
+        "podman run",
+        "podman rm",
+    ], t.verbs()
     assert parts(t.runs[0]["argv"])["env"]["RUNNER_ENVIRONMENT"] == "github-hosted"
 
 
@@ -519,8 +546,53 @@ def test_only_the_images_with_work_are_pulled() -> None:
     t = FakeTools()
     with contextlib.redirect_stdout(io.StringIO()):
         rc = _run(t, files, result, "crunchtools/acquacotta")
-    pulled = [a[-1] for a in t.argvs if a[4] == "pull"]
-    assert rc == 0 and pulled == [f"quay.io/crunchtools/acquacotta@{DIGEST}"], pulled
+    pulled = [a[-2] for a in t.argvs if a[0] == "skopeo"]
+    assert rc == 0 and pulled == [f"docker://quay.io/crunchtools/acquacotta@{DIGEST}"], pulled
+
+
+def test_the_pull_is_skopeos_by_digest_under_a_policy_for_that_digest_alone() -> None:
+    t = FakeTools()
+    rc, _, ws = go(t, CONTRACT)
+    copy = next(a for a in t.argvs if a[0] == "skopeo")
+    archive = f"{ws}/{boot.PULL}/image.tar"
+    assert rc == 0 and copy[-2:] == [
+        f"docker://{REF}@{DIGEST}",
+        f"oci-archive:{archive}:{REF}:gated-{SHA}",
+    ]
+    assert {"--src-no-creds", "--preserve-digests"} <= set(copy), copy
+    assert t.policies == [
+        {
+            "default": [{"type": "reject"}],
+            "transports": {"docker": {f"{REF}@{DIGEST}": [{"type": "insecureAcceptAnything"}]}},
+        }
+    ], t.policies
+    load = next(a for a in t.argvs if "load" in a)
+    assert load[-2:] == ["--input", archive] and load[:2] == ["podman", "--remote"], load
+    assert not (ws / boot.PULL).exists(), "the policy and the archive outlive the pull"
+    assert not any(a[0] == "podman" and "pull" in a for a in t.argvs), "the engine pulled"
+
+
+def test_the_policy_names_no_tag_and_no_other_repository() -> None:
+    doc = boot.policy(f"{REF}@{DIGEST}")
+    accepted = [
+        scope
+        for scopes in doc["transports"].values()
+        for scope, reqs in scopes.items()
+        if reqs != [{"type": "reject"}]
+    ]
+    assert doc["default"] == [{"type": "reject"}] and accepted == [f"{REF}@{DIGEST}"], doc
+
+
+def test_a_load_the_engine_cannot_find_by_digest_is_a_2() -> None:
+    t = FakeTools()
+    t.loaded = "sha256:" + "b" * 64
+    msg = ""
+    try:
+        go(t, CONTRACT)
+    except CannotRunError as exc:
+        msg = str(exc)
+    assert "not " + DIGEST in msg, f"expected a refusal (exit 2), got {msg!r}"
+    assert not t.runs, "a shell ran on an image the engine does not hold"
 
 
 def _run(t: FakeTools, files: dict[str, str], result: dict, repo: str) -> int:
