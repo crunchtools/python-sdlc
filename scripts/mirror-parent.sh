@@ -55,7 +55,7 @@ trap 'rm -rf "$work"' EXIT
 sed -n "/<<'FLEET_KEY'\$/,/^FLEET_KEY\$/p" "$here/bin/sdlc-bootstrap" | sed '1d;$d' > "$work/fleet.pub"
 [ -s "$work/fleet.pub" ] || die "bin/sdlc-bootstrap carries no fleet key"
 printf '%s\n' "$QUAY_PASSWORD" \
-  | skopeo login -q --authfile "$work/config.json" -u "$QUAY_USERNAME" --password-stdin quay.io >/dev/null
+  | skopeo login --authfile "$work/config.json" -u "$QUAY_USERNAME" --password-stdin quay.io >/dev/null
 
 skopeo copy -q --all --preserve-digests --dest-authfile "$work/config.json" \
   "docker://$upstream" "docker://$mirror:$tag"
