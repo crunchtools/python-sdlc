@@ -127,9 +127,13 @@ def build(tools: Tools, env: Mapping[str, str], root: Path, version: str, name: 
 
 
 def dist_files(out: Path, name: str, version: str) -> list[Path]:
-    """The files `uv build` left in `out`, each named for this project at this version."""
+    """The files `uv build` left in `out`, each named for this project at this version.
+
+    `uv build` also writes `.gitignore` into its output directory; that one name
+    is never uploaded and never checked.
+    """
     stem = re.sub(r"[-_.]+", "_", name).lower()
-    files = sorted(p for p in out.glob("*") if p.is_file())
+    files = sorted(p for p in out.glob("*") if p.is_file() and p.name != ".gitignore")
     same = stem.replace("_", "[-_.]")  # sdists of older backends keep the hyphens
     pattern = re.compile(rf"{same}-{re.escape(version)}(\.tar\.gz|-.*\.whl)", re.IGNORECASE)
     if not files or not all(pattern.fullmatch(p.name) for p in files):

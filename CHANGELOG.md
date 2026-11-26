@@ -6,6 +6,13 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- The `pypi` job no longer refuses every build: `uv build` writes a
+  `.gitignore` into `dist/`, and the check that each file is named for the
+  release counted it. That one name is now skipped and never uploaded; any
+  other stray file still refuses (a1745).
+
 ## [0.17.0] - 2026-11-26
 
 ### Added

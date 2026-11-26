@@ -308,6 +308,23 @@ def test_bad_dist_names() -> None:
         assert "uv publish" not in " ".join(tools.verbs())
 
 
+def test_uv_gitignore_is_not_uploaded() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        tools.dist = [*tools.dist, ".gitignore"]
+        assert pypi.run("push", {}, env, tools) == 0
+        publish = tools.argvs[tools.publish()]
+        assert not any(p.endswith(".gitignore") for p in publish)
+
+
+def test_other_dotfiles_are_refused() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        tools.dist = [*tools.dist, ".pypirc"]
+        assert "dist/" in refusal(tools, env)
+        assert "uv publish" not in " ".join(tools.verbs())
+
+
 def test_name_is_read_before_the_build() -> None:
     tools, env, tmp = make()
     with tmp:
