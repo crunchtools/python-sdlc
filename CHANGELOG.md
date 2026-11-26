@@ -16,6 +16,12 @@ All notable changes to this project are documented here, following
   subscription-manager said "Must specify an activation key". The lowercase
   ids (`activation_key`) never collided. CI was not affected: a runner's podman
   holds no secret.
+- `check` on a push treats a 403 from listing the merged pull request's
+  Actions runs as no evidence the pull request passed, and runs every gate,
+  with one line saying why. `local-release.sh`'s App token cannot list runs on
+  a private repository, where the Ashigaru App holds no Actions permission, so
+  rhel10-bootc-workstation's local release stopped there with a 2 (a1654). A
+  401, a 404 or any other failure is still a 2.
 
 ## [0.16.6] - 2026-11-25
 

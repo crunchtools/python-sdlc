@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,7 @@ class FakeTools(Tools):
         self.env: dict[str, str] = {}  # added to the job's environment
         self.trees: dict[str, str] = {}  # commit -> tree, for gated_on_pr
         self.jobs: list[dict] = []  # the jobs of the merged PR head's ci.yml run
+        self.runs_status = 200  # what listing the merged PR head's Actions runs answers
         self.pr_base = BASE_SHA  # the pull request's base.sha, in the event
         self.before: str | None = None  # a push's `before`, in the event
         self.head_repo = ""  # a pull request's head repo, in the event
@@ -186,7 +188,8 @@ class FakeTools(Tools):
                 "path": ".github/workflows/ci.yml",
                 "head_repository": {"full_name": REPO},
             }
-            return Response(200, json.dumps({"workflow_runs": [run]}).encode())
+            listed = {"workflow_runs": [run]} if self.runs_status == HTTPStatus.OK else {}
+            return Response(self.runs_status, json.dumps(listed).encode())
         if method == "GET" and path.endswith("/actions/runs/9/jobs"):
             return Response(200, json.dumps({"jobs": self.jobs}).encode())
         return self.write(method, path)
@@ -382,6 +385,25 @@ def test_push_gates_when_the_tree_or_the_check_differs() -> None:
     for t in (merged("d" * 40), merged("c" * 40, "failure"), FakeTools()):
         rc, _ = go("push", t, files=IMAGE)
         assert rc == 0 and gated(t)
+
+
+def test_push_gates_when_the_token_may_not_list_actions_runs() -> None:
+    # local-release.sh's App token on a private repo: 403, no evidence, every gate.
+    t = merged("c" * 40)
+    t.runs_status = 403
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc, plan = go("push", t, files=IMAGE)
+    assert rc == 0 and gated(t), plan
+    assert "may not read crunchtools/demo's Actions runs (403); no PR evidence" in out.getvalue()
+
+
+def test_push_other_actions_runs_failures_are_still_a_2() -> None:
+    for status in (401, 404, 500):
+        t = merged("c" * 40)
+        t.runs_status = status
+        msg = refusal("push", t, files=IMAGE)
+        assert f"answered {status}" in msg and "/actions/runs?" in msg, (status, msg)
 
 
 def test_push_image_repo_builds_only_a_release() -> None:
