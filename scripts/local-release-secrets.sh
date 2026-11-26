@@ -5,7 +5,7 @@
 # never to disk, never on argv: the role and secret ids go to jq by --rawfile,
 # the OpenBao token to curl by a header on stdin.
 #
-# kv/gloval/github is the mirror of the org secrets ci.yml's image and promote
+# kv/gloval/crunchtools is the mirror of the org secrets ci.yml's image and promote
 # jobs hold: the fleet cosign key, RHSM and registry.redhat.io, and the Ashigaru
 # App key local-release.sh mints its read token from. The quay robot is
 # kv/gloval/crunchtools-sdlc-quay's (crunchtools+sdlc).
@@ -33,8 +33,8 @@ read_kv() {
     | jq -ce .data.data \
     || { echo "local-release-secrets: $OPENBAO_PREFIX/$1 could not be read" >&2; exit 1; }
 }
-# The quay robot is crunchtools-sdlc-quay's: github's QUAY_* is a stale login.
-github=$(read_kv github)
+# The quay robot is crunchtools-sdlc-quay's: crunchtools' QUAY_* is a stale login.
+github=$(read_kv crunchtools)
 quay=$(read_kv crunchtools-sdlc-quay)
 printf '%s\n%s\n' "$github" "$quay" | jq -cse '.[0] as $g | .[1] as $q
   | $g | {COSIGN_PRIVATE_KEY, COSIGN_PASSWORD, ASHIGARU_APP_KEY,
