@@ -402,7 +402,11 @@ sign_one() {
   _have=$(signed_version "$1@$2" "$3") \
     || die "$1@$2 carries an ambiguous sdlc signature; refusing to add another"
   if [ -z "$_have" ]; then
-    cosign_key sign --yes --tlog-upload=false --key env://SDLC_KEY \
+    # The legacy format, as promote.py's LEGACY_FORMAT: cosign v3's default
+    # bundle is an OCI referrer podman and bootc cannot read, and v3 refuses
+    # --tlog-upload=false without --use-signing-config=false (a1751).
+    cosign_key sign --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false \
+      --key env://SDLC_KEY \
       -a "repo=$3" -a "version=$4" "$1@$2"
     _have=$(signed_version "$1@$2" "$3") || die "$1@$2 is ambiguous after signing"
   fi
