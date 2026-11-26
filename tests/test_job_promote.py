@@ -218,6 +218,14 @@ def refused(
     raise AssertionError("expected a refusal (exit 2)")
 
 
+def test_every_cosign_reads_large_attachments() -> None:
+    # A workstation SBOM attestation is over cosign's 128 MiB default (a1654).
+    t = FakeTools()
+    assert go(t) == 0
+    cosigns = [e for a, e in zip(t.argvs, t.envs, strict=True) if a[0] == "cosign"]
+    assert cosigns and all(e.get("COSIGN_MAX_ATTACHMENT_SIZE") == "512MiB" for e in cosigns)
+
+
 def test_a_planned_boot_must_have_succeeded() -> None:
     planned = json.dumps({"image": True, "boot": True, "release": None})
     for result in ("failure", "skipped", "cancelled", ""):

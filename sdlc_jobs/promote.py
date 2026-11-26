@@ -78,6 +78,12 @@ BUILT_LABELS = ("org.opencontainers.image.revision", "com.crunchtools.build.comm
 SECRET_KEYS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
 
 
+# cosign refuses to read an attachment over 128 MiB by default, after it was
+# happy to upload it: rhel10-bootc-workstation's SBOM attestation is 185 MB, so
+# its own verify-attestation failed (a1654). Every cosign here reads with this.
+MAX_ATTACHMENT = "512MiB"
+
+
 @dataclass
 class Job:
     tools: Tools
@@ -101,6 +107,7 @@ class Job:
         }
         env["DOCKER_CONFIG"] = str(self.scratch / "docker")
         env["REGISTRY_AUTH_FILE"] = str(self.scratch / "docker" / "config.json")
+        env["COSIGN_MAX_ATTACHMENT_SIZE"] = MAX_ATTACHMENT
         return env
 
     def run(self, argv: list[str], *, key: bool = False) -> subprocess.CompletedProcess[str]:
