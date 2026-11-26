@@ -6,6 +6,13 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `promote` reads cosign attachments up to 512 MiB. cosign uploads an
+  attestation of any size but refuses to read one over 128 MiB by default, so
+  rhel10-bootc-workstation 0.3.0's 185 MB SBOM attestation failed promote's own
+  verify-attestation and nothing was tagged in the registry (a1654).
+
 ## [0.16.8] - 2026-11-26
 
 ### Fixed
