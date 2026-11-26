@@ -6,6 +6,17 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/mirror-parent.sh` mirrors one upstream parent, pinned by digest,
+  into `quay.io/crunchtools/<name>:<tag>` with `skopeo copy --all
+  --preserve-digests` and signs it with the fleet key and
+  `repo=crunchtools/<name>`, the signature the image job's `verify_parent`
+  trusts (a1730). A repo built FROM `quay.io/podman/stable`, which nobody
+  signs, was refused; it now builds FROM
+  `quay.io/crunchtools/podman-stable` at the same digest. It runs on Exedore
+  with the secrets `local-release-secrets.sh` already pipes.
+
 ### Changed
 
 - cosign and grype come from Hummingbird (`registry.access.redhat.com/hi/cosign`
