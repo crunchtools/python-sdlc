@@ -35,6 +35,9 @@ All notable changes to this project are documented here, following
   attestations, and podman's `sigstoreSigned` policy accepts them. cosign
   2.6.5 accepts the flags, so container.yml's downloaded v2 binary keeps
   working.
+- ShellCheck runs from `quay.io/crunchtools/shellcheck`, v0.11.0 built from
+  upstream source and fleet-signed, not `docker.io/koalaman/shellcheck`: the
+  pre-commit hook, `scripts/self.sh` and `container.yml` (a1751).
 
 ## [0.17.1] - 2026-11-26
 
