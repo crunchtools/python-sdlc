@@ -6,6 +6,40 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/local-release.sh` runs ci.yml's `pypi` job after promote when the
+  release publishes to PyPI, so fleet releases reach PyPI again while org
+  Actions are off. `local-release-secrets.sh` emits `PYPI_API_TOKEN` from
+  `kv/gloval/crunchtools`; the script hands it to the pypi job alone, as
+  `UV_PUBLISH_TOKEN`, and stops before image when a PyPI release has no token.
+  `--pypi <owner/repo> <sha>` publishes a release already tagged that missed
+  PyPI, reading every page of the repo's tags for it. A PyPI failure after
+  promote says the release is out and prints that retry line (a1738).
+- The `pypi` job publishes with an API token in `UV_PUBLISH_TOKEN` when no
+  OIDC request variables are present. The token is kept out of every other
+  step's environment, the nested build included, and off argv; OIDC stays the
+  CI path, and a job holding both refuses (a1738).
+
+### Security
+
+- `pypi` uploads with `uv --no-config publish --publish-url
+  https://upload.pypi.org/legacy/`, on the OIDC path too. uv ran in the
+  checkout, so a committed `uv.toml` or `[tool.uv] publish-url`, or one the
+  nested build wrote into the read-write workspace, chose where the files and
+  the credential went. The token also leaves `os.environ` before the first
+  step, so the shared helpers' podman calls do not inherit it (a1738).
+
+### Fixed
+
+- `tests/test_job_pypi.py` ran its `safe.directory` test only under pytest: it
+  was defined after the script's `main()` call.
+- `tests/test_local_release.py` runs the script end to end against faked host
+  tools (`tests/local_release_stub.py`, under `SDLC_LOCAL_RELEASE_ROOT`) and
+  asserts what each job was handed. It was regexes over the source with no
+  `test_` function, so pytest collected nothing and moved or deleted lines
+  passed.
+
 ## [0.16.9] - 2026-11-26
 
 ### Fixed

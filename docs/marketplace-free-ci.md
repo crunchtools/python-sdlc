@@ -522,7 +522,10 @@ the new ruleset like any converted repo.
      `check`, and moves `X.Y.Z` with `latest`.
    - `pypi` re-derives the release from the API itself with the same tests,
      using its read token, and refuses unless it agrees with `write`'s output.
-     Then it publishes by OIDC.
+     Then it publishes by OIDC. Where no Actions run exists
+     (`scripts/local-release.sh`), it publishes with a PyPI API token in
+     `UV_PUBLISH_TOKEN` instead, handed to `uv publish` alone; a job holding
+     both refuses.
 
 **"Needed" comes from the plan, and a skipped needed job is a failure.** A job
 whose `if:` is false is `skipped`, and GitHub lets a dependent job read that as
