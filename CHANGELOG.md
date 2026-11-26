@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.16.7] - 2026-11-26
+
 ### Fixed
 
 - **local-release.sh starts its podman service with no secret in its
