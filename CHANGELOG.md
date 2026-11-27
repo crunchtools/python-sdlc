@@ -14,6 +14,12 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- A redirect no longer carries the job's token to another host (#278). Both
+  HTTP clients, `Tools.http` and the `GitHub` client, open through
+  `_github.SafeRedirect`. It follows an https redirect, carries only Accept,
+  Accept-Language, User-Agent and X-GitHub-Api-Version when the host changes,
+  and refuses a hop to plain http, which comes back as the 3xx it answered. A release
+  download, which 302s to a githubusercontent host, still works.
 - The lane memory budget now keeps a quarter of MemTotal (never under 512 MB)
   for the kernel, podman and the page cache, as it already did for a cgroup
   ceiling (a1809, crunchtools/gha-runner#71). A 16G runner VM gave four lanes
