@@ -261,17 +261,20 @@ class StubHttps(urllib.request.HTTPSHandler):
         return resp
 
 
-def through_redirect(location: str, target: str) -> tuple[object, list[urllib.request.Request]]:
-    """Tools().http with a token, through the real handler, to a URL answering 302."""
-    stub = StubHttps(
-        {"https://api.example/x": (302, location, b"moved"), target: (200, "", b"landed")}
-    )
+REDIRECT_CODES = (301, 302, 303, 307, 308)
+START = "https://api.example/x"
+CREDENTIALS = {"Authorization": "Bearer t", "Cookie": "s=1", "X-Api-Key": "k"}
+
+
+def through_redirect(
+    code: int, location: str, target: str
+) -> tuple[object, list[urllib.request.Request]]:
+    """Tools().http with credentials, through the real handler, to a URL answering `code`."""
+    stub = StubHttps({START: (code, location, b"moved"), target: (200, "", b"landed")})
     opener = urllib.request.build_opener(github.SafeRedirect, stub)
     with mock.patch.object(core, "SAFE_REDIRECTS", opener):
         try:
-            got: object = core.Tools().http(
-                "GET", "https://api.example/x", {"Authorization": "Bearer t"}
-            )
+            got: object = core.Tools().http("GET", START, {"Accept": "x", **CREDENTIALS})
         except core.CannotRunError as exc:
             got = str(exc)
     return got, stub.seen
@@ -281,33 +284,43 @@ def seen_of(seen: list[urllib.request.Request]) -> str:
     return str([(r.full_url, r.header_items()) for r in seen])
 
 
-def test_http_redirect_to_another_host_drops_the_token() -> None:
+def test_http_redirect_to_another_host_drops_the_credentials() -> None:
     target = "https://objects.example/asset"
-    got, seen = through_redirect(target, target)
-    check("a cross-host 302 lands on its body", got == core.Response(200, b"landed"), str(got))
-    check(
-        "the cross-host follow-up carries no Authorization",
-        len(seen) == 2 and seen[1].full_url == target and not seen[1].has_header("Authorization"),
-        seen_of(seen),
-    )
+    for code in REDIRECT_CODES:
+        got, seen = through_redirect(code, target, target)
+        check(f"a cross-host {code} lands on its body", got == core.Response(200, b"landed"))
+        check(
+            f"the cross-host {code} follow-up carries no credential header",
+            [r.full_url for r in seen] == [START, target]
+            and not any(seen[-1].has_header(h.capitalize()) for h in CREDENTIALS),
+            seen_of(seen),
+        )
+        check(
+            f"the cross-host {code} follow-up keeps Accept",
+            seen[-1].get_header("Accept") == "x",
+            seen_of(seen),
+        )
 
 
 def test_http_redirect_on_the_same_host_keeps_the_token() -> None:
     target = "https://api.example/y"
-    got, seen = through_redirect("/y", target)
-    check("a same-host 302 lands on its body", got == core.Response(200, b"landed"), str(got))
-    check(
-        "the same-host follow-up keeps Authorization",
-        len(seen) == 2 and seen[1].get_header("Authorization") == "Bearer t",
-        seen_of(seen),
-    )
+    for code in REDIRECT_CODES:
+        got, seen = through_redirect(code, "/y", target)
+        check(f"a same-host {code} lands on its body", got == core.Response(200, b"landed"))
+        check(
+            f"the same-host {code} follow-up keeps Authorization",
+            [r.full_url for r in seen] == [START, target]
+            and seen[-1].get_header("Authorization") == "Bearer t",
+            seen_of(seen),
+        )
 
 
 def test_http_refuses_a_redirect_off_https() -> None:
     target = "http://api.example/y"
-    got, seen = through_redirect(target, target)
-    check("a 302 to http is the 302 itself", got == core.Response(302, b"moved"), str(got))
-    check("no request follows a 302 to http", len(seen) == 1, seen_of(seen))
+    for code in REDIRECT_CODES:
+        got, seen = through_redirect(code, target, target)
+        check(f"a {code} to http is the {code} itself", got == core.Response(code, b"moved"))
+        check(f"no request follows a {code} to http", len(seen) == 1, seen_of(seen))
     uses = any(isinstance(h, github.SafeRedirect) for h in core.SAFE_REDIRECTS.handlers)
     check("Tools.http opens through that handler", uses)
 

@@ -17,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from typing import Any, Protocol
+from typing import Any, Protocol, override
 
 API_HOST = "api.github.com"
 JSON = "application/vnd.github+json"
@@ -39,13 +39,18 @@ _NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
 
 
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
-    """Follow a redirect over https only; `Authorization` stays with its own host.
+    """Follow a redirect over https only; credentials stay with their own host.
 
     A redirect to anything but https is not followed, so the 3xx arrives as an
-    HTTPError. One to another host is followed without the credential, since a
-    release asset download (github.com -> objects.githubusercontent.com) must work.
+    HTTPError. One to another host is followed carrying only the headers named
+    in `CROSS_HOST_HEADERS`, so no `Authorization`, `Cookie` or API key a caller
+    set goes with it; a release asset download
+    (github.com -> objects.githubusercontent.com) must still work.
     """
 
+    CROSS_HOST_HEADERS = frozenset({"accept", "user-agent"})
+
+    @override
     def redirect_request(
         self,
         req: urllib.request.Request,
@@ -61,7 +66,11 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         here = urllib.parse.urlsplit(req.full_url).netloc.lower()
         if new is not None and to.netloc.lower() != here:
-            new.remove_header("Authorization")
+            keep = self.CROSS_HOST_HEADERS
+            new.headers = {k: v for k, v in new.headers.items() if k.lower() in keep}
+            new.unredirected_hdrs = {
+                k: v for k, v in new.unredirected_hdrs.items() if k.lower() in keep
+            }
         return new
 
 
