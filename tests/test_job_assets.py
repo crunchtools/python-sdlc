@@ -451,6 +451,10 @@ def test_upload_url_for_another_release() -> None:
     assert "upload_url" in refused(built=True, setup=lambda t: setattr(t, "upload_url", foreign))
     plain = f"http://uploads.github.com/repos/{REPO}/releases/9/assets"
     assert "upload_url" in refused(built=True, setup=lambda t: setattr(t, "upload_url", plain))
+    for host in ("uploads.github.com.evil.example", "evil.example/uploads.github.com"):
+        elsewhere = f"https://{host}/repos/{REPO}/releases/9/assets{{?name,label}}"
+        msg = refused(built=True, setup=lambda t, u=elsewhere: setattr(t, "upload_url", u))
+        assert "upload_url" in msg, host
 
 
 def test_build_failure() -> None:

@@ -75,6 +75,7 @@ STAGE = re.compile(r"[a-z0-9][a-z0-9._-]*")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*")  # what a build may name a file
 RENAMED = re.compile(r"[^A-Za-z0-9._-]")  # what GitHub stores as "." (ashigaru+desk-*.rpm)
 SUMS = "SHA256SUMS"
+UPLOADS = "uploads.github.com"  # the only host an upload, and so the token, goes to
 CREATED = 201
 OCTETS = "application/octet-stream"
 
@@ -267,11 +268,12 @@ def release_of(tools: Tools, env: Mapping[str, str], repo: str, version: str, sh
 
 
 def upload_base(rel: Mapping, repo: str) -> str:
-    """`upload_url` without its {?name,label} template, checked to be this Release's."""
+    """`upload_url` without its {?name,label} template, checked to be this Release's.
+
+    The token goes with every upload, so the host must be GitHub's upload host too.
+    """
     url = str(rel.get("upload_url", "")).split("{", 1)[0]
-    if not url.startswith("https://") or not url.endswith(
-        f"/repos/{repo}/releases/{rel.get('id')}/assets"
-    ):
+    if url != f"https://{UPLOADS}/repos/{repo}/releases/{rel.get('id')}/assets":
         cannot(f"the Release's upload_url {url!r} is not this Release's")
     return url
 
