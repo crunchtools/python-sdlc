@@ -107,6 +107,7 @@ class FakeTools(Tools):
         self.secret_fprs = [FPR]
         self.public_fprs = [FPR]
         self.gh_pages = True  # does `git fetch` of gh-pages succeed
+        self.fetch_error = ""  # its stderr when it fails; "" is a missing branch
         self.live_tree: dict[str, bytes] = {}  # what FETCH_HEAD checks out
         self.checksig = "digests signatures OK\n"
         self.checksig_rc = 0
@@ -175,11 +176,14 @@ class FakeTools(Tools):
                 (repodata / "repomd.xml").write_text("<repomd/>")
             case "git":
                 out, rc = self.git(argv, cwd or "")
+        err = ""
+        if argv[:2] == ["git", "fetch"] and rc:
+            err = self.fetch_error or f"fatal: couldn't find remote ref refs/heads/{pages.BRANCH}"
         if tool == "gpg" and "--import-options" in argv:
             out = colons(self.public_fprs, "pub")
         elif tool == "gpg" and "--list-secret-keys" in argv:
             out = colons(self.secret_fprs, "sec")
-        return subprocess.CompletedProcess(argv, rc, out, "")
+        return subprocess.CompletedProcess(argv, rc, out, err)
 
     def gpg(self, argv: list[str], stdin: str | None, env: Mapping[str, str] | None) -> None:
         self.gnupghome = (env or {}).get("GNUPGHOME", "")
@@ -487,6 +491,15 @@ def test_no_gh_pages_branch_yet() -> None:
         push = next(a for a in tools.argvs if a[:2] == ["git", "push"])
         assert "--force-with-lease=refs/heads/gh-pages:" in push
         assert set(tools.signed) == {RPM_PETIT2, RPM_PETIT1, RPM_AGENT}
+
+
+def test_gh_pages_fetch_failing_otherwise_is_refused() -> None:
+    def tweak(t: FakeTools, e: dict[str, str]) -> None:
+        t.gh_pages = False
+        t.fetch_error = "fatal: Authentication failed for 'https://github.com/x/'"
+
+    msg = refused(tweak)
+    assert "fetching gh-pages exited 128" in msg and "Authentication failed" in msg, msg
 
 
 def test_schedule_with_nothing_new_publishes_nothing() -> None:

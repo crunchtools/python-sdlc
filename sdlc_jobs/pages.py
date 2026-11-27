@@ -376,11 +376,14 @@ def live_branch(tools: Tools, env: Mapping[str, str], repo: str, into: Path) -> 
     got = tools.run(
         ["git", "fetch", "-q", "--depth=1", "origin", f"refs/heads/{BRANCH}"],
         cwd=str(into),
-        env=genv,
+        env={**genv, "LC_ALL": "C"},  # the missing-ref message below is git's English one
     )
-    if got.returncode != 0:
+    if got.returncode != 0 and "couldn't find remote ref" in (got.stderr or ""):
         print(f"pages: no {BRANCH} branch yet; every package is signed afresh", flush=True)
         return ""
+    if got.returncode != 0:  # auth, network or repository: never taken for a first deploy
+        tail = (got.stderr or "").strip().splitlines()[-3:]
+        cannot(f"fetching {BRANCH} exited {got.returncode}: {' / '.join(tail)}")
     must(tools, ["git", "checkout", "-q", "FETCH_HEAD"], cwd=str(into), env=genv)
     return must(tools, ["git", "rev-parse", "HEAD"], cwd=str(into), env=genv).strip()
 
