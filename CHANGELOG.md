@@ -6,6 +6,14 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Removed
+
+- `.github/workflows/container.yml` (a1790). `ci.yml`'s `test`, `image` and
+  `sign` already build, test, sign and publish every release; `scripts/self.sh`
+  now also runs `tests/test_mirror_parent.sh` and shellchecks `mirror-parent.sh`,
+  the one test only container.yml ran. `:main` and the `python-sdlc` mirror,
+  which only container.yml moved, stay at 0.15.8 and are no longer published.
+
 ### Security
 
 - The fleet `ci.yml` (and sdlc's own) give the `ai` job `CLAUDE_CODE_OAUTH_TOKEN`

@@ -471,7 +471,7 @@ a job that has nothing to take:
 | `gatehouse.yml`, `gatehouse-retriage.yml` | deleted; `ai`, `write`, `gate` |
 | `gourmand.yml`, `constitution.yml` | deleted; `check` runs the constitution in `sdlc ci` and Gourmand right after it (`check.py` `review`) |
 | `bootstrap.yml` | deleted; a `bootstrap` dispatch of `ci.yml` runs `approve`, `image` and `sign` |
-| `container.yml` (build, verify-digest, promote) | stays for now; to go to `check`, `image`, `sign` |
+| `container.yml` (build, verify-digest, promote) | deleted (a1790); its tests run in `test` (`scripts/self.sh`), its build and signing in `image` and `sign`; `:main` and the `python-sdlc` mirror stopped at 0.15.8 |
 | `release.yml` (open and tag with the App) | deleted; `write` opens, verifies and tags, and `sign` publishes |
 | `update-tools.yml` | deleted; Renovate moves the `Containerfile` pins (`renovate.json`) |
 | `dependabot-automerge.yml` | deleted with Dependabot |
