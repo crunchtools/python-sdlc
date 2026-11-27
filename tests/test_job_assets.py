@@ -457,7 +457,7 @@ def test_unpinned_copy_and_mount_sources_are_refused() -> None:
         assert "fedora:latest, named by" in msg and "not pinned" in msg, line
 
 
-PROBE = "quay.io/crunchtools-probe/nonexistent-xyz:1"  # what each bypass would pull
+PROBE = "registry.example.invalid/probe/nonexistent:1"  # what each bypass would pull
 
 
 def test_what_the_pin_check_cannot_model_is_refused() -> None:
