@@ -594,6 +594,11 @@ def plan(env: Mapping[str, str]) -> dict:
                        the weekly audit with an alert to keep
         weekly   bool  this is the weekly run (audit, rebuild, keepalive)
         audit    null, or {"found": bool, "summary": str} on the weekly run
+        assets   bool  assets runs after write: a release merge in a repo with
+                       [[tool.sdlc.assets]]
+        pages    bool  pages runs: a repo with [tool.sdlc.pages], on a
+                       default-branch push, a bare dispatch, or a poll that found
+                       its products' releases differ from the site's index.json
     """
     raw = env.get("SDLC_CHECK") or "{}"
     try:

@@ -73,6 +73,10 @@ for probe in \
   "lychee:lychee --version" \
   "podman-remote:podman-remote --version" \
   "skopeo:skopeo --version" \
+  "gpg:gpg --version" \
+  "rpmsign:rpmsign --version" \
+  "rpmkeys:rpmkeys --version" \
+  "createrepo_c:createrepo_c --version" \
   "docker:docker --version" \
   "cosign:cosign version" \
   "syft:syft --version" \

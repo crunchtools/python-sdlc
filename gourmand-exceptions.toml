@@ -364,3 +364,54 @@ justification = """
   indirection, and the convert_repo.py matches cross a deliberate boundary \
   (the image's jobs vs a standalone script).
 """
+
+[[exceptions]]
+check = "CH001-absolute_paths"
+path = "sdlc_jobs/pages.py"
+classification = "by_design"
+justification = """
+  The `Signed-By:` line naming the apt keyrings directory under etc is a line of the published \
+  <name>.sources file, and names where a reader's apt looks for the key on \
+  THEIR machine; the job never opens that path. deb822 requires an absolute \
+  path (or an inline key), and that directory is the one apt's \
+  documentation tells a repository's users to put keys in, so there is no \
+  relative form or config to move it to.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/assets.py"
+classification = "gourmand_bug"
+justification = """
+  assets.entry (checks one [[tool.sdlc.assets]] table against the image-build \
+  check it names) is paired with pages.settings (checks [tool.sdlc.pages]). \
+  Both are a run of `get a key, refuse unless it has this type or shape` \
+  statements, so the statement shapes match; the keys, the types and the \
+  refusal texts do not, and each message names its own table so the exit-2 \
+  contract stays specific. A helper taking a predicate and a message per \
+  line would be a validation DSL longer than the two functions.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/pages.py"
+classification = "gourmand_bug"
+justification = """
+  pages.run is paired with the run functions of _boot, _relock and renovate, and with _debrepo.control_of: \
+  each is a short function that builds its inputs, calls one \
+  worker and returns. That silhouette is the whole match; they \
+  share no line, call or identifier. The real shared pieces (Tools, \
+  cannot, in_checkout, tool_sdlc) are already in _core.
+"""
+
+[[exceptions]]
+check = "CH012-copy_paste_detection"
+path = "sdlc_jobs/_debrepo.py"
+classification = "gourmand_bug"
+justification = """
+  _debrepo.control_of (opens a .deb, walks its ar members, picks the control \
+  tarball and parses it) is paired with _relock.shim and renovate's \
+  Job.discover: nine statements of guards, assignments and a return, the \
+  silhouette of most short Python functions, with no line, call or \
+  identifier in common. There is no helper to extract.
+"""

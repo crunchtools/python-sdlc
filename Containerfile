@@ -218,6 +218,14 @@ RUN dnf install -y git-core tar zstd libzstd which jq gawk podman-remote skopeo 
  && dnf clean all \
  && rm -rf /var/cache/dnf
 
+# The package site's signing tools, for the `pages` job alone (a1796): gpg signs
+# repomd.xml and the apt Release, rpmsign each RPM, createrepo_c writes the rpm
+# metadata. Not toolbox members either; they float with the repo as podman-remote
+# does. The apt index is sdlc_jobs/_debrepo.py, so no apt-utils.
+RUN dnf install -y gnupg2 rpm-sign createrepo_c \
+ && dnf clean all \
+ && rm -rf /var/cache/dnf
+
 # Node and npm are their own step, with --no-best, because Hummingbird publishes
 # them as separate RPMs that do not always land together: when this was written
 # the newest nodejs24-npm required nodejs24 build 0.1 while the repo's newest
