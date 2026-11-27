@@ -3,8 +3,8 @@
 # named repository with the fleet key, unless it already carries them, and
 # prove each attestation verifies (a997), as constitution's container-release.yml
 # did for every other image (#203, #204). container.yml's promote ran it after
-# scripts/sign-digest.sh; since that was retired (a1790) nothing calls it, and
-# the sign job is to (#266).
+# scripts/sign-digest.sh; since that was retired (a1790) nothing calls it.
+# sdlc's own releases are attested with sdlc's key by scripts/self.sh (#266).
 #
 # Two steps, as constitution#209 splits them, so the key is never in the
 # environment of anything that parses the image:

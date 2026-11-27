@@ -26,6 +26,16 @@ All notable changes to this project are documented here, following
   "renamed in X" and "retired in X" as naming the end release, and no longer
   reads a continuation line that opens with `--` or `**bold**` as a new bullet.
   claude-supervisor's 2.0.0 CHANGELOG, which hit the first two, now passes.
+- sdlc's own releases carry an SPDX SBOM and SLSA v1 provenance attestation
+  again, under sdlc's key (#266). They stopped at 0.15.9, when releases moved
+  from `container.yml` to `ci.yml`'s `sign` step, which signed and never
+  attested. `scripts/self.sh`'s sign now scans each digest with syft (pinned,
+  without the key), writes provenance from its build labels with
+  `scripts/provenance.py`, and attests and verifies both before any tag
+  moves; sdlc-bootstrap gets the same build labels and attestations. Fleet
+  images were never affected: `sdlc image promote` attests them. syft runs
+  read-only with no registry login. A rollback attests its digest's SBOM, if
+  it lacks one, before `:<major>` moves to it.
 
 ### Removed
 
