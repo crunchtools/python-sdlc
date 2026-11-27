@@ -959,6 +959,27 @@ MANY = {
 }
 
 
+def test_trentina_may_publish_its_l2_model() -> None:
+    """EXTRA_IMAGES gives crunchtools/trentina its L2 model image (a1793), and no other repo."""
+    entry = (
+        '[[tool.sdlc.images]]\nname = "trentina-l2-model"\ncontainerfile = "m/Containerfile"\n'
+        'context = "m"\nboot = "none"\nboot-none-reason = "data only"\n'
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "m").mkdir()
+        (root / "m" / "Containerfile").write_text("FROM scratch\n")
+        (root / "pyproject.toml").write_text("[tool.sdlc.image]\npublish = false\n" + entry)
+        found = _core.images(root, "crunchtools/trentina")
+        assert [i.name for i in found] == ["trentina-l2-model"], found
+        msg = ""
+        try:
+            _core.images(root, "crunchtools/rotv")
+        except CannotRunError as exc:
+            msg = str(exc)
+        assert "may publish only" in msg, msg
+
+
 def test_publish_false_plans_no_image() -> None:
     rc, plan = go("push", FakeTools(prs=[pr()]), files=OPT_OUT)
     assert rc == 0 and plan["image"] is False

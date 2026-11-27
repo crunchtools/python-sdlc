@@ -670,6 +670,19 @@ def test_an_image_this_repo_may_not_publish_is_refused_before_anything() -> None
         assert not t.argvs, bad
 
 
+def test_trentina_may_promote_its_l2_model_and_no_other_repo_may() -> None:
+    """The real allowlist (a1793): trentina-l2-model is trentina's, not rotv's."""
+    ref = "quay.io/crunchtools/trentina-l2-model"
+    env = {"GITHUB_SHA": SHA, "SDLC_IMAGE_RESULT": json.dumps({"images": [one(ref)], "sha": SHA})}
+    assert promote.validate_image(env, "crunchtools/trentina") == [(ref, NEW)]
+    msg = ""
+    try:
+        promote.validate_image(env, "crunchtools/rotv")
+    except CannotRunError as exc:
+        msg = str(exc)
+    assert "is not exactly one of" in msg, msg
+
+
 def test_one_image_that_does_not_check_out_signs_none() -> None:
     t = FakeTools()
     t.labels[OLD] = {}

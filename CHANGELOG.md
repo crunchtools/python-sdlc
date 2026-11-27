@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Added
+
+- `EXTRA_IMAGES` gives crunchtools/trentina `trentina-l2-model`, the L2 model
+  image a training round publishes through `ci.yml` (crunchtools/trentina#954,
+  a1793).
+
 ### Fixed
 
 - The lane memory budget now keeps a quarter of MemTotal (never under 512 MB)
