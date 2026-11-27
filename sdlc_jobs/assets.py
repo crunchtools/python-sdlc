@@ -61,7 +61,7 @@ from sdlc_jobs._core import (
 )
 from sdlc_jobs._tools import child_env, safe_directory
 from sdlc_jobs._verify_release import verify_release
-from sdlc_jobs.image import builder_stages
+from sdlc_jobs.image import builder_stages, copy_sources
 from sdlc_jobs.pypi import parse_release
 
 EVENTS = ("push",)  # ci.yml's `assets` job runs on a push and nothing else
@@ -165,6 +165,13 @@ def pinned(root: Path, e: Entry) -> None:
             cannot(
                 f"{e.containerfile}: FROM {parent.image} is not pinned by @sha256:; a "
                 "release asset is built only on a build root the review saw"
+            )
+    for ref in copy_sources(text, e.build_args):
+        if not DIGEST.fullmatch(ref.partition("@")[2]):
+            cannot(
+                f"{e.containerfile}: {ref}, named by a --from= or a RUN --mount from=, is "
+                "not pinned by @sha256:; a release asset takes bytes only from images the "
+                "review saw"
             )
 
 

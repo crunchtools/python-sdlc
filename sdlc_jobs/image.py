@@ -483,6 +483,55 @@ def builder_stages(
     return found
 
 
+def from_refs(op: str, words: list[str]) -> list[str]:
+    """The `--from=` values of a COPY/ADD and the `from=` keys of a RUN's `--mount`s."""
+    if op in ("COPY", "ADD"):
+        return [w.partition("=")[2] for w in words if w.startswith("--from=")]
+    if op != "RUN":
+        return []
+    opts = (
+        kv.partition("=")
+        for w in words
+        if w.startswith("--mount=")
+        for kv in w.partition("=")[2].split(",")
+    )
+    return [v for k, eq, v in opts if eq and k == "from"]
+
+
+def copy_sources(text: str, overrides: Mapping[str, str] | None = None) -> list[str]:
+    """Every image a `COPY|ADD --from=` or `RUN --mount=...,from=` names, not a stage.
+
+    An earlier stage's alias (any case) or a stage index is no image. Expanded like
+    `builder_stages`, which stays FROM-only: the image job verifies what it returns.
+    """
+    args: dict[str, str] = {}
+    aliases: list[str] = []
+    found: list[str] = []
+    started = False
+    for raw in re.sub(r"\\\n", " ", text).splitlines():
+        words = raw.split()
+        op = words[0].upper() if words else ""
+        refs: list[str] = []
+        if op == "ARG" and not started:
+            args.update(
+                {k: v.strip("\"'") for k, eq, v in (w.partition("=") for w in words[1:]) if eq}
+            )
+        elif op == "FROM":
+            if not started:
+                args.update(overrides or {})
+                started = True
+            rest = [w for w in words[1:] if not w.startswith("--")]
+            if len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS":
+                aliases.append(rest[2].lower())
+        else:
+            refs = from_refs(op, words[1:])
+        for ref in refs:
+            image = expand_build_vars(ref, args, strict=True).strip("\"'")
+            if image and not image.isdigit() and image.lower() not in aliases:
+                found.append(image)
+    return found
+
+
 def split_ref(image: str) -> tuple[str, str]:
     """(registry host, repository path) of a reference, tag and digest dropped."""
     first, _, rest = image.partition("/")

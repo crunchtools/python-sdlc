@@ -402,6 +402,38 @@ def test_pinned_froms_alias_and_scratch_pass() -> None:
         assert assets.run("push", {}, env, tools) == 0
 
 
+def test_unpinned_copy_and_mount_sources_are_refused() -> None:
+    for line in (
+        "COPY --from=fedora:latest /x /y",
+        "RUN --mount=type=bind,from=fedora:latest,target=/m true",
+        "ARG IMG=fedora:latest\nCOPY --from=${IMG} /x /y",
+    ):
+        cf = CONTAINERFILE.replace("RUN mkdir /out", f"RUN mkdir /out\n{line}")
+        if line.startswith("ARG"):  # globals precede the first FROM
+            cf = (
+                line.split("\n")[0]
+                + "\n"
+                + CONTAINERFILE.replace("RUN mkdir /out", "RUN mkdir /out\n" + line.split("\n")[1])
+            )
+        msg = refused(containerfile=cf)
+        assert "fedora:latest, named by" in msg and "not pinned" in msg, line
+
+
+def test_copy_and_mount_sources_that_are_not_unpinned_images_pass() -> None:
+    for line in (
+        "RUN --mount=type=cache,target=/c true",
+        "COPY --from=build /x /y",
+        "COPY --from=BUILD /x /y",
+        "COPY --from=0 /x /y",
+        f"COPY --from={ROOT_FROM} /x /y",
+        "RUN --mount=type=bind,from=build,target=/m true",
+    ):
+        cf = CONTAINERFILE.replace("FROM scratch AS other", f"{line}\nFROM scratch AS other")
+        tools, env, tmp = make(containerfile=cf)
+        with tmp:
+            assert assets.run("push", {}, env, tools) == 0, line
+
+
 def test_now_build_arg_is_refused() -> None:
     msg = refused(PYPROJECT.replace('"@project.version"', '"@now"'))
     assert "@now" in msg
