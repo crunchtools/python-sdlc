@@ -629,6 +629,9 @@ def test_bad_settings() -> None:
         (toml_text(products="[]"), "products must be"),
         (toml_text(products='["crunchtools/petit", "crunchtools/petit"]'), "products must be"),
         (toml_text(products='["not-a-repo"]'), "products must be"),
+        (toml_text(products='["crunchtools/.."]'), "products must be"),
+        (toml_text(products='["../.."]'), "products must be"),
+        (toml_text(products='["crunchtools/."]'), "products must be"),
         (toml_text(static='["index.json"]'), "static files"),
         (toml_text(static='["crunchtools.asc"]'), "static files"),
         (toml_text(static='["missing.html"]'), "static"),
@@ -637,6 +640,14 @@ def test_bad_settings() -> None:
     ]
     for text, fragment in cases:
         assert fragment in refused(toml=text), (text, fragment)
+
+
+def test_static_dotfile_is_refused() -> None:
+    def tweak(t: FakeTools, e: dict[str, str]) -> None:
+        (t.root / ".gitattributes").write_text("*.rpm text\n")
+
+    msg = refused(tweak, toml=toml_text(static='[".gitattributes"]'))
+    assert "no dotfile" in msg, msg
 
 
 def test_pages_build_errors() -> None:

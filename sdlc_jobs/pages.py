@@ -70,7 +70,7 @@ EVENTS = ("push", "schedule", "workflow_dispatch")
 KEY_ENV = "SDLC_PAGES_GPG_KEY"
 BRANCH = "gh-pages"
 KEYS = {"name", "site-url", "key", "products", "keep", "static"}
-REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.\.?$)[A-Za-z0-9_.-]+")  # no `.` or `..` repo
 ID = re.compile(r"[a-z][a-z0-9-]{0,39}")
 FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*\.(rpm|deb)")
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -136,8 +136,12 @@ def settings(root: Path) -> Site:
     if not isinstance(static, list):
         cannot("[tool.sdlc.pages] static must be a list of files")
     files = [in_checkout(root, s, "[tool.sdlc.pages] static", directory=False) for s in static]
-    if any("/" in f or f in ("index.json", ".nojekyll", f"{name}.asc") for f in files):
-        cannot("[tool.sdlc.pages] static files sit at the repo root and name no generated file")
+    # A dotfile such as .gitattributes would steer `git add -A` on the site's own branch.
+    if any("/" in f or f.startswith(".") or f in ("index.json", f"{name}.asc") for f in files):
+        cannot(
+            "[tool.sdlc.pages] static files sit at the repo root, are no dotfile "
+            "and name no generated file"
+        )
     return Site(name, url, key, list(products), keep, files)
 
 
