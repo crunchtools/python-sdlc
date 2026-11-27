@@ -1436,31 +1436,31 @@ else
 fi
 
 log_mark
-SDLC_IMAGE=main boot tiers > "$RUN/out" 2>&1 || true
+rc=0
+SDLC_IMAGE=main boot tiers > "$RUN/out" 2>&1 || rc=$?
 log_since
-if grep -q -- "-- $PINNED launcher $PINNED\$" "$RUN/podman.log" \
-   && last_run | grep -q -- " $PINNED tiers\$" \
-   && grep -q 'NOT THE PINNED RELEASE' "$RUN/out" \
-   && grep -q 'quay.io/crunchtools/sdlc:main$' "$RUN/out"; then
-  ok "SDLC_IMAGE=main: main's own launcher runs main by digest, and says it is not the release"
+if [ "$rc" -eq 2 ] && ! grep -q -- ' launcher \| verify ' "$RUN/podman.log" \
+   && grep -q 'SDLC_IMAGE=main: :main is no longer published' "$RUN/out"; then
+  ok "SDLC_IMAGE=main is a 2: :main is retired, nothing is verified or run"
 else
-  bad "bootstrap on main: $(last_run) / $(head -3 "$RUN/out")"
+  bad "bootstrap on main exited $rc: $(head -3 "$RUN/out")"
 fi
 
-# main is still signed by the fleet key alone (container.yml): under the same
-# PATH, the launcher asks the fleet key first, which vouches for it, and runs
-# it. A release such as :latest never asks the fleet key, and refusing it is a 2.
+# A digest signed by the fleet key alone (a release up to 0.15.1): under the
+# same PATH, the launcher asks sdlc's key, then the fleet key, which vouches
+# for it, and runs it. A release such as :latest never asks the fleet key, and
+# refusing it is a 2.
 : > "$SHIM/unsigned-sdlc"
 log_mark
 rm -rf "$RUN/cache"
-SDLC_IMAGE=main boot tiers > "$RUN/out" 2>&1 || true
+SDLC_IMAGE="@${PINNED#*@}" boot tiers > "$RUN/out" 2>&1 || true
 log_since
-if ! grep -q -- ' verify --key /sdlc.pub ' "$RUN/podman.log" \
+if grep -q -- ' verify --key /sdlc.pub ' "$RUN/podman.log" \
    && grep -q -- " verify --key /fleet.pub --insecure-ignore-tlog=true $PINNED\$" "$RUN/podman.log" \
    && last_run | grep -q -- " $PINNED tiers\$"; then
-  ok "SDLC_IMAGE=main signed by the fleet key alone verifies with podman and POSIX sh"
+  ok "a digest signed by the fleet key alone verifies with podman and POSIX sh"
 else
-  bad "fleet-signed main: $(last_run) / $(head -3 "$RUN/out")"
+  bad "fleet-signed digest: $(last_run) / $(head -3 "$RUN/out")"
 fi
 log_mark
 rm -rf "$RUN/cache"
@@ -1477,17 +1477,15 @@ rm -f "$SHIM/unsigned-sdlc"
 rm -rf "$RUN/cache"
 
 # What the bootstrap runs is what it pulls, so it pulls from one repository:
-# quay.io/crunchtools/sdlc at main, latest, a release or a digest.
+# quay.io/crunchtools/sdlc at latest, a release or a digest.
 D64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 for good in "0.9.0:$PINNED" \
             "@sha256:$D64:quay.io/crunchtools/sdlc@sha256:$D64" \
-            "quay.io/crunchtools/sdlc:main:$PINNED" \
             "quay.io/crunchtools/sdlc@sha256:$D64:quay.io/crunchtools/sdlc@sha256:$D64"; do
   case "$good" in
     @sha256:*|quay.io/crunchtools/sdlc@*) value=${good%:quay.io/*}; want=${good#"$value":} ;;
     *) value=${good%%:quay.io/*}; want=${good#"$value":} ;;
   esac
-  case "$good" in quay.io/crunchtools/sdlc:main:*) value=quay.io/crunchtools/sdlc:main; want=$PINNED ;; esac
   log_mark
   SDLC_IMAGE=$value boot tiers > "$RUN/out" 2>&1 || true
   log_since
@@ -1505,7 +1503,7 @@ for bad_ in localhost/sdlc:dev quay.io/evil/sdlc:latest quay.io/crunchtools/sdlc
   rc=0
   SDLC_IMAGE=$bad_ boot tiers > "$RUN/out" 2>&1 || rc=$?
   log_since
-  if [ "$rc" -eq 2 ] && grep -q 'is not main, latest, X.Y.Z or @sha256' "$RUN/out" \
+  if [ "$rc" -eq 2 ] && grep -q 'is not latest, X.Y.Z or @sha256' "$RUN/out" \
      && ! [ -s "$RUN/podman.log" ]; then
     ok "SDLC_IMAGE='$bad_' is refused (exit 2) before podman runs"
   else

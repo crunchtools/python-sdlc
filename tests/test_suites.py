@@ -1,7 +1,7 @@
 """Every script-style suite in tests/, as pytest sees it.
 
 The suites here are scripts: each checks as it goes and exits non-zero from
-main() if anything failed, so container.yml runs them one by one in the image.
+main() if anything failed, so they are run one by one in the image.
 Importing one under pytest would run its checks at collection and report
 nothing, which is why `python_files` points pytest at this file alone and this
 file runs each suite as its own process -- the same way CI does, so a suite
@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 SUITES = sorted(p for p in HERE.glob("test_*.py") if p.name != Path(__file__).name)
 
 # Suites for scripts that run on the Actions runner, not in the image, and the
-# runner's tools they need. container.yml runs these on the host; in the image,
+# runner's tools they need. scripts/self.sh runs these on the host; in the image,
 # which has no awk, they are skipped by name rather than failed.
 HOST_TOOLS = {"test_release_version.py": ("awk", "bash")}
 

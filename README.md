@@ -89,10 +89,11 @@ signed every release since 0.15.2. An `@sha256` digest may carry
 either sdlc's key or the crunchtools fleet key, which signed the releases up to
 0.15.1 and the retired `:main`; run one of those by its digest. A digest verified
 once is remembered in `${XDG_CACHE_HOME:-~/.cache}/sdlc/verified/`, so an
-offline seat keeps working. CI always verifies. Promote also attests an SPDX
-SBOM and SLSA v1 provenance to the digest with the fleet key; `cosign
-verify-attestation --insecure-ignore-tlog --type spdxjson` (or
-`slsaprovenance1`) reads them.
+offline seat keeps working. CI always verifies. A fleet image's promote also
+attests an SPDX SBOM and SLSA v1 provenance to the digest with the fleet key;
+`cosign verify-attestation --insecure-ignore-tlog --type spdxjson` (or
+`slsaprovenance1`) reads them. sdlc's own releases since 0.15.9 are signed but
+not attested (#266).
 
 `.pre-commit-config.yaml` is
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
@@ -607,8 +608,9 @@ this image before it merges, build it locally (`podman build -t
 localhost/sdlc:dev .`) and run it with
 `SDLC_IMAGE=localhost/sdlc:dev` through this clone's `bin/sdlc`. A
 converted repo's `.sdlc/bin/sdlc` will not take it: the bootstrap runs what it
-pulls, so it pulls only `quay.io/crunchtools/sdlc` at `main`, `latest`, a
-release `X.Y.Z` or `@sha256:<digest>`, and refuses anything else with exit 2.
+pulls, so it pulls only `quay.io/crunchtools/sdlc` at `latest`, a release
+`X.Y.Z` or `@sha256:<digest>`, and refuses anything else with exit 2; `main`
+is refused by name, since `:main` stopped at 0.15.8.
 `sdlc` has no push step, and only this repo's GitHub Actions on main publish to
 quay.io.
 

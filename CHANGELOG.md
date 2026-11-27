@@ -14,6 +14,16 @@ All notable changes to this project are documented here, following
   the one test only container.yml ran. `:main` and the `python-sdlc` mirror,
   which only container.yml moved, stay at 0.15.8 and are no longer published.
 
+### Changed
+
+- `bin/sdlc-bootstrap` refuses `SDLC_IMAGE=main` with exit 2 and says why:
+  `:main` stopped at 0.15.8, and running it would gate on a frozen image that
+  still verifies under the fleet key. Use `latest`, a release, a digest, or a
+  local build through a clone's `bin/sdlc`. `examples/pre-commit-floating.yaml`
+  no longer suggests it; re-copy it. `scripts/provenance.py` now trusts a build
+  record from `ci.yml`, and the README says sdlc's own releases are signed but
+  not attested since 0.15.9 (#266).
+
 ### Security
 
 - The fleet `ci.yml` (and sdlc's own) give the `ai` job `CLAUDE_CODE_OAUTH_TOKEN`

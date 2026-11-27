@@ -775,7 +775,7 @@ CodeQL uploads as `/language:python` and semgrep as `semgrep`; zizmor, which
 | Job | Event | Runs | Was |
 |---|---|---|---|
 | check | pull_request, push | `ci`, `gourmand`, `constitution`; on a default-branch push, then `sarif` (CodeQL and semgrep again, with an output directory mounted, no repo shell, CodeQL cold under `/tmp`) and its SARIF uploaded, a report only (a scan that could not run is an `::error::`), even when the merged PR's gates stand; an image repo also builds and gates the PR's Containerfile in a nested container, nothing pushed | ci.yml, constitution.yml, security.yml CodeQL, container-release on a PR |
-| check | push | plans `image`, and `release` on the merge of an App-authored `ashigaru/release-X.Y.Z` PR | container.yml `resolve` |
+| check | push | plans `image`, and `release` on the merge of an App-authored `ashigaru/release-X.Y.Z` PR | `resolve` in sdlc's retired container.yml |
 | check | schedule `17 6 * * 1` | `audit`, plans the weekly rebuild, and `sarif` (CodeQL and semgrep on the default branch, SARIF uploaded): the scan's verdict is the run's | dependency-audit.yml, weekly rebuild, security.yml's weekly CodeQL |
 | check | schedule `47 */6 * * *` | plans a rebuild only when the parent image's digest moved | repository_dispatch `parent-image-updated` |
 | ai | pull_request_target | Gatehouse review of the head SHA's diff, read through the API; on an `ashigaru/` branch in this repo also Ashigaru `fix`, five rounds at most | review.yml, fix.yml agent |
@@ -1084,7 +1084,8 @@ in favour of Renovate `customManagers` on the `ARG` lines.
   gha-runner's podman API.
 - **cosign 3.1.6** (copied from Hummingbird's digest-pinned image, signing in the legacy format), and **syft**: for
   `sdlc image promote`. They do what `scripts/sign-digest.sh` and
-  `scripts/attest-digest.sh` already do in sdlc's own `container.yml`.
+  `scripts/attest-digest.sh` did in sdlc's own `container.yml`, retired in
+  a1790; sdlc's own releases are not attested until #266.
 - **zizmor**: today it is installed by hash in the constitution's
   `requirements/zizmor.txt`.
 - **claude**: the CLI from npm, at an exact version, under its own prefix as
