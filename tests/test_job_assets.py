@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -284,6 +285,43 @@ def test_build_gets_no_token_volume_or_secret() -> None:
             assert not any(TOKEN in a for a in argv), argv
             assert child is not None and "GITHUB_TOKEN" not in child, child
             assert TOKEN not in child.values(), child
+
+
+def test_real_podman_reaches_the_jobs_socket_and_no_secret() -> None:
+    """build() through the real Tools and a stub podman on PATH: the fake hides --url."""
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        log = base / "calls.jsonl"
+        (base / "bin").mkdir()
+        stub = base / "bin" / "podman"
+        stub.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            f"with open({str(log)!r}, 'a') as fh:\n"
+            "    fh.write(json.dumps({'argv': sys.argv[1:], 'env': dict(os.environ)}) + '\\n')\n"
+            "if 'create' in sys.argv:\n"
+            "    print('cid-stub')\n"
+        )
+        stub.chmod(0o755)
+        sock = f"unix://{base}/podman.sock"
+        job_env = {
+            "PATH": f"{base / 'bin'}:{os.environ.get('PATH', os.defpath)}",
+            "HOME": str(base),
+            "CONTAINER_HOST": sock,
+            "GITHUB_TOKEN": TOKEN,
+            "SDLC_PAGES_GPG_KEY": "PRIVATE KEY",
+        }
+        (base / "ws").mkdir()
+        e = assets.Entry("rpm-fc43", "Containerfile", ".", {}, "build", "/out", ["*.rpm"])
+        assets.build(Tools(), job_env, base / "ws", e, base / "out")
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        verbs = [c["argv"][3] for c in calls]
+        assert verbs == ["build", "create", "cp", "rm"], verbs
+        for c in calls:
+            assert c["argv"][:3] == ["--remote", "--url", sock], c["argv"]
+            assert c["env"].get("CONTAINER_HOST") == sock, c["env"]
+            assert "GITHUB_TOKEN" not in c["env"] and "SDLC_PAGES_GPG_KEY" not in c["env"]
+            assert not any(TOKEN in v for v in [*c["argv"], *c["env"].values()]), c
 
 
 def test_scratch_is_removed() -> None:

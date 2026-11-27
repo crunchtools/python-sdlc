@@ -46,6 +46,7 @@ from pathlib import Path
 from sdlc_jobs._core import (
     CLEAN,
     DIGEST,
+    SOCKET,
     Tools,
     api,
     cannot,
@@ -183,10 +184,10 @@ def pinned(root: Path, e: Entry) -> None:
 def build(tools: Tools, job_env: Mapping[str, str], root: Path, e: Entry, out: Path) -> None:
     """The entry's stage, built through the socket; its `path` copied into `out` as data.
 
-    podman gets the allowlisted base only: the socket is in its argv, and no
-    GITHUB_TOKEN, volume or secret reaches the build.
+    podman gets the allowlisted base and CONTAINER_HOST, the socket it builds through
+    (also its --url); no GITHUB_TOKEN, volume or secret reaches the build.
     """
-    env = child_env(job_env)
+    env = child_env(job_env, CONTAINER_HOST=job_env.get("CONTAINER_HOST") or SOCKET)
     tag = f"localhost/sdlc-assets:{e.check}"
     argv = [*podman(env), "build", "--pull=missing", "-f", str(root / e.containerfile)]
     for key, value in e.build_args.items():
