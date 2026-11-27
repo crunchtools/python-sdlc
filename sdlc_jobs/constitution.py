@@ -299,7 +299,7 @@ def check_changelog(root: Path, report: Report) -> None:
 RELEASE_HEAD = re.compile(r"^##\s*\[?v?(\d+)\.(\d+)\.(\d+)\]?", re.MULTILINE)
 SUBHEAD = re.compile(r"^###\s*(\w+)", re.MULTILINE)
 ENDS_IN = re.compile(
-    r"\b(?:removed|dropped|ends?|ending|deleted|goes away|until)\b"
+    r"\b(?:removed|dropped|ends?|ending|deleted|renamed|retired|goes away|until)\b"
     r"[^.;]*?\bv?(\d+)\.(\d+)(?:\.(\d+))?",
     re.IGNORECASE,
 )
@@ -315,7 +315,20 @@ def _subsections(body: str) -> dict[str, str]:
 
 
 def _bullets(text: str) -> list[str]:
-    return [line.strip() for line in text.splitlines() if line.lstrip().startswith(("-", "*"))]
+    """Each bullet, with its wrapped continuation lines joined on by single spaces."""
+    bullets: list[list[str]] = []
+    open_bullet = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        # A marker needs its space or tab, so `-- aside` and `**bold**` lines are not bullets.
+        if stripped.startswith(("- ", "* ", "-\t", "*\t")):
+            bullets.append([stripped])
+            open_bullet = True
+        elif stripped and open_bullet:
+            bullets[-1].append(stripped)
+        else:
+            open_bullet = False
+    return [" ".join(lines) for lines in bullets]
 
 
 def _newest_two(text: str) -> tuple[tuple[int, ...] | None, tuple[int, ...] | None, str]:
