@@ -325,6 +325,7 @@ else bad "test: exit $RC"; dump; fi
 reset; run test test GITHUB_EVENT_NAME=pull_request GITHUB_SERVER_URL=https://github.com \
   GITHUB_REPOSITORY=crunchtools/sdlc GITHUB_RUN_ID=9 GITHUB_RUN_ATTEMPT=2 \
   GITHUB_WORKFLOW_REF=crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main
+# shellcheck disable=SC2329  # called through check
 labelled() {         # Containerfile: its build line carries all four labels
   _l=$(grep "^podman build .*-f $1 " "$W/log" 2> /dev/null) || return 1
   [ "$(printf '%s\n' "$_l" | wc -l)" -eq 1 ] || return 1
