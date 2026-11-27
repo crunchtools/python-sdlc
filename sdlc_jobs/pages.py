@@ -108,6 +108,7 @@ class Asset:
 
 
 def settings(root: Path) -> Site:
+    """`[tool.sdlc.pages]` from the checked-out tree, every setting checked; or a 2."""
     raw = tool_sdlc(root).get("pages")
     if not isinstance(raw, dict):
         cannot("the tree has no [tool.sdlc.pages]; the plan is not an authority")
@@ -244,6 +245,7 @@ class Signer:
         self.fpr = ""
 
     def gpg(self, *args: str, stdin: str | None = None) -> str:
+        """gpg in batch and loopback mode with `args`, `stdin` fed in; its stdout, or a 2."""
         argv = ["gpg", "--batch", "--yes", "--no-tty", "--pinentry-mode", "loopback", *args]
         return must(self.tools, argv, env=self.env, input=stdin)
 

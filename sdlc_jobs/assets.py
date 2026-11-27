@@ -107,6 +107,11 @@ def entries(root: Path, version: str, sha: str) -> list[Entry]:
 
 
 def entry(root: Path, checks: Mapping, raw: dict, version: str, sha: str) -> Entry:
+    """One `[[tool.sdlc.assets]]` table, checked, as the build it names.
+
+    containerfile, context and build_args come from the image-build check it names
+    in `checks`, the build-args resolved for this release; anything malformed is a 2.
+    """
     where = f"[[tool.sdlc.assets]] {raw.get('check')!r}"
     stray = sorted(set(raw) - KEYS)
     if stray:
@@ -237,6 +242,7 @@ def as_served(e: Entry, found: Mapping[str, Path]) -> dict[str, Path]:
 
 
 def sha256(path: Path) -> str:
+    """The SHA-256 hex digest of the file at `path`, read a chunk at a time."""
     h = hashlib.sha256()
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(CHUNK), b""):
