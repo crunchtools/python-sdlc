@@ -98,6 +98,7 @@ class FakeTools(Tools):
         self.existing: list[dict] = []  # assets already on the Release
         self.status: dict[str, int] = {}  # an upload's answer, by asset name
         self.said: dict[str, str] = {}  # the digest GitHub claims, by asset name
+        self.envs: list[dict[str, str] | None] = []  # each argv's env, in step with argvs
         self.stored: dict[str, str] = {}  # the name GitHub claims it stored, by asset name
         self.cids: dict[str, str] = {}
 
@@ -114,6 +115,7 @@ class FakeTools(Tools):
         if argv[:3] == ["podman", "--remote", "--url"]:
             argv = ["podman", *argv[4:]]
         self.argvs.append(argv)
+        self.envs.append(None if env is None else dict(env))
         out = ""
         code = 0
         match argv[:2]:
@@ -269,6 +271,19 @@ def test_happy_path() -> None:
             assert headers["Authorization"] == f"Bearer {TOKEN}"
         assert not tools.deletes()
         assert ["podman", "rm", "-f", "cid-rpm-fc43"] in tools.argvs
+
+
+def test_build_gets_no_token_volume_or_secret() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        assert assets.run("push", {}, env, tools) == 0
+        ran = [(a, e) for a, e in zip(tools.argvs, tools.envs, strict=True) if a[0] == "podman"]
+        assert any(a[:2] == ["podman", "build"] for a, _e in ran), ran
+        for argv, child in ran:
+            assert not {"-v", "--volume", "--secret", "--mount"} & set(argv), argv
+            assert not any(TOKEN in a for a in argv), argv
+            assert child is not None and "GITHUB_TOKEN" not in child, child
+            assert TOKEN not in child.values(), child
 
 
 def test_scratch_is_removed() -> None:

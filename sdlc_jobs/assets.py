@@ -59,7 +59,7 @@ from sdlc_jobs._core import (
     tool_sdlc,
     workspace,
 )
-from sdlc_jobs._tools import safe_directory
+from sdlc_jobs._tools import child_env, safe_directory
 from sdlc_jobs._verify_release import verify_release
 from sdlc_jobs.image import builder_stages
 from sdlc_jobs.pypi import parse_release
@@ -167,8 +167,13 @@ def pinned(root: Path, e: Entry) -> None:
             )
 
 
-def build(tools: Tools, env: Mapping[str, str], root: Path, e: Entry, out: Path) -> None:
-    """The entry's stage, built through the socket; its `path` copied into `out` as data."""
+def build(tools: Tools, job_env: Mapping[str, str], root: Path, e: Entry, out: Path) -> None:
+    """The entry's stage, built through the socket; its `path` copied into `out` as data.
+
+    podman gets the allowlisted base only: the socket is in its argv, and no
+    GITHUB_TOKEN, volume or secret reaches the build.
+    """
+    env = child_env(job_env)
     tag = f"localhost/sdlc-assets:{e.check}"
     argv = [*podman(env), "build", "--pull=missing", "-f", str(root / e.containerfile)]
     for key, value in e.build_args.items():
