@@ -196,17 +196,24 @@ def published(tools: Tools, site: Site) -> object:
 def changed(tools: Tools, env: Mapping[str, str], root: Path) -> bool:
     """`check`'s poll: does the site differ from what the products now release?
 
-    An asset with no stored digest cannot be compared, so it counts as changed.
+    An asset with no stored digest is compared by name: the site's index.json holds
+    the digest of the bytes it was served, and a file the site lacks is a change.
     """
     site = settings(root)
     want = wanted(pool(tools, env, site))
-    if any(not w["sha256"] for w in want):
+    live = published(tools, site)
+    if not isinstance(live, list):
         return True
-    return published(tools, site) != want
+    served = {e.get("file"): e.get("sha256") for e in live if isinstance(e, dict)}
+    return live != [{**w, "sha256": w["sha256"] or served.get(w["file"], "")} for w in want]
 
 
 def fetch(tools: Tools, a: Asset, dest: Path) -> Path:
-    """One asset by its public URL, no token, checked against its stored digest."""
+    """One asset by its public URL, no token, checked against its stored digest.
+
+    An asset uploaded before GitHub stored digests has none: it is taken as served,
+    with a warning, since nothing else records what its bytes should be.
+    """
     resp = tools.http("GET", a.url, {"User-Agent": "sdlc-event", "Accept": "*/*"})
     if resp.status != OK:
         cannot(f"downloading {a.product} {a.tag} {a.file} answered {resp.status}")

@@ -724,9 +724,19 @@ def index_for(tools: FakeTools) -> list[dict[str, str]]:
 def test_changed_when_asset_has_no_digest() -> None:
     tools, env, root, tmp = make()
     with tmp:
+        live = index_for(tools)
         tools.releases["crunchtools/claude-agent"][0]["assets"][0]["digest"] = None
-        tools.index = []  # irrelevant: an asset without a digest cannot be compared
+        tools.index = [r for r in live if r["file"] != RPM_AGENT]  # the site lacks it
         assert pages.changed(tools, env, root) is True
+
+
+def test_asset_with_no_digest_that_the_site_serves_is_unchanged() -> None:
+    """No re-run every six hours for an asset GitHub stored no digest for."""
+    tools, env, root, tmp = make()
+    with tmp:
+        tools.index = index_for(tools)
+        tools.releases["crunchtools/claude-agent"][0]["assets"][0]["digest"] = None
+        assert pages.changed(tools, env, root) is False
 
 
 def test_changed_when_index_differs() -> None:
