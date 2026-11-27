@@ -33,7 +33,9 @@ CI=registry.access.redhat.com/hi/cosign@$(hex e)
 # `build` is a no-op; `push --digestfile F` writes
 # digest-sdlc or digest-boot; `run ... -- IMAGE ARGS` is cosign: public-key
 # prints secret.pub, verify succeeds for a ref that has signed/<ref>__<repo>
-# (one version per line) and prints cosign's JSON, sign records one.
+# (one version per line) and prints cosign's JSON, sign records one;
+# verify-attestation succeeds for a ref with att/<ref>__<type>, and attest
+# records one unless `att-fails` exists. `scan` is syft, printing an SBOM.
 { printf '#!/bin/sh\nW=%s\n' "$W"; cat <<'EOF'; } > "$W/bin/podman"
 printf 'podman %s\n' "$*" >> "$W/log"
 san() { printf '%s' "$1" | tr '/:@' '___'; }
@@ -83,6 +85,18 @@ case $1 in
                done
                mkdir -p "$W/signed"
                printf '%s\n' "$_v" > "$W/signed/$(san "$_ref")__$(san "$_repo")" ;;
+         verify-attestation|attest)
+               _c=$1 _n= _t= _ref=
+               for _a; do
+                 [ "$_n" != 1 ] || _t=$_a
+                 _n=; [ "$_a" != --type ] || _n=1
+                 _ref=$_a
+               done
+               _f=$W/att/$(san "$_ref")__$_t
+               if [ "$_c" = attest ]; then
+                 [ -e "$W/att-fails" ] || { mkdir -p "$W/att"; : > "$_f"; }
+               else [ -e "$_f" ] || exit 1; fi ;;
+         scan) printf '{"spdxVersion":"SPDX-2.3"}\n' ;;
          *) exit 99 ;;
        esac ;;
   *) exit 99 ;;
@@ -113,10 +127,12 @@ case $1 in
         if [ -s "$_f" ]; then cat "$_f"
         elif [ -e "$W/deleted-0" ]; then echo 'unknown: Tag 0 was deleted or has expired. To pull, revive via time machine' >&2; exit 1
         else echo 'Error: manifest unknown' >&2; exit 1; fi ;;
-      *image.revision*)
+      *--format*image.revision*)
         [ ! -e "$W/rev-fails" ] || { echo 'Error: unauthorized: authentication required' >&2; exit 1; }
         cat "$W/reg/rev/$(san "$_ref")" 2> /dev/null || : ;;
-      *) cat "$W/reg/label/$(san "$_ref")" 2> /dev/null || : ;;
+      *--format*) cat "$W/reg/label/$(san "$_ref")" 2> /dev/null || : ;;
+      # No --format is the whole inspect, which provenance.py reads.
+      *) cat "$W/reg/json/$(san "$_ref")" 2> /dev/null || printf '{"Labels":{}}\n' ;;
     esac ;;
   copy)
     for _a; do _src=${_dst:-}; _dst=${_a#docker://}; done
@@ -165,13 +181,14 @@ write_tree() {
   printf '# Changelog\n\n## [Unreleased]\n\n## [0.13.0] - 2026-11-23\n' > "$W/repo/CHANGELOG.md"
 }
 write_tree
+cp scripts/provenance.py "$W/repo/scripts/"
 git -C "$W/repo" init -q
 git -C "$W/repo" add -A
 git -C "$W/repo" -c user.name=t -c user.email=t@t commit -q -m init
 REV=$(git -C "$W/repo" rev-parse HEAD)
 
 reset() {
-  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/rev-fails" "$W/deleted-0" "$W/tags" \
+  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/att" "$W/att-fails" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/rev-fails" "$W/deleted-0" "$W/tags" \
          "$W/ls-remote-fails" "$W/curl-stdin" "$W/login-stdin" "$W/repo/boot/keys/"*
   mkdir -p "$W/reg/tag" "$W/reg/label"
   write_tree
@@ -430,15 +447,49 @@ if [ "$(n_log "^skopeo inspect .*{{.Digest}}.* docker://$A:latest\$")" -eq 1 ] \
    && in_log '^skopeo copy --authfile [^ ]* --all --preserve-digests'; then
   ok "each retag is a digest-preserving copy and is read back"
 else bad "no read-back"; fi
-# The key reaches cosign on public-key and sign only, never on verify, and
-# cosign is always the pinned digest.
-if [ "$(n_log '-e SDLC_KEY')" -eq 3 ] && ! grep ' verify ' "$W/log" | grep -q SDLC_KEY \
-   && ! grep 'SDLC_KEY' "$W/log" | grep -qv -e ' public-key ' -e ' sign --yes ' \
+# The key reaches cosign on public-key, sign and attest only, never on verify
+# or syft, and cosign is always the pinned digest.
+if [ "$(n_log '-e SDLC_KEY')" -eq 5 ] && ! grep -e ' verify ' -e ' verify-attestation ' -e ' scan ' "$W/log" | grep -q SDLC_KEY \
+   && ! grep 'SDLC_KEY' "$W/log" | grep -qv -e ' public-key ' -e ' sign --yes ' -e ' attest --yes ' \
    && in_log '-e SDLC_KEY .* -- .* public-key ' && ! in_log 'SDLC_KEY=' \
    && [ "$(n_log ' verify ')" -ge 4 ] \
-   && [ "$(n_log "-- $CI ")" -eq "$(( $(n_log ' verify ') + 3 ))" ]; then
-  ok "the key is passed to public-key and sign only, never to verify, and never as a value"
+   && [ "$(n_log "-- $CI ")" -eq "$(( $(n_log ' verify ') + $(n_log ' verify-attestation ') + 5 ))" ]; then
+  ok "the key is passed to public-key, sign and attest only, never to verify or syft, and never as a value"
 else bad "key exposure"; grep -- 'run ' "$W/log" | sed 's/^/     | /'; fi
+
+printf '\n%s\n' '-- sign release: attestations (#266)'
+# The build record a ci.yml run on main stamps (self.sh build), for provenance.py.
+record() {
+  mkdir -p "$W/reg/json"
+  _wf=crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main
+  printf '{"Labels":{"org.opencontainers.image.revision":"%s","com.crunchtools.build.commit":"%s","com.crunchtools.build.run":"https://github.com/crunchtools/sdlc/actions/runs/7/attempts/1","com.crunchtools.build.builder":"%s","com.crunchtools.build.workflow":"%s"}}\n' \
+    "$REV" "$REV" "$_wf" "$_wf" > "$W/reg/json/$(san "$1")"
+}
+has_att() { [ -e "$W/att/$(san "$1")__$2" ]; }
+rel_setup; record "$A@$D1"; rel
+mv_any=$(first '^skopeo copy')
+at_a=$(first " attest --yes .*--type spdxjson .*$A@$D1\$"); at_p=$(first " attest --yes .*--type slsaprovenance1 .*$A@$D1\$")
+at_b=$(first " attest --yes .*--type spdxjson .*$B@$DB\$")
+if [ "$RC" -eq 0 ] && has_att "$A@$D1" spdxjson && has_att "$A@$D1" slsaprovenance1 \
+   && has_att "$B@$DB" spdxjson && ! has_att "$B@$DB" slsaprovenance1 \
+   && [ -n "$at_a" ] && [ -n "$at_p" ] && [ -n "$at_b" ] && [ -n "$mv_any" ] \
+   && [ "$at_a" -lt "$mv_any" ] && [ "$at_p" -lt "$mv_any" ] && [ "$at_b" -lt "$mv_any" ] \
+   && in_log ' attest --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false ' \
+   && printf '%s' "$OUT" | grep -q 'no provenance attested'; then
+  ok "release: SBOMs for both and sdlc's provenance from its build record, all before any tag moves"
+else bad "release attest: exit $RC a=$at_a p=$at_p b=$at_b move=$mv_any"; dump; fi
+if [ "$(n_log ' scan ')" -eq 2 ] && ! grep ' scan ' "$W/log" | grep -q -e SDLC_KEY -e "$CI" \
+   && in_log "-- docker.io/anchore/syft:v[0-9.]*@sha256:[0-9a-f]\{64\} scan -q -o spdx-json registry:$A@$D1\$"; then
+  ok "syft runs from its pinned digest, without the key"
+else bad "syft"; grep ' scan ' "$W/log" | sed 's/^/     | /'; fi
+rel_setup; mkdir -p "$W/att"
+for at in "$A@$D1"__spdxjson "$A@$D1"__slsaprovenance1 "$B@$DB"__spdxjson; do : > "$W/att/$(san "$at")"; done
+rel
+if [ "$RC" -eq 0 ] && [ "$(n_log ' attest --yes ')" -eq 0 ] && [ "$(n_log ' scan ')" -eq 0 ]; then
+  ok "a re-run on attested digests scans and attests nothing"
+else bad "attest re-run: exit $RC"; dump; fi
+rel_setup; : > "$W/att-fails"; rel
+refused_late "an attestation that does not verify after attesting moves no tag" "attestation does not verify"
 
 rel_setup; carry "$D0" 0.12.0; rel
 if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0")" = "$D1" ] && [ "$(tag_of "$A:latest")" = "$D1" ]; then
@@ -525,6 +576,7 @@ if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0.13.0")" = "$D1" ] && [ "$(tag_of "$A:0")
    && [ "$(n_log '^skopeo copy')" -eq 2 ]; then
   ok "happy path: signs the rebuild, moves X.Y.Z and :0, not latest, touches no sdlc-bootstrap"
 else bad "weekly happy: exit $RC"; dump; fi
+check "  and attests the rebuild's SBOM" has_att "$A@$D1" spdxjson
 
 printf '\n%s\n' '-- sign rollback'
 rb_setup() { reset; mark_signed "$A@$D1" crunchtools/sdlc 0.13.0; reg_label "$A@$D1" 0.13.0; carry "$D0" 0.14.0; }
@@ -558,6 +610,7 @@ if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0")" = "$D1" ] && [ -z "$(tag_of "$A:lates
    && [ "$(n_log '^skopeo copy')" -eq 1 ] && [ "$(n_log ' sign --yes ')" -eq 0 ]; then
   ok "happy path: moves :0 and nothing else, signs nothing (not even down from a newer :0)"
 else bad "rollback happy: exit $RC"; dump; fi
+check "  and attests nothing" [ "$(n_log ' attest --yes ')" -eq 0 ]
 if ! printf '%s' "$OUT" | grep -q "cosign said"; then
   ok "a digest that verifies logs no cosign diagnostic"
 else bad "a verified digest still logged a cosign diagnostic"; dump; fi

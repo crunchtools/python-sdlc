@@ -1108,7 +1108,8 @@ in favour of Renovate `customManagers` on the `ARG` lines.
 - **cosign 3.1.6** (copied from Hummingbird's digest-pinned image, signing in the legacy format), and **syft**: for
   `sdlc image promote`. They do what `scripts/sign-digest.sh` and
   `scripts/attest-digest.sh` did in sdlc's own `container.yml`, retired in
-  a1790; sdlc's own releases are not attested until #266.
+  a1790. sdlc's own releases are attested by `scripts/self.sh`'s sign step
+  with sdlc's key (#266).
 - **zizmor**: today it is installed by hash in the constitution's
   `requirements/zizmor.txt`.
 - **claude**: the CLI from npm, at an exact version, under its own prefix as

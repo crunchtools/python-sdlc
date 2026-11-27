@@ -11,8 +11,8 @@ a997, or whose record is not this repo's ci.yml on main or a v* tag at its own
 revision (inherited FROM a base image, or a branch's dispatched build), gets no
 provenance rather than a wrong one. The same shape as constitution's
 container_release.py provenance (#204), whose trusted builder is its reusable
-workflow; sdlc hand-rolls its own, so the builder is this repo's ci.yml. Until
-the sign job attests (#266) nothing calls this; it moved from container.yml
+workflow; sdlc hand-rolls its own, so the builder is this repo's ci.yml.
+scripts/self.sh's sign step calls it (#266); it moved from container.yml
 (retired, a1790) to ci.yml with the build.
 
 Reads `skopeo inspect` JSON on stdin; writes --out only when there is a record.

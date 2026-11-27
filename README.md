@@ -92,8 +92,10 @@ once is remembered in `${XDG_CACHE_HOME:-~/.cache}/sdlc/verified/`, so an
 offline seat keeps working. CI always verifies. A fleet image's promote also
 attests an SPDX SBOM and SLSA v1 provenance to the digest with the fleet key;
 `cosign verify-attestation --insecure-ignore-tlog --type spdxjson` (or
-`slsaprovenance1`) reads them. sdlc's own releases since 0.15.9 are signed but
-not attested (#266).
+`slsaprovenance1`) reads them. sdlc's own release job attests the same two to
+its images with sdlc's key (#266); 0.15.9 through the last release before that
+fix are signed but not attested, and a release cut by `scripts/hotfix.sh`
+records no Actions run, so it carries the SBOM and no provenance.
 
 `.pre-commit-config.yaml` is
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two

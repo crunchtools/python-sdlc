@@ -16,7 +16,9 @@
 #          Pushes candidates by digest; signs nothing and moves no tag.
 #   sign   the only step with sdlc's key. Never runs the image it signs: cosign
 #          runs from COSIGN_IMAGE, a digest the workflow pins, and the release
-#          is data. Re-validates everything except which digest was built.
+#          is data. Re-validates everything except which digest was built, then
+#          signs and attests an SBOM (syft from SYFT, without the key) and SLSA
+#          v1 provenance (scripts/provenance.py) before any tag moves.
 #
 # Exit 2 is "could not run" (an unknown job or mode); 1 is a refusal or a
 # failed test.
@@ -76,6 +78,8 @@ SHELL_FILES='bin/sdlc bin/sdlc-bootstrap boot/sdlc scripts/self.sh scripts/relea
   tests/test_bootstrap.sh tests/test_sign_digest.sh tests/test_attest_digest.sh
   tests/test_boot.sh tests/test_self.sh tests/test_hotfix.sh tests/test_apparmor.sh .semgrep/run-tests.sh'
 SHELLCHECK=quay.io/crunchtools/shellcheck:latest@sha256:65e4e24aa913e454914cd7588b2df676beac5ad2a9e82a8fc900e9388121a719
+# The Containerfile's syft stage, by the same digest: sign scans what it attests with it.
+SYFT=docker.io/anchore/syft:v1.57.0@sha256:3c70e6d5979364cefdc22b51617a78fd264574d3bd6b4f84a351204147025e2a
 
 # Builds the tree in $1 as sdlc and sdlc-bootstrap, tagged $2 and $3. A run no
 # commit triggered must not reuse a cached `dnf install`, or it ships no errata.
@@ -97,6 +101,10 @@ build() {
   # shellcheck disable=SC2086
   podman build $_args -f "$_src/boot/Containerfile" \
     --build-arg "VERSION=$_ver" --build-arg "REVISION=$_rev" --build-arg "CREATED=$_created" \
+    --label "com.crunchtools.build.run=$_run" \
+    --label "com.crunchtools.build.builder=${GITHUB_WORKFLOW_REF:-}" \
+    --label "com.crunchtools.build.workflow=${GITHUB_WORKFLOW_REF:-}" \
+    --label "com.crunchtools.build.commit=$_rev" \
     -t "$3" "$_src"
 }
 
@@ -199,7 +207,9 @@ output() {
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 trap 'exit 2' HUP INT TERM
-mkdir "$work/auth" "$work/keys"
+mkdir "$work/auth" "$work/keys" "$work/att"
+# cosign's nonroot user reads the predicates sign writes here.
+chmod 0755 "$work/att"
 AUTH=$work/auth/config.json
 
 login() {
@@ -230,16 +240,18 @@ cosign_image() {
   esac
   die "COSIGN_IMAGE '${COSIGN_IMAGE:-}' is not registry.access.redhat.com/hi/cosign@sha256:<64 hex>"
 }
+# COSIGN_MAX_ATTACHMENT_SIZE as promote.py's MAX_ATTACHMENT: cosign uploads an
+# SBOM it then refuses to read back over 128 MiB (a1654).
 cosign() {
   podman run --rm --cap-drop=all --security-opt=no-new-privileges --read-only \
     -v "$work/auth:/auth:ro,z" -v "$work/keys:/keys:ro,z" -e DOCKER_CONFIG=/auth \
-    -- "$COSIGN_IMAGE" "$@"
+    -e COSIGN_MAX_ATTACHMENT_SIZE=512MiB -- "$COSIGN_IMAGE" "$@"
 }
 cosign_key() {
   COSIGN_PASSWORD=${SDLC_KEY_PASSWORD:-} podman run --rm --cap-drop=all \
     --security-opt=no-new-privileges --read-only \
-    -v "$work/auth:/auth:ro,z" -v "$work/keys:/keys:ro,z" -e DOCKER_CONFIG=/auth \
-    -e SDLC_KEY -e COSIGN_PASSWORD -- "$COSIGN_IMAGE" "$@"
+    -v "$work/auth:/auth:ro,z" -v "$work/keys:/keys:ro,z" -v "$work/att:/att:ro,z" -e DOCKER_CONFIG=/auth \
+    -e COSIGN_MAX_ATTACHMENT_SIZE=512MiB -e SDLC_KEY -e COSIGN_PASSWORD -- "$COSIGN_IMAGE" "$@"
 }
 
 # The one version sdlc's key signed $1 with for repo $2, or nothing when no
@@ -415,6 +427,51 @@ sign_one() {
   say "signed $1@$2 as $4"
 }
 
+# Whether any of sdlc's keys verifies a $3 attestation on $1@$2.
+attested() {
+  for _k in "$work/keys/"*.pub; do
+    cosign verify-attestation --key "/keys/${_k##*/}" --insecure-ignore-tlog=true \
+      --type "$3" "$1@$2" > /dev/null 2>&1 && return 0
+  done
+  return 1
+}
+# Attests $work/att/$4 to $1@$2 as a $3 predicate, in the legacy format
+# sign_one uses, and proves it verifies.
+attest_one() {
+  chmod 0644 "$work/att/$4"
+  cosign_key attest --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false \
+    --type "$3" --predicate "/att/$4" --key env://SDLC_KEY "$1@$2"
+  attested "$1" "$2" "$3" || die "the $3 attestation does not verify on $1@$2"
+  say "attested the $3 of $1@$2"
+}
+# The SPDX SBOM and SLSA v1 provenance of $1@$2 under sdlc's key, each unless
+# it already carries one (a re-run): what promote.py attests to every fleet
+# image with the fleet key (#266). syft and provenance.py parse the image and
+# never see the key; only cosign_key does.
+attest() {
+  rm -f "$work/att/"*
+  if attested "$1" "$2" spdxjson; then
+    say "$1@$2 already carries an SBOM"
+  else
+    podman run --rm --cap-drop=all --security-opt=no-new-privileges \
+      -v "$work/auth:/auth:ro,z" -e DOCKER_CONFIG=/auth -e SYFT_CHECK_FOR_APP_UPDATE=false \
+      -- "$SYFT" scan -q -o spdx-json "registry:$1@$2" > "$work/att/sbom.spdx.json" \
+      || die "syft could not scan $1@$2"
+    [ -s "$work/att/sbom.spdx.json" ] || die "syft wrote no SBOM for $1@$2"
+    attest_one "$1" "$2" spdxjson sbom.spdx.json
+  fi
+  if attested "$1" "$2" slsaprovenance1; then
+    say "$1@$2 already carries provenance"
+    return
+  fi
+  skopeo inspect --authfile "$AUTH" "docker://$1@$2" > "$work/inspect.json" || die "cannot inspect $1@$2"
+  env -u SDLC_KEY -u SDLC_KEY_PASSWORD python3 -I "$here/scripts/provenance.py" \
+    --repo crunchtools/sdlc --out "$work/att/provenance.json" < "$work/inspect.json" \
+    || die "provenance.py failed on $1@$2"
+  # provenance.py warns and writes nothing for an image with no build record.
+  [ ! -e "$work/att/provenance.json" ] || attest_one "$1" "$2" slsaprovenance1 provenance.json
+}
+
 mode_sign() {
   case $MODE:${EVENT:-} in release:push|weekly:schedule|rollback:workflow_dispatch|bootstrap:workflow_dispatch) ;;
     *) die "sign MODE=$MODE does not go with event ${EVENT:-none}" ;; esac
@@ -486,6 +543,9 @@ mode_sign() {
   fi
   sign_one "$QUAY" "$_d" crunchtools/sdlc "$_v"
   [ -z "$_b" ] || sign_one "$BOOT" "$_b" crunchtools/sdlc-bootstrap "$_v"
+  # Attested before any tag moves, as signed: no tag names an unattested digest.
+  attest "$QUAY" "$_d"
+  [ -z "$_b" ] || attest "$BOOT" "$_b"
 
   # Read again, inside the sdlc-sign concurrency group, immediately before the
   # move: a weekly run queued behind a release finds :<major> moved and stops.
