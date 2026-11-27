@@ -458,8 +458,12 @@ attest() {
   if attested "$1" "$2" spdxjson; then
     say "$1@$2 already carries an SBOM"
   else
-    podman run --rm --cap-drop=all --security-opt=no-new-privileges \
-      -v "$work/auth:/auth:ro,z" -e DOCKER_CONFIG=/auth -e SYFT_CHECK_FOR_APP_UPDATE=false \
+    # Both repositories are public, so syft, a third-party parser, gets no
+    # login (the robot's can push) and nothing writable but its scratch.
+    rm -rf "$work/syft"
+    mkdir -m 1777 "$work/syft"
+    podman run --rm --cap-drop=all --security-opt=no-new-privileges --read-only \
+      -v "$work/syft:/tmp:z" -e TMPDIR=/tmp -e HOME=/tmp -e SYFT_CHECK_FOR_APP_UPDATE=false \
       -- "$SYFT" scan -q -o spdx-json "registry:$1@$2" > "$work/att/sbom.spdx.json" \
       || die "syft could not scan $1@$2"
     [ -s "$work/att/sbom.spdx.json" ] || die "syft wrote no SBOM for $1@$2"

@@ -35,7 +35,8 @@ CI=registry.access.redhat.com/hi/cosign@$(hex e)
 # prints secret.pub, verify succeeds for a ref that has signed/<ref>__<repo>
 # (one version per line) and prints cosign's JSON, sign records one;
 # verify-attestation succeeds for a ref with att/<ref>__<type>, and attest
-# records one unless `att-fails` exists. `scan` is syft, printing an SBOM.
+# records one unless `att-fails` exists. `scan` is syft, printing an SBOM
+# (nothing on `syft-empty`, exit 1 on `syft-fails`).
 { printf '#!/bin/sh\nW=%s\n' "$W"; cat <<'EOF'; } > "$W/bin/podman"
 printf 'podman %s\n' "$*" >> "$W/log"
 san() { printf '%s' "$1" | tr '/:@' '___'; }
@@ -96,7 +97,8 @@ case $1 in
                if [ "$_c" = attest ]; then
                  [ -e "$W/att-fails" ] || { mkdir -p "$W/att"; : > "$_f"; }
                else [ -e "$_f" ] || { echo "error: no matching attestations for $_ref" >&2; exit 1; }; fi ;;
-         scan) printf '{"spdxVersion":"SPDX-2.3"}\n' ;;
+         scan) [ ! -e "$W/syft-fails" ] || exit 1
+               [ -e "$W/syft-empty" ] || printf '{"spdxVersion":"SPDX-2.3"}\n' ;;
          *) exit 99 ;;
        esac ;;
   *) exit 99 ;;
@@ -188,7 +190,7 @@ git -C "$W/repo" -c user.name=t -c user.email=t@t commit -q -m init
 REV=$(git -C "$W/repo" rev-parse HEAD)
 
 reset() {
-  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/att" "$W/att-fails" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/rev-fails" "$W/deleted-0" "$W/tags" \
+  rm -rf "$W/log" "$W/reg" "$W/signed" "$W/att" "$W/att-fails" "$W/syft-empty" "$W/syft-fails" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/rev-fails" "$W/deleted-0" "$W/tags" \
          "$W/ls-remote-fails" "$W/curl-stdin" "$W/login-stdin" "$W/repo/boot/keys/"*
   mkdir -p "$W/reg/tag" "$W/reg/label"
   write_tree
@@ -478,10 +480,17 @@ if [ "$RC" -eq 0 ] && has_att "$A@$D1" spdxjson && has_att "$A@$D1" slsaprovenan
    && printf '%s' "$OUT" | grep -q 'no provenance attested'; then
   ok "release: SBOMs for both and sdlc's provenance from its build record, all before any tag moves"
 else bad "release attest: exit $RC a=$at_a p=$at_p b=$at_b move=$mv_any"; dump; fi
-if [ "$(n_log ' scan ')" -eq 2 ] && ! grep ' scan ' "$W/log" | grep -q -e SDLC_KEY -e "$CI" \
+if [ "$(n_log ' scan ')" -eq 2 ] && ! grep ' scan ' "$W/log" | grep -q -e SDLC_KEY -e "$CI" -e /auth -e DOCKER_CONFIG \
+   && ! grep ' scan ' "$W/log" | grep -qv -e ' --read-only ' \
    && in_log "-- docker.io/anchore/syft:v[0-9.]*@sha256:[0-9a-f]\{64\} scan -q -o spdx-json registry:$A@$D1\$"; then
-  ok "syft runs from its pinned digest, without the key"
+  ok "syft runs read-only from its pinned digest, with neither the key nor the registry login"
 else bad "syft"; grep ' scan ' "$W/log" | sed 's/^/     | /'; fi
+rel_setup; : > "$W/syft-fails"; rel
+refused_late "syft failing moves no tag" "syft could not scan $A@$D1"
+check "  and attests nothing" [ "$(n_log ' attest --yes ')" -eq 0 ]
+rel_setup; : > "$W/syft-empty"; rel
+refused_late "an empty SBOM moves no tag" "syft wrote no SBOM for $A@$D1"
+check "  and attests nothing" [ "$(n_log ' attest --yes ')" -eq 0 ]
 rel_setup; mkdir -p "$W/att"
 for at in "$A@$D1"__spdxjson "$A@$D1"__slsaprovenance1 "$B@$DB"__spdxjson; do : > "$W/att/$(san "$at")"; done
 rel
