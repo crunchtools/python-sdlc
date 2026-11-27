@@ -293,18 +293,26 @@ _cgroup_memory_ceiling() {      # [proc-cgroup [cgroup-root]] -> memory.max leaf
 # RUN (a989, Exedore Max). The ceiling the kernel enforces is the seat's
 # memory.max, so that is what is read, smallest from leaf to root.
 #
-# A quarter of a cgroup ceiling, never under 512 MB, is left for what else lives
-# in it: on a seat that is the agent driving this run. MemTotal is taken as it
-# is -- the kernel's own reservation is already off it, and a dedicated runner
-# has nothing else to keep.
+# A quarter of whichever is smaller, never under 512 MB, is left for what else
+# lives there: on a seat that is the agent driving this run, and on a runner VM
+# the kernel, podman, the sdlc container and the page cache. MemTotal used to be
+# taken whole, on the theory that a dedicated runner has nothing else to keep:
+# a 16G Exedore VM gave four lanes 3.9G each, every cap held, and together they
+# filled the VM. The check thrashed for 38 minutes at its ceiling (a1809,
+# gha-runner#71). With the quarter kept, those lanes fall under LANE_MEMORY_MIN
+# and take turns.
 memory_available() {   # [meminfo [proc-cgroup [cgroup-root]]] -> MB
   _total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' "${1:-/proc/meminfo}" 2>/dev/null) || _total=
   case "$_total" in ''|*[!0-9]*) _total=0 ;; esac
   _cg=$(_cgroup_memory_ceiling "${2:-}" "${3:-}")
   if [ "${_cg:-0}" -gt 0 ] 2>/dev/null && { [ "$_total" -eq 0 ] || [ "$_cg" -lt "$_total" ]; }; then
-    _keep=$(( _cg / 4 ))
+    _total=$_cg
+  fi
+  # 0 is "nothing readable", which must stay 0 so it changes nothing.
+  if [ "$_total" -gt 0 ]; then
+    _keep=$(( _total / 4 ))
     [ "$_keep" -lt 512 ] && _keep=512
-    _total=$(( _cg - _keep ))
+    _total=$(( _total - _keep ))
     [ "$_total" -lt 1 ] && _total=1
   fi
   printf '%s' "$_total"

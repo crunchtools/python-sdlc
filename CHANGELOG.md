@@ -6,6 +6,16 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- The lane memory budget now keeps a quarter of MemTotal (never under 512 MB)
+  for the kernel, podman and the page cache, as it already did for a cgroup
+  ceiling (a1809, crunchtools/gha-runner#71). A 16G runner VM gave four lanes
+  3.9G each: every `--memory` held, but together they filled the VM, and
+  trentina#955's check thrashed at its ceiling for 38 minutes. Those four lanes
+  now take turns; three still run side by side. A 32G laptop's four lanes get
+  5.8G each instead of 8G.
+
 ### Removed
 
 - `.github/workflows/container.yml` (a1790). `ci.yml`'s `test`, `image` and

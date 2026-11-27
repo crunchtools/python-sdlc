@@ -781,7 +781,7 @@ mem() {                # expected gate-memory available lanes description
 }
 mem 0    8g 3072  2 "a 4g seat runs two CPU lanes in turn, not side by side"
 mem 3072 8g 3072  1 "one lane on a 4g seat gets what the seat has, not 8g"
-mem 8192 8g 16384 2 "a 16g runner still gives two lanes 8g each"
+mem 8192 8g 16384 2 "16g available still gives two lanes 8g each"
 mem 6144 8g 12288 2 "a smaller machine divides what it has between the lanes"
 mem 1024 1g 3072  2 "a budget set below the minimum is the floor asked for"
 mem 8192 8g 0     2 "memory that cannot be read changes nothing"
@@ -820,17 +820,29 @@ avail 5376  "$RUN/meminfo" "a 7g leaf is read under an unlimited parent"
 cgtree 0::/a/b max 4294967296 max
 avail 3072  "$RUN/meminfo" "the smallest ceiling on the way to the root wins"
 cgtree 0::/a/b max max max
-avail 15982 "$RUN/meminfo" "max everywhere is MemTotal, taken whole"
+avail 11987 "$RUN/meminfo" "max everywhere is MemTotal, less a quarter"
 cgtree 0::/a/b max 25769803776 max
-avail 15982 "$RUN/meminfo" "a slice larger than the machine changes nothing"
+avail 11987 "$RUN/meminfo" "a slice larger than the machine changes nothing"
 cgtree 0::/a/b '' '' ''
-avail 15982 "$RUN/meminfo" "no memory.max files is MemTotal"
+avail 11987 "$RUN/meminfo" "no memory.max files is MemTotal, less a quarter"
 cgtree 4:memory:/a/b '' '' 4294967296
-avail 15982 "$RUN/meminfo" "cgroup v1, with no unified line, is MemTotal"
+avail 11987 "$RUN/meminfo" "cgroup v1, with no unified line, is MemTotal, less a quarter"
 cgtree 0::/../a max max 4294967296
-avail 15982 "$RUN/meminfo" "a path outside the namespace is not walked"
+avail 11987 "$RUN/meminfo" "a path outside the namespace is not walked"
 cgtree 0::/a/b max max max
 avail 0     "$RUN/no-such-meminfo" "nothing readable is 0, which changes nothing"
+echo 'MemTotal:         786432 kB' > "$RUN/small-meminfo"
+avail 256   "$RUN/small-meminfo" "a 768m machine keeps 512m of it, not a quarter"
+
+# The whole chain on a runner VM, no cgroup ceiling, nothing faked but MemTotal:
+# the 16G Exedore VM's four lanes filled it side by side and thrashed for 38
+# minutes (a1809, gha-runner#71). With a quarter kept they take turns.
+runner=$(sh "$CGSH" "$RUN/meminfo" "$RUN/proc-cgroup" "$CG")
+mem 0    8g "$runner" 4 "a 16g runner VM runs four lanes in turn"
+mem 3995 8g "$runner" 3 "a 16g runner VM still runs three lanes side by side"
+echo 'MemTotal:       32617472 kB' > "$RUN/laptop-meminfo"
+laptop=$(sh "$CGSH" "$RUN/laptop-meminfo" "$RUN/proc-cgroup" "$CG")
+mem 5972 8g "$laptop" 4 "a 32g laptop still runs four lanes side by side"
 
 printf '\n== the lanes\n\n'
 
