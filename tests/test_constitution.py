@@ -208,6 +208,16 @@ R4_FAILS = {
         "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old`, since 1.2.0.\n",
         "## [1.1.0] - 2026-11-01\n",
     ),
+    "a bullet's join stops at the next bullet": changelog(
+        "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--a` is deprecated\n  forever.\n"
+        "- `--b`, removed in 2.0.0.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
+    "wrapped deprecation with no end": changelog(
+        "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old` is deprecated\n"
+        "  and will go eventually.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
     "deprecation ending in the past": changelog(
         "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old`; removed in 1.1.0.\n",
         "## [1.1.0] - 2026-11-01\n",
@@ -228,6 +238,12 @@ R4_PASSES = {
     "deprecation naming its end on a wrapped line": changelog(
         "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old` is deprecated.\n"
         "  It is removed\n  in 2.0.0.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
+    "two wrapped bullets, end after a sentence break": changelog(
+        "## [2.0.0] - 2026-11-24\n\n### Deprecated\n\n- The tmux server is deprecated\n"
+        "  and keeps working.\n- The session names are deprecated. They\n"
+        "  keep working unchanged. They are renamed in 3.0.0.\n",
         "## [1.1.0] - 2026-11-01\n",
     ),
     "an old unannounced removal is history": changelog(

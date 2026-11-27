@@ -9,7 +9,7 @@ All notable changes to this project are documented here, following
 ### Fixed
 
 - Constitution R4 reads a Deprecated bullet's wrapped continuation lines, so an
-  end release named on a later line (or split across lines) no longer fails (a1877).
+  end release named on a later line (or split across lines) no longer fails (#269).
 
 ### Removed
 

@@ -299,7 +299,7 @@ def check_changelog(root: Path, report: Report) -> None:
 RELEASE_HEAD = re.compile(r"^##\s*\[?v?(\d+)\.(\d+)\.(\d+)\]?", re.MULTILINE)
 SUBHEAD = re.compile(r"^###\s*(\w+)", re.MULTILINE)
 ENDS_IN = re.compile(
-    r"\b(?:removed|dropped|ends?|ending|deleted|goes away|until)\b"
+    r"\b(?:removed|renamed|replaced|dropped|ends?|ending|deleted|goes away|until)\b"
     r"[^.;]*?\bv?(\d+)\.(\d+)(?:\.(\d+))?",
     re.IGNORECASE,
 )
@@ -316,18 +316,18 @@ def _subsections(body: str) -> dict[str, str]:
 
 def _bullets(text: str) -> list[str]:
     """Each bullet, with its wrapped continuation lines joined on by single spaces."""
-    bullets: list[str] = []
+    parts: list[list[str]] = []
     open_bullet = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith(("-", "*")):
-            bullets.append(stripped)
+        if stripped.startswith(("- ", "* ")):
+            parts.append([stripped])
             open_bullet = True
         elif stripped and open_bullet:
-            bullets[-1] += " " + stripped
+            parts[-1].append(stripped)
         else:
             open_bullet = False
-    return bullets
+    return [" ".join(p) for p in parts]
 
 
 def _newest_two(text: str) -> tuple[tuple[int, ...] | None, tuple[int, ...] | None, str]:
