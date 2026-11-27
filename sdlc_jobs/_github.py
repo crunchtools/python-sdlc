@@ -38,6 +38,36 @@ APP_SLUG = "ashigaru-crunchtools-com"
 _NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
 
 
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect over https only; `Authorization` stays with its own host.
+
+    A redirect to anything but https is not followed, so the 3xx arrives as an
+    HTTPError. One to another host is followed without the credential, since a
+    release asset download (github.com -> objects.githubusercontent.com) must work.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        to = urllib.parse.urlsplit(newurl)  # http_error_30x has already urljoin'd it
+        if to.scheme != "https":
+            return None
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        here = urllib.parse.urlsplit(req.full_url).netloc.lower()
+        if new is not None and to.netloc.lower() != here:
+            new.remove_header("Authorization")
+        return new
+
+
+SAFE_REDIRECTS = urllib.request.build_opener(SafeRedirect)
+
+
 class CannotRunError(Exception):
     """Anything that is not the job's own verdict. Becomes exit 2."""
 
@@ -62,7 +92,8 @@ class GitHub:
     """One token's view of the REST API, on one host.
 
     Every request goes to that host. A pagination link is followed by its path
-    and query alone, so a `Link` header can never send the token elsewhere.
+    and query alone, so a `Link` header can never send the token elsewhere, and
+    a 3xx to another host is followed without it (`SafeRedirect`).
     """
 
     def __init__(
@@ -70,7 +101,7 @@ class GitHub:
         token: str,
         *,
         host: str = API_HOST,
-        opener: Callable[..., Any] = urllib.request.urlopen,
+        opener: Callable[..., Any] = SAFE_REDIRECTS.open,
     ) -> None:
         self._token = token
         self._host = host

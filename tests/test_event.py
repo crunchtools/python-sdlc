@@ -19,6 +19,7 @@ import contextlib
 import email.message
 import importlib.machinery
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -26,6 +27,8 @@ import sys
 import tempfile
 import types
 import urllib.error
+import urllib.request
+import urllib.response
 from pathlib import Path
 from unittest import mock
 
@@ -39,6 +42,7 @@ S = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(S)
 
 core = importlib.import_module("sdlc_jobs._core")
+github = importlib.import_module("sdlc_jobs._github")
 
 FAILED: list[str] = []
 CALLS: list[tuple[str, dict]] = []
@@ -195,7 +199,7 @@ class FakeReply(io.BytesIO):
 
 def http(url: str, opener_open: object) -> object:
     """Tools().http(GET, url) with the opener's open replaced; Response or CannotRun message."""
-    with mock.patch.object(core, "NO_REDIRECTS", mock.Mock(open=opener_open)):
+    with mock.patch.object(core, "SAFE_REDIRECTS", mock.Mock(open=opener_open)):
         try:
             return core.Tools().http("GET", url, {"Accept": "x"})
         except core.CannotRunError as exc:
@@ -238,16 +242,79 @@ def test_http_network_failure_is_a_2() -> None:
         )
 
 
-def test_http_refuses_a_redirect() -> None:
-    req = urllib.request.Request("https://api.example/x", headers={"Authorization": "Bearer t"})
-    handler = core._RefuseRedirect()
-    for code in (301, 302, 303, 307, 308):
-        got = handler.redirect_request(
-            req, io.BytesIO(), code, "moved", {}, "http://evil.example/y"
-        )
-        check(f"a {code} yields no follow-up request", got is None)
-    uses = any(isinstance(h, core._RefuseRedirect) for h in core.NO_REDIRECTS.handlers)
-    check("the client uses that handler", uses)
+class StubHttps(urllib.request.HTTPSHandler):
+    """The network as {URL: (status, Location, body)}; remembers each request."""
+
+    def __init__(self, answers: dict[str, tuple[int, str, bytes]]) -> None:
+        super().__init__()
+        self.answers = answers
+        self.seen: list[urllib.request.Request] = []
+
+    def https_open(self, req: urllib.request.Request) -> urllib.response.addinfourl:
+        self.seen.append(req)
+        status, location, body = self.answers[req.full_url]
+        hdrs = email.message.Message()
+        if location:
+            hdrs["Location"] = location
+        resp = urllib.response.addinfourl(io.BytesIO(body), hdrs, req.full_url, status)
+        resp.msg = "stub"  # type: ignore[attr-defined]
+        return resp
+
+
+def through_redirect(location: str, target: str) -> tuple[object, list[urllib.request.Request]]:
+    """Tools().http with a token, through the real handler, to a URL answering 302."""
+    stub = StubHttps(
+        {"https://api.example/x": (302, location, b"moved"), target: (200, "", b"landed")}
+    )
+    opener = urllib.request.build_opener(github.SafeRedirect, stub)
+    with mock.patch.object(core, "SAFE_REDIRECTS", opener):
+        try:
+            got: object = core.Tools().http(
+                "GET", "https://api.example/x", {"Authorization": "Bearer t"}
+            )
+        except core.CannotRunError as exc:
+            got = str(exc)
+    return got, stub.seen
+
+
+def seen_of(seen: list[urllib.request.Request]) -> str:
+    return str([(r.full_url, r.header_items()) for r in seen])
+
+
+def test_http_redirect_to_another_host_drops_the_token() -> None:
+    target = "https://objects.example/asset"
+    got, seen = through_redirect(target, target)
+    check("a cross-host 302 lands on its body", got == core.Response(200, b"landed"), str(got))
+    check(
+        "the cross-host follow-up carries no Authorization",
+        len(seen) == 2 and seen[1].full_url == target and not seen[1].has_header("Authorization"),
+        seen_of(seen),
+    )
+
+
+def test_http_redirect_on_the_same_host_keeps_the_token() -> None:
+    target = "https://api.example/y"
+    got, seen = through_redirect("/y", target)
+    check("a same-host 302 lands on its body", got == core.Response(200, b"landed"), str(got))
+    check(
+        "the same-host follow-up keeps Authorization",
+        len(seen) == 2 and seen[1].get_header("Authorization") == "Bearer t",
+        seen_of(seen),
+    )
+
+
+def test_http_refuses_a_redirect_off_https() -> None:
+    target = "http://api.example/y"
+    got, seen = through_redirect(target, target)
+    check("a 302 to http is the 302 itself", got == core.Response(302, b"moved"), str(got))
+    check("no request follows a 302 to http", len(seen) == 1, seen_of(seen))
+    uses = any(isinstance(h, github.SafeRedirect) for h in core.SAFE_REDIRECTS.handlers)
+    check("Tools.http opens through that handler", uses)
+
+
+def test_github_client_uses_the_safe_redirect() -> None:
+    opener = inspect.signature(github.GitHub).parameters["opener"].default
+    check("GitHub opens through SAFE_REDIRECTS", opener == github.SAFE_REDIRECTS.open, str(opener))
 
 
 def test_http_refuses_a_non_https_url() -> None:
@@ -272,7 +339,10 @@ def main() -> int:
         test_http_returns_a_https_response,
         test_http_error_status_is_a_response,
         test_http_network_failure_is_a_2,
-        test_http_refuses_a_redirect,
+        test_http_redirect_to_another_host_drops_the_token,
+        test_http_redirect_on_the_same_host_keeps_the_token,
+        test_http_refuses_a_redirect_off_https,
+        test_github_client_uses_the_safe_redirect,
         test_http_refuses_a_non_https_url,
     ):
         test()
