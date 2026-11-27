@@ -47,13 +47,13 @@ DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def ar_members(deb: Path) -> tuple[dict[str, bytes], list[str]]:
-    """The `debian-binary` and `control.tar*` members of an ar archive, and the skipped names.
+def ar_members(deb: Path) -> tuple[dict[str, bytes], int]:
+    """The `debian-binary` and `control.tar*` members of an ar archive, and the data.tar* count.
 
     Seeks past data.tar, which is most of the file and none of our business.
     """
     found: dict[str, bytes] = {}
-    skipped: list[str] = []
+    payloads = 0
     with deb.open("rb") as fh:
         if fh.read(len(AR_MAGIC)) != AR_MAGIC:
             cannot(f"{deb.name} is not an ar archive (bad magic)")
@@ -81,9 +81,9 @@ def ar_members(deb: Path) -> tuple[dict[str, bytes], list[str]]:
                 found[name] = body
                 fh.seek(size % 2, 1)
             else:
-                skipped.append(name)
+                payloads += name.startswith("data.tar")
                 fh.seek(size + size % 2, 1)
-    return found, skipped
+    return found, payloads
 
 
 def parse_stanza(text: str, where: str) -> dict[str, str]:
@@ -168,12 +168,11 @@ def read_control(deb: str, name: str, blob: bytes) -> bytes:
 
 def control_of(deb: Path) -> dict[str, str]:
     """The control fields of a .deb, in file order."""
-    members, skipped = ar_members(deb)
+    members, payloads = ar_members(deb)
     if members.get("debian-binary") != b"2.0\n":
         cannot(f"{deb.name}: debian-binary is missing or not 2.0")
-    payloads = [n for n in skipped if n.startswith("data.tar")]
-    if len(payloads) != 1:
-        cannot(f"{deb.name} needs exactly one data.tar member, has {len(payloads)}")
+    if payloads != 1:
+        cannot(f"{deb.name} needs exactly one data.tar member, has {payloads}")
     tarballs = [n for n in members if n.startswith("control.tar")]
     if len(tarballs) != 1:
         cannot(f"{deb.name} needs exactly one control.tar member, has {len(tarballs)}")
