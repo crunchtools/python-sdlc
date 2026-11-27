@@ -27,6 +27,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import IO, NoReturn, Protocol, TypedDict, Unpack
 
+from sdlc_jobs._github import OPENER
 from sdlc_jobs._tools import git_env
 
 CLEAN = 0
@@ -174,7 +175,7 @@ class Tools:
             cannot(f"refusing a non-https URL: {url}")
         req = urllib.request.Request(url, data=payload, method=method, headers=dict(headers))  # noqa: S310
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
+            with OPENER.open(req, timeout=60) as resp:  # a redirect: _github.SafeRedirect
                 return Response(resp.status, resp.read())
         except urllib.error.HTTPError as exc:
             return Response(exc.code, exc.read())

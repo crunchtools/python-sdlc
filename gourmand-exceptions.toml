@@ -126,12 +126,13 @@ check = "EV001-lint_suppression"
 path = "sdlc_jobs/_core.py"
 classification = "by_design"
 justification = """
-  Two `noqa: S310` on Tools.http's Request and urlopen, both guarded by the \
+  One `noqa: S310` on Tools.http's Request, guarded by the \
   `startswith("https://")` refusal at the top of the same function. The \
-  scheme is fixed to https before any URL reaches urllib, so the file:// and \
-  custom-scheme risk S310 exists for is not reachable. Redirects must still \
-  be followed (GitHub answers a renamed repo with one), which rules out \
-  swapping to http.client.
+  scheme is fixed to https before any URL reaches urllib, and a redirect goes \
+  through _github.SafeRedirect, which refuses any hop that is not https, so \
+  the file:// and custom-scheme risk S310 exists for is not reachable. \
+  Redirects must still be followed (a release download 302s to a \
+  githubusercontent host), which rules out swapping to http.client.
 """
 
 [[exceptions]]

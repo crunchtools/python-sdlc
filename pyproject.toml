@@ -91,6 +91,9 @@ max-complexity = 10
 # of them have no settings to read, and a signature that varies per target would
 # be worse than an unused parameter.
 "sdlc" = ["S404", "S108", "ARG001"]
+# SafeRedirect overrides urllib's redirect_request, whose six positional
+# arguments are urllib's call, not a signature this repo chose.
+"sdlc_jobs/_github.py" = ["PLR0913", "PLR0917"]
 # A test asserts. That is what it is for.
 # S302: test_pycache_prefix.py unmarshals bytecode to show what pytest's
 # assertion rewriter sees. The input is a .pyc that test compiled itself,

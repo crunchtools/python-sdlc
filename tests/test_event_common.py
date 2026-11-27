@@ -6,7 +6,8 @@
   - GitHub.request/pages speak the REST API through an injected opener: one
     host, bearer auth, paths that start with "/" (an absolute URL is refused),
     Link pagination by path and query on that same host, HTTP errors as
-    ApiError, text on request
+    ApiError, text on request; by default through OPENER, whose redirects keep
+    the token on its own host and never go to plain http (#278)
   - an App token is scoped to one repository and exactly the named
     permissions, masked at once, and revoked on exit even when the body raises
   - a child process sees the allowlisted environment plus what it is handed,
@@ -31,10 +32,12 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import fake_https
 import jwt
 import sdlc_root
 from cryptography.hazmat.primitives import serialization
@@ -46,9 +49,11 @@ from sdlc_jobs._app_token import app_jwt, app_token
 from sdlc_jobs._github import (
     CANNOT_RUN,
     DIFF,
+    OPENER,
     ApiError,
     CannotRunError,
     GitHub,
+    SafeRedirect,
     contract,
     mask,
     repo_of,
@@ -249,6 +254,30 @@ check(
     "github: so the token never leaves for the Link's host",
     all("evil.example" not in r.full_url for r in opener.requests)
     and all(r.get_header("Authorization") == "Bearer tok-secret" for r in opener.requests),
+)
+
+check("github: the default opener is OPENER", GitHub("t")._open == OPENER.open)
+check(
+    "github: OPENER redirects through SafeRedirect",
+    any(isinstance(h, SafeRedirect) for h in OPENER.handlers),
+)
+for where, kept in (("https://objects.example/x", False), ("https://api.github.com/y", True)):
+    site = fake_https.Site(
+        {"https://api.github.com/x": (302, b"", where), where: (200, b'{"id": 7}', "")}
+    )
+    client = GitHub("tok-r", opener=urllib.request.build_opener(SafeRedirect, site).open)
+    got = client.request("GET", "/x")
+    check(f"github: a 302 to {where} is followed", got == {"id": 7})
+    check(
+        f"github: and {'keeps' if kept else 'drops'} Authorization there",
+        site.seen[-1].has_header("Authorization") == kept,
+    )
+site = fake_https.Site({"https://api.github.com/x": (302, b"{}", "http://api.github.com/x")})
+plain = GitHub("t", opener=urllib.request.build_opener(SafeRedirect, site).open)
+err = raises(ApiError, plain.request, "GET", "/x")
+check(
+    "github: a 302 to plain http is an ApiError of the 302, never opened",
+    isinstance(err, ApiError) and err.status == 302 and len(site.seen) == 1,
 )
 
 opener = Opener(Resp("[1]", '<https://evil.example/s>; rel="next"'), Resp("[2]"))

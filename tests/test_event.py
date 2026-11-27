@@ -9,6 +9,8 @@ from passing by accident are pinned here:
   - a helper (a name starting with `_`) is never a job
   - `write` with DIGEST set is sdlc's rollback dispatch and does nothing
   - a job's CannotRunError and any return outside 0-3 are a 2
+  - Tools.http follows an https redirect, keeps Authorization on its own host
+    only, and refuses a hop to plain http (#278)
 
 Run: python3 tests/test_event.py
 """
@@ -26,8 +28,11 @@ import sys
 import tempfile
 import types
 import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest import mock
+
+import fake_https
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -39,6 +44,7 @@ S = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(S)
 
 core = importlib.import_module("sdlc_jobs._core")
+gh = importlib.import_module("sdlc_jobs._github")
 
 FAILED: list[str] = []
 CALLS: list[tuple[str, dict]] = []
@@ -188,16 +194,16 @@ def test_an_unexpected_exception_is_a_2() -> None:
 
 
 class FakeReply(io.BytesIO):
-    """What urlopen yields: a context manager with a status and a body."""
+    """What the opener yields: a context manager with a status and a body."""
 
     status = 200
 
 
-def http(url: str, urlopen: object) -> object:
-    """Tools().http(GET, url) with urlopen replaced; the Response or the CannotRun message."""
-    with mock.patch.object(core.urllib.request, "urlopen", urlopen):
+def http(url: str, urlopen: object, headers: dict[str, str] | None = None) -> object:
+    """Tools().http(GET, url) with the opener's open replaced; Response or CannotRun message."""
+    with mock.patch.object(core, "OPENER", mock.Mock(open=urlopen)):
         try:
-            return core.Tools().http("GET", url, {"Accept": "x"})
+            return core.Tools().http("GET", url, headers or {"Accept": "x"})
         except core.CannotRunError as exc:
             return str(exc)
 
@@ -238,6 +244,54 @@ def test_http_network_failure_is_a_2() -> None:
         )
 
 
+TOKEN = {"Authorization": "Bearer t", "X-Api-Key": "opaque-k", "Accept": "x"}
+
+
+def redirected(location: str) -> tuple[object, fake_https.Site]:
+    """Tools.http through the real redirect handler, api.example 302ing to `location`."""
+    site = fake_https.Site(
+        {
+            "https://api.example/x": (302, b"moved", location),
+            location: (200, b"asset", ""),
+        }
+    )
+    got = http(
+        "https://api.example/x", urllib.request.build_opener(gh.SafeRedirect, site).open, TOKEN
+    )
+    return got, site
+
+
+def test_http_cross_host_redirect_drops_the_token() -> None:
+    got, site = redirected("https://objects.example/asset")
+    check("a cross-host 302 is followed", got == core.Response(200, b"asset"), str(got))
+    hop = site.seen[-1]
+    check("the first request carried Authorization", site.seen[0].has_header("Authorization"))
+    check("the hop has no Authorization", not hop.has_header("Authorization"), str(hop.headers))
+    check("nor a header it does not know", not hop.has_header("X-api-key"), str(hop.headers))
+    check("other headers still go", hop.get_header("Accept") == "x", str(hop.headers))
+    check(
+        "the client is the one SafeRedirect is in",
+        any(isinstance(h, gh.SafeRedirect) for h in core.OPENER.handlers),
+    )
+
+
+def test_http_same_host_redirect_keeps_the_token() -> None:
+    got, site = redirected("https://api.example/y")
+    check("a same-host 302 is followed", got == core.Response(200, b"asset"), str(got))
+    check(
+        "and keeps Authorization",
+        site.seen[-1].get_header("Authorization") == "Bearer t",
+        str(site.seen[-1].headers),
+    )
+
+
+def test_http_refuses_a_plain_http_hop() -> None:
+    for location in ("http://api.example/y", "http://objects.example/asset"):
+        got, site = redirected(location)
+        check(f"a 302 to {location} is the 302", got == core.Response(302, b"moved"), str(got))
+        check(f"{location} is never opened", len(site.seen) == 1)
+
+
 def test_http_refuses_a_non_https_url() -> None:
     def urlopen(*_: object, **__: object) -> FakeReply:
         raise AssertionError("opened a non-https URL")
@@ -260,6 +314,9 @@ def main() -> int:
         test_http_returns_a_https_response,
         test_http_error_status_is_a_response,
         test_http_network_failure_is_a_2,
+        test_http_cross_host_redirect_drops_the_token,
+        test_http_same_host_redirect_keeps_the_token,
+        test_http_refuses_a_plain_http_hop,
         test_http_refuses_a_non_https_url,
     ):
         test()

@@ -8,6 +8,7 @@ job a fake and nothing touches real GitHub.
 from __future__ import annotations
 
 import functools
+import http.client
 import json
 import re
 import secrets
@@ -17,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from typing import Any, Protocol
+from typing import IO, Any, Protocol
 
 API_HOST = "api.github.com"
 JSON = "application/vnd.github+json"
@@ -36,6 +37,9 @@ APP_LOGIN = "ashigaru-crunchtools-com[bot]"
 APP_SLUG = "ashigaru-crunchtools-com"
 
 _NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
+# The only request headers a redirect carries to another host. Any other header
+# may be a credential, whatever it is named, so it stays with the host it was for.
+CROSS_HOST_HEADERS = frozenset({"accept", "accept-language", "user-agent", "x-github-api-version"})
 
 
 class CannotRunError(Exception):
@@ -58,11 +62,49 @@ class Api(Protocol):
     def pages(self, path: str, key: str | None = None) -> list[Any]: ...
 
 
+class SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect over https only, and a credential only on its own host.
+
+    urllib copies every header but the content ones onto the next request, so a
+    302 to another host would carry the token there (#278). At another host only
+    CROSS_HOST_HEADERS go on, so a credential under any name stays behind. A
+    redirect is still followed: a release download on github.com answers 302 to
+    a githubusercontent host, which needs no token. A hop to anything but https
+    is not followed, and the caller gets the 3xx it answered.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: http.client.HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        to = urllib.parse.urlsplit(newurl)  # http_error_302 has joined it to req's URL
+        if to.scheme != "https":
+            return None
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if (
+            new is not None
+            and to.netloc.lower() != urllib.parse.urlsplit(req.full_url).netloc.lower()
+        ):
+            for name in [k for k, _ in new.header_items() if k.lower() not in CROSS_HOST_HEADERS]:
+                new.remove_header(name)
+        return new
+
+
+# Every HTTP request the jobs make goes through this opener, never bare urlopen.
+OPENER = urllib.request.build_opener(SafeRedirect)
+
+
 class GitHub:
     """One token's view of the REST API, on one host.
 
     Every request goes to that host. A pagination link is followed by its path
-    and query alone, so a `Link` header can never send the token elsewhere.
+    and query alone, so a `Link` header can never send the token elsewhere, and
+    a redirect goes through SafeRedirect, which drops it at another host.
     """
 
     def __init__(
@@ -70,7 +112,7 @@ class GitHub:
         token: str,
         *,
         host: str = API_HOST,
-        opener: Callable[..., Any] = urllib.request.urlopen,
+        opener: Callable[..., Any] = OPENER.open,
     ) -> None:
         self._token = token
         self._host = host
