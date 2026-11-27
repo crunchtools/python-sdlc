@@ -1,0 +1,96 @@
+== assets: real podman build through unix:///tmp/claude-1000/-home-podman-work/d1f4adc0-9850-4f5d-87f0-f546a39fc3e9/scratchpad/proof/podman.sock
+
+== assets: re-derive the release from the API
+
+== assets: build rpm-fc43 to build
+STEP 1/3: FROM quay.io/fedora/fedora@sha256:d66bf08e6e6a29912382b4765c9b0cdf7e4a200a95ae0fcbf9dfbf6017031a59 AS build
+STEP 2/3: ARG VERSION
+--> Using cache 40371bc61090743f853cdfeac707dada1f565115b70fa6d3b3149f011e5bbdda
+--> 40371bc61090
+STEP 3/3: RUN mkdir /out && for d in fc43 el10; do echo "demo $VERSION $d" > /out/demo-$VERSION-1.$d.noarch.rpm; done  && echo stray > /out/notes.txt && ln -s /etc/hostname /out/demo-$VERSION-link.rpm
+--> Using cache 582755ca96b891e31a9989d9be134a9c26d57c37d34244a55ae8d8645d24b4bd
+COMMIT localhost/sdlc-assets:rpm-fc43
+--> 582755ca96b8
+Successfully tagged localhost/sdlc-assets:rpm-fc43
+582755ca96b891e31a9989d9be134a9c26d57c37d34244a55ae8d8645d24b4bd
+
+== assets: attach 3 files to v1.2.3
+assets: attached demo-1.2.3-1.el10.noarch.rpm
+assets: attached demo-1.2.3-1.fc43.noarch.rpm
+assets: attached SHA256SUMS
+{"version": "1.2.3", "attached": 3, "files": ["SHA256SUMS", "demo-1.2.3-1.el10.noarch.rpm", "demo-1.2.3-1.fc43.noarch.rpm"]}
+uploaded: ['demo-1.2.3-1.el10.noarch.rpm', 'demo-1.2.3-1.fc43.noarch.rpm', 'SHA256SUMS']
+
+== assets: re-derive the release from the API
+
+== assets: build rpm-fc43 to build
+STEP 1/3: FROM quay.io/fedora/fedora@sha256:d66bf08e6e6a29912382b4765c9b0cdf7e4a200a95ae0fcbf9dfbf6017031a59 AS build
+STEP 2/3: ARG VERSION
+--> Using cache 40371bc61090743f853cdfeac707dada1f565115b70fa6d3b3149f011e5bbdda
+--> 40371bc61090
+STEP 3/3: RUN mkdir /out && for d in fc43 el10; do echo "demo $VERSION $d" > /out/demo-$VERSION-1.$d.noarch.rpm; done  && echo stray > /out/notes.txt && ln -s /etc/hostname /out/demo-$VERSION-link.rpm
+--> Using cache 582755ca96b891e31a9989d9be134a9c26d57c37d34244a55ae8d8645d24b4bd
+COMMIT localhost/sdlc-assets:rpm-fc43
+--> 582755ca96b8
+Successfully tagged localhost/sdlc-assets:rpm-fc43
+582755ca96b891e31a9989d9be134a9c26d57c37d34244a55ae8d8645d24b4bd
+
+== assets: attach 3 files to v1.2.3
+assets: demo-1.2.3-1.el10.noarch.rpm is already attached with these bytes
+assets: demo-1.2.3-1.fc43.noarch.rpm is already attached with these bytes
+assets: SHA256SUMS is already attached with these bytes
+{"version": "1.2.3", "attached": 0, "files": ["SHA256SUMS", "demo-1.2.3-1.el10.noarch.rpm", "demo-1.2.3-1.fc43.noarch.rpm"]}
+re-run uploaded: [] deleted: []
+first-run digests: [('demo-1.2.3-1.el10.noarch.rpm', 'sha256:cd88c9199369f4f5901a9f7560164f5ff681d14754466f1aa72f754e47475873'), ('demo-1.2.3-1.fc43.noarch.rpm', 'sha256:2522cbb4418549cfdfc3434c1a6d5b13ee45ea1c981164cf1c33ad256087dba3'), ('SHA256SUMS', 'sha256:8407a71124dd98a7586f30b92b84a8e80a94e7eb24804d53ed6c33cb7e225ca2')]
+refused as it should: packaging/rpm.Containerfile: FROM quay.io/fedora/fedora:43 is not pinned by @sha256:; a release asset is built only on a build root the review saw
+== pages: throwaway key, real gpg, real git push
+
+== pages: load the signing key
+wrong key refused as it should: the signing key ['D6DDAE01F5B603E9ADB130E10759B98A5AFB9974'] is not the one crunchtools.asc publishes ['779DDBF9BEF2E64E6B631D5F22394994D5BC2D29']
+
+== pages: load the signing key
+pages: no gh-pages branch yet; every package is signed afresh
+
+== pages: fetch, check and sign the packages
+
+== pages: push gh-pages
+
+== pages: request the Pages build
+pages: (proof) would request and await the Pages build of bba654aa2636c23d50adfd9e53d4d007e0431bd2
+gh-pages tree: ['.nojekyll', 'crunchtools.asc', 'deb/InRelease', 'deb/Packages', 'deb/Packages.gz', 'deb/Release', 'deb/Release.gpg', 'deb/claude-supervisor_1.0.0-1_all.deb', 'deb/crunchtools.sources', 'deb/petit_1.0.0-1_all.deb', 'index.html', 'index.json']
+InRelease: gpgv: Good signature from "a1796 proof <proof@example.invalid>"
+Release.gpg: good signature
+Release lists Packages and Packages.gz with their sha256
+Package: claude-supervisor
+Version: 1.0.0-1
+Architecture: all
+Maintainer: x <x@x>
+Description: claude-supervisor
+ multi-line
+Filename: ./claude-supervisor_1.0.0-1_all.deb
+Size: 510
+MD5sum: 3d4ffe0cfa967fbd04f55a2c508144e2
+SHA1: ea00a0f69e1b8a9dc9f23b6bc735ce11c0451cf4
+SHA256: 391c7a41096de5fce164f04a553f7a7cb221d1d520c852809ce3da56ef074c43
+
+Package: petit
+Version: 1.0.0-1
+Architecture: all
+Maintainer: x <x@x>
+Description: petit
+ multi-line
+Filename: ./petit_1.0.0-1_all.deb
+Size: 500
+MD5sum: 6fadf938402c8f803a607f908543183f
+SHA1: ebdda7259d5b390701d0aadeddfecae16a406280
+SHA256: a6622a07d4bcf8b57c4ba0d3f4cb4212f42a2699cc87cff3905cade67cc3a252
+
+
+index.json: [{'file': 'claude-supervisor_1.0.0-1_all.deb', 'sha256': '391c7a41096de5fce164f04a553f7a7cb221d1d520c852809ce3da56ef074c43'}, {'file': 'petit_1.0.0-1_all.deb', 'sha256': 'a6622a07d4bcf8b57c4ba0d3f4cb4212f42a2699cc87cff3905cade67cc3a252'}]
+
+== pages: load the signing key
+
+== pages: fetch, check and sign the packages
+pages: the site already serves these packages; nothing to publish
+schedule with an unchanged pool: nothing pushed
+LOCAL PROOF PASSED
