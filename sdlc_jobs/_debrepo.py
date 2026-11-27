@@ -31,6 +31,14 @@ zstd: Any = None
 with contextlib.suppress(ImportError):
     zstd = importlib.import_module("compression.zstd")  # Python 3.14+
 HAVE_ZSTD = zstd is not None
+# The control.tar compressions read, and how: the one list, so a suffix this Python
+# cannot open is refused by control_of rather than met in unpack. "" is plain tar.
+OPENERS: dict[str, Any] = {
+    "": None,
+    ".gz": lambda src: gzip.GzipFile(fileobj=src),
+    ".xz": lzma.LZMAFile,
+    **({".zst": zstd.ZstdFile} if HAVE_ZSTD else {}),
+}
 
 AR_MAGIC = b"!<arch>\n"
 AR_HEADER = 60
@@ -39,7 +47,6 @@ MAX_TARBALL = 16 << 20  # bytes of control.tar.*: bounds what we read before dec
 MAX_UNPACKED = 16 << 20  # bytes of control.tar.* decompressed: tarfile reads a header whole
 MAX_MEMBERS = 1000  # tar members of control.tar.* walked; real ones hold a dozen
 CHUNK = 1 << 20  # bytes per read when hashing: a MiB keeps memory flat on a large .deb
-SUFFIXES = ("", ".gz", ".xz", ".zst")  # control.tar compressions we read
 REQUIRED = ("package", "version", "architecture")  # what apt cannot index a .deb without
 COMPUTED = ("Filename", "Size", "MD5sum", "SHA1", "SHA256")
 FIELD = re.compile(r"([A-Za-z0-9][A-Za-z0-9._+-]*):[ \t]*(.*)")
@@ -117,18 +124,14 @@ def parse_stanza(text: str, where: str) -> dict[str, str]:
 def unpack(deb: str, name: str, blob: bytes) -> bytes:
     """The control tarball decompressed, at most MAX_UNPACKED bytes of it; more is a refusal."""
     suffix = name.removeprefix("control.tar")
-    if suffix == "":
+    opener = OPENERS[suffix]
+    if opener is None:
         return blob
-    openers: dict[str, Any] = {
-        ".gz": lambda src: gzip.GzipFile(fileobj=src),
-        ".xz": lzma.LZMAFile,
-        ".zst": zstd.ZstdFile if zstd is not None else None,  # control_of checks HAVE_ZSTD
-    }
     # zstd's ZstdError (3.14+) is no subclass of the others
     errors = (OSError, EOFError, lzma.LZMAError, ValueError, MemoryError)
     errors += (zstd.ZstdError,) if zstd is not None else ()
     try:
-        with openers[suffix](io.BytesIO(blob)) as stream:
+        with opener(io.BytesIO(blob)) as stream:
             body = cast("bytes", stream.read(MAX_UNPACKED + 1))
     except errors as exc:
         cannot(f"{deb}: {name} is unreadable: {exc}")
@@ -178,7 +181,7 @@ def control_of(deb: Path) -> dict[str, str]:
         cannot(f"{deb.name} needs exactly one control.tar member, has {len(tarballs)}")
     name = tarballs[0]
     suffix = name.removeprefix("control.tar")
-    if suffix not in SUFFIXES or (suffix == ".zst" and not HAVE_ZSTD):
+    if suffix not in OPENERS:
         cannot(f"{deb.name}: {name} uses a compression this Python cannot read")
     control = read_control(deb.name, name, members[name])
     try:
