@@ -548,8 +548,8 @@ dependent job fails. The cases:
 The `always()` in those `if:`s exists to make that judgement **run**, never to
 let it pass.
 
-Nothing runs from a tag, and nothing triggers on `release` or a closed pull
-request. The App-only tag ruleset stays as it is today.
+Nothing runs from a tag (a tag push lists a run whose every job is skipped),
+and nothing triggers on `release` or a closed pull request. The App-only tag ruleset stays as it is today.
 
 ## Jobs are trust levels
 
@@ -830,6 +830,29 @@ of one workflow run. The doorbell fires only for a review comment whose
 outsiders never re-run `gate`, so an outsider cannot burn the cap with
 comments. Past 50 collaborator replies on one head, re-triage waits for the
 next push, which starts a new run.
+
+## Spike #103, re-checked (a1792, 2026-11-27)
+
+Items 2 and 7 were left open when org CI paused. They were re-run on
+crunchtools/ci-spike, a public scratch repo carrying `examples/ci.yml` byte
+for byte, after #262 and the org's Actions event policy.
+
+| Behaviour | Result | Evidence |
+|---|---|---|
+| A member's review comment re-runs `gate` where it counts | **yes** | comment run [46026506289](https://github.com/crunchtools/ci-spike/actions/runs/46026506289) re-ran `gate` as attempt 2 of the PR's `pull_request_target` run [46026141395](https://github.com/crunchtools/ci-spike/actions/runs/46026141395), started by `github-actions[bot]` |
+| A bot's comment does not | **yes, live** | the App's own findings (`Bot`, `NONE`) made runs [46026448914](https://github.com/crunchtools/ci-spike/actions/runs/46026448914) and [46026448144](https://github.com/crunchtools/ci-spike/actions/runs/46026448144), every job skipped |
+| An outsider's comment does not | **yes, locally only** | `sdlc event gate` on saved payloads (`NONE`, `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`) does nothing and calls no API; no non-member account exists for a live run |
+| `pypi` admits the default branch only | **yes** | a branch run is refused before the job starts ([46025662801](https://github.com/crunchtools/ci-spike/actions/runs/46025662801)); the run from `main` deploys ([46025916977](https://github.com/crunchtools/ci-spike/actions/runs/46025916977)). That the secret then arrives is unproven: no token we hold may write an environment secret, so that waits on one value set in the web UI |
+| A tag push starts no job | **yes** | [46026473401](https://github.com/crunchtools/ci-spike/actions/runs/46026473401): the push still lists a run, with every job skipped |
+| An App release works end to end | **yes** | dispatch [46028026213](https://github.com/crunchtools/ci-spike/actions/runs/46028026213) opened App PR #3; its merge push [46029167848](https://github.com/crunchtools/ci-spike/actions/runs/46029167848) ran `write`, which tagged `v0.1.0` and published the Release as the App. The App's tag push [46029366070](https://github.com/crunchtools/ci-spike/actions/runs/46029366070) started no job. No image and no PyPI publish: the repo has neither |
+
+A repo whose `[tool.sdlc]` lives in `pyproject.toml` is a Python project to
+`check`, which then plans `uv sync --locked`, CodeQL and semgrep, and all three
+fail on a repo with no code ([46026771986](https://github.com/crunchtools/ci-spike/actions/runs/46026771986)). Such a repo keeps its table in
+`sdlc.toml`.
+
+No `user.type` test is needed beside `author_association`: an App is never an
+owner, member or collaborator, and the live run shows it as `NONE`.
 
 ## Cutover prerequisites
 
