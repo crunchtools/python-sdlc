@@ -202,6 +202,35 @@ def test_malformed_ar_size() -> None:
                 assert "malformed ar member size" in msg, (name, field, msg)
 
 
+def test_too_many_members() -> None:
+    with tempfile.TemporaryDirectory() as t:
+        junk = [(f"./f{i}", b"", b"") for i in range(_debrepo.MAX_MEMBERS)]
+        deb = make_deb(Path(t) / "a.deb", entries=[*junk, ("./control", CONTROL.encode(), b"")])
+        assert "members" in refusal(lambda: _debrepo.control_of(deb))
+
+
+def test_data_tar_exactly_one() -> None:
+    with tempfile.TemporaryDirectory() as t:
+        deb = make_deb(Path(t) / "a.deb")
+        whole = deb.read_bytes()
+        cut = whole.index(b"data.tar.gz/")
+        deb.write_bytes(whole[:cut])
+        assert "exactly one data.tar member, has 0" in refusal(lambda: _debrepo.control_of(deb))
+        deb.write_bytes(whole + ar_member("data.tar.xz", b"zz"))
+        assert "exactly one data.tar member, has 2" in refusal(lambda: _debrepo.control_of(deb))
+
+
+def test_required_fields() -> None:
+    for field in ("Package", "Version", "Architecture"):
+        with tempfile.TemporaryDirectory() as t:
+            lines = [ln for ln in CONTROL.splitlines(True) if not ln.startswith(field)]
+            deb = make_deb(Path(t) / "a.deb", control="".join(lines))
+            assert field.lower() in refusal(lambda d=deb: _debrepo.control_of(d))
+    with tempfile.TemporaryDirectory() as t:  # deb822 names are case-insensitive
+        deb = make_deb(Path(t) / "a.deb", control=CONTROL.replace("Package:", "package:", 1))
+        assert _debrepo.control_of(deb)["package"] == "hello"
+
+
 def test_bad_debian_binary() -> None:
     with tempfile.TemporaryDirectory() as t:
         deb = make_deb(Path(t) / "a.deb", lead=(b"!<arch>\n", b"3.0\n"))

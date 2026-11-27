@@ -36,20 +36,23 @@ AR_MAGIC = b"!<arch>\n"
 AR_HEADER = 60
 MAX_CONTROL = 1 << 20  # bytes of control file; real ones are a few KiB
 MAX_TARBALL = 16 << 20  # bytes of control.tar.*: bounds what we read before decompressing
+MAX_MEMBERS = 1000  # tar members of control.tar.* walked; real ones hold a dozen
 CHUNK = 1 << 20  # bytes per read when hashing: a MiB keeps memory flat on a large .deb
 COMPRESSION: dict[str, str] = {"": "r:", ".gz": "r:gz", ".xz": "r:xz", ".zst": "r:zst"}
+REQUIRED = ("package", "version", "architecture")  # what apt cannot index a .deb without
 COMPUTED = ("Filename", "Size", "MD5sum", "SHA1", "SHA256")
 FIELD = re.compile(r"([A-Za-z0-9][A-Za-z0-9._+-]*):[ \t]*(.*)")
 DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def ar_members(deb: Path) -> dict[str, bytes]:
-    """The `debian-binary` and `control.tar*` members of an ar archive; the rest are skipped.
+def ar_members(deb: Path) -> tuple[dict[str, bytes], list[str]]:
+    """The `debian-binary` and `control.tar*` members of an ar archive, and the skipped names.
 
     Seeks past data.tar, which is most of the file and none of our business.
     """
     found: dict[str, bytes] = {}
+    skipped: list[str] = []
     with deb.open("rb") as fh:
         if fh.read(len(AR_MAGIC)) != AR_MAGIC:
             cannot(f"{deb.name} is not an ar archive (bad magic)")
@@ -77,8 +80,9 @@ def ar_members(deb: Path) -> dict[str, bytes]:
                 found[name] = body
                 fh.seek(size % 2, 1)
             else:
+                skipped.append(name)
                 fh.seek(size + size % 2, 1)
-    return found
+    return found, skipped
 
 
 def parse_stanza(text: str, where: str) -> dict[str, str]:
@@ -114,7 +118,9 @@ def read_control(deb: str, name: str, blob: bytes, mode: str) -> bytes:
     control: bytes | None = None
     try:  # cast: typeshed's tarfile.open overloads do not list r:zst (3.14) yet
         with tarfile.open(fileobj=io.BytesIO(blob), mode=cast("Any", mode)) as tar:
-            for member in tar:
+            for count, member in enumerate(tar, 1):
+                if count > MAX_MEMBERS:
+                    cannot(f"{deb}: {name} has over {MAX_MEMBERS} members")
                 parts = member.name.split("/")
                 if member.name.startswith("/") or ".." in parts:
                     cannot(f"{deb}: control member path {member.name!r} escapes")
@@ -137,9 +143,12 @@ def read_control(deb: str, name: str, blob: bytes, mode: str) -> bytes:
 
 def control_of(deb: Path) -> dict[str, str]:
     """The control fields of a .deb, in file order."""
-    members = ar_members(deb)
+    members, skipped = ar_members(deb)
     if members.get("debian-binary") != b"2.0\n":
         cannot(f"{deb.name}: debian-binary is missing or not 2.0")
+    payloads = [n for n in skipped if n.startswith("data.tar")]
+    if len(payloads) != 1:
+        cannot(f"{deb.name} needs exactly one data.tar member, has {len(payloads)}")
     tarballs = [n for n in members if n.startswith("control.tar")]
     if len(tarballs) != 1:
         cannot(f"{deb.name} needs exactly one control.tar member, has {len(tarballs)}")
@@ -152,7 +161,11 @@ def control_of(deb: Path) -> dict[str, str]:
         text = control.decode("utf-8")
     except UnicodeDecodeError:
         cannot(f"{deb.name}: control is not UTF-8")
-    return parse_stanza(text, f"{deb.name} control")
+    fields = parse_stanza(text, f"{deb.name} control")
+    missing = [f for f in REQUIRED if f not in {k.lower() for k in fields}]
+    if missing:
+        cannot(f"{deb.name} control lacks {', '.join(missing)}")
+    return fields
 
 
 def digests(path: Path) -> tuple[int, dict[str, str]]:
