@@ -89,6 +89,16 @@ class RunOptions(TypedDict, total=False):
     timeout: float | None
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """A 3xx stays an HTTPError, so `Authorization` never follows it to another host."""
+
+    def redirect_request(self, *_: object, **__: object) -> None:
+        return None
+
+
+NO_REDIRECTS = urllib.request.build_opener(_RefuseRedirect)
+
+
 @dataclass
 class Response:
     status: int
@@ -174,7 +184,7 @@ class Tools:
             cannot(f"refusing a non-https URL: {url}")
         req = urllib.request.Request(url, data=payload, method=method, headers=dict(headers))  # noqa: S310
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
+            with NO_REDIRECTS.open(req, timeout=60) as resp:
                 return Response(resp.status, resp.read())
         except urllib.error.HTTPError as exc:
             return Response(exc.code, exc.read())

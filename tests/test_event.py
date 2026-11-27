@@ -195,7 +195,7 @@ class FakeReply(io.BytesIO):
 
 def http(url: str, urlopen: object) -> object:
     """Tools().http(GET, url) with urlopen replaced; the Response or the CannotRun message."""
-    with mock.patch.object(core.urllib.request, "urlopen", urlopen):
+    with mock.patch.object(core, "NO_REDIRECTS", mock.Mock(open=urlopen)):
         try:
             return core.Tools().http("GET", url, {"Accept": "x"})
         except core.CannotRunError as exc:
@@ -238,6 +238,18 @@ def test_http_network_failure_is_a_2() -> None:
         )
 
 
+def test_http_refuses_a_redirect() -> None:
+    req = urllib.request.Request("https://api.example/x", headers={"Authorization": "Bearer t"})
+    handler = core._RefuseRedirect()
+    for code in (301, 302, 303, 307, 308):
+        got = handler.redirect_request(
+            req, io.BytesIO(), code, "moved", {}, "http://evil.example/y"
+        )
+        check(f"a {code} yields no follow-up request", got is None)
+    uses = any(isinstance(h, core._RefuseRedirect) for h in core.NO_REDIRECTS.handlers)
+    check("the client uses that handler", uses)
+
+
 def test_http_refuses_a_non_https_url() -> None:
     def urlopen(*_: object, **__: object) -> FakeReply:
         raise AssertionError("opened a non-https URL")
@@ -260,6 +272,7 @@ def main() -> int:
         test_http_returns_a_https_response,
         test_http_error_status_is_a_response,
         test_http_network_failure_is_a_2,
+        test_http_refuses_a_redirect,
         test_http_refuses_a_non_https_url,
     ):
         test()

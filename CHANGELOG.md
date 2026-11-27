@@ -8,6 +8,8 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- `Tools.http` no longer follows redirects, so the `Authorization` header
+  can never be carried to another host or to plain http (#278).
 - The lane memory budget now keeps a quarter of MemTotal (never under 512 MB)
   for the kernel, podman and the page cache, as it already did for a cgroup
   ceiling (a1809, crunchtools/gha-runner#71). A 16G runner VM gave four lanes
