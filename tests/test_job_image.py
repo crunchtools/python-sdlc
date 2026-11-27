@@ -550,6 +550,38 @@ def test_final_stage_not_first_is_rewritten() -> None:
     assert lines[2] == f"FROM quay.io/crunchtools/ubi10-core@{PARENT}"
 
 
+def test_comment_ending_in_a_backslash_does_not_swallow_the_next_from() -> None:
+    cf = "FROM a:1 AS b\n# note \\\nFROM c:2\n"
+    assert _core.final_stage(cf, strict=True) == (1, "c:2")
+    assert [p.image for p in image.builder_stages(cf, 1)] == ["a:1"]
+
+
+def test_escape_directive_backtick_continues_lines() -> None:
+    cf = "# escape=`\nFROM a:1 AS b\nRUN true `\n FROM x\nFROM c:2\n"
+    assert _core.logical_lines(cf) == ["FROM a:1 AS b", "RUN true   FROM x", "FROM c:2"]
+    assert _core.final_stage(cf, strict=True) == (1, "c:2")
+    # without the directive a backtick continues nothing, and a directive late is a comment
+    late = "FROM a:1\n# escape=`\nRUN true `\nFROM c:2\n"
+    assert _core.final_stage(late, strict=True) == (1, "c:2")
+    assert _core.logical_lines(late) == ["FROM a:1", "RUN true `", "FROM c:2"]
+
+
+def test_comment_inside_a_continued_run_is_dropped() -> None:
+    cf = "FROM a:1\nRUN one \\\n  # two \\\n  three\nFROM c:2\n"
+    assert _core.logical_lines(cf) == ["FROM a:1", "RUN one    three", "FROM c:2"]
+
+
+def test_copy_sources_are_images_not_stages() -> None:
+    cf = (
+        "ARG IMG=f:1\nFROM a:1@sha256:x AS Build\n"
+        "COPY --from=build /a /a\nCOPY --from=0 /a /a\nCOPY --from=${IMG} /a /a\n"
+        "ADD --from=g:2 /a /a\nRUN --mount=type=cache,target=/c \\\n"
+        "  --mount=type=bind,from=h:3,target=/m true\n"
+    )
+    assert image.copy_sources(cf) == ["f:1", "g:2", "h:3"]
+    assert image.copy_sources(cf, {"IMG": "z:9"})[0] == "z:9"
+
+
 def test_a_continued_line_that_starts_with_from_is_not_rewritten() -> None:
     t = FakeTools()
     cf = (

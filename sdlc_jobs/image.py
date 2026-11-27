@@ -72,6 +72,7 @@ from sdlc_jobs._core import (
     host_mount,
     image_owner,
     images,
+    logical_lines,
     must,
     no_new_privileges,
     podman,
@@ -464,7 +465,7 @@ def builder_stages(
     aliases: list[str] = []
     found: list[Parent] = []
     index = -1
-    for raw in re.sub(r"\\\n", " ", text).splitlines():
+    for raw in logical_lines(text):
         words = raw.split()
         op = words[0].upper() if words else ""
         if op == "ARG" and index < 0:
@@ -508,7 +509,7 @@ def copy_sources(text: str, overrides: Mapping[str, str] | None = None) -> list[
     aliases: list[str] = []
     found: list[str] = []
     started = False
-    for raw in re.sub(r"\\\n", " ", text).splitlines():
+    for raw in logical_lines(text):
         words = raw.split()
         op = words[0].upper() if words else ""
         refs: list[str] = []

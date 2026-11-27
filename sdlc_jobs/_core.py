@@ -773,6 +773,40 @@ def expand_build_vars(image: str, args: Mapping[str, str], *, strict: bool) -> s
     return BUILD_VAR.sub(value, image)
 
 
+DIRECTIVE = re.compile(r"\s*#\s*([a-z]+)\s*=\s*(\S*)\s*$", re.IGNORECASE)
+
+
+def logical_lines(text: str) -> list[str]:
+    """A Containerfile's instructions, one string each, as buildah reads them.
+
+    Parser directives are honoured only at the very top (`# escape=` takes `\\` or a
+    backtick). A comment line is dropped before continuations are joined, even inside
+    a continued instruction, and never continues. A continued line is joined with a space.
+    """
+    lines = text.splitlines()
+    escape = "\\"
+    for line in lines:
+        found = DIRECTIVE.fullmatch(line)
+        if not found:
+            break
+        if found[1].lower() == "escape" and found[2] in ("\\", "`"):
+            escape = found[2]
+    out: list[str] = []
+    pending: list[str] = []
+    for line in lines:
+        if line.lstrip().startswith("#"):
+            continue
+        body = line.rstrip()
+        if body.endswith(escape):
+            pending.append(body[: -len(escape)])
+        elif pending or body:
+            out.append(" ".join([*pending, body]))
+            pending = []
+    if pending:
+        out.append(" ".join(pending))
+    return out
+
+
 def final_stage(
     text: str, *, strict: bool, overrides: Mapping[str, str] | None = None
 ) -> tuple[int, str] | None:
@@ -785,7 +819,7 @@ def final_stage(
     """
     args: dict[str, str] = {}
     stages: list[tuple[str, str | None]] = []
-    for raw in re.sub(r"\\\n", " ", text).splitlines():
+    for raw in logical_lines(text):
         words = raw.split()
         op = words[0].upper() if words else ""
         if op == "ARG" and not stages:
