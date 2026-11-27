@@ -506,10 +506,12 @@ if [ "$(n_log "^skopeo inspect .*{{.Digest}}.* docker://$A:latest\$")" -eq 1 ] \
   ok "each retag is a digest-preserving copy and is read back"
 else bad "no read-back"; fi
 # The key reaches cosign on public-key, sign and attest only, never on verify
-# or syft, and cosign is always the pinned digest. Every public-key, sign and
-# attest takes it, however many attestations there are.
+# or syft, and cosign is always the pinned digest. This release makes one
+# public-key, two signs and two attests (both SBOMs; no build record, so no
+# provenance), and each of them takes the key.
 KEYED=$(( $(n_log ' public-key ') + $(n_log ' sign --yes ') + $(n_log ' attest --yes ') ))
-if [ "$KEYED" -ge 4 ] && [ "$(n_log '-e SDLC_KEY')" -eq "$KEYED" ] && ! grep -e ' verify ' -e ' verify-attestation ' -e ' scan ' "$W/log" | grep -q SDLC_KEY \
+if [ "$(n_log ' public-key ')" -eq 1 ] && [ "$(n_log ' sign --yes ')" -eq 2 ] \
+   && [ "$(n_log ' attest --yes ')" -eq 2 ] && [ "$(n_log '-e SDLC_KEY')" -eq "$KEYED" ] && ! grep -e ' verify ' -e ' verify-attestation ' -e ' scan ' "$W/log" | grep -q SDLC_KEY \
    && ! grep 'SDLC_KEY' "$W/log" | grep -qv -e ' public-key ' -e ' sign --yes ' -e ' attest --yes ' \
    && in_log '-e SDLC_KEY .* -- .* public-key ' && ! in_log 'SDLC_KEY=' \
    && [ "$(n_log ' verify ')" -ge 4 ] \
