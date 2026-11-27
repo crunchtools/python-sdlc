@@ -6,6 +6,14 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Security
+
+- The fleet `ci.yml` (and sdlc's own) give the `ai` job `CLAUDE_CODE_OAUTH_TOKEN`
+  only for this repository's own pull requests and for issues opened by an
+  owner, member or collaborator (#215, a1650). A fork's `pull_request_target`
+  or an outsider's issue now runs triage with no Claude token, so text an
+  outsider wrote never reaches a model that holds one. Re-copy `examples/ci.yml`.
+
 ## [0.18.0] - 2026-11-26
 
 ### Added
