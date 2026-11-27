@@ -56,7 +56,9 @@ nHVNg0KnBqqs/x+WThX8zEKaGmiZ2SM5336mPfJKZl68/lXBnoWlU0E9Tg==
 SEMVER = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 BUILD_ARG = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=[^\x00-\x1f]*")
-BUILD_VAR = re.compile(r"\$(?:\{(?P<braced>\w+)(?::?-(?P<default>[^}]*))?\}|(?P<bare>\w+))")
+BUILD_VAR = re.compile(
+    r"\$(?:\{(?P<braced>\w+)(?::?-(?P<default>[^}]*))?\}|(?P<bare>\w+))", re.ASCII
+)
 
 
 class CannotRunError(Exception):
@@ -773,7 +775,26 @@ def expand_build_vars(image: str, args: Mapping[str, str], *, strict: bool) -> s
     return BUILD_VAR.sub(value, image)
 
 
-DIRECTIVE = re.compile(r"\s*#\s*([a-z]+)\s*=\s*(\S*)\s*$", re.IGNORECASE)
+DIRECTIVE = re.compile(r"\s*#\s*([a-z]+)\s*=\s*(\S*)\s*$", re.IGNORECASE | re.ASCII)
+
+
+def containerfile_text(path: Path) -> str:
+    """A Containerfile's text: strict UTF-8, and only what `logical_lines` accepts."""
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        cannot(f"{path.name} is not readable as UTF-8: {exc}")
+    plain_text(text, path.name)
+    return text
+
+
+def plain_text(text: str, where: str = "the Containerfile") -> None:
+    """Refuse what buildah and Python would split differently: \\r, any control character
+    but \\n and \\t, and any whitespace that is not ASCII. buildah breaks lines on \\n only."""
+    for i, ch in enumerate(text):
+        if ch not in "\n\t " and (ch.isspace() or not ch.isprintable()):
+            line = text.count("\n", 0, i) + 1
+            cannot(f"{where} line {line} holds {ch!r}: only space, \\n and \\t are whitespace here")
 
 
 def escape_of(lines: list[str]) -> str:
@@ -792,24 +813,28 @@ def logical_lines(text: str) -> list[str]:
     """A Containerfile's instructions, one string each, as buildah reads them.
 
     Parser directives are honoured only at the very top (`# escape=` takes `\\` or a
-    backtick). A comment line is dropped before continuations are joined, even inside
-    a continued instruction, and never continues. A continued line is joined with a space.
+    backtick). Lines break on \\n only (`plain_text` refuses anything else that could).
+    A comment line is dropped before continuations are joined, even inside a continued
+    instruction, and never continues. A continued line is concatenated as buildah does:
+    the escape goes, the next line's leading blanks go, and nothing is put between.
     """
-    lines = text.splitlines()
+    plain_text(text)
+    lines = text.split("\n")
     escape = escape_of(lines)
     out: list[str] = []
     pending: list[str] = []
     for line in lines:
-        if line.lstrip().startswith("#"):
+        if line.lstrip(" \t").startswith("#"):
             continue
-        body = line.rstrip()
+        body = line.rstrip(" \t")
+        part = body.lstrip(" \t") if pending else body
         if body.endswith(escape):
-            pending.append(body[: -len(escape)])
+            pending.append(part[: -len(escape)])
         elif pending or body:
-            out.append(" ".join([*pending, body]))
+            out.append("".join([*pending, part]))
             pending = []
     if pending:
-        out.append(" ".join(pending))
+        out.append("".join(pending))
     return out
 
 

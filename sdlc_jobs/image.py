@@ -66,6 +66,7 @@ from sdlc_jobs._core import (
     build_arg_map,
     build_args,
     cannot,
+    containerfile_text,
     escape_of,
     expand_build_vars,
     fetch_tree,
@@ -76,6 +77,7 @@ from sdlc_jobs._core import (
     logical_lines,
     must,
     no_new_privileges,
+    plain_text,
     podman,
     set_output,
     show,
@@ -107,7 +109,7 @@ SECRETS = (
     "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
     "ACTIONS_ID_TOKEN_REQUEST_URL",
 )
-FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE)
+FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE | re.ASCII)
 # The `podman run` options the planner emits for a host step (container-smoke,
 # container-scan, bootc-lint), and nothing else: a repo's config cannot add one.
 RUN_FLAGS = ("--rm", "--read-only")
@@ -293,7 +295,7 @@ def stages_of(job: Job, img: Image) -> tuple[str, Parent | None, list[Parent]]:
     )
     if name is None:
         cannot("there is no Containerfile or Dockerfile at the repo root to build")
-    text = (job.root / name).read_text(encoding="utf-8", errors="replace")
+    text = containerfile_text(job.root / name)
     overrides = build_arg_map(img.settings)
     parent = parent_stage(text, overrides)
     stages = [
@@ -382,7 +384,7 @@ def build_order(root: Path, imgs: list[Image]) -> tuple[list[Image], dict[str, s
         path = img.containerfile or next(
             (f for f in ("Containerfile", "Dockerfile") if (root / f).is_file()), ""
         )
-        text = (root / path).read_text(encoding="utf-8", errors="replace") if path else ""
+        text = containerfile_text(root / path) if path else ""
         overrides = build_arg_map(img.settings)
         parent = parent_stage(text, overrides) if text else None
         stages = [*([parent] if parent else [])]
@@ -531,13 +533,13 @@ def copy_sources(text: str, overrides: Mapping[str, str] | None = None) -> list[
             image = expand_build_vars(ref, args, strict=True).strip("\"'")
             if not image:
                 cannot(f"--from/from= {ref} expands to nothing")
-            if not image.isdigit() and image.lower() not in aliases:
+            if not (image.isascii() and image.isdigit()) and image.lower() not in aliases:
                 found.append(image)
     return found
 
 
-DIRECTIVE_LIKE = re.compile(r"\s*#\s*([A-Za-z][A-Za-z0-9]*)\s*=(.*)")
-PLAIN_VAR = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+DIRECTIVE_LIKE = re.compile(r"\s*#\s*([A-Za-z][A-Za-z0-9]*)\s*=(.*)", re.ASCII)
+PLAIN_VAR = re.compile(r"\$(?:\{(\w+)\}|(\w+))", re.ASCII)
 
 
 def unmodelled(text: str) -> str:
@@ -548,7 +550,8 @@ def unmodelled(text: str) -> str:
     `\\` or a backtick, a quoted --mount, and an image named through anything but a
     plain $NAME/${NAME} of a global ARG that no stage ARG default or ENV redefines.
     """
-    lines = text.splitlines()
+    plain_text(text)
+    lines = text.split("\n")
     for line in lines:
         found = DIRECTIVE_LIKE.fullmatch(line)
         if not found:
@@ -557,11 +560,11 @@ def unmodelled(text: str) -> str:
             return f"its escape directive {found[2].strip()!r} is not exactly \\ or a backtick"
     escape, pending = escape_of(lines), False
     for line in lines:
-        bare = line.strip()
+        bare = line.strip(" \t")
         if pending and (not bare or bare.startswith("#")):
             return "a blank or comment line sits inside a continued instruction"
         if not bare.startswith("#"):
-            pending = line.rstrip().endswith(escape)
+            pending = line.rstrip(" \t").endswith(escape)
     return unmodelled_refs(logical_lines(text))
 
 
@@ -752,7 +755,7 @@ def root_is_bootc(job: Job) -> bool:
     name = next((f for f in ("Containerfile", "Dockerfile") if (job.root / f).is_file()), None)
     if name is None:
         return False
-    text = (job.root / name).read_text(encoding="utf-8", errors="replace")
+    text = containerfile_text(job.root / name)
     found = final_stage(text, strict=False, overrides=build_arg_map(job.settings))
     return bool(found and found[1] and "bootc" in found[1].lower())
 

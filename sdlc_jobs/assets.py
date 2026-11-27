@@ -50,8 +50,10 @@ from sdlc_jobs._core import (
     Tools,
     api,
     cannot,
+    containerfile_text,
     fetch_tree,
     in_checkout,
+    logical_lines,
     must,
     needed,
     podman,
@@ -162,14 +164,15 @@ def resolve(where: str, value: object, version: str, sha: str) -> str:
 
 def pinned(root: Path, e: Entry) -> None:
     """Every registry FROM must carry a reviewed digest; the target must be a stage."""
-    text = (root / e.containerfile).read_text(encoding="utf-8", errors="replace")
+    text = containerfile_text(root / e.containerfile)
     why = unmodelled(text)
     if why:
         cannot(
             f"{e.containerfile}: {why}; a release asset is built only from a Containerfile "
             "the pin check reads as buildah does"
         )
-    if not re.search(rf"(?im)^\s*FROM\s.+\sAS\s+{re.escape(e.target)}\s*$", text):
+    stage = re.compile(rf"FROM\s.+\sAS\s+{re.escape(e.target)}\s*", re.ASCII | re.IGNORECASE)
+    if not any(stage.fullmatch(line.strip(" \t")) for line in logical_lines(text)):
         cannot(f"{e.containerfile} has no stage named {e.target}")
     for parent in builder_stages(text, -1, e.build_args):
         found = parent.image.partition("@")[2]

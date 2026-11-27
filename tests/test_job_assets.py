@@ -510,6 +510,37 @@ def test_what_the_pin_check_cannot_model_is_refused() -> None:
         assert fragment in msg, (cf, msg)
 
 
+def test_split_and_odd_bytes_cannot_hide_an_image() -> None:
+    """The third round of sdlc#268: buildah concatenates continuations, breaks on \\n only."""
+    in_build = CONTAINERFILE.replace("RUN mkdir /out", "RUN mkdir /out\n{}")
+    cases = [
+        (in_build.format(f"COPY --fr\\\nom={PROBE} /a /b"), f"{PROBE}, named by"),
+        (
+            in_build.format(f"RUN --mount=type=bind,fr\\\nom={PROBE},target=/x true"),
+            f"{PROBE}, named by",
+        ),
+        (f"FR\\\nOM {PROBE} AS build\nRUN mkdir /out\n", "is not pinned"),
+        (
+            in_build.format(
+                f"RUN <\\\n<EOF\nFROM scratch AS {PROBE}\nEOF\nCOPY --from={PROBE} /a /b"
+            ),
+            "heredoc",
+        ),
+        (CONTAINERFILE.replace("RUN mkdir /out", f"RUN mkdir /out\rFROM {PROBE}"), "'\\r'"),
+        (CONTAINERFILE.replace("RUN mkdir /out", f"RUN mkdir /out\x1cFROM {PROBE}"), "'\\x1c'"),
+        (CONTAINERFILE.replace("RUN mkdir /out", f"RUN mkdir /out\x85FROM {PROBE}"), "'\\x85'"),
+        ("#\xa0escape=`\n" + in_build.format(f"COPY `\n--from={PROBE} /a /b"), "'\\xa0'"),
+    ]
+    for cf, fragment in cases:
+        msg = refused(containerfile=cf)
+        assert fragment in msg, (cf, msg)
+
+    def bad_utf8(t: FakeTools) -> None:
+        (t.root / "packaging/rpm.Containerfile").write_bytes(CONTAINERFILE.encode() + b"\xff\n")
+
+    assert "not readable as UTF-8" in refused(setup=bad_utf8)
+
+
 def test_release_containerfile_shapes_pass() -> None:
     """ashigaru's (FROM root-${TARGET}) and petit's (a stage re-importing a global ARG)."""
     for cf in (
