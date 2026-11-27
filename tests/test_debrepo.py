@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import io
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -166,6 +167,39 @@ def test_bad_magic() -> None:
     with tempfile.TemporaryDirectory() as t:
         deb = make_deb(Path(t) / "a.deb", lead=(b"!<arcX>\n", b"2.0\n"))
         assert "bad magic" in refusal(lambda: _debrepo.control_of(deb))
+
+
+def raw_deb(path: Path, name: str, size_field: bytes) -> Path:
+    """A deb whose second member `name` carries `size_field` verbatim, then 60 filler bytes."""
+    head = (
+        f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}".encode() + size_field.ljust(10) + b"`\n"
+    )
+    path.write_bytes(b"!<arch>\n" + ar_member("debian-binary", b"2.0\n") + head + b"x" * 60)
+    return path
+
+
+def refusal_fast(fn: Callable[[], object]) -> str:
+    """`refusal`, but a regression that loops forever fails after 5 seconds, not never."""
+
+    def stuck(*_: object) -> None:
+        raise AssertionError("ar_members did not return")
+
+    old = signal.signal(signal.SIGALRM, stuck)
+    signal.alarm(5)
+    try:
+        return refusal(fn)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def test_malformed_ar_size() -> None:
+    for name in ("junk", "control.tar.gz"):
+        for field in (b"-60", b"+60", b"1_0", b"0x10", b"", b"6 0"):
+            with tempfile.TemporaryDirectory() as t:
+                deb = raw_deb(Path(t) / "a.deb", name, field)
+                msg = refusal_fast(lambda d=deb: _debrepo.control_of(d))
+                assert "malformed ar member size" in msg, (name, field, msg)
 
 
 def test_bad_debian_binary() -> None:

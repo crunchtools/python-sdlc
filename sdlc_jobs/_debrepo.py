@@ -58,10 +58,11 @@ def ar_members(deb: Path) -> dict[str, bytes]:
             if len(header) != AR_HEADER or header[58:60] != b"`\n":
                 cannot(f"{deb.name} has a malformed ar header")
             name = header[:16].decode("ascii", "replace").strip().rstrip("/")
-            try:
-                size = int(header[48:58])
-            except ValueError:
+            # bytes.isdigit is ASCII-only; int() would take "-60", "+5" and "1_0"
+            digits = header[48:58].strip()
+            if not digits.isdigit():
                 cannot(f"{deb.name} has a malformed ar member size")
+            size = int(digits)
             if order == 0 and name != "debian-binary":
                 cannot(f"{deb.name}: first member is {name!r}, not debian-binary")
             order += 1
