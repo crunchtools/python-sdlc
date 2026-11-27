@@ -457,6 +457,72 @@ def test_unpinned_copy_and_mount_sources_are_refused() -> None:
         assert "fedora:latest, named by" in msg and "not pinned" in msg, line
 
 
+PROBE = "quay.io/crunchtools-probe/nonexistent-xyz:1"  # what each bypass would pull
+
+
+def test_what_the_pin_check_cannot_model_is_refused() -> None:
+    """Each of these made buildah pull PROBE while the checker saw no image (sdlc#268)."""
+    in_build = CONTAINERFILE.replace("RUN mkdir /out", "RUN mkdir /out\n{}")
+    cases = [
+        (
+            in_build.format(f"RUN <<EOF\nFROM scratch AS {PROBE}\nEOF\nCOPY --from={PROBE} /a /b"),
+            "heredoc",
+        ),
+        (
+            f"FROM {ROOT_FROM} AS pre\nRUN <<EOF\nFROM scratch AS {PROBE}\nEOF\n"
+            f"FROM {PROBE} AS build\nRUN mkdir /out\n",
+            "heredoc",
+        ),
+        (in_build.format(f"COPY \\\n\n--from={PROBE} /a /b"), "blank or comment line"),
+        (in_build.format(f"COPY \\\n   \n--from={PROBE} /a /b"), "blank or comment line"),
+        (in_build.format(f"COPY \\\n# note\n--from={PROBE} /a /b"), "blank or comment line"),
+        (f"FROM \\\n\n{PROBE} AS build\nRUN mkdir /out\n", "blank or comment line"),
+        ("# escape=`x\n" + in_build.format(f"COPY `\n--from={PROBE} /a /b"), "escape directive"),
+        ("# escape=` x\n" + in_build.format(f"COPY `\n--from={PROBE} /a /b"), "escape directive"),
+        (in_build.format(f'RUN --mount=type=bind,"from={PROBE}",target=/x true'), "quoted --mount"),
+        (in_build.format(f"RUN --mount=type=bind,'from={PROBE}',target=/x true"), "quoted --mount"),
+        (
+            f"ARG IMG={ROOT_FROM}\nFROM {ROOT_FROM} AS build\nARG IMG={PROBE}\nRUN mkdir /out\n"
+            "COPY --from=${IMG} /a /b\n",
+            "not a global ARG left alone",
+        ),
+        (
+            f"ARG IMG={ROOT_FROM}\nFROM {ROOT_FROM} AS build\nENV IMG={PROBE}\nRUN mkdir /out\n"
+            "COPY --from=$IMG /a /b\n",
+            "not a global ARG left alone",
+        ),
+        (
+            f"ARG A=\nFROM {ROOT_FROM} AS build\nRUN mkdir /out\n"
+            f"COPY --from=${{A:-{PROBE}}} /a /b\n",
+            "variable form",
+        ),
+        (
+            f"FROM {ROOT_FROM} AS build\nARG IMG={PROBE}\nRUN mkdir /out\nCOPY --from=$IMG /a /b\n",
+            "not a global ARG left alone",
+        ),
+        (
+            f"ARG A=\nFROM {ROOT_FROM} AS build\nRUN mkdir /out\nCOPY --from=${{A}} /a /b\n",
+            "expands to nothing",
+        ),
+    ]
+    for cf, fragment in cases:
+        msg = refused(containerfile=cf)
+        assert fragment in msg, (cf, msg)
+
+
+def test_release_containerfile_shapes_pass() -> None:
+    """ashigaru's (FROM root-${TARGET}) and petit's (a stage re-importing a global ARG)."""
+    for cf in (
+        f"ARG TARGET\nFROM {ROOT_FROM} AS root-fc43\nFROM root-${{TARGET}} AS build\n"
+        "RUN mkdir /out\nFROM root-${TARGET}\nCOPY --from=build /out/ /rpms/\n",
+        f"# escape=\\\nARG VERSION=0\nFROM {ROOT_FROM} AS build\nARG VERSION\n"
+        "RUN mkdir /out \\\n && true\n",
+    ):
+        tools, env, tmp = make(containerfile=cf)
+        with tmp:
+            assert assets.run("push", {}, env, tools) == 0, cf
+
+
 def test_copy_and_mount_sources_that_are_not_unpinned_images_pass() -> None:
     for line in (
         "RUN --mount=type=cache,target=/c true",

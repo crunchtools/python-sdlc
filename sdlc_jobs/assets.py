@@ -62,7 +62,7 @@ from sdlc_jobs._core import (
 )
 from sdlc_jobs._tools import child_env, safe_directory
 from sdlc_jobs._verify_release import verify_release
-from sdlc_jobs.image import builder_stages, copy_sources
+from sdlc_jobs.image import builder_stages, copy_sources, unmodelled
 from sdlc_jobs.pypi import parse_release
 
 EVENTS = ("push",)  # ci.yml's `assets` job runs on a push and nothing else
@@ -163,6 +163,12 @@ def resolve(where: str, value: object, version: str, sha: str) -> str:
 def pinned(root: Path, e: Entry) -> None:
     """Every registry FROM must carry a reviewed digest; the target must be a stage."""
     text = (root / e.containerfile).read_text(encoding="utf-8", errors="replace")
+    why = unmodelled(text)
+    if why:
+        cannot(
+            f"{e.containerfile}: {why}; a release asset is built only from a Containerfile "
+            "the pin check reads as buildah does"
+        )
     if not re.search(rf"(?im)^\s*FROM\s.+\sAS\s+{re.escape(e.target)}\s*$", text):
         cannot(f"{e.containerfile} has no stage named {e.target}")
     for parent in builder_stages(text, -1, e.build_args):

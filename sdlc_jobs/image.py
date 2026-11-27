@@ -66,6 +66,7 @@ from sdlc_jobs._core import (
     build_arg_map,
     build_args,
     cannot,
+    escape_of,
     expand_build_vars,
     fetch_tree,
     final_stage,
@@ -528,9 +529,85 @@ def copy_sources(text: str, overrides: Mapping[str, str] | None = None) -> list[
             refs = from_refs(op, words[1:])
         for ref in refs:
             image = expand_build_vars(ref, args, strict=True).strip("\"'")
-            if image and not image.isdigit() and image.lower() not in aliases:
+            if not image:
+                cannot(f"--from/from= {ref} expands to nothing")
+            if not image.isdigit() and image.lower() not in aliases:
                 found.append(image)
     return found
+
+
+DIRECTIVE_LIKE = re.compile(r"\s*#\s*([A-Za-z][A-Za-z0-9]*)\s*=(.*)")
+PLAIN_VAR = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+
+
+def unmodelled(text: str) -> str:
+    """Why the pin check cannot read `text` as buildah does; "" when it can.
+
+    The check fails closed rather than model these: a heredoc, a blank or comment
+    line inside a continued instruction, an escape directive that is not exactly
+    `\\` or a backtick, a quoted --mount, and an image named through anything but a
+    plain $NAME/${NAME} of a global ARG that no stage ARG default or ENV redefines.
+    """
+    lines = text.splitlines()
+    for line in lines:
+        found = DIRECTIVE_LIKE.fullmatch(line)
+        if not found:
+            break
+        if found[1].lower() == "escape" and found[2].strip() not in ("\\", "`"):
+            return f"its escape directive {found[2].strip()!r} is not exactly \\ or a backtick"
+    escape, pending = escape_of(lines), False
+    for line in lines:
+        bare = line.strip()
+        if pending and (not bare or bare.startswith("#")):
+            return "a blank or comment line sits inside a continued instruction"
+        if not bare.startswith("#"):
+            pending = line.rstrip().endswith(escape)
+    return unmodelled_refs(logical_lines(text))
+
+
+def unmodelled_refs(instructions: list[str]) -> str:
+    """`unmodelled` for the joined instructions: heredocs, quoted mounts, variables."""
+    global_args: set[str] = set()
+    redefined: set[str] = set()
+    refs: list[str] = []
+    started = False
+    for raw in instructions:
+        words = raw.split()
+        op = words[0].upper() if words else ""
+        if "<<" in raw:
+            return f"its {op} has a heredoc"
+        if any(w.startswith("--mount=") and ("'" in w or '"' in w) for w in words):
+            return f"its {op} has a quoted --mount"
+        if op == "FROM":
+            started = True
+            refs += [w for w in words[1:] if not w.startswith("--")][:1]
+        elif op in ("ARG", "ENV"):
+            (redefined if started or op == "ENV" else global_args).update(
+                declared(op, words[1:], started=started)
+            )
+        else:
+            refs += from_refs(op, words[1:])
+    return unfollowed(refs, global_args, redefined)
+
+
+def declared(op: str, words: list[str], *, started: bool) -> list[str]:
+    """Names an ARG or ENV sets: every global ARG; a stage ARG only with a default."""
+    if op == "ARG":
+        return [w.partition("=")[0] for w in words if "=" in w or not started]
+    pairs = [w for w in words if "=" in w] if words and "=" in words[0] else words[:1]
+    return [w.partition("=")[0] for w in pairs]
+
+
+def unfollowed(refs: list[str], global_args: set[str], redefined: set[str]) -> str:
+    """The first image reference whose variables are not plain, untouched global ARGs."""
+    for ref in (r for r in refs if "$" in r):
+        if "$" in PLAIN_VAR.sub("", ref):
+            return f"{ref} uses a variable form the check does not follow"
+        for m in PLAIN_VAR.finditer(ref):
+            name = m[1] or m[2]
+            if name not in global_args or name in redefined:
+                return f"{ref} uses {name}, which is not a global ARG left alone by every stage"
+    return ""
 
 
 def split_ref(image: str) -> tuple[str, str]:

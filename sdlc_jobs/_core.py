@@ -776,6 +776,18 @@ def expand_build_vars(image: str, args: Mapping[str, str], *, strict: bool) -> s
 DIRECTIVE = re.compile(r"\s*#\s*([a-z]+)\s*=\s*(\S*)\s*$", re.IGNORECASE)
 
 
+def escape_of(lines: list[str]) -> str:
+    """The escape character the leading parser directives set: `\\` unless `# escape=`."""
+    escape = "\\"
+    for line in lines:
+        found = DIRECTIVE.fullmatch(line)
+        if not found:
+            break
+        if found[1].lower() == "escape" and found[2] in ("\\", "`"):
+            escape = found[2]
+    return escape
+
+
 def logical_lines(text: str) -> list[str]:
     """A Containerfile's instructions, one string each, as buildah reads them.
 
@@ -784,13 +796,7 @@ def logical_lines(text: str) -> list[str]:
     a continued instruction, and never continues. A continued line is joined with a space.
     """
     lines = text.splitlines()
-    escape = "\\"
-    for line in lines:
-        found = DIRECTIVE.fullmatch(line)
-        if not found:
-            break
-        if found[1].lower() == "escape" and found[2] in ("\\", "`"):
-            escape = found[2]
+    escape = escape_of(lines)
     out: list[str] = []
     pending: list[str] = []
     for line in lines:
