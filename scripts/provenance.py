@@ -2,17 +2,18 @@
 """Write the SLSA v1 provenance predicate of a digest from the build record its
 labels carry, for scripts/attest-digest.sh to attest (a997).
 
-container.yml's build step stamps the run that built the image, the workflow
-that ran it and the commit into the image config, next to the
-org.opencontainers.image.revision it already wrote, so the signature covers
-them. Promote usually takes a digest an EARLIER run built (a tag run builds
-nothing), so the builder is read off the image, never taken from the promote
-run. A digest built before a997, or whose record is not this repo's
-container.yml on main or a v* tag at its own revision (inherited FROM a base
-image, or a branch's dispatched build), gets no provenance rather than a wrong
-one. The same shape as constitution's
+The build (scripts/self.sh, in ci.yml's image job) stamps the run that built
+the image, the workflow that ran it and the commit into the image config, next
+to the org.opencontainers.image.revision it already wrote, so the signature
+covers them. The signer may take a digest an EARLIER run built, so the builder
+is read off the image, never taken from the signing run. A digest built before
+a997, or whose record is not this repo's ci.yml on main or a v* tag at its own
+revision (inherited FROM a base image, or a branch's dispatched build), gets no
+provenance rather than a wrong one. The same shape as constitution's
 container_release.py provenance (#204), whose trusted builder is its reusable
-workflow; sdlc hand-rolls its own, so the builder is this repo's container.yml.
+workflow; sdlc hand-rolls its own, so the builder is this repo's ci.yml. Until
+the sign job attests (#266) nothing calls this; it moved from container.yml
+(retired, a1790) to ci.yml with the build.
 
 Reads `skopeo inspect` JSON on stdin; writes --out only when there is a record.
 
@@ -32,7 +33,7 @@ BUILD_BUILDER = "com.crunchtools.build.builder"
 BUILD_WORKFLOW = "com.crunchtools.build.workflow"
 BUILD_COMMIT = "com.crunchtools.build.commit"
 REVISION = "org.opencontainers.image.revision"
-WORKFLOW = ".github/workflows/container.yml@"
+WORKFLOW = ".github/workflows/ci.yml@"
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # Only main and release tags build what promote publishes; a record from any
 # other ref (a pull request's merge ref, a dispatched branch) is not one.
@@ -42,7 +43,7 @@ BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflo
 
 def build_record(labels: dict[str, str], repo: str) -> tuple[str, str, str, str] | None:
     """(run, builder, workflow, commit) when the labels record this repo's
-    container.yml building its own revision."""
+    ci.yml building its own revision."""
     run_url, builder, workflow, commit = (
         labels.get(k, "") for k in (BUILD_RUN, BUILD_BUILDER, BUILD_WORKFLOW, BUILD_COMMIT)
     )
@@ -93,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     predicate = provenance(labels, a.repo)
     if predicate is None:
         print(
-            f"::warning::the image records no container.yml run of {a.repo} on main or a v* tag "
+            f"::warning::the image records no ci.yml run of {a.repo} on main or a v* tag "
             "at its own revision (built before a997, a branch build, or a base image's record); "
             "no provenance attested",
             file=sys.stderr,

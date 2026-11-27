@@ -82,8 +82,8 @@ good_labels() {
   cat > "$W/labels.json" <<EOF
 {
   "com.crunchtools.build.run": "https://github.com/crunchtools/sdlc/actions/runs/123/attempts/1",
-  "com.crunchtools.build.builder": "crunchtools/sdlc/.github/workflows/container.yml@refs/heads/main",
-  "com.crunchtools.build.workflow": "crunchtools/sdlc/.github/workflows/container.yml@refs/heads/main",
+  "com.crunchtools.build.builder": "crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main",
+  "com.crunchtools.build.workflow": "crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main",
   "com.crunchtools.build.commit": "$SHA",
   "org.opencontainers.image.revision": "$SHA"
 }

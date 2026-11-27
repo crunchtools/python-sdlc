@@ -69,7 +69,8 @@ tree_version() {
 # ------------------------------------------------------------- building/testing
 
 SHELL_FILES='bin/sdlc bin/sdlc-bootstrap boot/sdlc scripts/self.sh scripts/release-version.sh
-  scripts/hotfix.sh scripts/revision-of.sh scripts/sign-digest.sh scripts/attest-digest.sh tests/contract.sh
+  scripts/hotfix.sh scripts/revision-of.sh scripts/sign-digest.sh scripts/attest-digest.sh
+  scripts/mirror-parent.sh tests/test_mirror_parent.sh tests/contract.sh
   tests/test_host_contract.sh tests/test_container_stack.sh tests/test_node_stack.sh
   tests/test_bootc_stack.sh tests/test_docs_stack.sh tests/test_revision_of.sh
   tests/test_bootstrap.sh tests/test_sign_digest.sh tests/test_attest_digest.sh
@@ -99,7 +100,7 @@ build() {
     -t "$3" "$_src"
 }
 
-# Everything container.yml's build job runs today, plus sdlc-bootstrap's own tests
+# Everything container.yml's build job ran (a1790 retired it), plus sdlc-bootstrap's own tests
 # and `sdlc ci` from the image just built. $1 is the sdlc image, $2 sdlc-bootstrap.
 test_all() {
   cd "$here"
@@ -108,7 +109,7 @@ test_all() {
   for t in tests/test_host_contract.sh tests/test_bootstrap.sh tests/test_sign_digest.sh \
            tests/test_attest_digest.sh tests/test_provenance.py tests/test_revision_of.sh \
            tests/test_release_version.py tests/test_boot.sh tests/test_self.sh \
-           tests/test_hotfix.sh; do
+           tests/test_hotfix.sh tests/test_mirror_parent.sh; do
     "$t"
   done
   tests/contract.sh "$1"

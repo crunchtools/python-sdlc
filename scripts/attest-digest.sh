@@ -1,9 +1,10 @@
 #!/bin/sh
 # Attest a syft SPDX SBOM and SLSA v1 provenance to one signed digest in each
 # named repository with the fleet key, unless it already carries them, and
-# prove each attestation verifies. Used by container.yml's promote job after
-# scripts/sign-digest.sh and before any tag moves (a997), as constitution's
-# container-release.yml does for every other image (#203, #204).
+# prove each attestation verifies (a997), as constitution's container-release.yml
+# did for every other image (#203, #204). container.yml's promote ran it after
+# scripts/sign-digest.sh; since that was retired (a1790) nothing calls it, and
+# the sign job is to (#266).
 #
 # Two steps, as constitution#209 splits them, so the key is never in the
 # environment of anything that parses the image:

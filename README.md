@@ -85,14 +85,15 @@ the tag resolves to is signed by a key it carries inline, using cosign
 from a digest-pinned Hummingbird image. Then it runs the launcher and every check by that
 digest. An unsigned image is a 2, GATE CANNOT RUN. A release (`:latest`,
 `X.Y.Z`) must be signed by sdlc's own key (`boot/keys/sdlc.pub`), which has
-signed every release since 0.15.2. `:main` and an `@sha256` digest may carry
-either sdlc's key or the crunchtools fleet key, which signs `:main` and signed
-the releases up to 0.15.1; run one of those by its digest. A digest verified
+signed every release since 0.15.2. An `@sha256` digest may carry
+either sdlc's key or the crunchtools fleet key, which signed the releases up to
+0.15.1 and the retired `:main`; run one of those by its digest. A digest verified
 once is remembered in `${XDG_CACHE_HOME:-~/.cache}/sdlc/verified/`, so an
-offline seat keeps working. CI always verifies. Promote also attests an SPDX
-SBOM and SLSA v1 provenance to the digest with the fleet key; `cosign
-verify-attestation --insecure-ignore-tlog --type spdxjson` (or
-`slsaprovenance1`) reads them.
+offline seat keeps working. CI always verifies. A fleet image's promote also
+attests an SPDX SBOM and SLSA v1 provenance to the digest with the fleet key;
+`cosign verify-attestation --insecure-ignore-tlog --type spdxjson` (or
+`slsaprovenance1`) reads them. sdlc's own releases since 0.15.9 are signed but
+not attested (#266).
 
 `.pre-commit-config.yaml` is
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
@@ -576,31 +577,26 @@ config stays something a person can read.
 
 ## Running main before a release
 
-Every push to main publishes its tested image as `quay.io/crunchtools/sdlc:main`,
-the same name git and Gourmand use: what has merged and not yet been released.
-It is the digest the contract test ran against at `:<sha>`, read back after the
-copy, and it never moves back onto an older commit. Only a release moves `latest` and the version tags, and no
-pull request run touches a registry at all. The release is the gate.
+Nothing publishes `quay.io/crunchtools/sdlc:main` any more: the release is the
+gate, and only a release moves `:<major>`, `latest` and the version tags.
+`:main` and the transitional mirror `quay.io/crunchtools/python-sdlc` stopped
+at 0.15.8 when container.yml was retired (a1790); neither is a target. To run
+an unreleased tree, build it here (below).
 
-`quay.io/crunchtools/sdlc` is the image. `quay.io/crunchtools/python-sdlc` is a
-transitional mirror carrying the same signed digest, retired once the fleet has
-moved.
-
-A floating repo opts its CI into `:main` with the repository variable
-`SDLC_IMAGE=main` -- a setting only an admin can change, rather than a one-line
-edit a pull request could slip in. It is not a wall: a pull request from a
-branch can still edit `ci.yml` or `.sdlc/bin/sdlc` themselves, as it always
-could edit its workflows; an org ruleset's required workflow is what would
-close that. To run one on your machine, first matching wins:
+A repo pins a release with the repository variable `SDLC_IMAGE=X.Y.Z` -- a
+setting only an admin can change, rather than a one-line edit a pull request
+could slip in. It is not a wall: a pull request from a branch can still edit
+`ci.yml` or `.sdlc/bin/sdlc` themselves, as it always could edit its
+workflows; an org ruleset's required workflow is what would close that. To run
+one on your machine, first matching wins:
 
 | How | Value |
 |---|---|
-| `SDLC_IMAGE=main git push` | a bare tag of `quay.io/crunchtools/sdlc` (`main`, or a release such as `0.8.0`), or a full image reference |
-| `[tool.sdlc] image = "main"` | a bare tag only, written on its own line under `[tool.sdlc]` |
+| `SDLC_IMAGE=0.18.0 git push` | a bare tag of `quay.io/crunchtools/sdlc` (a release such as `0.18.0`), or a full image reference |
+| `[tool.sdlc] image = "0.18.0"` | a bare tag only, written on its own line under `[tool.sdlc]` |
 
 Every command on anything but the pinned release prints which image it is and
-what chose it. A registry tag is pulled when newer, so `:main` is the current
-`:main`, not whatever was cached.
+what chose it. A registry tag is pulled when newer, not taken from the cache.
 
 **CI never honours `[tool.sdlc] image`.** Under `CI` or `GITHUB_ACTIONS`, and
 for `sdlc ci` anywhere, the key is refused with exit 2. A pull request must not
@@ -612,8 +608,9 @@ this image before it merges, build it locally (`podman build -t
 localhost/sdlc:dev .`) and run it with
 `SDLC_IMAGE=localhost/sdlc:dev` through this clone's `bin/sdlc`. A
 converted repo's `.sdlc/bin/sdlc` will not take it: the bootstrap runs what it
-pulls, so it pulls only `quay.io/crunchtools/sdlc` at `main`, `latest`, a
-release `X.Y.Z` or `@sha256:<digest>`, and refuses anything else with exit 2.
+pulls, so it pulls only `quay.io/crunchtools/sdlc` at `latest`, a release
+`X.Y.Z` or `@sha256:<digest>`, and refuses anything else with exit 2; `main`
+is refused by name, since `:main` stopped at 0.15.8.
 `sdlc` has no push step, and only this repo's GitHub Actions on main publish to
 quay.io.
 

@@ -1,9 +1,9 @@
 #!/bin/sh
 # bin/sdlc-bootstrap against a fake podman: nothing from the image runs before
 # a trusted key's signature on its digest is verified (sdlc's own for a
-# release, sdlc's or the fleet key for main or a digest), and everything after
-# runs by that digest (#81). The real cosign and quay.io are what
-# container.yml's promote step proves; this pins the order and the exits.
+# release, sdlc's or the fleet key for a digest), and everything after
+# runs by that digest (#81). The real cosign and quay.io are what a release's
+# sign job proves; this pins the order and the exits.
 #
 # Usage: tests/test_bootstrap.sh
 
@@ -160,7 +160,7 @@ else
   bad "unsigned: exit $RC, ran '$(cat "$W/ran" 2>/dev/null)'"; printf '%s\n' "$OUT"
 fi
 
-# Which key vouches: a release only by sdlc's, main and a digest by either.
+# Which key vouches: a release only by sdlc's, a digest by either.
 reset
 touch "$W/unsigned-sdlc"
 boot versions
@@ -186,54 +186,37 @@ for v in 0.15.7 0.15.1; do
   esac
 done
 
+# :main is no longer published (container.yml retired, a1790): a 2 that says
+# so, before anything is pulled, verified or run.
+reset
+RC=0
+OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" \
+        SDLC_IMAGE=main sh "$BOOT" versions 2>&1) || RC=$?
+if [ "$RC" -eq 2 ] && [ ! -e "$W/ran" ] && [ ! -e "$W/log" ] \
+   && printf '%s' "$OUT" | grep -q 'GATE CANNOT RUN: SDLC_IMAGE=main: :main is no longer published'; then
+  ok "SDLC_IMAGE=main is a 2 that says :main is retired, and touches nothing"
+else
+  bad "SDLC_IMAGE=main: exit $RC"; printf '%s\n' "$OUT"
+fi
+
+# A digest the fleet key vouched for, remembered, is not a release.
 reset
 touch "$W/unsigned-sdlc"
 RC=0
 OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" \
-        SDLC_IMAGE=main sh "$BOOT" versions 2>&1) || RC=$?
-if [ "$RC" -eq 0 ] && [ "$(verifies)" = "fleet " ] \
-   && [ "$(cat "$W/ran" 2>/dev/null)" = "$FLEET@$D|$FLEET:main|versions" ] \
+        SDLC_IMAGE="@$D" sh "$BOOT" versions 2>&1) || RC=$?
+if [ "$RC" -eq 0 ] && [ "$(verifies)" = "sdlc fleet " ] \
    && [ -e "$W/cache/sdlc/verified/$FLEET_ID/${D#sha256:}" ] && [ ! -d "$W/cache/sdlc/verified/$SDLC_ID" ]; then
-  ok "SDLC_IMAGE=main signed by the fleet key runs on the first verification, remembered under the fleet key"
+  ok "a digest signed by the fleet key alone runs, remembered under the fleet key"
 else
-  bad "fleet-signed main: exit $RC, verified with '$(verifies)'"; printf '%s\n' "$OUT"
+  bad "fleet-signed digest marker: exit $RC, verified with '$(verifies)'"; printf '%s\n' "$OUT"
 fi
-
-# A digest the fleet key vouched for, remembered, vouches for main only.
 rm -f "$W/log" "$W/ran"
 boot versions
 if [ "$RC" -eq 2 ] && [ "$(verifies)" = "sdlc " ] && [ ! -e "$W/ran" ]; then
   ok "a digest remembered under the fleet key is not a release: :latest asks sdlc's key again"
 else
   bad ":latest after a fleet-key marker: exit $RC, verified with '$(verifies)'"; printf '%s\n' "$OUT"
-fi
-
-reset
-touch "$W/unsigned-fleet"
-RC=0
-OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" \
-        SDLC_IMAGE=main sh "$BOOT" versions 2>&1) || RC=$?
-if [ "$RC" -eq 0 ] && [ "$(verifies)" = "fleet sdlc " ]; then
-  ok "SDLC_IMAGE=main signed by sdlc's key alone: the fleet key is tried first, then sdlc's"
-else
-  bad "sdlc-signed main: exit $RC, verified with '$(verifies)'"
-fi
-
-reset
-touch "$W/unsigned-sdlc" "$W/unsigned-fleet"
-RC=0
-OUT=$(env -u CI -u GITHUB_ACTIONS PATH="$W/bin:$PATH" XDG_CACHE_HOME="$W/cache" \
-        SDLC_IMAGE=main sh "$BOOT" versions 2>&1) || RC=$?
-if [ "$RC" -eq 2 ] && [ ! -e "$W/ran" ] && [ "$(verifies)" = "fleet sdlc " ] \
-   && printf '%s' "$OUT" | grep -q "signed by sdlc's key or the crunchtools fleet key\$" \
-   && [ "$(printf '%s\n' "$OUT" | grep -E 'key:$|no (sdlc|fleet) signature found' \
-             | sed -e 's/^.*fleet key:$/FK/' -e 's/^.*sdlc key:$/SK/' \
-                   -e 's/^.*no fleet signature found.*$/fe/' -e 's/^.*no sdlc signature found.*$/se/' \
-             | tr '\n' ' ')" = "FK fe SK se " ] \
-   && [ ! -d "$W/cache/sdlc/verified" ]; then
-  ok "main signed by neither key is a 2 with both keys' refusals, runs nothing, remembers nothing"
-else
-  bad "unsigned main: exit $RC, verified with '$(verifies)'"; printf '%s\n' "$OUT"
 fi
 
 reset

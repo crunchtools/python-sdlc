@@ -2,9 +2,9 @@
 """`scripts/provenance.py` must attest only a build record it can trust (a997).
 
 attest-digest.sh signs whatever predicate this writes, so a wrong record is worse
-than none. The record is the labels container.yml stamps into the image: the run,
+than none. The record is the labels ci.yml's build stamps into the image: the run,
 the builder, the workflow and the commit. This feeds `skopeo inspect`-shaped JSON
-to the script and asserts that a record of this repo's container.yml at its own
+to the script and asserts that a record of this repo's ci.yml at its own
 revision yields the exact SLSA v1 predicate, and that every other shape (no
 labels, another repo's run, another workflow, a ref other than main or a v*
 tag, a commit that is not the revision) yields exit 0, no file and a ::warning::.
@@ -26,7 +26,7 @@ SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "provenance.py"
 
 REPO = "crunchtools/sdlc"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
-BUILDER = f"{REPO}/.github/workflows/container.yml@refs/heads/main"
+BUILDER = f"{REPO}/.github/workflows/ci.yml@refs/heads/main"
 RUN = f"https://github.com/{REPO}/actions/runs/123/attempts/2"
 
 VALID = {
@@ -44,7 +44,7 @@ EXPECTED = {
             "workflow": {
                 "ref": "refs/heads/main",
                 "repository": f"https://github.com/{REPO}",
-                "path": ".github/workflows/container.yml",
+                "path": ".github/workflows/ci.yml",
             }
         },
         "resolvedDependencies": [
@@ -139,15 +139,15 @@ REFUSALS = [
         "builder is the prefix with nothing after @",
         inspect(
             with_labels(
-                builder=f"{REPO}/.github/workflows/container.yml@",
-                workflow=f"{REPO}/.github/workflows/container.yml@",
+                builder=f"{REPO}/.github/workflows/ci.yml@",
+                workflow=f"{REPO}/.github/workflows/ci.yml@",
             )
         ),
         True,
     ),
     (
         "workflow is not the builder",
-        inspect(with_labels(workflow=f"{REPO}/.github/workflows/container.yml@refs/tags/v1")),
+        inspect(with_labels(workflow=f"{REPO}/.github/workflows/ci.yml@refs/tags/v1")),
         True,
     ),
     *[
@@ -155,8 +155,8 @@ REFUSALS = [
             f"builder ref is {ref}",
             inspect(
                 with_labels(
-                    builder=f"{REPO}/.github/workflows/container.yml@{ref}",
-                    workflow=f"{REPO}/.github/workflows/container.yml@{ref}",
+                    builder=f"{REPO}/.github/workflows/ci.yml@{ref}",
+                    workflow=f"{REPO}/.github/workflows/ci.yml@{ref}",
                 )
             ),
             True,
@@ -193,7 +193,7 @@ def main() -> int:
     failed += check("valid record exits 0", code == 0, f"exit {code}: {err}")
     failed += check("valid record has no warning", "::warning::" not in err, err)
 
-    tag = f"{REPO}/.github/workflows/container.yml@refs/tags/v0.12.0"
+    tag = f"{REPO}/.github/workflows/ci.yml@refs/tags/v0.12.0"
     code, _, written = run(inspect(with_labels(builder=tag, workflow=tag)))
     failed += check(
         "a v* tag's record is trusted",

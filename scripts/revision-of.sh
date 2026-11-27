@@ -1,7 +1,8 @@
 #!/bin/sh
 # Print the revision label of a published image tag, or nothing when the tag
-# does not exist yet. Used by container.yml's promote guard, which refuses to
-# move a floating tag onto a commit the tag already contains.
+# does not exist yet: the guard that refuses to move a floating tag onto a
+# commit the tag already contains. container.yml's promote used it; nothing has
+# since that was retired (a1790), and the sign job's attestation (#266) may.
 #
 # Only "manifest unknown" means absent. Any other failure to read the tag --
 # auth, network, a registry error -- exits non-zero: a guard that cannot read

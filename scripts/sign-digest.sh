@@ -1,7 +1,8 @@
 #!/bin/sh
 # Sign one tested digest in each named repository with the fleet key, unless
-# it is already signed, and prove each signature verifies. Used by
-# container.yml's promote job before any tag moves (#81).
+# it is already signed, and prove each signature verifies (#81). container.yml's
+# promote used it; since that was retired (a1790) sdlc_jobs/promote.py does this
+# for the fleet, and nothing calls this script.
 #
 # The public key is the one bin/sdlc-bootstrap trusts, read out of it, and the
 # private key must be its other half: the key that signs and the key every
