@@ -452,7 +452,9 @@ attest_one() {
 # The SPDX SBOM and SLSA v1 provenance of $1@$2 under sdlc's key, each unless
 # it already carries one (a re-run): what promote.py attests to every fleet
 # image with the fleet key (#266). syft and provenance.py parse the image and
-# never see the key; only cosign_key does.
+# never see the key; only cosign_key does. $3 = rollback: the digest may be a
+# release from before #266 or a hotfix, so a missing build record is not a
+# refusal there; it still gets its SBOM.
 attest() {
   rm -f "$work/att/"*
   if attested "$1" "$2" spdxjson; then
@@ -482,7 +484,7 @@ attest() {
   # only scripts/hotfix.sh, which records no run, ships without (#275).
   if [ -e "$work/att/provenance.json" ]; then
     attest_one "$1" "$2" slsaprovenance1 provenance.json
-  elif [ "${GITHUB_ACTIONS:-}" = true ]; then
+  elif [ "${GITHUB_ACTIONS:-}" = true ] && [ "${3:-}" != rollback ]; then
     die "$1@$2 records no ci.yml build run; refusing to publish it without provenance"
   fi
 }
@@ -510,7 +512,10 @@ mode_sign() {
       || die "$QUAY@$DIGEST carries an ambiguous sdlc signature"
     [ "$_sv" = "$VERSION" ] || die "$QUAY@$DIGEST is not signed by sdlc's key as $VERSION ('$_sv')"
     [ "$(label_version "$QUAY@$DIGEST")" = "$VERSION" ] || die "$QUAY@$DIGEST's version label is not $VERSION"
-    # Nothing is built or signed: only :<major> moves.
+    # Nothing is built or signed. As on a release, no tag names an unattested
+    # digest: one from before #266 is attested now, and verified, before
+    # :<major> moves to it.
+    attest "$QUAY" "$DIGEST" rollback
     retag "$QUAY" "$DIGEST" "$MAJOR"
     return
   fi

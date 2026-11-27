@@ -628,7 +628,25 @@ if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0")" = "$D1" ] && [ -z "$(tag_of "$A:lates
    && [ "$(n_log '^skopeo copy')" -eq 1 ] && [ "$(n_log ' sign --yes ')" -eq 0 ]; then
   ok "happy path: moves :0 and nothing else, signs nothing (not even down from a newer :0)"
 else bad "rollback happy: exit $RC"; dump; fi
-check "  and attests nothing" [ "$(n_log ' attest --yes ')" -eq 0 ]
+at_r=$(first " attest --yes .*--type spdxjson .*$A@$D1\$"); mv_r=$(first '^skopeo copy')
+if has_att "$A@$D1" spdxjson && [ -n "$at_r" ] && [ -n "$mv_r" ] && [ "$at_r" -lt "$mv_r" ]; then
+  ok "  and an unattested digest (from before #266) gets its SBOM before :0 moves"
+else bad "rollback attest: attest=$at_r move=$mv_r"; dump; fi
+rb_setup; mkdir -p "$W/att"; : > "$W/att/$(san "$A@$D1")__spdxjson"; rb
+if [ "$RC" -eq 0 ] && [ "$(n_log ' scan ')" -eq 0 ] && [ "$(n_log ' attest --yes ')" -eq 0 ] \
+   && [ "$(tag_of "$A:0")" = "$D1" ]; then
+  ok "rollback to an attested digest scans and attests nothing"
+else bad "rollback attested: exit $RC"; dump; fi
+rb_setup; : > "$W/att-fails"; rb
+if [ "$RC" -eq 1 ] && printf '%s' "$OUT" | grep -qF "attestation does not verify" \
+   && [ "$(tag_of "$A:0")" = "$D0" ]; then
+  ok "rollback to a digest whose attestation does not verify leaves :0 where it was"
+else bad "rollback att-fails: exit $RC"; dump; fi
+rb_setup; rb GITHUB_ACTIONS=true
+if [ "$RC" -eq 0 ] && has_att "$A@$D1" spdxjson && ! has_att "$A@$D1" slsaprovenance1 \
+   && [ "$(tag_of "$A:0")" = "$D1" ]; then
+  ok "in Actions, rollback to a digest with no build record (a hotfix) still goes, with its SBOM"
+else bad "rollback actions: exit $RC"; dump; fi
 if ! printf '%s' "$OUT" | grep -q "cosign said"; then
   ok "a digest that verifies logs no cosign diagnostic"
 else bad "a verified digest still logged a cosign diagnostic"; dump; fi

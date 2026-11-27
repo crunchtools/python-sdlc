@@ -33,7 +33,9 @@ All notable changes to this project are documented here, following
   without the key), writes provenance from its build labels with
   `scripts/provenance.py`, and attests and verifies both before any tag
   moves; sdlc-bootstrap gets the same build labels and attestations. Fleet
-  images were never affected: `sdlc image promote` attests them.
+  images were never affected: `sdlc image promote` attests them. syft runs
+  read-only with no registry login. A rollback attests its digest's SBOM, if
+  it lacks one, before `:<major>` moves to it.
 
 ### Removed
 
