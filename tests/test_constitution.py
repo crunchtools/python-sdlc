@@ -193,6 +193,20 @@ def changelog(*releases: str) -> str:
 
 
 REMOVED = "### Removed\n\n- `--old`; use `--new` instead.\n"
+# claude-supervisor's 2.0.0 Deprecated section verbatim (3a23c47), which R4 failed (#269).
+CLAUDE_SUPERVISOR_DEPRECATED = """### Deprecated
+- The 1.x names, kept through 2.x and dropped in 3.0.0. Each package provides
+  and obsoletes its `claude-agent` counterpart (deb: `Provides`, `Replaces`,
+  `Breaks`), so an upgrade replaces it. `claude-agent` is a symlink to
+  `claude-supervisor`. `CLAUDE_AGENT` and `CLAUDE_AGENT_*` are read where the
+  new names are unset; the CLI, the supervisor and the bridge warn once for
+  each, the hooks silently.
+- The tmux server and session (`tmux -L claude-agent`, session
+  `claude-agent`), the tmux owner option and the state and runtime
+  directories keep their `claude-agent` names through 2.x, so tools that
+  address the pane -- Josui Prime's `/clear` guard and login relay among
+  them -- keep working unchanged. They are renamed in 3.0.0.
+"""
 R4_FAILS = {
     "removal in a MINOR after 1.0": changelog(
         "## [1.3.0] - 2026-11-24\n\n" + REMOVED, "## [1.2.0] - 2026-11-01\n"
@@ -212,6 +226,17 @@ R4_FAILS = {
         "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old`; removed in 1.1.0.\n",
         "## [1.1.0] - 2026-11-01\n",
     ),
+    "wrapped deprecation with no end": changelog(
+        "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old` is deprecated\n"
+        "  and will go eventually.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
+    # The next bullet's end release must not bleed back into this one.
+    "endless bullet before a bullet that ends": changelog(
+        "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--a` is deprecated\n"
+        "  for now.\n- `--b`; removed in 2.0.0.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
 }
 R4_PASSES = {
     "no release yet": changelog(),
@@ -228,6 +253,15 @@ R4_PASSES = {
     "deprecation naming its end on a wrapped line": changelog(
         "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old` is deprecated.\n"
         "  It is removed\n  in 2.0.0.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
+    "claude-supervisor 2.0.0, renamed on its last wrapped line": changelog(
+        "## [2.0.0] - 2026-11-27\n\n" + CLAUDE_SUPERVISOR_DEPRECATED,
+        "## [1.2.0] - 2026-11-17\n",
+    ),
+    "a wrapped line opening with -- or ** is no bullet": changelog(
+        "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old` goes away\n"
+        "  -- in 2.0.0, that is.\n\n  **Why.** It was slow.\n",
         "## [1.1.0] - 2026-11-01\n",
     ),
     "an old unannounced removal is history": changelog(

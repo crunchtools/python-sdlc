@@ -299,7 +299,7 @@ def check_changelog(root: Path, report: Report) -> None:
 RELEASE_HEAD = re.compile(r"^##\s*\[?v?(\d+)\.(\d+)\.(\d+)\]?", re.MULTILINE)
 SUBHEAD = re.compile(r"^###\s*(\w+)", re.MULTILINE)
 ENDS_IN = re.compile(
-    r"\b(?:removed|dropped|ends?|ending|deleted|goes away|until)\b"
+    r"\b(?:removed|dropped|ends?|ending|deleted|renamed|retired|goes away|until)\b"
     r"[^.;]*?\bv?(\d+)\.(\d+)(?:\.(\d+))?",
     re.IGNORECASE,
 )
@@ -320,7 +320,8 @@ def _bullets(text: str) -> list[str]:
     open_bullet = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith(("-", "*")):
+        # A marker needs its space, so `-- aside` and `**bold**` lines are not bullets.
+        if stripped.startswith(("- ", "* ")):
             bullets.append(stripped)
             open_bullet = True
         elif stripped and open_bullet:

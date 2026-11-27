@@ -15,9 +15,11 @@ All notable changes to this project are documented here, following
   trentina#955's check thrashed at its ceiling for 38 minutes. Those four lanes
   now take turns; three still run side by side. A 32G laptop's four lanes get
   5.8G each instead of 8G.
-
 - Constitution R4 reads a Deprecated bullet's wrapped continuation lines, so an
-  end release named on a later line (or split across lines) no longer fails (a1877).
+  end release named on a later line no longer fails (#269). It also takes
+  "renamed in X" and "retired in X" as naming the end release, and no longer
+  reads a continuation line that opens with `--` or `**bold**` as a new bullet.
+  claude-supervisor's 2.0.0 CHANGELOG, which hit the first two, now passes.
 
 ### Removed
 
