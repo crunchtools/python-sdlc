@@ -188,14 +188,14 @@ def test_an_unexpected_exception_is_a_2() -> None:
 
 
 class FakeReply(io.BytesIO):
-    """What urlopen yields: a context manager with a status and a body."""
+    """What the opener's open yields: a context manager with a status and a body."""
 
     status = 200
 
 
-def http(url: str, urlopen: object) -> object:
-    """Tools().http(GET, url) with urlopen replaced; the Response or the CannotRun message."""
-    with mock.patch.object(core, "NO_REDIRECTS", mock.Mock(open=urlopen)):
+def http(url: str, opener_open: object) -> object:
+    """Tools().http(GET, url) with NO_REDIRECTS.open replaced; the Response or the CannotRun message."""
+    with mock.patch.object(core, "NO_REDIRECTS", mock.Mock(open=opener_open)):
         try:
             return core.Tools().http("GET", url, {"Accept": "x"})
         except core.CannotRunError as exc:
