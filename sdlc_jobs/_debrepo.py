@@ -9,10 +9,12 @@ guess. Nothing is extracted to disk and no member path is ever used as one.
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
 import importlib
 import io
+import lzma
 import re
 import tarfile
 from datetime import UTC, datetime
@@ -25,20 +27,19 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
-try:
-    importlib.import_module("compression.zstd")  # Python 3.14+: tarfile reads .zst through it
-
-    HAVE_ZSTD = True
-except ImportError:
-    HAVE_ZSTD = False
+zstd: Any = None
+with contextlib.suppress(ImportError):
+    zstd = importlib.import_module("compression.zstd")  # Python 3.14+
+HAVE_ZSTD = zstd is not None
 
 AR_MAGIC = b"!<arch>\n"
 AR_HEADER = 60
 MAX_CONTROL = 1 << 20  # bytes of control file; real ones are a few KiB
 MAX_TARBALL = 16 << 20  # bytes of control.tar.*: bounds what we read before decompressing
+MAX_UNPACKED = 16 << 20  # bytes of control.tar.* decompressed: tarfile reads a header whole
 MAX_MEMBERS = 1000  # tar members of control.tar.* walked; real ones hold a dozen
 CHUNK = 1 << 20  # bytes per read when hashing: a MiB keeps memory flat on a large .deb
-COMPRESSION: dict[str, str] = {"": "r:", ".gz": "r:gz", ".xz": "r:xz", ".zst": "r:zst"}
+SUFFIXES = ("", ".gz", ".xz", ".zst")  # control.tar compressions we read
 REQUIRED = ("package", "version", "architecture")  # what apt cannot index a .deb without
 COMPUTED = ("Filename", "Size", "MD5sum", "SHA1", "SHA256")
 FIELD = re.compile(r"([A-Za-z0-9][A-Za-z0-9._+-]*):[ \t]*(.*)")
@@ -113,11 +114,35 @@ def parse_stanza(text: str, where: str) -> dict[str, str]:
     return fields
 
 
-def read_control(deb: str, name: str, blob: bytes, mode: str) -> bytes:
+def unpack(deb: str, name: str, blob: bytes) -> bytes:
+    """The control tarball decompressed, at most MAX_UNPACKED bytes of it; more is a refusal."""
+    suffix = name.removeprefix("control.tar")
+    if suffix == "":
+        return blob
+    openers: dict[str, Any] = {
+        ".gz": lambda src: gzip.GzipFile(fileobj=src),
+        ".xz": lzma.LZMAFile,
+        ".zst": zstd.ZstdFile if zstd is not None else None,  # control_of checks HAVE_ZSTD
+    }
+    # zstd's ZstdError (3.14+) is no subclass of the others
+    errors = (OSError, EOFError, lzma.LZMAError, ValueError, MemoryError)
+    errors += (zstd.ZstdError,) if zstd is not None else ()
+    try:
+        with openers[suffix](io.BytesIO(blob)) as stream:
+            body = cast("bytes", stream.read(MAX_UNPACKED + 1))
+    except errors as exc:
+        cannot(f"{deb}: {name} is unreadable: {exc}")
+    if len(body) > MAX_UNPACKED:
+        cannot(f"{deb}: {name} unpacks to over {MAX_UNPACKED} bytes")
+    return body
+
+
+def read_control(deb: str, name: str, blob: bytes) -> bytes:
     """The bytes of the one regular `control` member; any unsafe member path is refused."""
     control: bytes | None = None
-    try:  # cast: typeshed's tarfile.open overloads do not list r:zst (3.14) yet
-        with tarfile.open(fileobj=io.BytesIO(blob), mode=cast("Any", mode)) as tar:
+    body = unpack(deb, name, blob)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r:") as tar:
             for count, member in enumerate(tar, 1):
                 if count > MAX_MEMBERS:
                     cannot(f"{deb}: {name} has over {MAX_MEMBERS} members")
@@ -134,7 +159,7 @@ def read_control(deb: str, name: str, blob: bytes, mode: str) -> bytes:
                     cannot(f"{deb}: control is {member.size} bytes, over 1 MiB")
                 fobj = tar.extractfile(member)
                 control = fobj.read(MAX_CONTROL) if fobj else b""
-    except (tarfile.TarError, OSError, EOFError, ValueError) as exc:
+    except (tarfile.TarError, OSError, EOFError, ValueError, MemoryError) as exc:
         cannot(f"{deb}: {name} is unreadable: {exc}")
     if control is None:
         cannot(f"{deb}: {name} has no control file")
@@ -153,10 +178,10 @@ def control_of(deb: Path) -> dict[str, str]:
     if len(tarballs) != 1:
         cannot(f"{deb.name} needs exactly one control.tar member, has {len(tarballs)}")
     name = tarballs[0]
-    mode = COMPRESSION.get(name.removeprefix("control.tar"))
-    if mode is None or (mode == "r:zst" and not HAVE_ZSTD):
+    suffix = name.removeprefix("control.tar")
+    if suffix not in SUFFIXES or (suffix == ".zst" and not HAVE_ZSTD):
         cannot(f"{deb.name}: {name} uses a compression this Python cannot read")
-    control = read_control(deb.name, name, members[name], mode)
+    control = read_control(deb.name, name, members[name])
     try:
         text = control.decode("utf-8")
     except UnicodeDecodeError:

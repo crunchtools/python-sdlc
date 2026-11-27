@@ -13,6 +13,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
+import lzma
 import shutil
 import signal
 import subprocess
@@ -161,6 +162,41 @@ def test_release() -> None:
             for n, line in zip(("Packages", "Packages.gz"), lines[i + 1 : i + 3], strict=True):
                 data = (d / n).read_bytes()
                 assert line == f" {hashlib.new(algo, data).hexdigest()} {len(data):>16} {n}"
+
+
+def raw_control_deb(path: Path, ext: str, body: bytes) -> Path:
+    """A deb whose control.tar<ext> is `body` verbatim."""
+    path.write_bytes(
+        b"!<arch>\n"
+        + ar_member("debian-binary", b"2.0\n")
+        + ar_member(f"control.tar{ext}", body)
+        + ar_member("data.tar.gz", b"x")
+    )
+    return path
+
+
+def test_unpacked_cap() -> None:
+    cap = _debrepo.MAX_UNPACKED
+    packers = {".gz": _debrepo.gzip_n, ".xz": lzma.compress}
+    for ext, pack in packers.items():
+        with tempfile.TemporaryDirectory() as t:
+            deb = raw_control_deb(Path(t) / "a.deb", ext, pack(bytes(cap + 1)))
+            assert "unpacks to over" in refusal(lambda d=deb: _debrepo.control_of(d)), ext
+
+
+def test_unpacked_cap_longname() -> None:
+    saved = _debrepo.MAX_UNPACKED
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:", format=tarfile.GNU_FORMAT) as tar:
+        info = tarfile.TarInfo("./" + "d/" * 2500 + "control")
+        tar.addfile(info)
+    _debrepo.MAX_UNPACKED = 4096
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            deb = raw_control_deb(Path(t) / "a.deb", ".xz", lzma.compress(buf.getvalue()))
+            assert "unpacks to over" in refusal(lambda: _debrepo.control_of(deb))
+    finally:
+        _debrepo.MAX_UNPACKED = saved
 
 
 def test_bad_magic() -> None:
