@@ -225,6 +225,11 @@ R4_PASSES = {
         "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old`; removed in 2.0.0.\n",
         "## [1.1.0] - 2026-11-01\n",
     ),
+    "deprecation naming its end on a wrapped line": changelog(
+        "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n- `--old` is deprecated.\n"
+        "  It is removed\n  in 2.0.0.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
     "an old unannounced removal is history": changelog(
         "## [1.3.0] - 2026-11-24\n\n### Added\n\n- x\n",
         "## [1.2.1] - 2026-11-01\n\n" + REMOVED,

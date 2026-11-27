@@ -315,7 +315,19 @@ def _subsections(body: str) -> dict[str, str]:
 
 
 def _bullets(text: str) -> list[str]:
-    return [line.strip() for line in text.splitlines() if line.lstrip().startswith(("-", "*"))]
+    """Each bullet, with its wrapped continuation lines joined on by single spaces."""
+    bullets: list[str] = []
+    open_bullet = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("-", "*")):
+            bullets.append(stripped)
+            open_bullet = True
+        elif stripped and open_bullet:
+            bullets[-1] += " " + stripped
+        else:
+            open_bullet = False
+    return bullets
 
 
 def _newest_two(text: str) -> tuple[tuple[int, ...] | None, tuple[int, ...] | None, str]:

@@ -16,6 +16,9 @@ All notable changes to this project are documented here, following
   now take turns; three still run side by side. A 32G laptop's four lanes get
   5.8G each instead of 8G.
 
+- Constitution R4 reads a Deprecated bullet's wrapped continuation lines, so an
+  end release named on a later line (or split across lines) no longer fails (a1877).
+
 ### Removed
 
 - `.github/workflows/container.yml` (a1790). `ci.yml`'s `test`, `image` and
