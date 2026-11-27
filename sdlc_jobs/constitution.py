@@ -320,7 +320,7 @@ def _bullets(text: str) -> list[str]:
     open_bullet = False
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith(("- ", "* ")):
+        if len(stripped) > 1 and stripped[0] in "-*" and stripped[1] in " \t":
             parts.append([stripped])
             open_bullet = True
         elif stripped and open_bullet:
