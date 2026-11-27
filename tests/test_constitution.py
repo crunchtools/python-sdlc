@@ -237,6 +237,10 @@ R4_FAILS = {
         "  for now.\n- `--b`; removed in 2.0.0.\n",
         "## [1.1.0] - 2026-11-01\n",
     ),
+    "endless bullet after a tab marker": changelog(
+        "## [1.2.0] - 2026-11-24\n\n### Deprecated\n\n-\t`--old` is deprecated.\n",
+        "## [1.1.0] - 2026-11-01\n",
+    ),
 }
 R4_PASSES = {
     "no release yet": changelog(),

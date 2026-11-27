@@ -316,19 +316,19 @@ def _subsections(body: str) -> dict[str, str]:
 
 def _bullets(text: str) -> list[str]:
     """Each bullet, with its wrapped continuation lines joined on by single spaces."""
-    bullets: list[str] = []
+    bullets: list[list[str]] = []
     open_bullet = False
     for line in text.splitlines():
         stripped = line.strip()
-        # A marker needs its space, so `-- aside` and `**bold**` lines are not bullets.
-        if stripped.startswith(("- ", "* ")):
-            bullets.append(stripped)
+        # A marker needs its space or tab, so `-- aside` and `**bold**` lines are not bullets.
+        if stripped.startswith(("- ", "* ", "-\t", "*\t")):
+            bullets.append([stripped])
             open_bullet = True
         elif stripped and open_bullet:
-            bullets[-1] += " " + stripped
+            bullets[-1].append(stripped)
         else:
             open_bullet = False
-    return bullets
+    return [" ".join(lines) for lines in bullets]
 
 
 def _newest_two(text: str) -> tuple[tuple[int, ...] | None, tuple[int, ...] | None, str]:
