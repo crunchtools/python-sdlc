@@ -194,7 +194,7 @@ class FakeReply(io.BytesIO):
 
 
 def http(url: str, opener_open: object) -> object:
-    """Tools().http(GET, url) with NO_REDIRECTS.open replaced; the Response or the CannotRun message."""
+    """Tools().http(GET, url) with the opener's open replaced; Response or CannotRun message."""
     with mock.patch.object(core, "NO_REDIRECTS", mock.Mock(open=opener_open)):
         try:
             return core.Tools().http("GET", url, {"Accept": "x"})
