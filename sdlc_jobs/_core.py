@@ -470,7 +470,7 @@ def build_arg_map(settings: dict) -> dict[str, str]:
 EXTRA_IMAGES: dict[str, tuple[str, ...]] = {
     "crunchtools/acquacotta": ("acquacotta-base",),
     "crunchtools/rotv": ("rotv-base", "rotv-dev", "images-rotv"),
-    "crunchtools/trentina": ("trentina-demo",),
+    "crunchtools/trentina": ("trentina-demo", "trentina-l2-model"),
 }
 # An extra image's entry: where it is built from, plus the image job's own settings.
 # `image` and `publish` are the root image's: an entry's name is its image.
