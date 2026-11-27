@@ -198,7 +198,9 @@ def changed(tools: Tools, env: Mapping[str, str], root: Path) -> bool:
     """`check`'s poll: does the site differ from what the products now release?
 
     An asset with no stored digest is compared by name: the site's index.json holds
-    the digest of the bytes it was served, and a file the site lacks is a change.
+    the digest of the bytes it was served, and a file the site lacks is a change. A
+    change to such an asset's bytes is invisible here, which only assets uploaded
+    before GitHub stored digests can have.
     """
     site = settings(root)
     want = wanted(pool(tools, env, site))
