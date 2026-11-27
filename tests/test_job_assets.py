@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,7 @@ class FakeTools(Tools):
         self.existing: list[dict] = []  # assets already on the Release
         self.status: dict[str, int] = {}  # an upload's answer, by asset name
         self.said: dict[str, str] = {}  # the digest GitHub claims, by asset name
+        self.stored: dict[str, str] = {}  # the name GitHub claims it stored, by asset name
         self.cids: dict[str, str] = {}
 
     def run(  # noqa: PLR0913
@@ -168,7 +170,8 @@ class FakeTools(Tools):
         code = self.status.get(name, 201)
         if code != assets.CREATED:
             return Response(code, b'{"message": "Validation Failed"}')
-        body = {"name": name, "digest": self.said.get(name, digest(data))}
+        stored = self.stored.get(name) or re.sub(r"[^A-Za-z0-9._-]", ".", name)  # as github.com
+        body = {"name": stored, "digest": self.said.get(name, digest(data))}
         return Response(201, json.dumps(body).encode())
 
     # what the job did
@@ -458,6 +461,36 @@ def test_odd_names_are_refused() -> None:
         t.out["*"] = {f"-rf {VERSION}.rpm": b"x"}
 
     assert "not a name" in refused(built=True, setup=setup)
+
+
+def test_names_github_rewrites_are_attached_as_served() -> None:
+    """`+` and `~` are stored as `.`: SHA256SUMS and the upload use that name."""
+    plus = f"ashigaru+desk-{VERSION}-1.fc43.noarch.rpm"
+    tilde = f"ashigaru-{VERSION}~rc1-1.fc43.noarch.rpm"
+    tools, env, tmp = make()
+    with tmp:
+        tools.out["*"] = {plus: b"desk", tilde: b"rc"}
+        assert assets.run("push", {}, env, tools) == 0
+        sent = tools.uploaded()
+        dotted = [plus.replace("+", "."), tilde.replace("~", ".")]
+        assert sorted(sent) == sorted([*dotted, "SHA256SUMS"]), list(sent)
+        sums = sent["SHA256SUMS"].decode()
+        assert all(f"  {n}\n" in sums for n in dotted) and "+" not in sums, sums
+
+
+def test_two_files_that_github_would_store_alike() -> None:
+    def setup(t: FakeTools) -> None:
+        t.out["*"] = {f"a+b-{VERSION}.rpm": b"1", f"a.b-{VERSION}.rpm": b"2"}
+
+    assert "are both" in refused(built=True, setup=setup)
+
+
+def test_a_name_github_stores_otherwise_is_refused() -> None:
+    tools, env, tmp = make()
+    with tmp:
+        tools.stored[RPM] = "renamed-" + RPM
+        msg = refusal(tools, env)
+        assert "SHA256SUMS would name a file it lacks" in msg, msg
 
 
 def test_two_entries_same_name_different_bytes() -> None:

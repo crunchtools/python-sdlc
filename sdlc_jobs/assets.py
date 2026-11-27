@@ -72,7 +72,8 @@ CHUNK = 1 << 20  # bytes per read when hashing: a MiB keeps memory flat on a lar
 MAX_ASSET = 2 * 1024**3  # GitHub refuses a release asset of 2 GiB or more
 MAX_ASSETS = 100  # one page of the Release's assets: more is a 2, never a guess
 STAGE = re.compile(r"[a-z0-9][a-z0-9._-]*")
-NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*")  # what GitHub keeps as given
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*")  # what a build may name a file
+RENAMED = re.compile(r"[^A-Za-z0-9._-]")  # what GitHub stores as "." (ashigaru+desk-*.rpm)
 SUMS = "SHA256SUMS"
 CREATED = 201
 OCTETS = "application/octet-stream"
@@ -187,7 +188,11 @@ def build(tools: Tools, env: Mapping[str, str], root: Path, e: Entry, out: Path)
 
 
 def collect(e: Entry, out: Path, version: str) -> dict[str, Path]:
-    """The files the entry asks for: regular, top-level, named for this version."""
+    """The files the entry asks for: regular, top-level, named for this version.
+
+    Keyed by the name GitHub serves: it stores `+` and `~` as `.`, so the file is
+    attached, matched on a re-run, and listed in SHA256SUMS under that name.
+    """
     found: dict[str, Path] = {}
     for p in sorted(out.iterdir()):
         if p.is_symlink() or not p.is_file():
@@ -204,7 +209,18 @@ def collect(e: Entry, out: Path, version: str) -> dict[str, Path]:
             cannot(f"{e.check}: {name} does not carry the release version {version}")
         if p.stat().st_size >= MAX_ASSET:
             cannot(f"{e.check}: {name} is 2 GiB or more, which GitHub refuses")
-    return found
+    return as_served(e, found)
+
+
+def as_served(e: Entry, found: Mapping[str, Path]) -> dict[str, Path]:
+    """`found` keyed by the names GitHub will serve; two files served alike are a 2."""
+    served: dict[str, Path] = {}
+    for name, p in found.items():
+        key = RENAMED.sub(".", name)
+        if key in served:
+            cannot(f"{e.check}: {name} and {served[key].name} are both {key} on GitHub")
+        served[key] = p
+    return served
 
 
 def sha256(path: Path) -> str:
@@ -289,6 +305,9 @@ def attach(
         said = got.get("digest") if isinstance(got, dict) else None
         if said and said != digest:
             cannot(f"GitHub stored {name} as {said}, not {digest}")
+        stored = got.get("name") if isinstance(got, dict) else None
+        if stored and stored != name:
+            cannot(f"GitHub stored {name} as {stored}: SHA256SUMS would name a file it lacks")
         print(f"assets: attached {name}", flush=True)
         sent += 1
     return sent
