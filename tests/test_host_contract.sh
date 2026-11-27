@@ -831,6 +831,9 @@ cgtree 0::/../a max max 4294967296
 avail 11987 "$RUN/meminfo" "a path outside the namespace is not walked"
 cgtree 0::/a/b max max max
 avail 0     "$RUN/no-such-meminfo" "nothing readable is 0, which changes nothing"
+cgtree 0::/ 4294967296 '' ''
+avail 3072  "$RUN/no-such-meminfo" "an unreadable MemTotal under a 4g ceiling is the ceiling, less a quarter"
+cgtree 0::/a/b max max max
 echo 'MemTotal:         786432 kB' > "$RUN/small-meminfo"
 avail 256   "$RUN/small-meminfo" "a 768m machine keeps 512m of it, not a quarter"
 
