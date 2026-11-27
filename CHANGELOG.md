@@ -24,6 +24,13 @@ All notable changes to this project are documented here, following
   record from `ci.yml`, and the README says sdlc's own releases are signed but
   not attested since 0.15.9 (#266).
 
+### Documentation
+
+- `docs/marketplace-free-ci.md` records spike #103's open items re-run on
+  crunchtools/ci-spike (a1792): review-comment re-triage, the `pypi`
+  environment's default-branch policy, a tag push starting no job, and an App
+  release end to end, each with its run.
+
 ### Security
 
 - The fleet `ci.yml` (and sdlc's own) give the `ai` job `CLAUDE_CODE_OAUTH_TOKEN`
