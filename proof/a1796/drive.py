@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import urllib.parse
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -64,13 +65,15 @@ class GitHub(Tools):
 
     def http(self, method: str, url: str, headers: Mapping[str, str], payload=None) -> Response:
         if url.startswith("https://uploads.github.com/"):
-            name = url.split("name=")[1]
+            # github.com decodes the query and stores `+` and `~` as `.` (ashigaru v6.0.2)
+            asked = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["name"][0]
+            name = re.sub(r"[^A-Za-z0-9._-]", ".", asked)
             digest = "sha256:" + hashlib.sha256(payload).hexdigest()
             self.uploads.append((name, digest))
             self.assets.append({"id": len(self.assets) + 1, "name": name, "digest": digest})
             if self.pool is not None:
                 (self.pool / name).write_bytes(payload)
-            return Response(201, json.dumps({"digest": digest}).encode())
+            return Response(201, json.dumps({"name": name, "digest": digest}).encode())
         path = url.removeprefix("https://api.github.com")
         if path.endswith("/releases/9/assets?per_page=100"):
             return Response(200, json.dumps(self.assets).encode())
