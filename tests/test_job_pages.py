@@ -409,6 +409,21 @@ def test_downloads_carry_no_token() -> None:
         assert api and all(h.get("Authorization") == "Bearer ghs_tokenvalue" for h in api)
 
 
+def test_package_tools_get_no_token() -> None:
+    """gpg, rpm, rpmkeys, rpmsign and createrepo_c parse downloaded bytes: no token."""
+    tools, env, _root, tmp = make()
+    with tmp:
+        env["SOMETHING_ELSE"] = "job-only"
+        run(tools, env)
+        names = {"gpg", "rpm", "rpmkeys", "rpmsign", "createrepo_c"}
+        ran = [(a[0], e) for a, e in zip(tools.argvs, tools.envs, strict=True) if a[0] in names]
+        # rpm -qp runs only against a live signed copy, which this site has none of
+        assert names - {"rpm"} <= {t for t, _e in ran}, ran
+        for tool, e in ran:
+            assert e is not None and "GNUPGHOME" in e, tool
+            assert not {"GITHUB_TOKEN", "SOMETHING_ELSE", pages.KEY_ENV} & set(e), (tool, e)
+
+
 def test_pool_leaves_out_what_it_should() -> None:
     tools, env, _root, tmp = make()
     with tmp:

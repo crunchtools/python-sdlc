@@ -64,7 +64,7 @@ from sdlc_jobs._core import (
     tool_sdlc,
     workspace,
 )
-from sdlc_jobs._tools import git_env
+from sdlc_jobs._tools import child_env, git_env
 
 EVENTS = ("push", "schedule", "workflow_dispatch")
 KEY_ENV = "SDLC_PAGES_GPG_KEY"
@@ -219,12 +219,16 @@ def fetch(tools: Tools, a: Asset, dest: Path) -> Path:
 
 
 class Signer:
-    """gpg and rpmsign with the one key, in a GNUPGHOME of their own."""
+    """gpg and rpmsign with the one key, in a GNUPGHOME of their own.
+
+    `env` is what every tool that touches a package runs with: the allowlisted
+    base and GNUPGHOME, never GITHUB_TOKEN, since they parse downloaded bytes.
+    """
 
     def __init__(self, tools: Tools, env: Mapping[str, str], home: Path, public: Path) -> None:
         self.tools = tools
         self.home = home
-        self.env = {k: v for k, v in env.items() if k != KEY_ENV} | {"GNUPGHOME": str(home)}
+        self.env = child_env(env, GNUPGHOME=str(home))
         self.public = public
         self.fpr = ""
 
@@ -293,13 +297,18 @@ def kept(tools: Tools, env: Mapping[str, str], rpmdb: Path, old: Path, new: Path
     return must(tools, [*q, str(old)], env=env) == must(tools, [*q, str(new)], env=env)
 
 
-def build_site(root: Path, site: Site, signer: Signer, work: Path) -> Path:
-    """The signed tree, from the pool and the site's current branch, in `work`/site."""
+def build_site(
+    root: Path, site: Site, signer: Signer, work: Path, api_env: Mapping[str, str]
+) -> Path:
+    """The signed tree, from the pool and the site's current branch, in `work`/site.
+
+    `api_env` carries the token for the release listing; the package tools get `signer.env`.
+    """
     tools, env = signer.tools, signer.env
     out, poold, live = work / "site", work / "pool", work / "live"
     for d in (out / "rpm", out / "deb", poold):
         d.mkdir(parents=True)
-    assets = pool(tools, env, site)
+    assets = pool(tools, api_env, site)
     files = [fetch(tools, a, poold) for a in assets]
     index = [{"file": p.name, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]
 
@@ -449,7 +458,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         del secret
         old = live_branch(tools, env, repo, work / "live")
         step("pages: fetch, check and sign the packages")
-        out = build_site(root, site, signer, work)
+        out = build_site(root, site, signer, work, env)
         shutil.rmtree(signer.home)  # the key is gone before anything is pushed
         if event_name == "schedule" and old and same_tree(work / "live", out):
             print("pages: the site already serves these packages; nothing to publish", flush=True)
