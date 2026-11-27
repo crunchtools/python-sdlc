@@ -427,11 +427,13 @@ sign_one() {
   say "signed $1@$2 as $4"
 }
 
-# Whether any of sdlc's keys verifies a $3 attestation on $1@$2.
+# Whether any of sdlc's keys verifies a $3 attestation on $1@$2. cosign's
+# words are kept in attest.err for a caller that must say why not.
 attested() {
+  : > "$work/attest.err"
   for _k in "$work/keys/"*.pub; do
     cosign verify-attestation --key "/keys/${_k##*/}" --insecure-ignore-tlog=true \
-      --type "$3" "$1@$2" > /dev/null 2>&1 && return 0
+      --type "$3" "$1@$2" > /dev/null 2>> "$work/attest.err" && return 0
   done
   return 1
 }
@@ -441,7 +443,10 @@ attest_one() {
   chmod 0644 "$work/att/$4"
   cosign_key attest --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false \
     --type "$3" --predicate "/att/$4" --key env://SDLC_KEY "$1@$2"
-  attested "$1" "$2" "$3" || die "the $3 attestation does not verify on $1@$2"
+  if ! attested "$1" "$2" "$3"; then
+    sed 's/^/self.sh:   /' "$work/attest.err" >&2
+    die "the $3 attestation does not verify on $1@$2"
+  fi
   say "attested the $3 of $1@$2"
 }
 # The SPDX SBOM and SLSA v1 provenance of $1@$2 under sdlc's key, each unless
@@ -469,7 +474,13 @@ attest() {
     --repo crunchtools/sdlc --out "$work/att/provenance.json" < "$work/inspect.json" \
     || die "provenance.py failed on $1@$2"
   # provenance.py warns and writes nothing for an image with no build record.
-  [ ! -e "$work/att/provenance.json" ] || attest_one "$1" "$2" slsaprovenance1 provenance.json
+  # In Actions, ci.yml's image job stamped one, so its absence is a refusal;
+  # only scripts/hotfix.sh, which records no run, ships without (#275).
+  if [ -e "$work/att/provenance.json" ]; then
+    attest_one "$1" "$2" slsaprovenance1 provenance.json
+  elif [ "${GITHUB_ACTIONS:-}" = true ]; then
+    die "$1@$2 records no ci.yml build run; refusing to publish it without provenance"
+  fi
 }
 
 mode_sign() {

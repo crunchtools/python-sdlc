@@ -95,7 +95,7 @@ case $1 in
                _f=$W/att/$(san "$_ref")__$_t
                if [ "$_c" = attest ]; then
                  [ -e "$W/att-fails" ] || { mkdir -p "$W/att"; : > "$_f"; }
-               else [ -e "$_f" ] || exit 1; fi ;;
+               else [ -e "$_f" ] || { echo "error: no matching attestations for $_ref" >&2; exit 1; }; fi ;;
          scan) printf '{"spdxVersion":"SPDX-2.3"}\n' ;;
          *) exit 99 ;;
        esac ;;
@@ -490,6 +490,15 @@ if [ "$RC" -eq 0 ] && [ "$(n_log ' attest --yes ')" -eq 0 ] && [ "$(n_log ' scan
 else bad "attest re-run: exit $RC"; dump; fi
 rel_setup; : > "$W/att-fails"; rel
 refused_late "an attestation that does not verify after attesting moves no tag" "attestation does not verify"
+if printf '%s' "$OUT" | grep -q '^self.sh:   '; then
+  ok "  and cosign's own words are logged under the refusal"
+else bad "no cosign diagnostic for a failed attestation"; dump; fi
+rel_setup; record "$A@$D1"; record "$B@$DB"; rel GITHUB_ACTIONS=true
+if [ "$RC" -eq 0 ] && has_att "$A@$D1" slsaprovenance1 && has_att "$B@$DB" slsaprovenance1; then
+  ok "in Actions: both images' build records give provenance"
+else bad "actions provenance: exit $RC"; dump; fi
+rel_setup; record "$A@$D1"; rel GITHUB_ACTIONS=true
+refused_late "in Actions: an image with no build record is refused before any tag moves" "refusing to publish it without provenance"
 
 rel_setup; carry "$D0" 0.12.0; rel
 if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0")" = "$D1" ] && [ "$(tag_of "$A:latest")" = "$D1" ]; then

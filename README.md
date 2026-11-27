@@ -95,7 +95,7 @@ attests an SPDX SBOM and SLSA v1 provenance to the digest with the fleet key;
 `slsaprovenance1`) reads them. sdlc's own release job attests the same two to
 its images with sdlc's key (#266); 0.15.9 through the last release before that
 fix are signed but not attested, and a release cut by `scripts/hotfix.sh`
-records no Actions run, so it carries the SBOM and no provenance.
+records no Actions run, so it carries the SBOM and no provenance (#275).
 
 `.pre-commit-config.yaml` is
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
