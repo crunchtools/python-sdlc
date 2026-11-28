@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-28
+
 ### Fixed
 
 - `promote.local_provenance` no longer claims the GitHub Actions workflow
