@@ -6,6 +6,15 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- The fleet `ci.yml`'s `pages` job names its environment through an
+  expression (`pages-signing` when the plan has pages, else none). With the
+  bare name, GitHub refused the whole workflow file in every repo without a
+  `pages-signing` environment, so 0.19.0's re-copy started no `pull_request`
+  run and its required `sdlc / check` never reported. Without the environment
+  the job has no key. Re-copy `examples/ci.yml`.
+
 ## [0.19.0] - 2026-11-28
 
 ### Added
