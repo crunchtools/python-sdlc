@@ -287,123 +287,21 @@ Break-glass is that same rollback; there is no other mode and no deny.
 Laptops keep `.sdlc/bin/sdlc`, which does the same resolve-and-verify against
 the same key.
 
-## sdlc's own workflow: 98 lines, the stated exception
+## sdlc's own workflow: the stated exception
 
 crunchtools/sdlc builds the image that `sdlc-bootstrap` runs, so the jobs that
 build and sign it cannot run from `sdlc-bootstrap`. It is the one repo whose
 `ci.yml` differs from the fleet file:
 
-```yaml
-# crunchtools/sdlc's own ci.yml: the trust root, and the one exception to
-# "every repo, byte for byte". A pull request's sdlc code runs only in `test`,
-# which holds no write permission, no secret and no socket of ours. Everything
-# that holds a token, a socket or a key runs reviewed default-branch code or a
-# released sdlc. ai, write and gate are the fleet's jobs, unchanged. sign never
-# executes a release image: cosign runs from the digest-pinned image below, and
-# the release is data. Inputs reach scripts only through env:.
-name: CI
-on:
-  push:
-  pull_request:
-  pull_request_target: { types: [opened, synchronize, reopened] }  # zizmor: ignore[dangerous-triggers]
-  pull_request_review_comment: { types: [created, edited, deleted] }
-  issues: { types: [opened, labeled, reopened] }
-  schedule: [{ cron: "17 6 * * 1" }]  # weekly: rebuild what :<major> carries, audit, keepalive
-  workflow_dispatch:
-    inputs:
-      version: { type: string, default: "" }  # alone: open the release PR; with digest: roll :<major> back to it
-      digest: { type: string, default: "" }
-permissions: {}
-env: { COSIGN_IMAGE: "registry.access.redhat.com/hi/cosign@sha256:a64a815e27be23817d46425c97cb93db9e70b8bb2d4170e7d6b015d82b1576b8" }  # v3.1.6
-jobs:
-  test:  # the PR's own sdlc code, and nothing to steal: read-only contents, no secret, GitHub's machine
-    name: sdlc / check (${{ github.event_name }})  # required as "(pull_request)"
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions: { contents: read }
-    env: { MODE: test }
-    steps:  # sdlc is public: the fetch needs no token and persists none; origin names the repo for the validator's exemptions
-      - &fetch { run: 'git init -q . && git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" && git fetch -q --depth=1 origin "$GITHUB_SHA" && git checkout -q FETCH_HEAD' }
-      - run: scripts/self.sh  # podman build, then `sdlc ci` and the contract test from the built digest
-  check:  # default-branch code only: builds it, runs `sdlc ci` from it, plans, uploads SARIF, keeps the schedule alive
-    name: sdlc / plan (${{ github.event_name }})  # never the required name: test reports that
-    if: >-
-      github.event_name == 'schedule'
-      || contains(fromJSON('["push","workflow_dispatch"]'), github.event_name) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL || 'ubuntu-latest' }}
-    permissions: { contents: read, security-events: write, actions: write }
-    outputs: { result: "${{ steps.s.outputs.result }}" }
-    env: { GITHUB_TOKEN: "${{ github.token }}", MODE: check }
-    steps: [*fetch, { id: s, run: scripts/self.sh }]
-  ai:  # model keys and a read token, never an App key; hands its result on in four chunks of at most 112,500 bytes
-    if: github.event_name == 'issues' || github.event_name == 'pull_request_target'
-    runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
-    container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:abf7da909c14ae7b32d0a325fce912ec1a955d7bf4032365015b0ec46d9b3296", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
-    permissions: { contents: read, issues: read, pull-requests: read }
-    outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
-    # OpenRouter reaches every PR and no issue, a fork's PR too: Gatehouse is a fork PR's required review.
-    # The job's one step is the digest-pinned bootstrap, which runs no PR code and passes the key only to
-    # the gatehouse CLI, never to a model. An outsider's issue gets neither key.
-    env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ (github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association) || github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository) && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}", OPENROUTER_API_KEY: "${{ github.event_name == 'pull_request_target' && secrets.OPENROUTER_API_KEY || '' }}" }
-    steps: &event [{ id: e, run: sdlc event }]
-  write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
-    needs: [check, ai]
-    if: >-
-      always() && !cancelled() && !inputs.digest
-      && (github.event_name == 'pull_request_target' || github.event_name == 'issues'
-          || needs.check.result == 'success' && (github.event_name == 'workflow_dispatch' || fromJSON(needs.check.outputs.result || '{}').write))
-    concurrency: { group: "write-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}", queue: max }
-    runs-on: *secret
-    permissions: {}
-    outputs: { release: "${{ steps.e.outputs.release }}" }
-    env: { ASHIGARU_CLIENT_ID: "${{ vars.ASHIGARU_CLIENT_ID }}", ASHIGARU_APP_KEY: "${{ secrets.ASHIGARU_APP_KEY }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}", SDLC_CHECK: "${{ needs.check.outputs.result }}",
-           SDLC_AI: "${{ needs.ai.result }}", SDLC_AI_0: "${{ needs.ai.outputs.p0 }}", SDLC_AI_1: "${{ needs.ai.outputs.p1 }}", SDLC_AI_2: "${{ needs.ai.outputs.p2 }}", SDLC_AI_3: "${{ needs.ai.outputs.p3 }}" }
-    steps: *event
-  gate:  # required: guard, review done on this head, every finding answered; no secret. A collaborator's reply re-runs it where it counts
-    name: sdlc / gate (${{ github.event_name }})  # required as "(pull_request_target)"
-    needs: [ai, write]
-    if: >-
-      always() && (github.event_name == 'pull_request_target'
-      || github.event_name == 'pull_request_review_comment' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
-    concurrency: { group: "gate-${{ github.event.pull_request.number }}-${{ github.event_name }}" }
-    runs-on: ${{ vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}  # no repo code runs here, a fork's PR included
-    permissions: { contents: read, pull-requests: write, actions: write }
-    env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_AI: "${{ needs.ai.result }}", SDLC_WRITE: "${{ needs.write.result }}" }
-    steps: *event
-  image:  # a release build only: a verified release merge, or the version :<major> carries, weekly
-    needs: [check, write]
-    if: always() && !cancelled() && needs.check.result == 'success' && (fromJSON(needs.check.outputs.result || '{}').release || github.event_name == 'schedule')
-    runs-on: ubuntu-latest
-    permissions: { contents: read }
-    outputs: { result: "${{ steps.s.outputs.result }}" }
-    env: { GITHUB_TOKEN: "${{ github.token }}", MODE: "${{ github.event_name == 'schedule' && 'weekly' || 'release' }}", SDLC_WRITE: "${{ needs.write.result }}",
-           SDLC_RELEASE: "${{ needs.write.outputs.release }}", SDLC_QUAY_USERNAME: "${{ secrets.SDLC_QUAY_USERNAME }}", SDLC_QUAY_PASSWORD: "${{ secrets.SDLC_QUAY_PASSWORD }}" }
-    steps: [*fetch, { id: s, run: scripts/self.sh }]
-  approve:  # no secret; sdlc-approval's reviewers (Josui Prime, Scott; prevent_self_review) are the approval
-    if: github.event_name == 'workflow_dispatch' && inputs.digest != '' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
-    environment: sdlc-approval
-    permissions: {}
-    steps: [{ run: "true" }]
-  sign:  # the only job with the sdlc key: cosign and validation on the host; release images are data
-    needs: [image, approve]
-    if: always() && !cancelled() && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (needs.image.result == 'success' || needs.approve.result == 'success')
-    concurrency: { group: sdlc-sign, queue: max }
-    runs-on: ubuntu-latest
-    environment: sdlc-signing
-    permissions: { contents: read }
-    env: { MODE: "${{ github.event_name == 'workflow_dispatch' && 'rollback' || github.event_name == 'schedule' && 'weekly' || 'release' }}", EVENT: "${{ github.event_name }}",
-           BUILT: "${{ needs.image.outputs.result }}", APPROVED: "${{ needs.approve.result }}", VERSION: "${{ inputs.version }}", DIGEST: "${{ inputs.digest }}",
-           SDLC_KEY: "${{ secrets.SDLC_COSIGN_KEY }}", SDLC_KEY_PASSWORD: "${{ secrets.SDLC_COSIGN_PASSWORD }}",
-           SDLC_QUAY_USERNAME: "${{ secrets.SDLC_QUAY_USERNAME }}", SDLC_QUAY_PASSWORD: "${{ secrets.SDLC_QUAY_PASSWORD }}" }
-    steps: [*fetch, { run: scripts/self.sh }]
-```
-
-**It is longer than the 54-line draft because it is now converted like every
-other repo.** It has the fleet's `ai`, `write` and `gate`, byte for byte,
-running from `sdlc-bootstrap`. So sdlc gets Gatehouse review, Ashigaru and the
-required `sdlc / gate (pull_request_target)`. Only `test`, `check`, `image`,
-`approve` and `sign` are its own.
+The file is [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), and
+that is the one copy: this page does not mirror it, and nothing in
+`examples/` does either. Its header comment says what each job is.
+`tests/test_workflows.py` holds it to the fleet file: `ai` and `gate` are the
+fleet's byte for byte, running from `sdlc-bootstrap`, and `write` is the
+fleet's but for its `needs`, `if:` and `env:`, which wait on `image`. So sdlc
+gets Gatehouse review, Ashigaru and the required
+`sdlc / gate (pull_request_target)`. Only `test`, `check`, `image`, `approve`
+and `sign` are its own.
 
 **The fleet invariant, applied to sdlc's own pull requests: code a PR wrote
 never runs where a token with write, a secret or a socket of ours is.** In the
