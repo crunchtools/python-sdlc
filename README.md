@@ -277,7 +277,9 @@ root-keys = "install/root-authorized-keys"    # optional: root's SSH keys
 ```
 
 After the gated push, `image` runs a digest-pinned bootc-image-builder against
-`gated-<sha>@sha256:…` and pushes the zstd-compressed raw disk to the image's
+`gated-<sha>@sha256:…`. osbuild runs that image's own code as its buildroot, so the
+builder gets no network, no environment and no secret. Its only image store is a
+private one holding that digest, never the engine's. The job then pushes the zstd-compressed raw disk to the image's
 own repo as an OCI artifact tagged `disk-gated-<sha>`. `promote` signs it with
 the fleet key and attests the image's SPDX SBOM and a SLSA v1 provenance, whose
 dependencies are the commit, the image digest and the builder digest. It gets

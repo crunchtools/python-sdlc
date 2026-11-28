@@ -8,10 +8,19 @@
     root-keys = "install/root-authorized-keys"    # optional: root's SSH keys
 
 The `image` job holds the registry secrets and the socket, and bootc-image-builder
-(BIB) runs privileged through that socket. So the repo supplies data and nothing
-else: no argv, no podman option, no BIB config of its own. BIB is digest-pinned
-here, its flags are this module's, and the keys file is read by sdlc and written
-into BIB's config as validated `<type> <base64>` lines, comments dropped.
+(BIB) runs privileged through that socket. The repo's config is data: no argv, no
+podman option, no BIB config of its own. BIB is digest-pinned here, its flags are
+this module's, and the keys file is read by sdlc and written into BIB's config as
+validated `<type> <base64>` lines; any other line is refused.
+
+The repo's code does run there, though: osbuild uses the gated image itself as its
+buildroot, privileged. So BIB is given nothing worth stealing. It runs with
+--network=none and no environment, and it never sees the socket, the auth file or
+the engine's own storage, which holds the job container's config and so its
+secrets. Its image store is a private one under the work directory, seeded by a
+helper in sdlc's own image with only the gated digest. Its mounts are that work
+directory (its output, temp, store and image store) and one read-only file, the
+BIB config sdlc wrote in RUNNER_TEMP.
 
 The build needs real root, osbuild's user namespaces and more disk than the root
 filesystem of GitHub's runner has free. It runs only on a GitHub-hosted runner, a
@@ -89,11 +98,21 @@ MARGIN = 4 * GIB
 PREPARE = r"""set -eu
 f=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
 if [ -e "$f" ]; then echo 0 > "$f"; fi
-mkdir -p "$W/output" "$W/var-tmp" "$W/store"
+mkdir -p "$W/output" "$W/var-tmp" "$W/store" "$W/graph" "$W/graph-run"
 chmod 0700 "$W"
 echo "uid_map: $(tr -s ' \t' ' ' < /proc/self/uid_map | sed 's/^ //; s/ $//' | paste -sd';')"
 echo "root: $(df -B1 --output=avail /host | tail -n1 | tr -d ' ')"
 echo "mnt: $(df -B1 --output=avail /mnt | tail -n1 | tr -d ' ')"
+"""
+# BIB's only image store: the gated digest alone, copied by sdlc's skopeo, which
+# holds the auth file BIB never sees. Privileged, for the overlay driver's mounts.
+SEED = r"""set -eu
+for try in 1 2 3; do
+  skopeo copy --authfile /auth.json --preserve-digests "docker://$SRC" \
+    "containers-storage:[overlay@$W/graph+$W/graph-run]$SRC" && break
+  [ "$try" = 3 ] && exit 1
+  sleep 20
+done
 """
 # The raw is sparse; zstd reads its holes as zeros and the copy is ~1/6 of it.
 PACK = r"""set -eu
@@ -155,8 +174,9 @@ def disk_settings(
 def root_keys(text: str, where: str) -> tuple[str, ...]:
     """Each `<type> <base64>` of an authorized_keys file; anything else but a comment is a 2.
 
-    Options and comments are dropped: what reaches BIB's config is only what this
-    module matched, so no line of the file can add TOML of its own."""
+    Comments and blank lines are skipped; a line with options, or anything else, is
+    refused. What reaches BIB's config is only what this module matched, so no line of
+    the file can add TOML of its own."""
     keys = []
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
@@ -193,9 +213,10 @@ def runner_ok(env: Mapping[str, str]) -> None:
 def need(image_size: int) -> int:
     """Bytes /mnt must have free: the raw (fully allocated, BIB's root is twice the
     image and at least 10 GiB, plus /boot and the ESP), BIB's store (about twice the
-    image), the zstd copy (at most the image) and a margin."""
+    image), the seeded image store and the zstd copy (each at most the image) and a
+    margin."""
     raw = max(MIN_RAW, 2 * image_size) + GIB
-    return raw + 2 * image_size + image_size + MARGIN
+    return raw + 2 * image_size + 2 * image_size + MARGIN
 
 
 def room(report: str, image_size: int) -> None:
@@ -294,6 +315,9 @@ def check_manifest(raw: str, ref: str, image_digest: str, sha: str) -> dict[str,
     for key, value in want.items():
         if notes.get(key) != value:
             cannot(f"the disk records {key}={notes.get(key)!r}, not {value!r}")
+    # Any pinned BIB, not only this module's: image and promote each bootstrap
+    # sdlc:<major> on their own, so an sdlc release between the two jobs of one run
+    # can give them different pins. The provenance records the one that built it.
     if not BIB_PINNED.fullmatch(str(notes.get(BUILDER, ""))):
         cannot(f"the disk names builder {notes.get(BUILDER)!r}, not a digest-pinned BIB")
     if notes.get(DISK_TYPE) not in TYPES or notes.get(DISK_ROOTFS) not in ROOTFS:

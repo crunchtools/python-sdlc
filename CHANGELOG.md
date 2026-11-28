@@ -13,7 +13,9 @@ All notable changes to this project are documented here, following
   the image's repo as an OCI artifact (`disk-gated-<sha>`). `promote` signs it
   with the fleet key and attests the image's SBOM and a SLSA v1 provenance,
   then tags it `disk-X.Y.Z` and `disk-latest` along with the image (#273,
-  a1887). The table only declares `type`, `rootfs` and a `root-keys` file. The
+  a1887). The builder runs with no network, no environment and a private image
+  store seeded with that digest alone, because osbuild runs the image's own code as
+  its buildroot. The table only declares `type`, `rootfs` and a `root-keys` file. The
   build runs only on GitHub-hosted runners, where it uses `/mnt`. Anywhere else
   it exits 2, and it also exits 2 when `/mnt` has too little room or the
   uid_map is not the full range. No `ci.yml` change.

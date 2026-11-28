@@ -248,7 +248,7 @@ class FakeTools(Tools):
 
     def podman_run(self, sub: list[str]) -> subprocess.CompletedProcess[str]:
         """A gate's `run`, or the boot gate's server and its mcp-http client."""
-        if sub[-1] in (_disk.PREPARE, _disk.PACK, _disk.PUSH, _disk.WIPE):  # a disk helper
+        if sub[-1] in (_disk.PREPARE, _disk.SEED, _disk.PACK, _disk.PUSH, _disk.WIPE):
             return self.disk_helper(sub)
         if _disk.BIB in sub:
             name = next(w for w in sub if w.endswith(":/config.toml:ro")).split(":")[0]
@@ -275,8 +275,8 @@ class FakeTools(Tools):
         return cp(0)
 
     def disk_runs(self) -> list[list[str]]:
-        """The disk's argvs, in order: pull, PREPARE, BIB, PACK, PUSH and WIPE."""
-        scripts = (_disk.PREPARE, _disk.PACK, _disk.PUSH, _disk.WIPE)
+        """The disk's argvs, in order: pull, PREPARE, SEED, BIB, PACK, PUSH and WIPE."""
+        scripts = (_disk.PREPARE, _disk.SEED, _disk.PACK, _disk.PUSH, _disk.WIPE)
         return [
             a
             for a in self.argvs
@@ -1864,8 +1864,8 @@ def test_a_declared_disk_builds_from_the_digest_and_pushes_the_artifact() -> Non
     assert rc == 0 and result is not None, t.log
     pinned = f"{OWN}@{PUSHED}"
     runs = t.disk_runs()
-    assert [a[4] for a in runs] == ["pull", "run", "run", "run", "run", "run"], runs
-    pull, prepare, bib, pack, push, wipe = runs
+    assert [a[4] for a in runs] == ["pull", "run", "run", "run", "run", "run", "run"], runs
+    pull, prepare, seed, bib, pack, push, wipe = runs
     assert pull[4:] == ["pull", "--authfile", pull[6], pinned] and pull[6].endswith("auth.json")
     assert t.argvs.index(pull) > t.argvs.index(next(a for a in t.argvs if a[4:5] == ["push"]))
     assert any(a[4:] == ["image", "inspect", "--format", "{{.Size}}", pinned] for a in t.argvs)
@@ -1876,17 +1876,22 @@ def test_a_declared_disk_builds_from_the_digest_and_pushes_the_artifact() -> Non
     assert prepare[prepare.index("--entrypoint") + 1 :][:2] == ["sh", "imgid"]
     work = "/mnt/sdlc-disk-sdlc-cache-7-1-demo"
     assert envs_of(prepare) == {"W": work}
-    # BIB: pinned digest, the four work mounts and the graph root, the image by digest
-    assert bib.count(_disk.BIB) == 1 and "--privileged" in bib
+    # The report PREPARE prints is the job's own log: fence (c)'s df and uid_map lines.
+    assert t.report in t.log, t.log
+    # SEED: the digest alone into BIB's private store, with the auth BIB never gets
+    assert envs_of(seed) == {"W": work, "SRC": pinned} and seed[-1] == _disk.SEED
+    assert f"{HOST}/auth.json:/auth.json:ro" in seed and f"{work}:{work}" in seed
+    # BIB: pinned digest, no network, the work mounts and the config, the image by digest
+    assert bib.count(_disk.BIB) == 1 and "--privileged" in bib and "--network=none" in bib
     assert "apparmor=unconfined" not in bib
-    for mount in (
+    mounts = [bib[i + 1] for i, w in enumerate(bib) if w == "-v"]
+    assert mounts == [
         f"{HOST}/disk-demo.toml:/config.toml:ro",
         f"{work}/output:/output",
         f"{work}/var-tmp:/var/tmp",
         f"{work}/store:/store",
-        "/graph:/var/lib/containers/storage",
-    ):
-        assert mount in bib, mount
+        f"{work}/graph:/var/lib/containers/storage",
+    ], mounts
     assert bib[bib.index(_disk.BIB) :] == [
         _disk.BIB,
         "build",
@@ -1917,6 +1922,20 @@ def test_a_declared_disk_builds_from_the_digest_and_pushes_the_artifact() -> Non
         "tag": f"disk-gated-{SHA}",
     }
     assert result["digest"] == PUSHED and result["tag"] == f"gated-{SHA}"
+
+
+def test_bib_gets_no_environment_no_secret_and_no_engine_storage() -> None:
+    """BIB runs the gated image's own code as osbuild's buildroot: it is handed nothing."""
+    t = FakeTools()
+    assert disk_go(t)[0] == 0, t.log
+    bib = next(a for a in t.argvs if _disk.BIB in a)
+    head = bib[bib.index("run") + 1 : bib.index(_disk.BIB)]  # past the remote's own --url
+    for word in head:
+        opt = word.partition("=")[0]
+        assert opt not in ("-e", "--env", "--env-file", "--env-host", "--volumes-from"), word
+        assert "auth.json" not in word and ".sock" not in word, word
+        assert not word.startswith("/graph:") and "QUAY" not in word and "RHSM" not in word, word
+    assert not any(a[4:6] == ["info", "--format"] and "GraphRoot" in a[-1] for a in t.argvs)
 
 
 def test_an_apparmor_engine_runs_bib_unconfined() -> None:

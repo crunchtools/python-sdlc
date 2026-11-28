@@ -1071,6 +1071,7 @@ def build_disk(job: Job, img: Image, digest: str, parent: Parent | None) -> str:
     try:
         size = pull_size(job, img, digest)
         prepare_disk(job, work, size)
+        seed_store(job, img, digest, work)
         disk_build(job, img, digest, disk, work)
         blob, packed = pack_disk(job, work)
         notes = disk_mod.notes_for(labels(job, parent), img.ref, digest, disk)
@@ -1106,19 +1107,27 @@ def prepare_disk(job: Job, work: str, size: int) -> None:
     disk_mod.room(report, size)
 
 
+def seed_store(job: Job, img: Image, digest: str, work: str) -> None:
+    """Copy the gated digest alone into BIB's private image store under `work`."""
+    host_auth = host_of(job.tools, job.env, job.auth)
+    args = ["--privileged", "--security-opt", "label=disable", "-v", f"{work}:{work}"]
+    args += ["-v", f"{host_auth}:/auth.json:ro"]
+    job.must(helper(job, args, disk_mod.SEED, {"W": work, "SRC": f"{img.ref}@{digest}"}))
+
+
 def disk_build(job: Job, img: Image, digest: str, disk: Disk, work: str) -> None:
-    """Run the pinned bootc-image-builder on the digest, privileged, through the socket."""
+    """Run the pinned bootc-image-builder on the digest, privileged, through the socket,
+    with no network, no environment and no store but the one seed_store filled."""
     config = job.scratch / f"disk-{img.name}.toml"
     config.write_text(disk_mod.config_toml(disk))
     host_config = host_of(job.tools, job.env, config)
-    graph = job.must([*job.podman, "info", "--format", "{{.Store.GraphRoot}}"]).strip()
-    argv = [*job.podman, "run", "--rm", "--privileged", "--pull=missing"]
+    argv = [*job.podman, "run", "--rm", "--privileged", "--pull=missing", "--network=none"]
     argv += ["--security-opt", "label=type:unconfined_t"]
     if not job.nnp:  # an AppArmor engine: osbuild's sandbox needs the profile off
         argv += ["--security-opt", "apparmor=unconfined"]
     argv += ["-v", f"{host_config}:/config.toml:ro", "-v", f"{work}/output:/output"]
     argv += ["-v", f"{work}/var-tmp:/var/tmp", "-v", f"{work}/store:/store"]
-    argv += ["-v", f"{graph}:/var/lib/containers/storage", disk_mod.BIB]
+    argv += ["-v", f"{work}/graph:/var/lib/containers/storage", disk_mod.BIB]
     argv += ["build", "--type", disk.type, "--rootfs", disk.rootfs, f"{img.ref}@{digest}"]
     proc = job.run(argv, stream=True)
     show(proc)

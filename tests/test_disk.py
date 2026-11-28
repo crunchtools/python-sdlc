@@ -58,7 +58,7 @@ def good(disk: Disk | None = None) -> str:
 def test_need_grows_with_the_image_and_is_at_least_a_ten_gib_raw() -> None:
     small, big = _disk.need(GIB), _disk.need(20 * GIB)
     assert small >= 10 * GIB + 3 * GIB + _disk.MARGIN
-    assert big > small and big == (40 + 1 + 2 * 20 + 20) * GIB + _disk.MARGIN
+    assert big > small and big == (40 + 1 + 2 * 20 + 2 * 20) * GIB + _disk.MARGIN
 
 
 def test_room_takes_the_whole_uid_range_and_enough_free_space() -> None:
@@ -211,6 +211,30 @@ def test_check_manifest_refuses_a_manifest_of_another_shape() -> None:
         assert "disk" in refused(_disk.check_manifest, json.dumps(broken), REF, DIGEST, SHA)
     assert "not JSON" in refused(_disk.check_manifest, "not json", REF, DIGEST, SHA)
     assert "not an object" in refused(_disk.check_manifest, "[]", REF, DIGEST, SHA)
+
+
+def test_the_helper_scripts_do_what_the_job_relies_on() -> None:
+    """The fake answers each script's output, so its text is held here."""
+    prepare = _disk.PREPARE
+    assert "apparmor_restrict_unprivileged_userns" in prepare
+    assert 'echo "uid_map: ' in prepare and "/proc/self/uid_map" in prepare
+    assert 'echo "root: $(df -B1 --output=avail /host' in prepare
+    assert 'echo "mnt: $(df -B1 --output=avail /mnt' in prepare
+    for sub in ("output", "var-tmp", "store", "graph", "graph-run"):
+        assert f'"$W/{sub}"' in prepare, sub
+    seed = _disk.SEED
+    assert "skopeo copy --authfile /auth.json --preserve-digests" in seed
+    assert '"containers-storage:[overlay@$W/graph+$W/graph-run]$SRC"' in seed
+    pack = _disk.PACK
+    assert "zstd -q -T0 -3 --rm -f output/image/disk.raw -o disk.raw.zst" in pack
+    assert "sha256sum disk.raw.zst" in pack and "stat -c %s disk.raw.zst" in pack
+    push = _disk.PUSH
+    assert 'mv disk.raw.zst "layout/blobs/sha256/$BLOB"' in push
+    assert '"$MANIFEST" > "layout/blobs/sha256/$MANIFEST_HEX"' in push
+    assert '"$INDEX" > layout/index.json' in push
+    assert "--preserve-digests --digestfile pushed.digest" in push
+    assert 'oci:layout:disk "docker://$DEST"' in push and "cat pushed.digest" in push
+    assert _disk.WIPE.strip() == 'rm -rf "$W"'
 
 
 def test_bib_is_pinned_by_digest() -> None:
