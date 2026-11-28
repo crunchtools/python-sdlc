@@ -6,6 +6,8 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-28
+
 ### Added
 
 - `EXTRA_IMAGES` gives crunchtools/trentina `trentina-l2-model`, the L2 model
