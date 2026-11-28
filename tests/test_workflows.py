@@ -420,7 +420,9 @@ pages_if = str(pages_job["if"])
 # An expression, not the bare name: GitHub refuses the whole file in a repo
 # that has no pages-signing environment. It names pages-signing or nothing,
 # and with nothing the key is not there at all.
-PAGES_ENVIRONMENT = "${{ fromJSON(needs.check.outputs.result || '{}').pages && 'pages-signing' || '' }}"
+PAGES_ENVIRONMENT = (
+    "${{ fromJSON(needs.check.outputs.result || '{}').pages && 'pages-signing' || '' }}"
+)
 check(
     "fleet: pages' key is in the pages-signing environment",
     pages_job.get("environment") == PAGES_ENVIRONMENT,
