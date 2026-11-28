@@ -417,9 +417,14 @@ check("fleet: assets shares the secret jobs' runner", assets.get("runs-on") == G
 # pages: the one GPG key, in pages-signing alone, on the default branch or the schedule.
 pages_job = fleet["pages"]
 pages_if = str(pages_job["if"])
+# An expression, not the bare name: GitHub refuses the whole file in a repo
+# that has no pages-signing environment. It names pages-signing or nothing,
+# and with nothing the key is not there at all.
+PAGES_ENVIRONMENT = "${{ fromJSON(needs.check.outputs.result || '{}').pages && 'pages-signing' || '' }}"
 check(
     "fleet: pages' key is in the pages-signing environment",
-    pages_job.get("environment") == "pages-signing",
+    pages_job.get("environment") == PAGES_ENVIRONMENT,
+    str(pages_job.get("environment")),
 )
 check(
     "fleet: pages may write contents and pages and nothing else",
@@ -453,7 +458,7 @@ NAMED_ENVIRONMENTS = {"pypi", "renovate", "pages-signing"}
 for job_id, job in fleet.items():
     check(
         f"fleet: {job_id} names no environment but pypi, renovate or pages-signing",
-        job.get("environment") in {None} | NAMED_ENVIRONMENTS,
+        job.get("environment") in {None, PAGES_ENVIRONMENT} | NAMED_ENVIRONMENTS,
         str(job.get("environment")),
     )
     holds = SECRET.search(yaml.safe_dump(job)) or job.get("environment") == "pypi"

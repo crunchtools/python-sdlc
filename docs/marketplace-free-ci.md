@@ -138,7 +138,7 @@ jobs:
       && (github.event_name == 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     concurrency: { group: "pages-${{ github.repository }}", queue: max }
     runs-on: *secret
-    environment: pages-signing
+    environment: ${{ fromJSON(needs.check.outputs.result || '{}').pages && 'pages-signing' || '' }}  # an expression: a bare name makes GitHub refuse the whole file in repos without it
     permissions: { contents: write, pages: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_PAGES_GPG_KEY: "${{ secrets.PACKAGES_GPG_KEY }}" }
     steps: *event
