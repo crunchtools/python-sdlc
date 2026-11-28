@@ -11,6 +11,17 @@ All notable changes to this project are documented here, following
 - `EXTRA_IMAGES` gives crunchtools/trentina `trentina-l2-model`, the L2 model
   image a training round publishes through `ci.yml` (crunchtools/trentina#954,
   a1793).
+- Two fleet jobs, `assets` and `pages`, for release packages and the signed
+  dnf/apt site (a1796, #263). `assets` rebuilds each `[[tool.sdlc.assets]]`
+  stage of a merged release on digest-pinned build roots and attaches the
+  files with a SHA256SUMS to its Release, using the job's own
+  `contents: write` token and no stored secret. `pages` runs where the tree has
+  `[tool.sdlc.pages]`: it signs the products' release assets and pushes the
+  site to `gh-pages` with the GPG key from the `pages-signing` environment
+  alone, then requests the Pages build. `examples/ci.yml` gains both jobs;
+  re-copy it. The image gains gnupg2, rpm-sign and createrepo_c, and
+  `sdlc_jobs/_debrepo.py` writes the apt index. The design is
+  "Release assets and the package site" in docs/marketplace-free-ci.md.
 
 ### Fixed
 
@@ -42,6 +53,9 @@ All notable changes to this project are documented here, following
   images were never affected: `sdlc image promote` attests them. syft runs
   read-only with no registry login. A rollback attests its digest's SBOM, if
   it lacks one, before `:<major>` moves to it.
+- `verify_release` (`pypi`, `assets`) reads a dynamic version from
+  `[tool.hatch.version].path`, as `write` already does, so a repo like
+  ashigaru is no longer refused at test 7.
 
 ### Removed
 

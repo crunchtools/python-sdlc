@@ -44,6 +44,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from sdlc_jobs import pages
 from sdlc_jobs._core import (
     BOOT_JOB,
     CANNOT_RUN,
@@ -141,7 +142,14 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         f"refs/heads/{(event.get('repository') or {}).get('default_branch', '')}"
     )
     cron = event.get("schedule") if event_name == "schedule" else None
+    bare = (
+        event_name == "workflow_dispatch"
+        and env.get("GITHUB_REF")
+        == f"refs/heads/{(event.get('repository') or {}).get('default_branch', '')}"
+        and not str((event.get("inputs") or {}).get("version") or "").strip()
+    )
     made = make_plan(tools, env, root, default_push, cron)
+    made["pages"] = pages_plan(tools, env, root, now=default_push or bare, cron=cron)
     set_output(env, "result", fit(made))
 
     if event_name == "schedule":
@@ -189,7 +197,7 @@ def make_plan(
     default_push: bool,
     cron: object,
 ) -> dict[str, Any]:
-    """The plan for this event, in the shape `_core.plan` documents."""
+    """The plan for this event, in the shape `_core.plan` documents; `run` adds `pages`."""
     repo = env.get("GITHUB_REPOSITORY", "")
     out: dict[str, Any] = {
         "image": False,
@@ -198,6 +206,8 @@ def make_plan(
         "write": False,
         "weekly": cron == WEEKLY,
         "audit": None,
+        "assets": False,
+        "pages": False,
     }
     own = images(root, repo)
     has_image = bool(own)
@@ -212,9 +222,26 @@ def make_plan(
         api(tools, env, "PUT", f"/repos/{repo}/actions/workflows/ci.yml/enable")
     elif cron == POLL and has_image:
         out["image"] = released_here(tools, env, root) and parent_moved(tools, root, repo)
+    out["assets"] = bool(out["release"]) and "assets" in tool_sdlc(root)
     # A clean report goes to `write` too: it is what closes the alert issue.
     out["write"] = bool(out["release"]) or out["audit"] is not None
     return out
+
+
+def pages_plan(
+    tools: Tools, env: Mapping[str, str], root: Path, *, now: bool, cron: object
+) -> bool:
+    """Does `pages` run? Only where the tree declares a site: on a default-branch push
+    or a bare dispatch, and on the 6-hourly and weekly polls when the products'
+    releases differ from what the site serves."""
+    if "pages" not in tool_sdlc(root):
+        return False
+    if now:
+        return True
+    if cron not in (WEEKLY, POLL):
+        return False
+    step("poll: the package site against its products' releases")
+    return pages.changed(tools, env, root)
 
 
 def released_here(tools: Tools, env: Mapping[str, str], root: Path) -> bool:

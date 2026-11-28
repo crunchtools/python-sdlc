@@ -550,6 +550,84 @@ def test_final_stage_not_first_is_rewritten() -> None:
     assert lines[2] == f"FROM quay.io/crunchtools/ubi10-core@{PARENT}"
 
 
+def test_comment_ending_in_a_backslash_does_not_swallow_the_next_from() -> None:
+    cf = "FROM a:1 AS b\n# note \\\nFROM c:2\n"
+    assert _core.final_stage(cf, strict=True) == (1, "c:2")
+    assert [p.image for p in image.builder_stages(cf, 1)] == ["a:1"]
+
+
+def test_escape_directive_backtick_continues_lines() -> None:
+    cf = "# escape=`\nFROM a:1 AS b\nRUN true `\n FROM x\nFROM c:2\n"
+    assert _core.logical_lines(cf) == ["FROM a:1 AS b", "RUN true FROM x", "FROM c:2"]
+    assert _core.final_stage(cf, strict=True) == (1, "c:2")
+    # without the directive a backtick continues nothing, and a directive late is a comment
+    late = "FROM a:1\n# escape=`\nRUN true `\nFROM c:2\n"
+    assert _core.final_stage(late, strict=True) == (1, "c:2")
+    assert _core.logical_lines(late) == ["FROM a:1", "RUN true `", "FROM c:2"]
+
+
+def test_comment_inside_a_continued_run_is_dropped() -> None:
+    cf = "FROM a:1\nRUN one \\\n  # two \\\n  three\nFROM c:2\n"
+    assert _core.logical_lines(cf) == ["FROM a:1", "RUN one three", "FROM c:2"]
+
+
+def test_a_continuation_is_concatenated_as_buildah_does() -> None:
+    """buildah joins `FR\\` and `OM x` into FROM x: no space goes between (sdlc#268)."""
+    cf = "FROM a:1@sha256:x AS b\nFR\\\n  OM p:1 AS c\nCOPY --fr\\\nom=q:1 /a /b\n"
+    assert _core.logical_lines(cf)[1:] == ["FROM p:1 AS c", "COPY --from=q:1 /a /b"]
+    assert [p.image for p in image.builder_stages(cf, 0)] == ["p:1"]
+    assert image.copy_sources(cf) == ["q:1"]
+    mount = "FROM a:1\nRUN --mount=type=bind,fr\\\nom=q:1,target=/m true\n"
+    assert image.copy_sources(mount) == ["q:1"]
+    assert "heredoc" in image.unmodelled("FROM a:1\nRUN <\\\n<EOF\nx\nEOF\n")
+
+
+def refusal_of(parse: Callable[[str], object], text: str) -> str:
+    """The message of the refusal `parse(text)` raises, or a failed assertion."""
+    try:
+        parse(text)
+    except CannotRunError as exc:
+        return str(exc)
+    raise AssertionError(f"accepted by {parse}: {text!r}")
+
+
+def test_what_buildah_and_python_would_split_differently_is_refused() -> None:
+    """buildah breaks lines on \\n only; Python's splitlines also on these."""
+    parsers: list[Callable[[str], object]] = [
+        lambda t: _core.final_stage(t, strict=True),
+        lambda t: image.builder_stages(t, 1),
+        image.copy_sources,
+        image.unmodelled,
+    ]
+    for ch in ("\r", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\xa0", "\x0b", "\x0c", "\x00"):
+        cf = f"FROM a:1 AS b\nFROM c:2{ch}FROM p:1\n"
+        for parse in parsers:
+            assert "only space, \\n and \\t" in refusal_of(parse, cf), (ch, parse)
+    assert "'\\xa0'" in refusal_of(_core.logical_lines, "#\xa0escape=`\nFROM a:1\n")
+    tab = "FROM a:1\tAS b\nRUN\ttrue\n"
+    assert _core.logical_lines(tab) == ["FROM a:1\tAS b", "RUN\ttrue"]
+
+
+def test_containerfile_text_is_strict_utf8() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "Containerfile"
+        path.write_bytes(b"FROM a:1\nRUN echo \xff\n")
+        assert "not readable as UTF-8" in refusal_of(lambda _t: _core.containerfile_text(path), "")
+        path.write_bytes("FROM a:1\nLABEL x=caf\u00e9\n".encode())
+        assert _core.containerfile_text(path).endswith("caf\u00e9\n")
+
+
+def test_copy_sources_are_images_not_stages() -> None:
+    cf = (
+        "ARG IMG=f:1\nFROM a:1@sha256:x AS Build\n"
+        "COPY --from=build /a /a\nCOPY --from=0 /a /a\nCOPY --from=${IMG} /a /a\n"
+        "ADD --from=g:2 /a /a\nRUN --mount=type=cache,target=/c \\\n"
+        "  --mount=type=bind,from=h:3,target=/m true\n"
+    )
+    assert image.copy_sources(cf) == ["f:1", "g:2", "h:3"]
+    assert image.copy_sources(cf, {"IMG": "z:9"})[0] == "z:9"
+
+
 def test_a_continued_line_that_starts_with_from_is_not_rewritten() -> None:
     t = FakeTools()
     cf = (

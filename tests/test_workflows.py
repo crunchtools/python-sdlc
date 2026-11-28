@@ -35,11 +35,17 @@ to review:
     defines them in a different first job. Parsed, they are equal too. `write`
     parses the same but for `needs`, `if` and `env`: sdlc has no `boot` job
   - and of the fleet file: no `uses:` at all, top-level `permissions: {}`,
-    no environment but pypi's and renovate's (every secret is an org
-    secret), and every job that holds a secret runs on
+    no environment but pypi's, renovate's and pages-signing's (every other
+    secret is an org secret), and every job that holds a secret runs on
     crunchtools-uncached only while the variable names exactly that (never the
     cached class), a fork's pull_request_target on ubuntu-latest, and `check`
     and `gate` hold none
+  - `assets` holds no stored secret: `permissions: { contents: write }`, an env of
+    GITHUB_TOKEN and write's result and release, and an `if:` that wants a
+    successful check, a default-branch push and the plan's `assets`
+  - `pages` holds the GPG key from `pages-signing` alone, `contents` and
+    `pages` write, and runs only on a successful check's plan, from the
+    default branch or the schedule, never a pull request
   - `renovate` runs only in crunchtools/constitution, on the weekly cron or a
     bare default-branch dispatch, within its token's hour, and holds the
     Renovate App key alone: no GITHUB_TOKEN, `permissions: {}`
@@ -378,15 +384,75 @@ check(
     runs_write(write_if, "pull_request_target", {}, "skipped", "skipped"),
 )
 
+# assets: a release's package files, with the job's own token and no stored secret.
+assets = fleet["assets"]
+assets_if = str(assets["if"])
+DEFAULT_REF = "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+check("fleet: assets holds no stored secret", "secrets." not in job_text(fleet_text, "assets"))
+check(
+    "fleet: assets may write contents and nothing else",
+    assets.get("permissions") == {"contents": "write"},
+)
+check("fleet: assets needs exactly check and write", sorted(assets["needs"]) == ["check", "write"])
+check(
+    "fleet: assets acts only on a successful check's plan, on a default-branch push",
+    CHECK_OK in assets_if
+    and "github.event_name == 'push'" in assets_if
+    and DEFAULT_REF in assets_if
+    and "fromJSON(needs.check.outputs.result || '{}').assets" in assets_if,
+    assets_if,
+)
+check(
+    "fleet: assets' env is GITHUB_TOKEN and write's result and release alone",
+    assets.get("env")
+    == {
+        "GITHUB_TOKEN": "${{ github.token }}",
+        "SDLC_WRITE": "${{ needs.write.result }}",
+        "SDLC_RELEASE": "${{ needs.write.outputs.release }}",
+    },
+    str(assets.get("env")),
+)
+check("fleet: assets shares the secret jobs' runner", assets.get("runs-on") == GUARDED_RUNNER)
+
+# pages: the one GPG key, in pages-signing alone, on the default branch or the schedule.
+pages_job = fleet["pages"]
+pages_if = str(pages_job["if"])
+check(
+    "fleet: pages' key is in the pages-signing environment",
+    pages_job.get("environment") == "pages-signing",
+)
+check(
+    "fleet: pages may write contents and pages and nothing else",
+    pages_job.get("permissions") == {"contents": "write", "pages": "write"},
+)
+check(
+    "fleet: pages' env is GITHUB_TOKEN and the GPG key alone",
+    pages_job.get("env")
+    == {
+        "GITHUB_TOKEN": "${{ github.token }}",
+        "SDLC_PAGES_GPG_KEY": "${{ secrets.PACKAGES_GPG_KEY }}",
+    },
+    str(pages_job.get("env")),
+)
+check(
+    "fleet: pages acts only on a successful check's plan, from the default branch or the schedule",
+    CHECK_OK in pages_if
+    and "fromJSON(needs.check.outputs.result || '{}').pages" in pages_if
+    and f"(github.event_name == 'schedule' || {DEFAULT_REF})" in pages_if
+    and not PULL_REQUEST.search(pages_if),
+    pages_if,
+)
+check("fleet: pages shares the secret jobs' runner", pages_job.get("runs-on") == GUARDED_RUNNER)
+
 check("fleet: no `uses:` anywhere", not re.search(r"^\s*-?\s*uses:", fleet_text, re.M))
 check("fleet: top-level permissions are {}", parsed.get("permissions") == {})
 # Every secret is an org secret: no environment to provision in any repo.
-# pypi's names PyPI's trusted publisher and holds no secret; renovate's runs in
-# one repo. Neither needs setting up anywhere else.
-NAMED_ENVIRONMENTS = {"pypi", "renovate"}
+# pypi's names PyPI's trusted publisher and holds no secret; renovate's and
+# pages-signing's each run in one repo, and pages-signing is the GPG key's only home.
+NAMED_ENVIRONMENTS = {"pypi", "renovate", "pages-signing"}
 for job_id, job in fleet.items():
     check(
-        f"fleet: {job_id} names no environment but pypi or renovate",
+        f"fleet: {job_id} names no environment but pypi, renovate or pages-signing",
         job.get("environment") in {None} | NAMED_ENVIRONMENTS,
         str(job.get("environment")),
     )

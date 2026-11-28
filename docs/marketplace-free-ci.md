@@ -4,11 +4,11 @@ Design for a1051. Nothing here is implemented: it is the target that
 `convert_repo.py` and `cutover.py` will be changed to write, and the list of
 `sdlc` internals that have to exist first.
 
-## The fleet file: 123 lines, nine jobs
+## The fleet file: 149 lines, eleven jobs
 
 Every fleet repo carries exactly this `.github/workflows/ci.yml`, byte for
 byte, whatever kind of repo it is. The one exception is crunchtools/sdlc
-itself, below. The file is 114 lines without comments. It contains no `uses:`
+itself, below. The file is 138 lines without comments. It contains no `uses:`
 of any kind: no `actions/checkout`, no reusable-workflow call and no
 third-party action. Every job runs one image, the sdlc **bootstrap**, by a
 literal digest, and one command, `sdlc event`. That command reads
@@ -121,6 +121,27 @@ jobs:
     permissions: { contents: read, id-token: write }
     env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_WRITE: "${{ needs.write.result }}", SDLC_RELEASE: "${{ needs.write.outputs.release }}" }
     steps: *event
+  assets:  # GITHUB_TOKEN with contents: write, no stored secret: builds a release's digest-pinned package stages, attaches their files to the Release write made
+    needs: [check, write]
+    if: >-
+      always() && !cancelled() && needs.check.result == 'success' && github.event_name == 'push'
+      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && fromJSON(needs.check.outputs.result || '{}').assets
+    concurrency: { group: "assets-${{ github.repository }}", queue: max }
+    runs-on: *secret
+    permissions: { contents: write }
+    env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_WRITE: "${{ needs.write.result }}", SDLC_RELEASE: "${{ needs.write.outputs.release }}" }
+    steps: *event
+  pages:  # the package site's GPG key, held only in pages-signing (default branch only); signs other repos' release assets as data, pushes gh-pages
+    needs: check
+    if: >-
+      needs.check.result == 'success' && fromJSON(needs.check.outputs.result || '{}').pages
+      && (github.event_name == 'schedule' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    concurrency: { group: "pages-${{ github.repository }}", queue: max }
+    runs-on: *secret
+    environment: pages-signing
+    permissions: { contents: write, pages: write }
+    env: { GITHUB_TOKEN: "${{ github.token }}", SDLC_PAGES_GPG_KEY: "${{ secrets.PACKAGES_GPG_KEY }}" }
+    steps: *event
   gate:  # required: guard, review done on this head, every finding answered; no secret. A collaborator's reply re-runs it where it counts
     name: sdlc / gate (${{ github.event_name }})  # required as "(pull_request_target)"
     needs: [ai, write]
@@ -146,8 +167,8 @@ jobs:
     steps: *event
 ```
 
-**Why 114 lines and not 20.** GitHub makes a separate job only where the
-permissions, the secrets, the environment or the runner differ. Seven levels
+**Why 138 lines and not 20.** GitHub makes a separate job only where the
+permissions, the secrets, the environment or the runner differ. Nine levels
 differ, and each job needs its `if`, `runs-on`, `environment`, `container`,
 `permissions`, `env` and `steps` lines. Merging any two would put a secret, a
 write grant or a signing key somewhere it must not be. Everything else is
@@ -194,12 +215,10 @@ where a dispatch took minutes.
 **Bottom line.**
 - 69 of the 70 public org repos have workflows today, and every one of them
   carries at least one third-party pin.
-- **65 of the 69 end with this one file and no `uses:` at all.**
-- The other four carry this file too, but each keeps its package release
-  workflow. These are ashigaru (`rpm.yml`), claude-agent and petit
-  (`packages.yml`), and crunchtools/packages (`publish.yml`, which builds the
-  package repository and deploys Pages). They are out of scope and keep their
-  current path.
+- **All 69 end with this one file and no `uses:` at all**, once the four
+  package repos adopt `assets` and `pages` (a1796, under "Release assets and
+  the package site"): ashigaru (`rpm.yml`), claude-agent and petit
+  (`packages.yml`), and crunchtools/packages (`publish.yml`).
 - mcp-atlassian has to delete the two upstream workflows its fork carries.
 - Private repos are a separate question, under "Private repos and the org's
   plan".
@@ -562,6 +581,8 @@ and nothing triggers on `release` or a closed pull request. The App-only tag rul
 | `boot` | | none; read token, the socket | when `check` plans `boot` and `image` succeeded; where the secret jobs run: our **uncached** runners while the variable names exactly them | any secret |
 | `promote` | | cosign key, quay; queued | after `image` and `boot`, and after `write` on a release; our **uncached** runners | an App key, a build |
 | `pypi` | | none: OIDC, environment `pypi` for the publisher | a release merge that publishes to PyPI; our **uncached** runners | anything else |
+| `assets` | | none stored; `GITHUB_TOKEN` with `contents: write`, the socket; queued | a release merge whose tree has `[[tool.sdlc.assets]]`, after `write`; our **uncached** runners | an App key, a signing key |
+| `pages` | | `pages-signing`: the package site's GPG key; `contents` and `pages` write; queued | crunchtools/packages alone: a default-branch push, a bare dispatch, or a poll that found new releases; our **uncached** runners | an App key, repo code |
 | `gate` | `sdlc / gate (pull_request_target)` (required) | none; `pull-requests: write`, `actions: write` | `pull_request_target`; a collaborator's review comment; `ubuntu-latest` | any secret |
 | `renovate` | | `renovate`: Renovate App key; no `GITHUB_TOKEN`; queued | crunchtools/constitution only: the weekly schedule, a bare dispatch from the default branch; our **uncached** runners | a token of this repo's, a build |
 
@@ -714,6 +735,10 @@ its robot and key must stay out of the fleet's reach, and it is one repo.
 - **`gate`:** it must come from the base definition and hold no secret, so it
   can be required.
 - **`pypi`:** a job has one environment.
+- **`write` / `assets`:** the App key never shares a job with a Containerfile
+  build; `assets` attaches with the job's own token instead.
+- **`assets` / `pages`:** the GPG key never shares a job with a build. `pages`
+  signs files other repos released, as data.
 
 **Ordering and races.**
 - `promote` and `write` use `queue: max`, so a second run waits and nothing is
@@ -789,6 +814,8 @@ CodeQL uploads as `/language:python` and semgrep as `semgrep`; zizmor, which
 | boot | after image, when `check` plans it | runs a repo's `boot-command` (`boot = "command"`) and `contract-test` on the digest `image` pushed; `free-disk` first | container-release's boot-command, contract-test and free-disk |
 | promote | after image | signs, attests, moves `latest`, and `X.Y.Z` from `write`'s output | container-release promote |
 | pypi | release merge push | re-verifies, `uv build` nested, `uv publish` by OIDC | publish.yml |
+| assets | release merge push, when `check` plans it | re-verifies, builds each `[[tool.sdlc.assets]]` stage through the socket on digest-pinned roots, attaches the files and SHA256SUMS to the Release | ashigaru rpm.yml, petit and claude-agent packages.yml attach |
+| pages | default-branch push, bare dispatch, or a poll that saw new releases; `[tool.sdlc.pages]` repos only | fetches the products' release assets by digest, signs them and the repo metadata, pushes `gh-pages`, requests and awaits the Pages build | packages publish.yml |
 | gate | pull_request_target | fails unless `ai` and `write` succeeded; workflow guard; triage, which needs a review of the head SHA | gatehouse.yml guard, triage.yml |
 | gate | collaborator review comment | re-runs `gate` in the PR's `pull_request_target` run with `GITHUB_TOKEN` | gatehouse-retriage.yml |
 | renovate | schedule `17 6 * * 1`, constitution only | `sdlc_jobs/renovate.py`: runs Renovate one repo at a time, each in a nested container of this image with a token minted for that repo alone (no socket, no key), with the constitution's `renovate/self-hosted.json` at this commit as `RENOVATE_CONFIG` | the constitution's renovate.yml |
@@ -930,6 +957,131 @@ This is a human step, for Scott. Each publisher must change from
    has no API for them, so the check is a ledger. `cutover.py` refuses to
    merge a PyPI repo until its row in the wave ledger records both steps as
    done, with who did them.
+
+## Release assets and the package site (a1796, #263)
+
+Two jobs close the last gap: `assets` attaches a release's packages to its
+GitHub Release, and `pages` signs them into the dnf/apt site. With them,
+ashigaru's `rpm.yml`, the attach half of petit's and claude-agent's
+`packages.yml`, and crunchtools/packages' `publish.yml` retire. #263 asked
+three questions, and this is what the design answers:
+
+- **(a) Build roots.** `image` still trusts only crunchtools and Red Hat
+  parents, because its output is signed with the fleet key. `assets` builds
+  with Fedora, CentOS, AlmaLinux and Debian roots, and verifies no signature
+  on them. What it trusts is the digest: every registry `FROM` in the
+  Containerfile must be `@sha256:`-pinned in the reviewed tree, or the job
+  refuses before it builds. A tag could move under a release, and a
+  reviewed digest cannot. Renovate moves the pins in a pull request, like any
+  other. The packages carry no fleet signature: the GPG signature that dnf and
+  apt check is added later, by `pages`.
+- **(b) The GPG key** lives in one job, `pages`, of one repo,
+  crunchtools/packages. It is stored only in that repo's `pages-signing`
+  environment, which admits the default branch alone. Following a867, it
+  must exist nowhere else, as neither an org secret nor a repo secret: either
+  copy would be readable from any branch. No repo code runs in `pages`.
+- **(c) No exceptions.** The three workflows go, and the fleet file stays
+  byte for byte in all four repos. The two jobs are skipped everywhere else,
+  because `check` plans them only from `[[tool.sdlc.assets]]` or
+  `[tool.sdlc.pages]`.
+
+**`assets`.** It runs on the push that merges a release, after `write` has
+tagged it and published the Release. It holds the job's `GITHUB_TOKEN` with
+`contents: write` and no stored secret: no App key, so no new key to gate.
+- **Checks first.** It re-derives the release from the API, as `pypi` does,
+  and refuses unless the result agrees with `write`'s output, and unless
+  `vX.Y.Z` names this commit.
+- **The build.** Each entry names an `image-build` check that `sdlc ci`
+  already ran on the pull request. It rebuilds that Containerfile, context and
+  build-args to the entry's `target` stage, through the socket, so a `RUN`
+  step gets no token. Then it copies the files out of the stage as data.
+- **What it attaches.** Regular files directly in `path` that match `files`
+  and carry the version in their name, plus a `SHA256SUMS`, attached last.
+- **Re-runs.** An asset already on the Release with the same `digest` is
+  kept. One with other bytes is deleted and uploaded again, with a warning,
+  because GitHub refuses a same-name upload (422) and an RPM rebuilt on a
+  re-run differs by its build time.
+
+```toml
+[[tool.sdlc.assets]]
+check = "rpm-fc43"   # an image-build check in [tool.sdlc.ci]
+target = "build"     # the stage holding the files
+path = "/out"        # the directory in that stage
+files = ["*.rpm"]    # globs on the name; each must match
+```
+
+**`pages`.** It runs only where the tree has `[tool.sdlc.pages]`, in three
+cases:
+- on a default-branch push;
+- on a bare dispatch;
+- on the 6-hourly or weekly poll, when `check` finds that the products'
+  release assets (name and stored `digest`) differ from the live
+  `index.json`.
+
+What it does, in order:
+1. **Fetch.** It reads the newest `keep` non-draft, non-prerelease releases of
+   each product and downloads their `.rpm` and `.deb` files with no token.
+   Each must hash to the `digest` GitHub stored at upload. Source RPMs are
+   left out.
+2. **Load the key.** It imports the key from `SDLC_PAGES_GPG_KEY` into a
+   GNUPGHOME of its own and takes the variable out of its environment. The
+   key must be the private half of the tree's public key file.
+3. **Sign.** It `rpmsign`s each RPM, keeping the site's existing signed copy
+   when that copy's header digest matches and its signature checks. It runs
+   `createrepo_c` and signs `repomd.xml`. For the deb side it writes
+   `Packages`, `Release`, `InRelease` and `Release.gpg`; `sdlc_jobs/_debrepo.py`
+   generates the index in place of `apt-ftparchive`, which an RPM image does
+   not have.
+4. **Publish.** It removes the GNUPGHOME, then pushes the tree to `gh-pages`
+   as one commit, leased on the old head.
+5. **Build Pages.** It calls `POST /pages/builds` and waits until the latest
+   build reports that commit as built. A push made with `GITHUB_TOKEN` does
+   not trigger a Pages build ([docs](https://docs.github.com/en/actions/concepts/security/github_token)),
+   so the request is what publishes.
+
+The site's layout and URLs are the ones `publish.yml` serves today, so no
+installed `.repo` or `.sources` file changes.
+
+```toml
+[tool.sdlc.pages]
+name = "crunchtools"
+site-url = "https://crunchtools.github.io/packages"
+key = "crunchtools.asc"
+products = ["crunchtools/petit", "crunchtools/claude-agent", "crunchtools/ashigaru"]
+keep = 5
+static = ["index.html"]
+```
+
+**What it costs.**
+- **Latency.** A new release reaches the site at the next 6-hourly poll,
+  where `publish.yml` polled hourly. The dispatch it listened for was never
+  sent. A bare dispatch of crunchtools/packages' `ci.yml` publishes at once.
+- **Smoke tests.** `publish.yml`'s live-site smoke matrix does not move into
+  `pages`: that would run thirteen unverified distro images in the job that
+  held the key. Each product's `sdlc ci` already smoke-tests its packages on
+  a pull request, unsigned. A signed-install check against the live site
+  becomes a weekly `command` check in crunchtools/packages, with
+  `network = true` and no secret.
+
+**The image gains** `gnupg2`, `rpm-sign` and `createrepo_c` (`rpm` is already
+there). The contract test asserts each one.
+
+**Adoption.** These are follow-up changes in each repo, not made here:
+1. **ashigaru.** Add `[[tool.sdlc.assets]]` for `rpm-fc43`, `rpm-fc45` and
+   `rpm-el10` (target `build`, path `/out`, files `*.rpm`). Delete `rpm.yml`.
+   Add `crunchtools/ashigaru` to the site's products if it is to be served.
+2. **petit.** Add one entry for `pkg-ubi8` (target `packages`, its path,
+   files `*.rpm` and `*.deb`). Delete `packages.yml`. Pin the workflow-only
+   roots that do not yet appear in `packaging/Containerfile`.
+3. **claude-agent.** Move `packages.yml`'s `almalinux:9` and `debian:12`
+   builds into a digest-pinned `packaging/Containerfile` with an
+   `image-build` check, as petit has. Add the `[[tool.sdlc.assets]]` entry.
+   Delete `packages.yml`.
+4. **crunchtools/packages.** Add `[tool.sdlc.pages]` and delete
+   `products.txt` and `publish.yml`. Create `pages-signing` with a
+   deployment-branch policy of the default branch only, and move
+   `PACKAGES_GPG_KEY` into it; any repo or org copy is deleted. Set the
+   Pages source to `gh-pages` `/`, which is an admin setting for Prime.
 
 ## What GitHub will not let us do this way
 
@@ -1080,7 +1232,7 @@ default branches, 2026-11-22). Counts are repos / `uses:` lines.
 | `anthropics/claude-code-action` | mcp-atlassian `claude.yml` (inherited from upstream) | delete; Ashigaru is the fleet's agent | n/a |
 | `dependabot/fetch-metadata` | 2: automerge | delete. Renovate's own automerge replaces it, and from constitution v1.60.0 Dependabot fails validation anyway | n/a |
 | `docker/login-action`, `setup-buildx-action`, `build-push-action` | trentina `l2-train`, rotv `tests` | `docker login` / `docker build` / `docker push` through the socket in `sdlc image`, or a repo-defined command | no: the docker CLI, skopeo and cosign have to come in |
-| `actions/upload-pages-artifact`, `deploy-pages` | packages `publish.yml` | `sdlc pages`: push the built site to a `gh-pages` branch, Pages source set to "Deploy from a branch" | no |
+| `actions/upload-pages-artifact`, `deploy-pages` | packages `publish.yml` | the `pages` job: push the built site to a `gh-pages` branch, Pages source set to "Deploy from a branch", then `POST /pages/builds` | yes (a1796) |
 | `actions/stale` | mcp-atlassian (upstream) | delete | n/a |
 | `OWASP/cve-lite-cli` | rotv | grype and `npm audit`, both already in `sdlc ci` | yes |
 
@@ -1140,11 +1292,9 @@ hand-offs, and what each becomes:
   pushes the candidate to quay by digest, and `needs.image.outputs` carries
   that digest to `promote`.
 - **RPM build → publish** (ashigaru `rpm.yml`, claude-agent and petit
-  `packages.yml`; a few MB per distro, attached as release assets). **Out of
-  scope for this design.** These keep their current workflows and their
-  artifact hand-off for now. Moving them needs a way to get files from a
-  no-token build job to a release, and nothing here provides one. They are
-  the one remaining source of `uses:` in those three repos.
+  `packages.yml`; a few MB per distro, attached as release assets). Nothing
+  is handed between jobs: `assets` builds and attaches in one job, under
+  "Release assets and the package site".
 - **trentina `l2-train`** (a model file). This becomes one job, or a push to
   ghcr as an OCI artifact, chosen when that workflow is converted. It is
   trentina-specific and is not part of the fleet template.
@@ -1164,13 +1314,12 @@ cosign and the fleet key (`attest-digest.sh`: SPDX SBOM and SLSA v1
 provenance), and that moves into `sdlc image promote` as it is. GitHub's
 attestation store is not used, and nothing is lost.
 
-**GitHub Pages.** Only `crunchtools/packages` deploys Pages, and its
-`publish.yml` is out of scope with the other package release workflows. What
-follows is the path for when it moves.
+**GitHub Pages.** Only `crunchtools/packages` deploys Pages.
 `actions/deploy-pages` needs an artifact made by `upload-pages-artifact`, and
 neither can run from a `run:` step. The repo moves its Pages source to
-"Deploy from a branch", and `sdlc pages` pushes the built tree to `gh-pages`
-from `write`, with the App token, on a push to the default branch only. That is a one-time setting change on that repo.
+"Deploy from a branch" (`gh-pages`, `/`), and the `pages` job pushes the
+built tree there, then requests the build. That is a one-time setting change
+on that repo; "Release assets and the package site" has the rest.
 
 **`container:` jobs and the socket.** Every job mounts the runner's container
 socket, and nothing runs `--privileged`.

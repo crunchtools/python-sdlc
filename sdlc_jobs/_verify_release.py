@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import tomllib
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sdlc_jobs._core import SEMVER, Tools, api, cannot, workspace
 
@@ -20,7 +20,9 @@ HEADING = re.compile(r"^## \[([^\]]+)\]", re.MULTILINE)
 
 
 def tree_version(root: Path) -> str:
-    """[project].version of the merged tree's pyproject.toml; anything else is a refusal."""
+    """[project].version of the merged tree's pyproject.toml, or the dynamic one hatch
+    reads from `[tool.hatch.version].path` (ashigaru's VERSION), as `write` reads it;
+    anything else is a refusal."""
     path = root / "pyproject.toml"
     if not path.is_file():
         cannot("test 7: the merged tree has no pyproject.toml to read the version from")
@@ -30,9 +32,32 @@ def tree_version(root: Path) -> str:
         cannot(f"pyproject.toml does not parse: {exc}")
     project = doc.get("project")
     version = project.get("version") if isinstance(project, dict) else None
-    if not isinstance(version, str):
-        cannot("test 7: pyproject.toml has no static [project].version")
-    return version
+    if isinstance(version, str):
+        return version
+    dynamic = project.get("dynamic") if isinstance(project, dict) else None
+    if not isinstance(dynamic, list) or "version" not in dynamic:
+        cannot("test 7: pyproject.toml has no [project].version, static or dynamic")
+    return hatch_version(root, doc)
+
+
+def hatch_version(root: Path, doc: dict) -> str:
+    """The X.Y.Z in the file `[tool.hatch.version].path` names, inside the tree."""
+    tool = doc.get("tool")
+    hatch = tool.get("hatch") if isinstance(tool, dict) else None
+    table = hatch.get("version") if isinstance(hatch, dict) else None
+    path = table.get("path") if isinstance(table, dict) else None
+    if not isinstance(path, str) or not path or "\\" in path:
+        cannot("test 7: a dynamic version needs [tool.hatch.version].path")
+    real = (root / path).resolve()
+    if PurePosixPath(path).is_absolute() or not real.is_relative_to(root.resolve()):
+        cannot(f"test 7: [tool.hatch.version].path {path!r} leaves the tree")
+    try:
+        found = real.read_text().strip()
+    except OSError as exc:
+        cannot(f"test 7: {path} cannot be read: {exc}")
+    if not SEMVER.fullmatch(found):
+        cannot(f"test 7: {path} holds {found[:40]!r}, not X.Y.Z")
+    return found
 
 
 def changelog_version(root: Path) -> str:

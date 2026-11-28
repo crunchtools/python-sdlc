@@ -66,14 +66,18 @@ from sdlc_jobs._core import (
     build_arg_map,
     build_args,
     cannot,
+    containerfile_text,
+    escape_of,
     expand_build_vars,
     fetch_tree,
     final_stage,
     host_mount,
     image_owner,
     images,
+    logical_lines,
     must,
     no_new_privileges,
+    plain_text,
     podman,
     set_output,
     show,
@@ -105,7 +109,7 @@ SECRETS = (
     "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
     "ACTIONS_ID_TOKEN_REQUEST_URL",
 )
-FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE)
+FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE | re.ASCII)
 # The `podman run` options the planner emits for a host step (container-smoke,
 # container-scan, bootc-lint), and nothing else: a repo's config cannot add one.
 RUN_FLAGS = ("--rm", "--read-only")
@@ -291,7 +295,7 @@ def stages_of(job: Job, img: Image) -> tuple[str, Parent | None, list[Parent]]:
     )
     if name is None:
         cannot("there is no Containerfile or Dockerfile at the repo root to build")
-    text = (job.root / name).read_text(encoding="utf-8", errors="replace")
+    text = containerfile_text(job.root / name)
     overrides = build_arg_map(img.settings)
     parent = parent_stage(text, overrides)
     stages = [
@@ -380,7 +384,7 @@ def build_order(root: Path, imgs: list[Image]) -> tuple[list[Image], dict[str, s
         path = img.containerfile or next(
             (f for f in ("Containerfile", "Dockerfile") if (root / f).is_file()), ""
         )
-        text = (root / path).read_text(encoding="utf-8", errors="replace") if path else ""
+        text = containerfile_text(root / path) if path else ""
         overrides = build_arg_map(img.settings)
         parent = parent_stage(text, overrides) if text else None
         stages = [*([parent] if parent else [])]
@@ -464,7 +468,7 @@ def builder_stages(
     aliases: list[str] = []
     found: list[Parent] = []
     index = -1
-    for raw in re.sub(r"\\\n", " ", text).splitlines():
+    for raw in logical_lines(text):
         words = raw.split()
         op = words[0].upper() if words else ""
         if op == "ARG" and index < 0:
@@ -481,6 +485,132 @@ def builder_stages(
             if len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS":
                 aliases.append(rest[2].lower())
     return found
+
+
+def from_refs(op: str, words: list[str]) -> list[str]:
+    """The `--from=` values of a COPY/ADD and the `from=` keys of a RUN's `--mount`s."""
+    if op in ("COPY", "ADD"):
+        return [w.partition("=")[2] for w in words if w.startswith("--from=")]
+    if op != "RUN":
+        return []
+    opts = (
+        kv.partition("=")
+        for w in words
+        if w.startswith("--mount=")
+        for kv in w.partition("=")[2].split(",")
+    )
+    return [v for k, eq, v in opts if eq and k == "from"]
+
+
+def copy_sources(text: str, overrides: Mapping[str, str] | None = None) -> list[str]:
+    """Every image a `COPY|ADD --from=` or `RUN --mount=...,from=` names, not a stage.
+
+    An earlier stage's alias (any case) or a stage index is no image. Expanded like
+    `builder_stages`, which stays FROM-only: the image job verifies what it returns.
+    """
+    args: dict[str, str] = {}
+    aliases: list[str] = []
+    found: list[str] = []
+    started = False
+    for raw in logical_lines(text):
+        words = raw.split()
+        op = words[0].upper() if words else ""
+        refs: list[str] = []
+        if op == "ARG" and not started:
+            args.update(
+                {k: v.strip("\"'") for k, eq, v in (w.partition("=") for w in words[1:]) if eq}
+            )
+        elif op == "FROM":
+            if not started:
+                args.update(overrides or {})
+                started = True
+            rest = [w for w in words[1:] if not w.startswith("--")]
+            if len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS":
+                aliases.append(rest[2].lower())
+        else:
+            refs = from_refs(op, words[1:])
+        for ref in refs:
+            image = expand_build_vars(ref, args, strict=True).strip("\"'")
+            if not image:
+                cannot(f"--from/from= {ref} expands to nothing")
+            if not (image.isascii() and image.isdigit()) and image.lower() not in aliases:
+                found.append(image)
+    return found
+
+
+DIRECTIVE_LIKE = re.compile(r"\s*#\s*([A-Za-z][A-Za-z0-9]*)\s*=(.*)", re.ASCII)
+PLAIN_VAR = re.compile(r"\$(?:\{(\w+)\}|(\w+))", re.ASCII)
+
+
+def unmodelled(text: str) -> str:
+    """Why the pin check cannot read `text` as buildah does; "" when it can.
+
+    The check fails closed rather than model these: a heredoc, a blank or comment
+    line inside a continued instruction, an escape directive that is not exactly
+    `\\` or a backtick, a quoted --mount, and an image named through anything but a
+    plain $NAME/${NAME} of a global ARG that no stage ARG default or ENV redefines.
+    """
+    plain_text(text)
+    lines = text.split("\n")
+    for line in lines:
+        found = DIRECTIVE_LIKE.fullmatch(line)
+        if not found:
+            break
+        if found[1].lower() == "escape" and found[2].strip() not in ("\\", "`"):
+            return f"its escape directive {found[2].strip()!r} is not exactly \\ or a backtick"
+    escape, pending = escape_of(lines), False
+    for line in lines:
+        bare = line.strip(" \t")
+        if pending and (not bare or bare.startswith("#")):
+            return "a blank or comment line sits inside a continued instruction"
+        if not bare.startswith("#"):
+            pending = line.rstrip(" \t").endswith(escape)
+    return unmodelled_refs(logical_lines(text))
+
+
+def unmodelled_refs(instructions: list[str]) -> str:
+    """`unmodelled` for the joined instructions: heredocs, quoted mounts, variables."""
+    global_args: set[str] = set()
+    redefined: set[str] = set()
+    refs: list[str] = []
+    started = False
+    for raw in instructions:
+        words = raw.split()
+        op = words[0].upper() if words else ""
+        if "<<" in raw:
+            return f"its {op} has a heredoc"
+        if any(w.startswith("--mount=") and ("'" in w or '"' in w) for w in words):
+            return f"its {op} has a quoted --mount"
+        if op == "FROM":
+            started = True
+            refs += [w for w in words[1:] if not w.startswith("--")][:1]
+        elif op in ("ARG", "ENV"):
+            (redefined if started or op == "ENV" else global_args).update(
+                declared(op, words[1:], started=started)
+            )
+        else:
+            refs += from_refs(op, words[1:])
+    return unfollowed(refs, global_args, redefined)
+
+
+def declared(op: str, words: list[str], *, started: bool) -> list[str]:
+    """Names an ARG or ENV sets: every global ARG; a stage ARG only with a default."""
+    if op == "ARG":
+        return [w.partition("=")[0] for w in words if "=" in w or not started]
+    pairs = [w for w in words if "=" in w] if words and "=" in words[0] else words[:1]
+    return [w.partition("=")[0] for w in pairs]
+
+
+def unfollowed(refs: list[str], global_args: set[str], redefined: set[str]) -> str:
+    """The first image reference whose variables are not plain, untouched global ARGs."""
+    for ref in (r for r in refs if "$" in r):
+        if "$" in PLAIN_VAR.sub("", ref):
+            return f"{ref} uses a variable form the check does not follow"
+        for m in PLAIN_VAR.finditer(ref):
+            name = m[1] or m[2]
+            if name not in global_args or name in redefined:
+                return f"{ref} uses {name}, which is not a global ARG left alone by every stage"
+    return ""
 
 
 def split_ref(image: str) -> tuple[str, str]:
@@ -625,7 +755,7 @@ def root_is_bootc(job: Job) -> bool:
     name = next((f for f in ("Containerfile", "Dockerfile") if (job.root / f).is_file()), None)
     if name is None:
         return False
-    text = (job.root / name).read_text(encoding="utf-8", errors="replace")
+    text = containerfile_text(job.root / name)
     found = final_stage(text, strict=False, overrides=build_arg_map(job.settings))
     return bool(found and found[1] and "bootc" in found[1].lower())
 
