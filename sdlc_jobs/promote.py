@@ -265,6 +265,10 @@ def plan_job(job: Job, version: str | None) -> tuple[list[tuple[str, str]], list
     if not job.disk:
         return moves, []
     job.notes = verify_disk(job)
+    # S5: what is published carries provenance. An image may lack a build record (a
+    # branch build, a base's labels); a disk built from one is refused before any signing.
+    if (provenance(job.labels, job.repo) or local_provenance(job)) is None:
+        cannot(f"{job.at} records no build of this repo, so its disk would carry no provenance")
     return moves, plan_disk_tags(job, moves, version)
 
 
@@ -513,6 +517,7 @@ def raw_digest_of(job: Job, tag: str) -> str | None:
 
 
 def sha256_of(raw: str) -> str:
+    """`sha256:<hex>` of a manifest's text, as the registry addresses those bytes."""
     return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -673,9 +678,8 @@ def attest_disk(job: Job, disk: Job) -> None:
         print("provenance is already attested", flush=True)
         return
     base = provenance(job.labels, job.repo) or local_provenance(job)
-    if base is None:
-        print("the image records no run of this repo's ci.yml: no disk provenance", flush=True)
-        return
+    if base is None:  # plan_job refused this before anything was signed
+        cannot(f"{job.at} records no build of this repo: no disk provenance")
     path = disk.scratch / "disk-provenance.json"
     path.write_text(json.dumps(disk_provenance(base, job)))
     attest_one(disk, "slsaprovenance1", path)

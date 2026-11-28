@@ -840,12 +840,12 @@ def test_a_disk_is_signed_and_given_the_images_sbom_and_a_provenance() -> None:
     assert p["runDetails"] == image["runDetails"]
 
 
-def test_a_disk_without_a_build_record_gets_no_provenance() -> None:
+def test_a_disk_without_a_build_record_is_refused_before_anything_is_signed() -> None:
     t = FakeTools()
     t.labels[NEW] = dict.fromkeys(promote.BUILT_LABELS, SHA)
-    disk, result = with_disk(t)
-    assert go(t, result=result) == 0
-    assert t.attested == {(NEW, "spdxjson"), (disk, "spdxjson")}
+    _, result = with_disk(t)
+    assert "no provenance" in refused(t, result=result)
+    assert not t.signs() and not t.attested and not t.copies()
 
 
 def test_a_release_moves_the_disks_version_and_latest_tags_with_a_rollback() -> None:
