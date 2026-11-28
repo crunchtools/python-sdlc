@@ -116,14 +116,16 @@ HF_ENV = {
 }
 HF_LABELS = with_labels(run=HF_RUN, builder="", workflow="")
 
+# hotfix.sh is no workflow: its own build type, naming the script at its commit.
 HF_EXPECTED = {
     "buildDefinition": {
-        "buildType": EXPECTED["buildDefinition"]["buildType"],
+        "buildType": "https://crunchtools.com/sdlc/buildtypes/hotfix/v1",
         "externalParameters": {
-            "workflow": {
-                "ref": "refs/tags/v1.2.3",
+            "script": {
                 "repository": f"https://github.com/{REPO}",
-                "path": ".github/workflows/ci.yml",
+                "path": "scripts/hotfix.sh",
+                "commit": COMMIT,
+                "ref": "refs/tags/v1.2.3",
             }
         },
         "resolvedDependencies": EXPECTED["buildDefinition"]["resolvedDependencies"],
@@ -227,6 +229,10 @@ HF_REFUSALS = [
 
 def inspect(labels: dict[str, str] | None) -> str:
     return json.dumps({"Labels": labels})
+
+
+def mod_hotfix_type() -> str:
+    return load_module().HOTFIX_BUILD_TYPE
 
 
 def load_module():
@@ -347,6 +353,15 @@ def main() -> int:
     code, err, written = run(inspect(HF_LABELS), extra_env=HF_ENV, commit=COMMIT)
     failed += check(
         "hotfix record writes the exact predicate", written == HF_EXPECTED, repr(written)
+    )
+    definition = (written or {}).get("buildDefinition", {})
+    failed += check(
+        "hotfix record carries the hotfix build type and never the workflow's",
+        definition.get("buildType") == mod_hotfix_type()
+        and definition.get("buildType") != EXPECTED["buildDefinition"]["buildType"]
+        and "workflow" not in definition.get("externalParameters", {})
+        and ".github/workflows" not in json.dumps(written),
+        repr(definition),
     )
     failed += check(
         "hotfix record exits 0 with no warning", code == 0 and "::warning::" not in err, err

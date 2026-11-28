@@ -46,6 +46,9 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # other ref (a pull request's merge ref, a dispatched branch) is not one.
 RELEASED_REF = re.compile(r"^(refs/heads/main|refs/tags/v[^/]+)$")
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
+# hotfix.sh is no workflow: its builds say so, with a build type of their own.
+HOTFIX_BUILD_TYPE = "https://crunchtools.com/sdlc/buildtypes/hotfix/v1"
+HOTFIX = "scripts/hotfix.sh"
 LOCAL_RUN = "https://github.com/{repo}/actions/runs//attempts/{attempt}"
 LOCAL_BUILDER = r"https://github\.com/{repo}/blob/([0-9a-f]{{40}})/scripts/hotfix\.sh"
 ATTEMPT = re.compile(r"[0-9]+")
@@ -84,7 +87,9 @@ def provenance(labels: dict[str, str], repo: str) -> dict | None:
         return None
     run_url, builder, workflow, commit = record
     ref = workflow.removeprefix(f"{repo}/{WORKFLOW}")
-    return predicate(repo, ref, commit, f"https://github.com/{builder}", run_url)
+    source = f"https://github.com/{repo}"
+    workflow_params = {"workflow": {"ref": ref, "repository": source, "path": WORKFLOW[:-1]}}
+    return predicate(BUILD_TYPE, workflow_params, commit, f"https://github.com/{builder}", run_url)
 
 
 def local_provenance(
@@ -116,17 +121,22 @@ def local_provenance(
     )
     if not honest:
         return None
-    return predicate(repo, ref, commit, builder, f"{builder}#attempt-{attempt}")
-
-
-def predicate(repo: str, ref: str, commit: str, builder: str, run: str) -> dict:
-    """SLSA v1: ci.yml's jobs at `ref` built `commit`, run as `run` by `builder`."""
     source = f"https://github.com/{repo}"
-    path = WORKFLOW.removesuffix("@")
+    script = {"repository": source, "path": HOTFIX, "commit": commit, "ref": ref}
+    return predicate(
+        HOTFIX_BUILD_TYPE, {"script": script}, commit, builder, f"{builder}#attempt-{attempt}"
+    )
+
+
+def predicate(build_type: str, parameters: dict, commit: str, builder: str, run: str) -> dict:
+    """SLSA v1 for either recorded build: `build_type` with its `parameters` (ci.yml's
+    workflow, or hotfix.sh at its commit) built `commit` of the repository the
+    parameters name, run as `run` by `builder`."""
+    source = next(iter(parameters.values()))["repository"]
     return {
         "buildDefinition": {
-            "buildType": BUILD_TYPE,
-            "externalParameters": {"workflow": {"ref": ref, "repository": source, "path": path}},
+            "buildType": build_type,
+            "externalParameters": parameters,
             "resolvedDependencies": [{"uri": f"git+{source}", "digest": {"gitCommit": commit}}],
         },
         "runDetails": {"builder": {"id": builder}, "metadata": {"invocationId": run}},

@@ -24,7 +24,9 @@ All notable changes to this project are documented here, following
   a1888). hotfix.sh stamps the build record `scripts/local-release.sh` gives a
   fleet build: itself as the builder, pinned to the commit it releases, an
   attempt unique to the run and no run id. `scripts/provenance.py` trusts that
-  record only from the sign step of the same run, and hotfix.sh builds from a
+  record only from the sign step of the same run, under a build type of its
+  own (`https://crunchtools.com/sdlc/buildtypes/hotfix/v1`, naming the script
+  at its commit) rather than the Actions workflow's, and hotfix.sh builds from a
   clean worktree of the commit, so no ignored file (a stale `__pycache__`)
   ships under it. With every release path now recording a build, self.sh's
   sign reads the record before it signs anything and refuses a digest with
