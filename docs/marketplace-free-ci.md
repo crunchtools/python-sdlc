@@ -27,7 +27,7 @@ that trust level does for that event in this repo.
 # workflow. Every job that holds one runs on our uncached runners, or GitHub's
 # for a fork. The Claude token never reaches a model reading a fork's PR or an
 # outsider's issue: ai gets it only for this repo's own PRs and members' issues.
-# The OpenRouter key also skips an outsider's issue, but reaches a fork's PR:
+# The OpenRouter key reaches no issue, but every PR, a fork's included:
 # Gatehouse must review it, and released code, never the PR's, passes it on.
 name: CI
 on:
@@ -65,10 +65,10 @@ jobs:
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
-    # OpenRouter reaches every PR, a fork's too: Gatehouse is a fork PR's required review. The job's one
-    # step is the digest-pinned bootstrap, which runs no PR code and passes the key only to the gatehouse
-    # CLI, never to a model. An outsider's issue gets neither key.
-    env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ (github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association) || github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository) && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}", OPENROUTER_API_KEY: "${{ (github.event_name == 'pull_request_target' || github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association)) && secrets.OPENROUTER_API_KEY || '' }}" }
+    # OpenRouter reaches every PR and no issue, a fork's PR too: Gatehouse is a fork PR's required review.
+    # The job's one step is the digest-pinned bootstrap, which runs no PR code and passes the key only to
+    # the gatehouse CLI, never to a model. An outsider's issue gets neither key.
+    env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ (github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association) || github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository) && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}", OPENROUTER_API_KEY: "${{ github.event_name == 'pull_request_target' && secrets.OPENROUTER_API_KEY || '' }}" }
     steps: *event
   image:  # one build per release: verifies the parent itself, builds FROM @digest through the socket, gates, pushes gated-<sha>
     name: sdlc / image (${{ github.event_name }})
@@ -338,10 +338,10 @@ jobs:
     container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:abf7da909c14ae7b32d0a325fce912ec1a955d7bf4032365015b0ec46d9b3296", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
-    # OpenRouter reaches every PR, a fork's too: Gatehouse is a fork PR's required review. The job's one
-    # step is the digest-pinned bootstrap, which runs no PR code and passes the key only to the gatehouse
-    # CLI, never to a model. An outsider's issue gets neither key.
-    env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ (github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association) || github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository) && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}", OPENROUTER_API_KEY: "${{ (github.event_name == 'pull_request_target' || github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association)) && secrets.OPENROUTER_API_KEY || '' }}" }
+    # OpenRouter reaches every PR and no issue, a fork's PR too: Gatehouse is a fork PR's required review.
+    # The job's one step is the digest-pinned bootstrap, which runs no PR code and passes the key only to
+    # the gatehouse CLI, never to a model. An outsider's issue gets neither key.
+    env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ (github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association) || github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository) && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}", OPENROUTER_API_KEY: "${{ github.event_name == 'pull_request_target' && secrets.OPENROUTER_API_KEY || '' }}" }
     steps: &event [{ id: e, run: sdlc event }]
   write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
     needs: [check, ai]
@@ -583,7 +583,7 @@ and nothing triggers on `release` or a closed pull request. The App-only tag rul
 | Job | Check name | Secrets (org secrets) | Runs on | Never holds |
 |---|---|---|---|---|
 | `check` | `sdlc / check (pull_request)` (required) | none; read token, `security-events`, the socket | pull_request (forks on `ubuntu-latest`), default-branch push, schedule, dispatch; our **uncached** runners otherwise | any secret |
-| `ai` | | Claude and OpenRouter keys (Claude: this repo's PRs and members' issues; OpenRouter: every PR and members' issues) | issues, `pull_request_target`; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | an App key, a write token |
+| `ai` | | Claude and OpenRouter keys (Claude: this repo's PRs and members' issues; OpenRouter: every PR, no issue) | issues, `pull_request_target`; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | an App key, a write token |
 | `image` | | quay, RHSM, registry.redhat.io | when `check` plans an image; our **uncached** runners | the cosign key |
 | `write` | | Ashigaru App key; queued | `pull_request_target`, issues, a `version` dispatch; otherwise only when a successful `check` plans `write` (a release merge, the weekly audit); never a rollback dispatch; our **uncached** runners (a fork's `pull_request_target`, or an outsider's issue, on `ubuntu-latest`) | a model |
 | `boot` | | none; read token, the socket | when `check` plans `boot` and `image` succeeded; where the secret jobs run: our **uncached** runners while the variable names exactly them | any secret |

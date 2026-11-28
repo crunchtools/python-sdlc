@@ -505,12 +505,12 @@ for label, ctx, want in guarded_routes:
     got = evaluate(GUARDED_RUNNER, ctx)
     check(f"fleet: guarded jobs run {label} on {want}", got == want, str(got))
 # ai's model keys (#294): Claude only where the run is trusted; OpenRouter on
-# every PR as well, a fork's included, because Gatehouse must review it.
+# every PR, a fork's included, because Gatehouse must review it, and no issue.
 ai_env = fleet["ai"]["env"]
 keys = {"secrets.CLAUDE_CODE_OAUTH_TOKEN": "claude", "secrets.OPENROUTER_API_KEY": "openrouter"}
 key_routes = (
     *(
-        (f"an issue by {who}", event("issues", **keys, **{author: who}), {"claude", "openrouter"})
+        (f"an issue by {who}", event("issues", **keys, **{author: who}), {"claude"})
         for who in ("OWNER", "MEMBER", "COLLABORATOR")
     ),
     *(
@@ -531,7 +531,7 @@ for label, ctx, want in key_routes:
     got = {
         name
         for secret, name in keys.items()
-        if evaluate(str(ai_env[secret.removeprefix("secrets.")]), ctx)
+        if evaluate(str(ai_env[secret.removeprefix("secrets.")]), ctx) == name
     }
     check(f"fleet: ai's model keys on {label} are {sorted(want)}", got == want, str(sorted(got)))
 for job_id in ("check", "gate"):
