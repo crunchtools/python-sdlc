@@ -12,7 +12,9 @@ Run: tests/test_job_promote.py   (needs python3 only)
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
 import io
 import json
 import subprocess
@@ -23,7 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sdlc_jobs import _core, promote
+from sdlc_jobs import _core, _disk, promote
 from sdlc_jobs._core import CannotRunError, Response, Tools
 from sdlc_jobs.image import FLEET_PUBLIC_KEY
 
@@ -70,6 +72,9 @@ class FakeTools(Tools):
         self.api_status: int | None = None  # every GitHub answer, when set
         self.headers: list[Mapping[str, str]] = []
         self.image_missing = False  # the registry has no manifest at the digest
+        self.manifests: dict[str, str] = {}  # digest -> the artifact manifest's bytes
+        self.predicates: dict[tuple[str, str], object] = {}  # (digest, type) -> what was attested
+        self.sbom_out: str | None = None  # verify-attestation's stdout over what was attested
         self.stdin: list[str | None] = []
         self.cwds: list[str | None] = []
 
@@ -88,13 +93,17 @@ class FakeTools(Tools):
         if argv[0] == "skopeo":
             return self.skopeo(argv)
         if argv[0] == "syft":
-            Path(argv[-1].split("=", 1)[1]).write_text("{}")
+            Path(argv[-1].split("=", 1)[1]).write_text('{"spdxVersion": "SPDX-2.3"}')
             return cp()
         assert argv[0] == "cosign", f"unexpected argv {argv}"
         return self.cosign(argv)
 
     def skopeo(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         target = argv[-1].removeprefix("docker://")
+        if argv[1] == "inspect" and "--raw" in argv:
+            digest = target.partition("@")[2] or self.tags.get(target.rpartition(":")[2], "")
+            raw = self.manifests.get(digest)
+            return cp(1, "", "manifest unknown") if raw is None else cp(0, raw)
         if argv[1] == "inspect" and "--format" in argv:
             tag = target.rpartition(":")[2]
             if tag == f"gated-{SHA}":
@@ -123,10 +132,17 @@ class FakeTools(Tools):
                 self.signed.append((digest, notes))
             case "attest":
                 self.attested.add((digest, kind))
+                path = Path(argv[argv.index("--predicate") + 1])
+                self.predicates[(digest, kind)] = json.loads(path.read_text())
             case "verify":
                 rc = 0 if any(d == digest and notes <= n for d, n in self.signed) else 1
             case "verify-attestation":
                 rc = 0 if (digest, kind) in self.attested else 1
+                predicate = self.predicates.get((digest, kind), {})
+                statement = base64.b64encode(json.dumps({"predicate": predicate}).encode())
+                out = json.dumps({"payload": statement.decode()}) + "\n"
+                if self.sbom_out is not None and kind == "spdxjson":
+                    out = self.sbom_out
         return cp(rc, out)
 
     def http(
@@ -694,6 +710,225 @@ def test_one_image_that_does_not_check_out_signs_none() -> None:
     t.labels[OLD] = {}
     msg = refused(t, result={"images": [one(REF), one(f"{REF}-base", OLD)]})
     assert "not this run's" in msg, msg
+
+
+# ------------------------------------------------------------------ a bootc disk
+
+DISK_BASE = _disk.Disk("raw", "xfs")
+
+
+def manifest_of(image: str = NEW, blob: str = "c" * 64) -> tuple[str, str]:
+    """(digest, bytes) of a disk artifact built from `image`, as `image` would push it."""
+    notes = _disk.notes_for(built_labels(), REF, image, DISK_BASE)
+    raw = _disk.manifest(blob, 1234, notes).decode()
+    return "sha256:" + hashlib.sha256(raw.encode()).hexdigest(), raw
+
+
+def with_disk(t: FakeTools) -> tuple[str, dict]:
+    """A disk in the registry as disk-gated-<sha>; its digest and the image's result."""
+    digest, raw = manifest_of()
+    t.manifests[digest] = raw
+    t.tags[_disk.gated_tag(SHA)] = digest
+    disk = {"ref": REF, "digest": digest, "tag": _disk.gated_tag(SHA)}
+    return digest, {**one(REF), "disk": disk}
+
+
+def held_disk(t: FakeTools, tag: str) -> str:
+    """Another disk, held by `disk-<tag>`."""
+    digest, raw = manifest_of(OLD, "e" * 64)
+    t.manifests[digest] = raw
+    t.tags[_disk.TAG_PREFIX + tag] = digest
+    return digest
+
+
+def test_no_disk_is_todays_behaviour() -> None:
+    t = FakeTools()
+    assert go(t, release="1.2.3") == 0
+    assert not any("--raw" in a for a in t.argvs)
+    assert t.copies() == ["1.2.3", "latest"] and len(t.signs()) == 1
+    assert t.attested == {(NEW, "spdxjson"), (NEW, "slsaprovenance1")}
+
+
+def test_a_disk_that_does_not_check_out_signs_nothing() -> None:
+    t = FakeTools()
+    digest, result = with_disk(t)
+    disk = result["disk"]
+    for bad in (
+        "x",
+        {**disk, "ref": f"{REF}-base"},
+        {**disk, "digest": "sha256:xyz"},
+        {**disk, "digest": digest.upper()},
+        {**disk, "tag": "disk-gated-" + OTHER_SHA},
+        {**disk, "tag": f"gated-{SHA}"},
+    ):
+        t = FakeTools()
+        with_disk(t)
+        refused(t, result={**result, "disk": bad})
+        assert not t.argvs, "a refused disk reached a tool"
+
+    def served(raw: str) -> tuple[FakeTools, dict]:
+        """A registry whose disk-gated-<sha> is `raw`, and the result naming it."""
+        t = FakeTools()
+        sha = "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+        t.manifests[sha] = raw
+        t.tags[_disk.gated_tag(SHA)] = sha
+        return t, {**result, "disk": {**disk, "digest": sha}}
+
+    doc = json.loads(manifest_of()[1])
+    doc["annotations"][_disk.BUILDER] = "quay.io/x/bib:latest"
+    unpinned = json.dumps(doc, separators=(",", ":"))
+    cases = {
+        "not a disk sdlc built": served('{"layers":[]}'),
+        "base.digest": served(manifest_of(OLD)[1]),
+        "not a digest-pinned BIB": served(unpinned),
+    }
+    t, bad = served(manifest_of()[1])
+    t.manifests[bad["disk"]["digest"]] = manifest_of(blob="f" * 64)[1]
+    cases["hashes to"] = (t, bad)
+    t, bad = served(manifest_of()[1])
+    t.tags.pop(_disk.gated_tag(SHA))
+    cases["is missing"] = (t, bad)
+    t, bad = served(manifest_of()[1])
+    t.tags[_disk.gated_tag(SHA)] = held_disk(t, "x")
+    cases["not the disk"] = (t, bad)
+    for want, (t, given) in cases.items():
+        msg = refused(t, result=given)
+        assert want in msg, (want, msg)
+        assert not any(a[:2] == ["cosign", "attest"] for a in t.argvs)
+
+
+def test_a_disk_is_signed_and_given_the_images_sbom_and_a_provenance() -> None:
+    t = FakeTools()
+    disk, result = with_disk(t)
+    assert go(t, release="1.2.3", result=result) == 0
+    signed = dict(t.signed)
+    assert signed[disk] == {f"repo={REPO}", "version=1.2.3"} and NEW in signed
+    assert t.attested == {
+        (NEW, "spdxjson"),
+        (NEW, "slsaprovenance1"),
+        (disk, "spdxjson"),
+        (disk, "slsaprovenance1"),
+    }
+    assert t.predicates[(disk, "spdxjson")] == t.predicates[(NEW, "spdxjson")]
+    assert not any(a[0] == "syft" and disk in a[2] for a in t.argvs)
+    sbom_reads = [a for a in t.argvs if a[1:2] == ["verify-attestation"] and a[-1].endswith(NEW)]
+    assert sbom_reads
+    p = t.predicates[(disk, "slsaprovenance1")]
+    assert isinstance(p, dict)
+    build, image = p["buildDefinition"], t.predicates[(NEW, "slsaprovenance1")]
+    assert isinstance(image, dict)
+    assert build["buildType"] == promote.DISK_BUILD_TYPE
+    assert (
+        build["externalParameters"]["workflow"]
+        == image["buildDefinition"]["externalParameters"]["workflow"]
+    )
+    assert build["externalParameters"]["disk"] == {
+        "type": "raw",
+        "rootfs": "xfs",
+        "builder": _disk.BIB,
+    }
+    assert build["resolvedDependencies"] == [
+        {"uri": f"git+https://github.com/{REPO}", "digest": {"gitCommit": SHA}},
+        {"uri": f"oci://{REF}", "digest": {"sha256": "a" * 64}},
+        {
+            "uri": "oci://quay.io/centos-bootc/bootc-image-builder",
+            "digest": {"sha256": _disk.BIB.rpartition("sha256:")[2]},
+        },
+    ]
+    assert p["runDetails"] == image["runDetails"]
+
+
+def test_a_disk_without_a_build_record_gets_no_provenance() -> None:
+    t = FakeTools()
+    t.labels[NEW] = dict.fromkeys(promote.BUILT_LABELS, SHA)
+    disk, result = with_disk(t)
+    assert go(t, result=result) == 0
+    assert t.attested == {(NEW, "spdxjson"), (disk, "spdxjson")}
+
+
+def test_a_release_moves_the_disks_version_and_latest_tags_with_a_rollback() -> None:
+    t = FakeTools()
+    disk, result = with_disk(t)
+    t.tags["latest"] = OLD
+    t.labels[OLD] = {"org.opencontainers.image.version": "1.2.2"}
+    old = held_disk(t, "latest")
+    assert go(t, release="1.2.3", result=result) == 0
+    assert t.tags["disk-1.2.3"] == disk and t.tags["disk-latest"] == disk
+    assert t.tags["disk-rollback-latest"] == old
+    copies = [a for a in t.argvs if a[:2] == ["skopeo", "copy"] and ":disk-" in a[-1]]
+    assert len(copies) == 3 and all("--preserve-digests" in a for a in copies)
+    assert f"docker://{REF}@{old}" in copies[1] and f"docker://{REF}@{disk}" in copies[2]
+    assert t.copies().index("disk-rollback-latest") < t.copies().index("disk-latest")
+
+
+def test_a_non_release_moves_only_disk_latest() -> None:
+    t = FakeTools()
+    disk, result = with_disk(t)
+    assert go(t, result=result) == 0
+    assert t.tags["disk-latest"] == disk and "disk-1.2.3" not in t.tags
+
+
+def test_a_latest_that_stays_leaves_disk_latest() -> None:
+    t = FakeTools()
+    disk, result = with_disk(t)
+    t.tags["latest"] = OLD
+    t.labels[OLD] = {"org.opencontainers.image.version": "2.0.0"}
+    t.release_tags["2.0.0"] = OTHER_SHA
+    t.labels[NEW] = built_labels("1.9.1")
+    other = held_disk(t, "latest")
+    assert go(t, release="1.9.1", result=result) == 0
+    assert t.tags["disk-latest"] == other and t.tags["disk-1.9.1"] == disk
+
+
+def test_a_rerun_with_everything_in_place_does_nothing() -> None:
+    t = FakeTools()
+    _, result = with_disk(t)
+    assert go(t, release="1.2.3", result=result) == 0
+    t.argvs.clear()
+    assert go(t, release="1.2.3", result=result) == 0
+    assert not t.signs() and not t.copies()
+    assert not any(a[:2] == ["cosign", "attest"] or a[0] == "syft" for a in t.argvs)
+
+
+def test_a_disk_version_tag_held_elsewhere_is_never_moved() -> None:
+    t = FakeTools()
+    _, result = with_disk(t)
+    t.tags["1.2.3"] = NEW  # the image's is already here: nothing moved it this run
+    old = held_disk(t, "1.2.3")
+    assert "never moved" in refused(t, release="1.2.3", result=result)
+    assert t.tags["disk-1.2.3"] == old
+
+
+def test_a_first_release_never_moves_a_held_disk_version_tag() -> None:
+    """The image's version tag is free, so this run moves it; the disk's is not a rebuild."""
+    t = FakeTools()
+    _, result = with_disk(t)
+    old = held_disk(t, "1.2.3")
+    assert "never moved" in refused(t, release="1.2.3", result=result)
+    assert t.tags["disk-1.2.3"] == old
+
+
+def test_a_rebuild_of_the_release_moves_the_disks_version_tag() -> None:
+    t = FakeTools()
+    disk, result = with_disk(t)
+    t.release_tags["1.2.3"] = SHA
+    t.tags["1.2.3"] = OLD
+    held_disk(t, "1.2.3")
+    assert go(t, result=result) == 0
+    assert t.tags["disk-1.2.3"] == disk and t.tags["1.2.3"] == NEW
+
+
+def test_a_disk_without_an_image_sbom_is_a_2() -> None:
+    t = FakeTools()
+    disk, result = with_disk(t)
+    t.sbom_out = ""
+    msg = ""
+    try:
+        go(t, result=result)
+    except CannotRunError as exc:
+        msg = str(exc)
+    assert "no verified SBOM" in msg, msg
+    assert not any(a[:2] == ["cosign", "attest"] and a[-1].endswith(disk) for a in t.argvs)
 
 
 def main() -> int:

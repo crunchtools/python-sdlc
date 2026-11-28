@@ -29,17 +29,27 @@ the key in its environment; only `cosign sign` and `cosign attest` see it. A bui
 `scripts/local-release.sh` ran records no Actions run; its provenance names that script
 as the builder instead, and only when the image's own run label is this very local
 run's (`local_provenance`).
+
+A bootc image that declares a disk (sdlc_jobs/_disk.py) hands on its artifact as
+`disk` in the image's result, and the disk rides the image: it is re-validated before
+anything is signed (manifest bytes at the digest, annotations naming this commit and
+this image digest, `disk-gated-<sha>` on it), signed like the image, and given the
+image's own SBOM, since its filesystem is the image's tree, and a provenance that
+names the image and BIB it was built from. It takes `disk-<tag>` for each tag the
+image holds after this run, never moving a version tag the image did not move.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from sdlc_jobs._core import (
@@ -57,6 +67,14 @@ from sdlc_jobs._core import (
     plan,
     step,
 )
+from sdlc_jobs._disk import (
+    BUILDER,
+    DISK_ROOTFS,
+    DISK_TYPE,
+    TAG_PREFIX,
+    check_manifest,
+    gated_tag,
+)
 from sdlc_jobs.image import ORG, QUAY
 
 # The repo's own `version` first: a base sets both, and a repo that labels its version
@@ -66,6 +84,7 @@ MISSING = re.compile(r"manifest unknown|not found|no such|name unknown", re.IGNO
 COMMIT = re.compile(r"[0-9a-f]{40}")
 RELEASED_REF = re.compile(r"refs/heads/.+")
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
+DISK_BUILD_TYPE = "https://crunchtools.com/sdlc/buildtypes/bootc-disk/v1"
 WORKFLOW = ".github/workflows/ci.yml@"
 # local-release.sh is no workflow: its builds say so, with a build type of their own.
 LOCAL_BUILD_TYPE = "https://crunchtools.com/sdlc/buildtypes/local-release/v1"
@@ -80,6 +99,7 @@ NOT_FOUND = 404
 EVENTS = ("push", "schedule", "workflow_dispatch")  # image's `if:` less pull_request
 BUILT_LABELS = ("org.opencontainers.image.revision", "com.crunchtools.build.commit")
 SECRET_KEYS = ("COSIGN_PRIVATE_KEY", "COSIGN_PASSWORD")
+UNDECODABLE = (ValueError, KeyError, TypeError)  # an attestation line that is no statement
 
 
 # cosign refuses to read an attachment over 128 MiB by default, after it was
@@ -97,6 +117,8 @@ class Job:
     digest: str
     scratch: Path
     labels: dict[str, str] = field(default_factory=dict)
+    disk: str = ""  # the digest of the image's disk artifact, "" for an image without one
+    notes: dict[str, str] = field(default_factory=dict)  # the disk's annotations, checked
 
     @property
     def at(self) -> str:
@@ -133,6 +155,11 @@ def parse_json(raw: str | None, what: str) -> dict:
 
 def validate_image(env: Mapping[str, str], repo: str) -> list[tuple[str, str]]:
     """(ref, digest) of each image `image` built, after every check it does not get to skip."""
+    return [(ref, digest) for ref, digest, _ in validate_images(env, repo)]
+
+
+def validate_images(env: Mapping[str, str], repo: str) -> list[tuple[str, str, str]]:
+    """(ref, digest, disk digest or "") of each image `image` built, checked."""
     doc = parse_json(env.get("SDLC_IMAGE_RESULT"), "SDLC_IMAGE_RESULT")
     docs = doc.get("images") if "images" in doc else [doc]
     if not isinstance(docs, list) or not docs or not all(isinstance(d, dict) for d in docs):
@@ -140,7 +167,7 @@ def validate_image(env: Mapping[str, str], repo: str) -> list[tuple[str, str]]:
     own = repo.rpartition("/")[2]
     allowed = {f"{QUAY}/{ORG}/{n}" for n in (own, *EXTRA_IMAGES.get(repo, ()))}
     sha = env.get("GITHUB_SHA", "")
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
     for one in docs:
         ref = one.get("ref")
         if not (isinstance(one.get("digest"), str) and DIGEST.fullmatch(one["digest"])):
@@ -149,10 +176,25 @@ def validate_image(env: Mapping[str, str], repo: str) -> list[tuple[str, str]]:
             cannot(f"image's ref {ref!r} is not exactly one of {', '.join(sorted(allowed))}")
         if not COMMIT.fullmatch(sha) or one.get("sha") != sha:
             cannot(f"image built {one.get('sha')!r}, not this run's commit {sha!r}")
-        if ref in (r for r, _ in out):
+        if ref in (r for r, _, _ in out):
             cannot(f"image's result names {ref} twice")
-        out.append((ref, one["digest"]))
+        out.append((ref, one["digest"], disk_digest(one, sha) if "disk" in one else ""))
     return out
+
+
+def disk_digest(one: Mapping, sha: str) -> str:
+    """The digest of the disk an image's result carries; anything malformed is a 2."""
+    disk = one.get("disk")
+    if not isinstance(disk, dict):
+        cannot("image's disk is not an object")
+    if disk.get("ref") != one.get("ref"):
+        cannot(f"the disk's ref {disk.get('ref')!r} is not its image's {one.get('ref')!r}")
+    digest = disk.get("digest")
+    if not (isinstance(digest, str) and DIGEST.fullmatch(digest)):
+        cannot("the disk's digest is not a well-formed sha256 digest")
+    if disk.get("tag") != gated_tag(sha):
+        cannot(f"the disk's tag {disk.get('tag')!r} is not {gated_tag(sha)}")
+    return digest
 
 
 def release_version(env: Mapping[str, str], planned: object) -> str | None:
@@ -188,7 +230,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
         cannot("GITHUB_REPOSITORY is not owner/name")
     if not env.get("GITHUB_TOKEN"):
         cannot("GITHUB_TOKEN is required: a tag read without it fails open on a private repo")
-    built = validate_image(env, repo)
+    built = validate_images(env, repo)
     # The digest's own boot proof (sdlc_jobs/boot.py) passed. A fleet file older than
     # the boot job maps no SDLC_BOOT: there the keys stay unenforced, as before it.
     if plan(env).get("boot") and "SDLC_BOOT" in env:
@@ -197,24 +239,33 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     scratch = Path(tempfile.mkdtemp(prefix="sdlc-promote-", dir=env.get("RUNNER_TEMP") or None))
     scratch.chmod(0o700)
     (scratch / "docker").mkdir()
-    jobs = [Job(tools, env, repo, ref, digest, scratch) for ref, digest in built]
+    jobs = [Job(tools, env, repo, ref, digest, scratch, disk=disk) for ref, digest, disk in built]
     try:
         login(jobs[0])
-        # Every image is checked, and its tag moves decided, before anything is signed.
-        planned = []
-        for job in jobs:
-            job.labels = inspect_labels(job)
-            verify_built(job)
-            if version:
-                refuse_mislabelled(job, version)
-            planned.append((job, plan_tags(job, version)))
-        for job, moves in planned:
+        # Every image and disk is checked, and its tag moves decided, before anything is signed.
+        planned = [(job, *plan_job(job, version)) for job in jobs]
+        for job, moves, disk_moves in planned:
             sign(job, version)
             attest(job)
             move_tags(job, moves)
+            if job.disk:
+                promote_disk(job, version, disk_moves)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
     return CLEAN
+
+
+def plan_job(job: Job, version: str | None) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Check one image and its disk; the image's tag copies and the disk's, nothing yet done."""
+    job.labels = inspect_labels(job)
+    verify_built(job)
+    if version:
+        refuse_mislabelled(job, version)
+    moves = plan_tags(job, version)
+    if not job.disk:
+        return moves, []
+    job.notes = verify_disk(job)
+    return moves, plan_disk_tags(job, moves, version)
 
 
 def login(job: Job) -> None:
@@ -437,15 +488,32 @@ def predicate(build_type: str, parameters: dict, commit: str, builder: str, run:
 # ------------------------------------------------------------------ tags
 
 
-def digest_of(job: Job, tag: str) -> str | None:
-    """What `tag` resolves to; None when it does not exist, 2 when it cannot be read."""
-    proc = job.run(["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{job.ref}:{tag}"])
+def read_tag(job: Job, tag: str, *flags: str) -> str | None:
+    """`skopeo inspect` of a tag; None when it does not exist, 2 when it cannot be read."""
+    proc = job.run(["skopeo", "inspect", *flags, f"docker://{job.ref}:{tag}"])
     if proc.returncode == 0:
-        return proc.stdout.strip()
+        return proc.stdout
     if MISSING.search(proc.stderr or ""):
         return None
     cannot(f"cannot read {job.ref}:{tag} to guard it: {(proc.stderr or '').strip()}")
     return None
+
+
+def digest_of(job: Job, tag: str) -> str | None:
+    """What `tag` resolves to; None when it does not exist, 2 when it cannot be read."""
+    out = read_tag(job, tag, "--format", "{{.Digest}}")
+    return None if out is None else out.strip()
+
+
+def raw_digest_of(job: Job, tag: str) -> str | None:
+    """As digest_of, for an artifact: the sha256 of its manifest's bytes, because its
+    config is the OCI empty descriptor and `--format {{.Digest}}` wants an image config."""
+    out = read_tag(job, tag, "--raw")
+    return None if out is None else sha256_of(out)
+
+
+def sha256_of(raw: str) -> str:
+    return "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
 
 
 def copy_to(job: Job, source: str, tag: str) -> None:
@@ -528,3 +596,131 @@ def move_tags(job: Job, moves: list[tuple[str, str]]) -> None:
         print("every tag already points here", flush=True)
     for source, tag in moves:
         copy_to(job, source, tag)
+
+
+# ------------------------------------------------------------------ the disk
+
+
+def verify_disk(job: Job) -> dict[str, str]:
+    """The disk at its digest is a manifest `image` pushed for this commit and this image."""
+    sha = job.env.get("GITHUB_SHA", "")
+    step(f"the disk at {job.ref}@{job.disk}")
+    raw = job.must(["skopeo", "inspect", "--raw", f"docker://{job.ref}@{job.disk}"])
+    if sha256_of(raw) != job.disk:
+        cannot(f"the manifest at {job.ref}@{job.disk} hashes to {sha256_of(raw)}")
+    notes = check_manifest(raw, job.ref, job.digest, sha)
+    gated = raw_digest_of(job, gated_tag(sha))
+    if gated != job.disk:
+        cannot(f"{job.ref}:{gated_tag(sha)} is {gated or 'missing'}, not the disk {job.disk}")
+    return notes
+
+
+def plan_disk_tags(
+    job: Job, moves: list[tuple[str, str]], version: str | None
+) -> list[tuple[str, str]]:
+    """(source, tag) copies the disk earns: `disk-<T>` for each tag T the image holds
+    after this run (R3, one build under the image's version), decided before any signing.
+
+    A disk version tag held by another disk moves only when the image's own moved in this
+    run, a rebuild of the release; `disk-latest` is kept as `disk-rollback-latest` first.
+    """
+    moved = {tag for _, tag in moves}
+    wanted = dict.fromkeys([*(t for _, t in moves), *([version] if version else []), "latest"])
+    copies: list[tuple[str, str]] = []
+    for tag in (t for t in wanted if t != "rollback-latest"):
+        if tag not in moved and digest_of(job, tag) != job.digest:
+            continue  # the image does not hold this tag (latest stays on a newer version)
+        held = raw_digest_of(job, TAG_PREFIX + tag)
+        if held == job.disk:
+            continue
+        # A rebuild moves a version tag the image already had; a first release does not.
+        rebuild = tag in moved and digest_of(job, tag) is not None
+        if held and SEMVER.fullmatch(tag) and not rebuild:
+            cannot(f"{job.ref}:{TAG_PREFIX}{tag} is held by {held}: a version tag is never moved")
+        if held and tag == "latest":
+            copies.append((f"{job.ref}@{held}", f"{TAG_PREFIX}rollback-latest"))
+        copies.append((f"{job.ref}@{job.disk}", TAG_PREFIX + tag))
+    return copies
+
+
+def promote_disk(job: Job, version: str | None, copies: list[tuple[str, str]]) -> None:
+    """Sign the disk, attest the image's SBOM and a provenance of its own, move its tags."""
+    disk = replace(job, digest=job.disk)
+    sign(disk, version)
+    attest_disk(job, disk)
+    step("disk tags")
+    if not copies:
+        print("every disk tag already points here", flush=True)
+    for source, tag in copies:
+        argv = ["skopeo", "copy", "--preserve-digests", f"docker://{source}"]
+        job.must([*argv, f"docker://{job.ref}:{tag}"])
+        if raw_digest_of(job, tag) != source.rpartition("@")[2]:
+            cannot(f"{job.ref}:{tag} does not resolve to the disk after the copy")
+        print(f"  {job.ref}:{tag} -> {source.rpartition('@')[2]}", flush=True)
+
+
+def attest_disk(job: Job, disk: Job) -> None:
+    """The disk's SBOM is its image's, its provenance names the image and BIB; each only
+    when the disk lacks it."""
+    step("attest the disk")
+    if verifies(disk, "--type", "spdxjson", kind="verify-attestation"):
+        print("an SBOM is already attested", flush=True)
+    else:
+        path = disk.scratch / "disk-sbom.spdx.json"
+        path.write_text(json.dumps(image_sbom(job)))
+        attest_one(disk, "spdxjson", path)
+    if verifies(disk, "--type", "slsaprovenance1", kind="verify-attestation"):
+        print("provenance is already attested", flush=True)
+        return
+    base = provenance(job.labels, job.repo) or local_provenance(job)
+    if base is None:
+        print("the image records no run of this repo's ci.yml: no disk provenance", flush=True)
+        return
+    path = disk.scratch / "disk-provenance.json"
+    path.write_text(json.dumps(disk_provenance(base, job)))
+    attest_one(disk, "slsaprovenance1", path)
+
+
+def image_sbom(job: Job) -> dict:
+    """The SPDX predicate the image's own SBOM attestation verifies with; no SBOM is a 2."""
+    pub = job.scratch / "fleet.pub"
+    pub.write_text(FLEET_PUBLIC_KEY)
+    argv = ["cosign", "verify-attestation", "--insecure-ignore-tlog", "--key", str(pub)]
+    proc = job.run([*argv, "--type", "spdxjson", job.at])
+    for line in proc.stdout.splitlines() if proc.returncode == 0 else []:
+        try:
+            statement = json.loads(base64.b64decode(json.loads(line)["payload"]))
+            predicate_ = statement["predicate"]
+        except UNDECODABLE:
+            continue
+        if isinstance(predicate_, dict):
+            return predicate_
+    cannot(f"{job.at} has no verified SBOM to give its disk")
+    return {}
+
+
+def disk_provenance(base: dict, job: Job) -> dict:
+    """The image's predicate as a disk's: the disk it asked for, the image and BIB it ran."""
+    builder = job.notes[BUILDER]
+    bib = builder.partition("@")[0]
+    build = base["buildDefinition"]
+    params = {
+        **build["externalParameters"],
+        "disk": {
+            "type": job.notes[DISK_TYPE],
+            "rootfs": job.notes[DISK_ROOTFS],
+            "builder": builder,
+        },
+    }
+    inputs = [
+        {"uri": f"oci://{job.ref}", "digest": {"sha256": job.digest.removeprefix("sha256:")}},
+        {"uri": f"oci://{bib}", "digest": {"sha256": builder.rpartition("sha256:")[2]}},
+    ]
+    return {
+        "buildDefinition": {
+            "buildType": DISK_BUILD_TYPE,
+            "externalParameters": params,
+            "resolvedDependencies": [*build["resolvedDependencies"], *inputs],
+        },
+        "runDetails": base["runDetails"],
+    }

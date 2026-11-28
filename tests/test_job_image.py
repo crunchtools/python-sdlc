@@ -12,18 +12,20 @@ Run: tests/test_job_image.py   (needs python3 only)
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Unpack
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sdlc_jobs import _boot, _core, image, promote
+from sdlc_jobs import _boot, _core, _disk, image, promote
 from sdlc_jobs._core import CannotRunError, Response, RunOptions, Tools
 
 REPO = "crunchtools/demo"
@@ -135,6 +137,13 @@ class FakeTools(Tools):
         self.landed = ""  # what gated-<sha> resolves to after a push
         self.http_calls: list[str] = []
         self.apparmor = ""  # what `podman info` says of .Host.Security.AppArmorEnabled
+        self.cwds: list[str] = []  # where each `inspect <this container>` was asked from
+        self.config = ""  # the BIB config file's text, read when BIB ran
+        self.size = "1000000000"  # what `podman image inspect --format {{.Size}}` prints
+        self.report = f"uid_map: {_disk.FULL_UID_MAP}\nroot: 1\nmnt: {100 * _disk.GIB}\n"
+        self.bib_rc = 0  # what bootc-image-builder exits
+        self.packed = f"{'d' * 64} 1234\n"  # what PACK prints
+        self.disk_digest: str | None = None  # what the PUSH helper prints; None, the manifest's
 
     def run(self, argv: list[str], **kw: Unpack[RunOptions]) -> subprocess.CompletedProcess[str]:
         done = self._answer(argv, **kw)
@@ -187,6 +196,7 @@ class FakeTools(Tools):
         up = self.smoke_up == "true"
         match sub[0]:
             case "inspect" if len(sub) == INSPECT_ME:
+                self.cwds.append(cwd)
                 mounts = [{"Destination": cwd, "Source": HOST}]
                 out = json.dumps([{"Mounts": mounts, "Image": "imgid"}])
             case "build":
@@ -199,6 +209,8 @@ class FakeTools(Tools):
                 out = (
                     ("true 0 false" if up else "false 1 false") if state_query else str(up).lower()
                 )
+            case "info" if "{{.Store.GraphRoot}}" in sub:
+                out = "/graph\n"
             case "info":
                 out = self.apparmor + "\n"
             case "push":
@@ -216,6 +228,8 @@ class FakeTools(Tools):
             case "image":
                 rc = self.image_inspect_rc
                 out = self.healthcheck if "{{json .Config.Healthcheck}}" in sub else "{}"
+                if "{{.Size}}" in sub:
+                    out = self.size + "\n"
             case "inspect":
                 rc, out = self.boot_inspect_rc, self.boot_running
             case "rm" if self.rm_rc.get(sub[-1]):
@@ -234,11 +248,40 @@ class FakeTools(Tools):
 
     def podman_run(self, sub: list[str]) -> subprocess.CompletedProcess[str]:
         """A gate's `run`, or the boot gate's server and its mcp-http client."""
+        if sub[-1] in (_disk.PREPARE, _disk.PACK, _disk.PUSH, _disk.WIPE):  # a disk helper
+            return self.disk_helper(sub)
+        if _disk.BIB in sub:
+            name = next(w for w in sub if w.endswith(":/config.toml:ro")).split(":")[0]
+            for where in self.cwds:
+                if (Path(where) / Path(name).name).is_file():
+                    self.config = (Path(where) / Path(name).name).read_text()
+            return cp(self.bib_rc)
         if "python3" in sub:  # the mcp-http client, in the server's namespace
             return cp(self.http_rc, self.http_out)
         if "--name" in sub and sub[sub.index("--name") + 1].startswith("sdlc-bootstrap-"):
             return cp(self.boot_rc)
         return cp(self.scan_rc if "-d" not in sub else 0)
+
+    def disk_helper(self, sub: list[str]) -> subprocess.CompletedProcess[str]:
+        script = sub[-1]
+        if script == _disk.PREPARE:
+            return cp(0, self.report)
+        if script == _disk.PACK:
+            return cp(0, self.packed)
+        if script == _disk.PUSH:
+            manifest = next(w for w in sub if w.startswith("MANIFEST=")).split("=", 1)[1]
+            mine = "sha256:" + hashlib.sha256(manifest.encode()).hexdigest()
+            return cp(0, "noise\n" + (self.disk_digest or mine) + "\n")
+        return cp(0)
+
+    def disk_runs(self) -> list[list[str]]:
+        """The disk's argvs, in order: pull, PREPARE, BIB, PACK, PUSH and WIPE."""
+        scripts = (_disk.PREPARE, _disk.PACK, _disk.PUSH, _disk.WIPE)
+        return [
+            a
+            for a in self.argvs
+            if a[-1] in scripts or _disk.BIB in a or (a[4:5] == ["pull"] and "@" in a[-1])
+        ]
 
     def skopeo(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         rc, out = 0, ""
@@ -1769,21 +1812,227 @@ def test_a_parent_another_repo_publishes_is_verified_as_that_repo() -> None:
     assert verify[verify.index("-a") + 1] == "repo=crunchtools/rotv", verify
 
 
-def main() -> int:
-    tests: list[Callable[[], None]] = [v for k, v in globals().items() if k.startswith("test_")]
-    failed = 0
-    for test in tests:
-        try:
-            test()
-            print(f"ok   {test.__name__}")
-        except Exception as exc:
-            failed += 1
-            print(f"FAIL {test.__name__}: {type(exc).__name__}: {exc}")
-    return 1 if failed else 0
+# ------------------------------------------------------------------ disk (#273)
+
+HOSTED = {"RUNNER_ENVIRONMENT": "github-hosted"}
+DISK = "[tool.sdlc.image.disk]\n"
+KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGl0ZXN0a2V5"
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+def disk_go(
+    t: FakeTools,
+    body: str = DISK,
+    files: dict[str, str] | None = None,
+    extra: Mapping[str, str | None] | None = HOSTED,
+) -> tuple[int, dict | None]:
+    return go(t, QUAY_PARENT, files={"pyproject.toml": body, **(files or {})}, extra=extra)
+
+
+def disk_refused(
+    t: FakeTools,
+    body: str = DISK,
+    files: dict[str, str] | None = None,
+    extra: Mapping[str, str | None] | None = HOSTED,
+) -> str:
+    try:
+        disk_go(t, body, files, extra)
+    except CannotRunError as exc:
+        return str(exc)
+    raise AssertionError("expected a refusal (exit 2)")
+
+
+def envs_of(argv: list[str]) -> dict[str, str]:
+    return {
+        argv[i + 1].split("=", 1)[0]: argv[i + 1].split("=", 1)[1]
+        for i, w in enumerate(argv)
+        if w == "-e"
+    }
+
+
+def test_no_disk_declared_runs_no_disk_argv() -> None:
+    t = FakeTools()
+    rc, result = go(t, QUAY_PARENT)
+    assert rc == 0 and result is not None and "disk" not in result, t.log
+    assert not t.disk_runs() and not any(a[4:5] == ["pull"] for a in t.argvs)
+    assert not any("{{.Store.GraphRoot}}" in a for a in t.argvs)
+    assert not any(_disk.BIB in w for a in t.argvs for w in a)
+
+
+def test_a_declared_disk_builds_from_the_digest_and_pushes_the_artifact() -> None:
+    t = FakeTools()
+    rc, result = disk_go(t)
+    assert rc == 0 and result is not None, t.log
+    pinned = f"{OWN}@{PUSHED}"
+    runs = t.disk_runs()
+    assert [a[4] for a in runs] == ["pull", "run", "run", "run", "run", "run"], runs
+    pull, prepare, bib, pack, push, wipe = runs
+    assert pull[4:] == ["pull", "--authfile", pull[6], pinned] and pull[6].endswith("auth.json")
+    assert t.argvs.index(pull) > t.argvs.index(next(a for a in t.argvs if a[4:5] == ["push"]))
+    assert any(a[4:] == ["image", "inspect", "--format", "{{.Size}}", pinned] for a in t.argvs)
+    # PREPARE: privileged, / read-only as /host, /mnt, on sdlc's own image
+    assert "--privileged" in prepare and "--network=none" in prepare
+    assert prepare[prepare.index("/:/host:ro") - 1] == "-v"
+    assert f"{_disk.MNT}:{_disk.MNT}" in prepare and prepare[-2:] == ["-c", _disk.PREPARE]
+    assert prepare[prepare.index("--entrypoint") + 1 :][:2] == ["sh", "imgid"]
+    work = "/mnt/sdlc-disk-sdlc-cache-7-1-demo"
+    assert envs_of(prepare) == {"W": work}
+    # BIB: pinned digest, the four work mounts and the graph root, the image by digest
+    assert bib.count(_disk.BIB) == 1 and "--privileged" in bib
+    assert "apparmor=unconfined" not in bib
+    for mount in (
+        f"{HOST}/disk-demo.toml:/config.toml:ro",
+        f"{work}/output:/output",
+        f"{work}/var-tmp:/var/tmp",
+        f"{work}/store:/store",
+        "/graph:/var/lib/containers/storage",
+    ):
+        assert mount in bib, mount
+    assert bib[bib.index(_disk.BIB) :] == [
+        _disk.BIB,
+        "build",
+        "--type",
+        "raw",
+        "--rootfs",
+        "xfs",
+        pinned,
+    ]
+    # PACK: no privilege
+    assert "--privileged" not in pack and "--network=none" in pack and envs_of(pack) == {"W": work}
+    # PUSH: the blob, the manifest and where it goes
+    env = envs_of(push)
+    assert env["DEST"] == f"{OWN}:disk-gated-{SHA}" and env["BLOB"] == "d" * 64
+    assert env["EMPTY_HEX"] == _disk.EMPTY_DIGEST.split(":")[1] and env["W"] == work
+    raw = env["MANIFEST"].encode()
+    assert env["MANIFEST_HEX"] == hashlib.sha256(raw).hexdigest()
+    assert env["INDEX"].encode() == _disk.index(raw)
+    assert f"{HOST}/auth.json:/auth.json:ro" in push and "--privileged" not in push
+    notes = json.loads(raw)["annotations"]
+    assert notes[_disk.BASE_DIGEST] == PUSHED and notes[_disk.REVISION] == SHA
+    assert notes[_disk.BASE_NAME] == OWN and notes[_disk.BUILDER] == _disk.BIB
+    # WIPE, last
+    assert envs_of(wipe) == {"W": work} and "/mnt:/mnt" in wipe and wipe == t.disk_runs()[-1]
+    assert result["disk"] == {
+        "ref": OWN,
+        "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "tag": f"disk-gated-{SHA}",
+    }
+    assert result["digest"] == PUSHED and result["tag"] == f"gated-{SHA}"
+
+
+def test_an_apparmor_engine_runs_bib_unconfined() -> None:
+    t = FakeTools()
+    t.apparmor = "true"
+    assert disk_go(t)[0] == 0, t.log
+    bib = next(a for a in t.argvs if _disk.BIB in a)
+    assert "apparmor=unconfined" in bib and "label=type:unconfined_t" in bib
+
+
+def test_a_disk_on_a_self_hosted_or_unset_runner_is_refused_before_anything_runs() -> None:
+    for extra in ({"RUNNER_ENVIRONMENT": "self-hosted"}, {"RUNNER_ENVIRONMENT": None}, {}):
+        t = FakeTools()
+        assert "GitHub-hosted" in disk_refused(t, extra=extra)
+        assert not t.argvs, t.argvs  # no login, no build, no push
+
+
+def test_a_disk_in_a_repo_entry_is_checked_and_builds_that_image() -> None:
+    body = (
+        '[[tool.sdlc.images]]\nname = "demo-base"\ncontainerfile = "Containerfile.base"\n'
+        '[tool.sdlc.images.disk]\nrootfs = "ext4"\n'
+    )
+    t = FakeTools()
+    rc, result = go(
+        t,
+        QUAY_PARENT,
+        files={"pyproject.toml": body, "Containerfile.base": BASE_FILE},
+        extra=HOSTED,
+    )
+    assert rc == 0 and result is not None, t.log
+    assert [i["name"] for i in result["images"] if "disk" in i] == ["demo-base"]
+    bib = next(a for a in t.argvs if _disk.BIB in a)
+    assert bib[bib.index("--rootfs") + 1] == "ext4"
+    assert bib[-1].startswith(f"{OWN}-base@")
+
+
+def test_a_uid_map_that_is_not_the_whole_range_is_refused() -> None:
+    t = FakeTools()
+    t.report = f"uid_map: 0 0 1\nroot: 1\nmnt: {100 * _disk.GIB}\n"
+    assert "uid_map" in disk_refused(t)
+    assert not any(_disk.BIB in a for a in t.argvs) and any(a[-1] == _disk.WIPE for a in t.argvs)
+
+
+def test_a_mnt_too_small_is_refused() -> None:
+    t = FakeTools()
+    t.report = f"uid_map: {_disk.FULL_UID_MAP}\nroot: 1\nmnt: {2 * _disk.GIB}\n"
+    assert "/mnt has 2.0 GiB" in disk_refused(t)
+    assert not any(_disk.BIB in a for a in t.argvs)
+
+
+def test_an_unparsable_image_size_is_refused() -> None:
+    t = FakeTools()
+    t.size = "big"
+    assert "size" in disk_refused(t)
+    assert not any(_disk.BIB in a for a in t.argvs)
+
+
+def test_a_bib_failure_is_a_refusal_and_the_work_is_still_wiped() -> None:
+    t = FakeTools()
+    t.bib_rc = 1
+    assert "bootc-image-builder exited 1" in disk_refused(t)
+    assert not any(a[-1] == _disk.PACK for a in t.argvs)
+    assert t.disk_runs()[-1][-1] == _disk.WIPE
+
+
+def test_a_pack_with_no_digest_and_size_is_refused() -> None:
+    for out in ("", "oops\n", f"{'d' * 64}\n", f"{'d' * 63} 12\n", f"{'d' * 64} x\n"):
+        t = FakeTools()
+        t.packed = out
+        assert "packing the disk" in disk_refused(t), out
+        assert not any(a[-1] == _disk.PUSH for a in t.argvs)
+
+
+def test_a_pushed_digest_that_is_not_the_manifests_is_refused() -> None:
+    t = FakeTools()
+    t.disk_digest = "sha256:" + "e" * 64
+    assert "not the manifest's" in disk_refused(t)
+    assert any(a[-1] == _disk.WIPE for a in t.argvs)
+
+
+def test_a_bad_disk_table_is_refused_before_anything_runs() -> None:
+    bad = {
+        "an unknown key": DISK + 'entrypoint = "sh"\n',
+        "a bad type": DISK + 'type = "qcow2"\n',
+        "a bad rootfs": DISK + 'rootfs = "btrfs"\n',
+        "a keys file out of the checkout": DISK + 'root-keys = "../keys"\n',
+        "an absolute keys file": DISK + 'root-keys = "/etc/shadow"\n',
+        "a missing keys file": DISK + 'root-keys = "nope"\n',
+    }
+    for why, body in bad.items():
+        t = FakeTools()
+        disk_refused(t, body)
+        assert not t.argvs, why
+    t = FakeTools()
+    disk_refused(t, DISK + 'root-keys = "keys"\n', {"keys": f'{KEY}\nname = "x"\n'})
+    assert not t.argvs
+    t = FakeTools()
+    assert "must be a table" in disk_refused(t, "[tool.sdlc.image]\ndisk = 3\n")
+    assert not t.argvs
+
+
+def test_root_keys_reach_the_config_as_toml_without_comments() -> None:
+    t = FakeTools()
+    text = f"# the ops key\n{KEY} ops@host\n\n  # another\nssh-rsa AAAAB3NzaC1yc2E=\n"
+    rc, _ = disk_go(t, DISK + 'root-keys = "install/keys"\n', {"install/keys": text})
+    assert rc == 0, t.log
+    doc = tomllib.loads(t.config)
+    (user,) = doc["customizations"]["user"]
+    assert user["name"] == "root"
+    assert user["key"] == f"{KEY}\nssh-rsa AAAAB3NzaC1yc2E="
+    assert "#" not in t.config and "ops@host" not in t.config
+
+
+def test_no_root_keys_leaves_the_config_empty() -> None:
+    t = FakeTools()
+    assert disk_go(t)[0] == 0 and t.config == ""
 
 
 def test_git_and_sdlc_trust_the_mounted_workspace() -> None:
@@ -1801,3 +2050,20 @@ def test_git_and_sdlc_trust_the_mounted_workspace() -> None:
         n = int(env["GIT_CONFIG_COUNT"]) - 1
         assert env[f"GIT_CONFIG_KEY_{n}"] == "safe.directory"
         assert Path(env[f"GIT_CONFIG_VALUE_{n}"]).name == "ws"  # the workspace, never `*`
+
+
+def main() -> int:
+    tests: list[Callable[[], None]] = [v for k, v in globals().items() if k.startswith("test_")]
+    failed = 0
+    for test in tests:
+        try:
+            test()
+            print(f"ok   {test.__name__}")
+        except Exception as exc:
+            failed += 1
+            print(f"FAIL {test.__name__}: {type(exc).__name__}: {exc}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
