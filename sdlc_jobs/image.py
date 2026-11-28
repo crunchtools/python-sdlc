@@ -133,6 +133,10 @@ RUN_VALUED = (
 )
 EVENTS = ("push", "schedule", "workflow_dispatch")  # the workflow's `if:`
 PLAN_FIELDS = 4  # name, stage, mode, argv
+MANIFEST_LISTS = (
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+)
 PACKED = re.compile(r"([0-9a-f]{64}) ([0-9]+)")  # PACK's last line: sha256 and size
 STATE_FIELDS = 3  # running, exit code, OOM-killed
 # The one capability a host step may take back, and only bootc-lint on a read-only
@@ -1087,8 +1091,22 @@ def build_disk(job: Job, img: Image, digest: str, parent: Parent | None) -> str:
 
 
 def pull_size(job: Job, img: Image, digest: str) -> int:
-    """Pull the image by digest into the engine; its size in bytes."""
+    """Pull the image by digest into the engine; its size in bytes. A manifest list or
+    index is a 2 here, with a reason, not BIB's own error later."""
     pinned = f"{img.ref}@{digest}"
+    raw = job.must(
+        ["skopeo", "inspect", "--raw", "--authfile", str(job.auth), f"docker://{pinned}"]
+    )
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        cannot(f"the manifest of {pinned} is not JSON: {exc}")
+    kind = doc.get("mediaType", "") if isinstance(doc, dict) else ""
+    if not isinstance(doc, dict) or kind in MANIFEST_LISTS or "manifests" in doc:
+        cannot(
+            f"{pinned} is a manifest list or index ({kind or 'no mediaType'}): "
+            "bootc-image-builder takes one image manifest, so no disk was built"
+        )
     job.must([*job.podman, "pull", "--authfile", str(job.auth), pinned])
     said = job.must([*job.podman, "image", "inspect", "--format", "{{.Size}}", pinned]).strip()
     try:

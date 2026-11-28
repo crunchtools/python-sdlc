@@ -142,6 +142,9 @@ class FakeTools(Tools):
         self.size = "1000000000"  # what `podman image inspect --format {{.Size}}` prints
         self.report = f"uid_map: {_disk.FULL_UID_MAP}\nroot: 1\nmnt: {100 * _disk.GIB}\n"
         self.bib_rc = 0  # what bootc-image-builder exits
+        # what `skopeo inspect --raw` of the pushed digest prints: one image manifest
+        self.image_manifest = '{"mediaType": "application/vnd.oci.image.manifest.v1+json"}'
+
         self.packed = f"{'d' * 64} 1234\n"  # what PACK prints
         self.disk_digest: str | None = None  # what the PUSH helper prints; None, the manifest's
 
@@ -289,6 +292,8 @@ class FakeTools(Tools):
             case "--policy":
                 self.policy = json.loads(Path(argv[2]).read_text())
                 rc = self.verify_rc
+            case "inspect" if "--raw" in argv and "@sha256:" in argv[-1]:
+                out = self.image_manifest
             case "inspect" if f"{OWN}:gated-" in argv[-1] or f"{OWN}-base:gated-" in argv[-1]:
                 out = self.landed
             case "inspect":
@@ -1880,7 +1885,9 @@ def test_a_declared_disk_builds_from_the_digest_and_pushes_the_artifact() -> Non
     assert t.report in t.log, t.log
     # SEED: the digest alone into BIB's private store, with the auth BIB never gets
     assert envs_of(seed) == {"W": work, "SRC": pinned} and seed[-1] == _disk.SEED
-    assert f"{HOST}/auth.json:/auth.json:ro" in seed and f"{work}:{work}" in seed
+    seeded = [seed[i + 1] for i, w in enumerate(seed) if w == "-v"]
+    assert seeded == [f"{work}:{work}", f"{HOST}/auth.json:/auth.json:ro"], seeded
+    assert "--privileged" in seed and "--network=none" not in seed  # it pulls
     # BIB: pinned digest, no network, the work mounts and the config, the image by digest
     assert bib.count(_disk.BIB) == 1 and "--privileged" in bib and "--network=none" in bib
     assert "apparmor=unconfined" not in bib
@@ -1936,6 +1943,25 @@ def test_bib_gets_no_environment_no_secret_and_no_engine_storage() -> None:
         assert "auth.json" not in word and ".sock" not in word, word
         assert not word.startswith("/graph:") and "QUAY" not in word and "RHSM" not in word, word
     assert not any(a[4:6] == ["info", "--format"] and "GraphRoot" in a[-1] for a in t.argvs)
+
+
+def test_a_manifest_list_is_refused_before_anything_is_pulled_for_the_disk() -> None:
+    for doc in (
+        {"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": []},
+        {"mediaType": "application/vnd.docker.distribution.manifest.list.v2+json"},
+        {"schemaVersion": 2, "manifests": []},
+        [],
+    ):
+        t = FakeTools()
+        t.image_manifest = json.dumps(doc)
+        msg = ""
+        try:
+            disk_go(t)
+        except CannotRunError as exc:
+            msg = str(exc)
+        assert "manifest list or index" in msg, (doc, msg)
+        assert not any(_disk.BIB in a for a in t.argvs) and t.disk_runs()[-1][-1] == _disk.WIPE
+        assert not any(a[4:5] == ["pull"] and "@" in a[-1] for a in t.argvs), doc
 
 
 def test_an_apparmor_engine_runs_bib_unconfined() -> None:
