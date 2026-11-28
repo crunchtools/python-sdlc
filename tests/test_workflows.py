@@ -765,14 +765,13 @@ else:
             check(f"own: {job_id} is byte for byte the fleet file's", same)
             check(f"own: {job_id} parses as the fleet file's", own.get(job_id) == fleet[job_id])
 
-# The own-file draft and its doc block give ai the fleet's env too, so neither
-# hands out a model key the fleet's would not (#294): the route cases above cover them.
-drafts = {
-    "examples/sdlc-ci.yml": (ROOT / "examples" / "sdlc-ci.yml").read_text(),
-    "the doc's own-file block": FLEET_BLOCK.findall(DOC.read_text())[1],
-}
-for label, text in drafts.items():
-    check(f"{label}: ai's env is the fleet file's", jobs_of(text)["ai"].get("env") == ai_env)
+# sdlc's own file is the one copy of itself (#296): the doc's only workflow is
+# the fleet block, so no stale mirror can hand out a key the fleet's would not.
+check(
+    "doc: the fleet file is its only workflow block",
+    [b for b in FLEET_BLOCK.findall(DOC.read_text()) if re.search(r"^jobs:", b, re.M)]
+    == [fleet_text],
+)
 
 # ------------------------------------------------------------ the launch step
 

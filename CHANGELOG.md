@@ -36,6 +36,15 @@ All notable changes to this project are documented here, following
   run and its required `sdlc / check` never reported. Without the environment
   the job has no key. Re-copy `examples/ci.yml`.
 
+### Removed
+
+- `examples/sdlc-ci.yml`, and the copy of sdlc's own workflow in
+  `docs/marketplace-free-ci.md` (#296). Both claimed to be
+  `.github/workflows/ci.yml` byte for byte; neither was, and nothing tested
+  that they were. The doc now points at `.github/workflows/ci.yml` as the one
+  copy, and `tests/test_workflows.py` checks the fleet block is the doc's only
+  workflow.
+
 ## [0.19.0] - 2026-11-28
 
 ### Added
