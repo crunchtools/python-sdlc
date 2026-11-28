@@ -67,11 +67,13 @@ COMMIT = re.compile(r"[0-9a-f]{40}")
 RELEASED_REF = re.compile(r"refs/heads/.+")
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
 WORKFLOW = ".github/workflows/ci.yml@"
-# A local-release build ran outside Actions, so it does not claim the workflow buildType.
-LOCAL_BUILD_TYPE = "https://github.com/crunchtools/sdlc/blob/main/scripts/local-release.sh#v1"
+# local-release.sh is no workflow: its builds say so, with a build type of their own.
+LOCAL_BUILD_TYPE = "https://crunchtools.com/sdlc/buildtypes/local-release/v1"
+LOCAL_SCRIPT = "scripts/local-release.sh"
+SDLC = "https://github.com/crunchtools/sdlc"
 # What scripts/local-release.sh names itself as, pinned to the sdlc commit it ran from.
 LOCAL_BUILDER = re.compile(
-    r"https://github\.com/crunchtools/sdlc/blob/[0-9a-f]{40}/scripts/local-release\.sh"
+    r"https://github\.com/crunchtools/sdlc/blob/([0-9a-f]{40})/scripts/local-release\.sh"
 )
 OK = 200
 NOT_FOUND = 404
@@ -376,7 +378,9 @@ def provenance(labels: Mapping[str, str], repo: str) -> dict | None:
     if not honest:
         return None
     ref = workflow.removeprefix(trusted)
-    return predicate(repo, ref, commit, f"https://github.com/{builder}", run_url)
+    source = f"https://github.com/{repo}"
+    params = {"workflow": {"ref": ref, "repository": source, "path": WORKFLOW.removesuffix("@")}}
+    return predicate(BUILD_TYPE, params, commit, f"https://github.com/{builder}", run_url)
 
 
 def local_provenance(job: Job) -> dict | None:
@@ -393,8 +397,9 @@ def local_provenance(job: Job) -> dict | None:
     )
     ref = env.get("GITHUB_REF", "")
     run_url = f"https://github.com/{job.repo}/actions/runs//attempts/{attempt}"
+    pinned = LOCAL_BUILDER.fullmatch(builder)
     honest = (
-        LOCAL_BUILDER.fullmatch(builder)
+        pinned
         and not env.get("GITHUB_RUN_ID")
         and attempt.isdigit()
         and labels.get("com.crunchtools.build.run") == run_url
@@ -404,32 +409,25 @@ def local_provenance(job: Job) -> dict | None:
         and COMMIT.fullmatch(sha)
         and all(labels.get(k) == sha for k in BUILT_LABELS)
     )
-    if not honest:
+    if not honest or pinned is None:
         return None
-    source = f"https://github.com/{job.repo}"
-    return {
-        "buildDefinition": {
-            "buildType": LOCAL_BUILD_TYPE,
-            "externalParameters": {
-                "script": {"ref": ref, "repository": source, "path": "scripts/local-release.sh"}
-            },
-            "resolvedDependencies": [{"uri": f"git+{source}", "digest": {"gitCommit": sha}}],
-        },
-        "runDetails": {
-            "builder": {"id": builder},
-            "metadata": {"invocationId": f"{builder}#attempt-{attempt}"},
-        },
+    # The script is sdlc's, at the commit it ran from; the source is this repo at `ref`.
+    params = {
+        "source": {"repository": f"https://github.com/{job.repo}", "ref": ref},
+        "script": {"repository": SDLC, "path": LOCAL_SCRIPT, "commit": pinned.group(1)},
     }
+    return predicate(LOCAL_BUILD_TYPE, params, sha, builder, f"{builder}#attempt-{attempt}")
 
 
-def predicate(repo: str, ref: str, commit: str, builder: str, run: str) -> dict:
-    """SLSA v1: ci.yml's jobs at `ref` built `commit`, run as `run` by `builder`."""
-    source = f"https://github.com/{repo}"
-    path = WORKFLOW.removesuffix("@")
+def predicate(build_type: str, parameters: dict, commit: str, builder: str, run: str) -> dict:
+    """SLSA v1 for either recorded build: `build_type` with its `parameters` (ci.yml's
+    workflow, or local-release.sh at its sdlc commit) built `commit` of the repository
+    the first parameter block names, run as `run` by `builder`."""
+    source = next(iter(parameters.values()))["repository"]
     return {
         "buildDefinition": {
-            "buildType": BUILD_TYPE,
-            "externalParameters": {"workflow": {"ref": ref, "repository": source, "path": path}},
+            "buildType": build_type,
+            "externalParameters": parameters,
             "resolvedDependencies": [{"uri": f"git+{source}", "digest": {"gitCommit": commit}}],
         },
         "runDetails": {"builder": {"id": builder}, "metadata": {"invocationId": run}},
