@@ -28,6 +28,7 @@ REPO = "crunchtools/sdlc"
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 BUILDER = f"{REPO}/.github/workflows/ci.yml@refs/heads/main"
 RUN = f"https://github.com/{REPO}/actions/runs/123/attempts/2"
+OTHER = "f" * 40
 
 VALID = {
     "com.crunchtools.build.run": RUN,
@@ -76,14 +77,27 @@ def with_labels(**changes: str | None) -> dict[str, str]:
     return labels
 
 
-def run(stdin: str, repo: str | None = REPO, env_repo: str | None = None):
+HOTFIX_ENV_NAMES = ("SDLC_LOCAL_BUILDER", "GITHUB_RUN_ATTEMPT", "GITHUB_REF", "GITHUB_RUN_ID")
+
+
+def run(
+    stdin: str,
+    repo: str | None = REPO,
+    env_repo: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    commit: str | None = None,
+):
     """(exit code, stderr, predicate or None) of the script run as the workflow runs it."""
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "predicate.json"
         cmd = [sys.executable, "-I", str(SCRIPT), "--out", str(out)]
         if repo is not None:
             cmd += ["--repo", repo]
-        env = {k: v for k, v in os.environ.items() if k != "GITHUB_REPOSITORY"}
+        if commit is not None:
+            cmd += ["--commit", commit]
+        skip = ("GITHUB_REPOSITORY", *HOTFIX_ENV_NAMES)
+        env = {k: v for k, v in os.environ.items() if k not in skip}
+        env.update(extra_env or {})
         if env_repo is not None:
             env["GITHUB_REPOSITORY"] = env_repo
         proc = subprocess.run(
@@ -91,6 +105,124 @@ def run(stdin: str, repo: str | None = REPO, env_repo: str | None = None):
         )
         written = json.loads(out.read_text()) if out.exists() else None
         return proc.returncode, proc.stderr, written
+
+
+HF_BUILDER = f"https://github.com/{REPO}/blob/{COMMIT}/scripts/hotfix.sh"
+HF_RUN = f"https://github.com/{REPO}/actions/runs//attempts/42"
+HF_ENV = {
+    "SDLC_LOCAL_BUILDER": HF_BUILDER,
+    "GITHUB_RUN_ATTEMPT": "42",
+    "GITHUB_REF": "refs/tags/v1.2.3",
+}
+HF_LABELS = with_labels(run=HF_RUN, builder="", workflow="")
+
+HF_EXPECTED = {
+    "buildDefinition": {
+        "buildType": EXPECTED["buildDefinition"]["buildType"],
+        "externalParameters": {
+            "workflow": {
+                "ref": "refs/tags/v1.2.3",
+                "repository": f"https://github.com/{REPO}",
+                "path": ".github/workflows/ci.yml",
+            }
+        },
+        "resolvedDependencies": EXPECTED["buildDefinition"]["resolvedDependencies"],
+    },
+    "runDetails": {
+        "builder": {"id": HF_BUILDER},
+        "metadata": {"invocationId": f"{HF_BUILDER}#attempt-42"},
+    },
+}
+
+
+def hf_env(**changes: str | None) -> dict[str, str]:
+    """HF_ENV with changes; None drops the variable."""
+    env = {**HF_ENV, **changes}
+    return {k: v for k, v in env.items() if v is not None}
+
+
+def hf_labels(**changes: str | None) -> dict[str, str]:
+    """HF_LABELS with short-keyed changes (see with_labels)."""
+    return with_labels(**{"run": HF_RUN, "builder": "", "workflow": "", **changes})
+
+
+# (name, labels, env, --commit): a hotfix record that must be refused.
+HF_REFUSALS = [
+    ("hotfix: builder empty", HF_LABELS, hf_env(SDLC_LOCAL_BUILDER=""), COMMIT),
+    (
+        "hotfix: builder pinned to another commit than --commit",
+        HF_LABELS,
+        hf_env(SDLC_LOCAL_BUILDER=HF_BUILDER.replace(COMMIT, "f" * 40)),
+        COMMIT,
+    ),
+    (
+        "hotfix: builder in another repo",
+        HF_LABELS,
+        hf_env(SDLC_LOCAL_BUILDER=HF_BUILDER.replace(REPO, "crunchtools/other")),
+        COMMIT,
+    ),
+    (
+        "hotfix: builder names scripts/local-release.sh",
+        HF_LABELS,
+        hf_env(SDLC_LOCAL_BUILDER=HF_BUILDER.replace("hotfix.sh", "local-release.sh")),
+        COMMIT,
+    ),
+    ("hotfix: GITHUB_RUN_ID set", HF_LABELS, hf_env(GITHUB_RUN_ID="9"), COMMIT),
+    ("hotfix: attempt 43 against label 42", HF_LABELS, hf_env(GITHUB_RUN_ATTEMPT="43"), COMMIT),
+    ("hotfix: attempt empty", HF_LABELS, hf_env(GITHUB_RUN_ATTEMPT=""), COMMIT),
+    ("hotfix: attempt missing", HF_LABELS, hf_env(GITHUB_RUN_ATTEMPT=None), COMMIT),
+    ("hotfix: ref is a pull request", HF_LABELS, hf_env(GITHUB_REF="refs/pull/1/merge"), COMMIT),
+    ("hotfix: --commit missing", HF_LABELS, hf_env(), None),
+    ("hotfix: label commit is another sha", hf_labels(commit="f" * 40), hf_env(), COMMIT),
+    ("hotfix: label revision is another sha", hf_labels(revision="f" * 40), hf_env(), COMMIT),
+    ("hotfix: label builder non-empty", hf_labels(builder=BUILDER), hf_env(), COMMIT),
+    ("hotfix: label workflow non-empty", hf_labels(workflow=BUILDER), hf_env(), COMMIT),
+    (
+        "hotfix: revision label differs from the commit label",
+        hf_labels(revision=OTHER),
+        hf_env(),
+        COMMIT,
+    ),
+    (
+        "hotfix: builder, commit and revision agree on another sha than --commit",
+        hf_labels(commit=OTHER, revision=OTHER),
+        hf_env(SDLC_LOCAL_BUILDER=HF_BUILDER.replace(COMMIT, OTHER)),
+        COMMIT,
+    ),
+    *[
+        (
+            f"hotfix: builder has {name} after hotfix.sh",
+            HF_LABELS,
+            hf_env(SDLC_LOCAL_BUILDER=HF_BUILDER + suffix),
+            COMMIT,
+        )
+        for name, suffix in (("a .bak suffix", ".bak"), ("a /x path", "/x"), ("a newline", "\n"))
+    ],
+    (
+        "hotfix: attempt 4a, with a run label that matches it",
+        hf_labels(run=HF_RUN.replace("42", "4a")),
+        hf_env(GITHUB_RUN_ATTEMPT="4a"),
+        COMMIT,
+    ),
+    (
+        "hotfix: fullwidth-digit attempt, with a run label that matches it",
+        hf_labels(run=HF_RUN.replace("42", "\uff14\uff12")),
+        hf_env(GITHUB_RUN_ATTEMPT="\uff14\uff12"),
+        COMMIT,
+    ),
+    (
+        "hotfix: ref has a trailing newline",
+        HF_LABELS,
+        hf_env(GITHUB_REF="refs/heads/main\n"),
+        COMMIT,
+    ),
+    (
+        "hotfix: run label has a run id",
+        hf_labels(run=RUN.rsplit("/", 1)[0] + "/42"),
+        hf_env(),
+        COMMIT,
+    ),
+]
 
 
 def inspect(labels: dict[str, str] | None) -> str:
@@ -212,6 +344,24 @@ def main() -> int:
         ok = code == 0 and written is None and "::warning::" in err
         failed += check(f"refused: {name}", ok, f"exit {code}, file {written is not None}, {err!r}")
 
+    code, err, written = run(inspect(HF_LABELS), extra_env=HF_ENV, commit=COMMIT)
+    failed += check(
+        "hotfix record writes the exact predicate", written == HF_EXPECTED, repr(written)
+    )
+    failed += check(
+        "hotfix record exits 0 with no warning", code == 0 and "::warning::" not in err, err
+    )
+
+    for name, labels, env, commit in HF_REFUSALS:
+        code, err, written = run(inspect(labels), extra_env=env, commit=commit)
+        ok = code == 0 and written is None and "::warning::" in err
+        failed += check(f"refused: {name}", ok, f"exit {code}, file {written is not None}, {err!r}")
+
+    code, _, written = run(inspect(VALID), extra_env=HF_ENV, commit=COMMIT)
+    failed += check(
+        "CI record is unchanged with the hotfix env set", code == 0 and written == EXPECTED
+    )
+
     code, _, written = run(inspect(VALID), repo=None)
     failed += check("no --repo and no GITHUB_REPOSITORY exits 1", code == 1 and written is None)
 
@@ -220,6 +370,18 @@ def main() -> int:
     failed += check(
         "build_record() returns the four fields",
         mod.build_record(VALID, REPO) == (RUN, BUILDER, BUILDER, COMMIT),
+    )
+    failed += check(
+        "local_provenance() matches the script",
+        mod.local_provenance(HF_LABELS, REPO, HF_ENV, COMMIT) == HF_EXPECTED,
+    )
+    failed += check(
+        "local_provenance() refuses every hotfix refusal",
+        all(mod.local_provenance(lb, REPO, env, c or "") is None for _, lb, env, c in HF_REFUSALS),
+    )
+    failed += check(
+        "local_provenance() refuses a CI record",
+        mod.local_provenance(VALID, REPO, HF_ENV, COMMIT) is None,
     )
     failed += check("another repo's labels give no record", mod.build_record(VALID, "a/b") is None)
     return 1 if failed else 0

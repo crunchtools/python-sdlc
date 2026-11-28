@@ -26,6 +26,8 @@ cat > "$TREE/scripts/self.sh" <<'SHIM'
 #!/bin/sh
 echo "self job=$GITHUB_JOB sdlckey=${SDLC_KEY:+set}${SDLC_KEY:-empty} app=${ASHIGARU_APP_KEY+key}${ASHIGARU_CLIENT_ID+id}" >> "$LOG"
 echo "self-in job=$GITHUB_JOB check=${SDLC_CHECK:-} write=${SDLC_WRITE:-} release=${SDLC_RELEASE:-}" >> "$LOG"
+echo "self-env job=$GITHUB_JOB builder=${SDLC_LOCAL_BUILDER-unset} attempt=${GITHUB_RUN_ATTEMPT-unset} ref=${GITHUB_REF-unset} runid=${GITHUB_RUN_ID-unset} wfref=${GITHUB_WORKFLOW_REF-unset}" >> "$LOG"
+echo "self-at job=$GITHUB_JOB at=$0 stale=$([ -e "$(dirname "$0")/../stale.pyc" ] && echo yes || echo no)" >> "$LOG"
 [ "$GITHUB_JOB" = image ] &&
   echo 'result={"digest":"sha256:abc","version":"1.2.3","boot":""}' >> "$GITHUB_OUTPUT"
 exit 0
@@ -68,10 +70,13 @@ chmod +x "$TREE/scripts/self.sh" "$BIN"/*
 # A PATH with every tool hotfix.sh needs except openssl.
 for t in git jq dirname cat sed head tr date mktemp rm base64; do ln -s "$(command -v "$t")" "$NOSSL/$t"; done
 ln -s "$BIN/curl" "$BIN/podman" "$NOSSL/"
+printf '*.pyc\n' > "$TREE/.gitignore"
 git -C "$TREE" init -q
 git -C "$TREE" add -A
 git -C "$TREE" -c user.name=t -c user.email=t@t commit -qm fake
 SHA=$(git -C "$TREE" rev-parse HEAD)
+# Ignored, so `status --porcelain` is clean; a build from $TREE itself would see it.
+echo stale > "$TREE/stale.pyc"
 
 ALL='"SDLC_KEY":"k","SDLC_KEY_PASSWORD":"p","SDLC_QUAY_USERNAME":"u","SDLC_QUAY_PASSWORD":"q"'
 FULL="{$ALL,\"ASHIGARU_CLIENT_ID\":\"CIDSECRET\",\"ASHIGARU_APP_KEY\":\"KEYSECRET\"}"
@@ -81,7 +86,8 @@ BODY='{"repositories":["sdlc"],"permissions":{"contents":"write","pull_requests"
 run() {
   : > "$LOG"
   rc=0
-  printf '%s' "$1" | LOG=$LOG FAIL_PODMAN=$WORK/${FAIL_PODMAN:-none} FAIL_MINT=$WORK/${FAIL_MINT:-none} \
+  # shellcheck disable=SC2086  # HF_CALLER_ENV is NAME=value words, split on purpose
+  printf '%s' "$1" | env ${HF_CALLER_ENV:-} LOG=$LOG FAIL_PODMAN=$WORK/${FAIL_PODMAN:-none} FAIL_MINT=$WORK/${FAIL_MINT:-none} \
     PATH="${2:-$BIN:$PATH}" "$SH" "$TREE/scripts/hotfix.sh" > "$WORK/out" 2> "$WORK/err" || rc=$?
 }
 SH=$(command -v sh)
@@ -95,9 +101,25 @@ events() {
 printf '== scripts/hotfix.sh\n\n'
 
 run "$FULL"
+first_attempt=$(sed -n 's/^self-env job=image .*attempt=\([0-9]*\) .*/\1/p' "$LOG")
+worktrees=$(git -C "$TREE" worktree list | wc -l)
 if [ "$rc" -eq 0 ] && [ "$(events)" = 'self-image curl-install curl-mint podman self-sign revoke ' ]; then
   ok "image, mint, tag, sign, revoke (exit 0)"
 else bad "order: rc=$rc events='$(events)' err=$(cat "$WORK/err")"; fi
+
+for job in image sign; do
+  at=$(sed -n "s/^self-at job=$job at=\\(.*\\) stale=.*/\\1/p" "$LOG")
+  case $at in
+    "$TREE/scripts/self.sh"|'') bad "$job ran self.sh from the tree itself, not a worktree: '$at'" ;;
+    */scripts/self.sh) ok "$job runs a worktree's self.sh ($at)" ;;
+    *) bad "$job self.sh path: '$at'" ;;
+  esac
+done
+if [ "$worktrees" -eq 1 ] && [ ! -e "${at%/scripts/self.sh}" ]; then ok "the worktree is gone after the run"
+else bad "worktrees after the run ($worktrees): $(git -C "$TREE" worktree list)"; fi
+if [ "$(grep -c 'stale=no$' "$LOG")" -eq 2 ] && [ -e "$TREE/stale.pyc" ]; then
+  ok "an ignored file (stale.pyc) is in the tree but never reaches image or sign"
+else bad "stale.pyc: $(grep '^self-at' "$LOG")"; fi
 
 if has "curl-body $BODY"; then ok "the token request asks for sdlc alone, contents write and pull_requests read"
 else bad "mint body: $(grep '^curl-body' "$LOG")"; fi
@@ -128,6 +150,30 @@ else bad "image inputs: $(grep '^self-in job=image' "$LOG")"; fi
 if has "self-in job=sign check= write=success release={\"version\":\"1.2.3\",\"sha\":\"$SHA\"}"
 then ok "sign is handed write's success and the release it tagged"
 else bad "sign inputs: $(grep '^self-in job=sign' "$LOG")"; fi
+
+# #275: the build record sign's provenance.py trusts. The caller's own run id
+# and workflow are dropped; the builder names this script at the tree's HEAD.
+HF_CALLER_ENV='GITHUB_RUN_ID=9 GITHUB_WORKFLOW_REF=x' run "$FULL"
+want_builder="https://github.com/crunchtools/sdlc/blob/$SHA/scripts/hotfix.sh"
+img_env=$(grep '^self-env job=image ' "$LOG" || true)
+sign_env=$(grep '^self-env job=sign ' "$LOG" || true)
+for job in image sign; do
+  line=$(grep "^self-env job=$job " "$LOG" || true)
+  case $line in
+    "self-env job=$job builder=$want_builder attempt="*" ref=refs/tags/v1.2.3 runid=unset wfref=unset")
+      ok "$job: builder pinned to HEAD, tag ref, no run id or workflow ref even when the caller set them" ;;
+    *) bad "$job env: $line" ;;
+  esac
+done
+img_attempt=${img_env#*attempt=}; img_attempt=${img_attempt%% *}
+sign_attempt=${sign_env#*attempt=}; sign_attempt=${sign_attempt%% *}
+case $img_attempt in ''|*[!0-9]*) bad "attempt is not all digits: '$img_attempt'" ;;
+  *) if [ "$img_attempt" = "$sign_attempt" ]; then ok "one all-digit GITHUB_RUN_ATTEMPT across image and sign"
+     else bad "attempt differs: image=$img_attempt sign=$sign_attempt"; fi ;;
+esac
+
+if [ -n "$first_attempt" ] && [ "$first_attempt" != "$img_attempt" ]; then ok "two runs get different attempts"
+else bad "attempts repeat: '$first_attempt' then '$img_attempt'"; fi
 
 for name in ASHIGARU_APP_KEY ASHIGARU_CLIENT_ID; do
   run "$(printf '%s' "$FULL" | jq -c --arg n "$name" 'del(.[$n])')"
