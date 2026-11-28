@@ -6,12 +6,6 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
-### Fixed
-
-- `promote.local_provenance` no longer claims the GitHub Actions workflow
-  `buildType` and `.github/workflows/ci.yml` for a `scripts/local-release.sh`
-  build; it has its own `buildType` and an `externalParameters.script` block (#285).
-
 ### Added
 
 - `EXTRA_IMAGES` gives crunchtools/trentina `trentina-l2-model`, the L2 model
@@ -31,6 +25,14 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- A `scripts/local-release.sh` build's provenance no longer claims the GitHub
+  Actions workflow buildType and `.github/workflows/ci.yml` (#285, a1904). It
+  carries `https://crunchtools.com/sdlc/buildtypes/local-release/v1`, with
+  externalParameters naming the built repository's ref and
+  `scripts/local-release.sh` in crunchtools/sdlc at the commit it ran from.
+  #286 first gave it a mutable `blob/main` URI and placed the script in the
+  built repository; promote's `predicate()` now takes the build type and
+  parameters from its caller, as scripts/provenance.py's does.
 - A redirect no longer carries the job's token to another host (#278). Both
   HTTP clients, `Tools.http` and the `GitHub` client, open through
   `_github.SafeRedirect`. It follows an https redirect, carries only Accept,

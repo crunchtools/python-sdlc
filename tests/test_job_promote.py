@@ -585,14 +585,16 @@ def test_local_provenance_names_the_script_and_this_run() -> None:
     p = promote.local_provenance(local_job(local_labels()))
     assert p is not None
     source = f"https://github.com/{REPO}"
+    # A local-release build is no Actions workflow and must never claim to be one.
     assert p["buildDefinition"]["buildType"] == promote.LOCAL_BUILD_TYPE
     assert p["buildDefinition"]["buildType"] != promote.BUILD_TYPE
     assert p["buildDefinition"]["externalParameters"] == {
         "script": {
-            "ref": "refs/heads/main",
-            "repository": source,
+            "repository": "https://github.com/crunchtools/sdlc",
             "path": "scripts/local-release.sh",
-        }
+            "commit": "c" * 40,
+        },
+        "source": {"repository": source, "ref": "refs/heads/main"},
     }
     assert ".github/workflows" not in json.dumps(p)
     assert p["buildDefinition"]["resolvedDependencies"] == [
