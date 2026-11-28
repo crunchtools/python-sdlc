@@ -299,6 +299,9 @@ def stages_of(job: Job, img: Image) -> tuple[str, Parent | None, list[Parent]]:
     if name is None:
         cannot("there is no Containerfile or Dockerfile at the repo root to build")
     text = containerfile_text(job.root / name)
+    why = unread_sources(text)
+    if why:
+        cannot(f"{name}: {why}; a --from= source is pinned only as buildah reads it")
     overrides = build_arg_map(img.settings)
     parent = parent_stage(text, overrides)
     # A --from= image is no stage: a negative index, which pin_args never takes for a FROM.
@@ -513,7 +516,10 @@ def builder_stages(
 
 
 def from_refs(op: str, words: list[str]) -> list[str]:
-    """The `--from=` values of a COPY/ADD and the `from=` keys of a RUN's `--mount`s."""
+    """The `--from=` values of a COPY/ADD and the `from=` keys of a RUN's `--mount`s,
+    as written or after an ONBUILD, which a build FROM this image runs."""
+    if op == "ONBUILD" and words:
+        return from_refs(words[0].upper(), words[1:])
     if op in ("COPY", "ADD"):
         return [w.partition("=")[2] for w in words if w.startswith("--from=")]
     if op != "RUN":
@@ -530,37 +536,45 @@ def from_refs(op: str, words: list[str]) -> list[str]:
 def copy_sources(text: str, overrides: Mapping[str, str] | None = None) -> list[str]:
     """Every image a `COPY|ADD --from=` or `RUN --mount=...,from=` names, not a stage.
 
-    An earlier stage's alias (any case) or a stage index is no image. Expanded like
+    An earlier stage's alias (any case) or index is no image; an index past the
+    stages so far is a 2. Expanded like
     `builder_stages`, which stays FROM-only: the image job verifies what it returns.
     """
     args: dict[str, str] = {}
     aliases: list[str] = []
     found: list[str] = []
-    started = False
+    seen = 0  # the FROMs so far
     for raw in logical_lines(text):
         words = raw.split()
         op = words[0].upper() if words else ""
         refs: list[str] = []
-        if op == "ARG" and not started:
+        if op == "ARG" and not seen:
             args.update(
                 {k: v.strip("\"'") for k, eq, v in (w.partition("=") for w in words[1:]) if eq}
             )
         elif op == "FROM":
-            if not started:
+            if not seen:
                 args.update(overrides or {})
-                started = True
+            seen += 1
             rest = [w for w in words[1:] if not w.startswith("--")]
             if len(rest) >= FROM_AS_WORDS and rest[1].upper() == "AS":
                 aliases.append(rest[2].lower())
         else:
             refs = from_refs(op, words[1:])
-        for ref in refs:
-            image = expand_build_vars(ref, args, strict=True).strip("\"'")
-            if not image:
-                cannot(f"--from/from= {ref} expands to nothing")
-            if not (image.isascii() and image.isdigit()) and image.lower() not in aliases:
-                found.append(image)
+        found += [image for ref in refs if (image := source_image(ref, args, aliases, seen))]
     return found
+
+
+def source_image(ref: str, args: Mapping[str, str], aliases: list[str], seen: int) -> str:
+    """The image a --from=/from= value names, "" for a stage; a 2 past the stages so far."""
+    image = expand_build_vars(ref, args, strict=True).strip("\"'")
+    if not image:
+        cannot(f"--from/from= {ref} expands to nothing")
+    if image.isascii() and image.isdigit():
+        if int(image) >= seen:
+            cannot(f"--from/from= {ref} names stage {image}, and there is no such stage")
+        return ""
+    return "" if image.lower() in aliases else image
 
 
 DIRECTIVE_LIKE = re.compile(r"\s*#\s*([A-Za-z][A-Za-z0-9]*)\s*=(.*)", re.ASCII)
@@ -616,6 +630,30 @@ def unmodelled_refs(instructions: list[str]) -> str:
         else:
             refs += from_refs(op, words[1:])
     return unfollowed(refs, global_args, redefined)
+
+
+def unread_sources(text: str) -> str:
+    """Why a --from= or from= source would not be read as buildah reads it; "" if it would.
+
+    A quoted --mount, and a source named through a variable its own stage declares:
+    buildah expands a --from= with the stage's ARGs and ENVs, copy_sources with the
+    globals. FROM refs, heredocs and blank continued lines are #279's, not this.
+    """
+    global_args: set[str] = set()
+    staged: set[str] = set()
+    started = False
+    for raw in logical_lines(text):
+        words = raw.split()
+        op = words[0].upper() if words else ""
+        if any("--mount=" in w and ("'" in w or '"' in w) for w in words):
+            return f"its {op} has a quoted --mount"
+        if op == "FROM":
+            started, staged = True, set()
+        elif op in ("ARG", "ENV"):
+            (staged if started else global_args).update(declared(op, words[1:], started=started))
+        elif why := unfollowed(from_refs(op, words[1:]), global_args, staged):
+            return why
+    return ""
 
 
 def declared(op: str, words: list[str], *, started: bool) -> list[str]:

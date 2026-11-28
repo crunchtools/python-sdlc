@@ -751,6 +751,74 @@ def test_run_mount_from_image_is_held_to_the_rule() -> None:
     assert rc == 0
 
 
+def test_a_stage_arg_shadowing_a_copy_source_is_refused() -> None:
+    """buildah expands --from with the stage's ARGs: a verified global is no proof."""
+    t = FakeTools()
+    cf = (
+        f"ARG T=quay.io/crunchtools/tools@{PARENT}\n{QUAY_PARENT}"
+        "ARG T=docker.io/library/busybox:1\nCOPY --from=$T /b /b\n"
+    )
+    assert "uses T, which is not a global ARG left alone" in refused(t, cf)
+    assert not t.built()
+
+
+def test_a_from_variable_redeclared_in_its_stage_is_still_followed() -> None:
+    """A FROM expands from the globals alone; a stage ARG of the same name is no bypass."""
+    t = FakeTools()
+    rc, _ = go(
+        t, "ARG V=latest\nFROM quay.io/crunchtools/ubi10-core:${V}\nARG V=latest\nRUN true\n"
+    )
+    assert rc == 0
+
+
+def test_a_heredoc_alone_is_left_to_279() -> None:
+    t = FakeTools()
+    rc, _ = go(t, f"{QUAY_PARENT}RUN <<EOF\necho hi\nEOF\n")
+    assert rc == 0
+
+
+def test_a_quoted_mount_is_refused() -> None:
+    for mount in (
+        '--mount="from=docker.io/library/busybox:1,type=bind,target=/x"',
+        "--mount=type=bind,'from=docker.io/library/busybox:1',target=/x",
+        '"--mount=from=docker.io/library/busybox:1,type=bind,target=/x"',
+    ):
+        t = FakeTools()
+        assert "has a quoted --mount" in refused(t, f"{QUAY_PARENT}RUN {mount} true\n")
+        assert not t.built()
+
+
+def test_an_onbuild_copy_source_is_held_to_the_rule() -> None:
+    """A build FROM this image runs the ONBUILD, a sibling built in this very job too."""
+    t = FakeTools()
+    cf = f"{QUAY_PARENT}ONBUILD COPY --from=docker.io/library/busybox:1 /b /b\n"
+    assert "docker.io/library/busybox:1 is on docker.io" in refused(t, cf)
+    assert not t.built()
+    t = FakeTools()
+    rc, _ = go(t, f"{QUAY_PARENT}ONBUILD COPY --from=quay.io/crunchtools/tools:1 /t /t\n")
+    assert t.built_file.splitlines()[2] == (
+        f"ONBUILD COPY --from=quay.io/crunchtools/tools@{PARENT} /t /t"
+    )
+    assert rc == 0
+
+
+def test_a_stage_index_past_the_stages_is_refused() -> None:
+    t = FakeTools()
+    msg = refused(t, f"FROM quay.io/crunchtools/builder:1 AS b\n{QUAY_PARENT}COPY --from=2 /a /a\n")
+    assert msg == "--from/from= 2 names stage 2, and there is no such stage", msg
+    assert not t.built()
+
+
+def test_a_mount_from_after_other_keys_is_pinned() -> None:
+    t = FakeTools()
+    cf = f"{QUAY_PARENT}RUN --mount=type=bind,from=quay.io/crunchtools/tools:1,target=/t true\n"
+    rc, _ = go(t, cf)
+    assert t.built_file.splitlines()[2] == (
+        f"RUN --mount=type=bind,from=quay.io/crunchtools/tools@{PARENT},target=/t true"
+    )
+    assert rc == 0
+
+
 def test_copy_from_image_that_cannot_be_pinned_is_refused() -> None:
     t = FakeTools()
     cf = f"ARG T=quay.io/crunchtools/tools:1\n{QUAY_PARENT}COPY --from=${{T}} /t /t\n"
