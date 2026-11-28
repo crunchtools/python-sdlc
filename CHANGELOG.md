@@ -6,6 +6,12 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Fixed
+
+- `promote.local_provenance` no longer claims the GitHub Actions workflow
+  `buildType` and `.github/workflows/ci.yml` for a `scripts/local-release.sh`
+  build; it has its own `buildType` and an `externalParameters.script` block (#285).
+
 ### Added
 
 - `EXTRA_IMAGES` gives crunchtools/trentina `trentina-l2-model`, the L2 model
