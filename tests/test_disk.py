@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -235,6 +236,39 @@ def test_the_helper_scripts_do_what_the_job_relies_on() -> None:
     assert "--preserve-digests --digestfile pushed.digest" in push
     assert 'oci:layout:disk "docker://$DEST"' in push and "cat pushed.digest" in push
     assert _disk.WIPE.strip() == 'rm -rf "$W"'
+
+
+def run_retrying(script: str, fails: int, work: Path) -> tuple[int, int]:
+    """(exit, skopeo calls) of `script` under sh, with a skopeo that fails `fails` times
+    and then writes its digestfile, and a sleep that returns at once."""
+    bin_ = work / "bin"
+    bin_.mkdir()
+    count = work / "calls"
+    (bin_ / "skopeo").write_text(
+        "#!/bin/sh\n"
+        f'n=$(($(cat "{count}" 2>/dev/null || echo 0) + 1)); echo "$n" > "{count}"\n'
+        f'[ "$n" -le {fails} ] && exit 1\n'
+        'printf %s "sha256:pushed" > "$W/pushed.digest"\n'
+    )
+    (bin_ / "sleep").write_text("#!/bin/sh\n")
+    for tool in (bin_ / "skopeo", bin_ / "sleep"):
+        tool.chmod(0o755)
+    env = {"PATH": f"{bin_}:/usr/bin:/bin", "W": str(work), "SRC": "q/x@sha256:a"}
+    env |= {"BLOB": "b", "EMPTY_HEX": "e", "MANIFEST": "{}", "MANIFEST_HEX": "m"}
+    env |= {"INDEX": "{}", "DEST": "q/x:disk-gated-s"}
+    proc = subprocess.run(["sh", "-c", script], env=env, cwd=work, capture_output=True, check=False)
+    return proc.returncode, int(count.read_text()) if count.exists() else 0
+
+
+def test_seed_and_push_retry_twice_then_give_up() -> None:
+    for script in (_disk.SEED, _disk.PUSH):
+        for fails, want in ((0, (0, 1)), (2, (0, 3)), (3, (1, 3))):
+            with tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                if script is _disk.PUSH:
+                    (work / "disk.raw.zst").write_text("z")
+                got = run_retrying(script, fails, work)
+                assert got == want, (script.splitlines()[2], fails, got)
 
 
 def test_bib_is_pinned_by_digest() -> None:
