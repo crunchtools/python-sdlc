@@ -338,7 +338,10 @@ jobs:
     container: &boot { image: "quay.io/crunchtools/sdlc-bootstrap@sha256:abf7da909c14ae7b32d0a325fce912ec1a955d7bf4032365015b0ec46d9b3296", volumes: ["/var/run/docker.sock:/var/run/docker.sock"] }
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
-    env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", OPENROUTER_API_KEY: "${{ secrets.OPENROUTER_API_KEY }}" }
+    # OpenRouter reaches every PR, a fork's too: Gatehouse is a fork PR's required review. The job's one
+    # step is the digest-pinned bootstrap, which runs no PR code and passes the key only to the gatehouse
+    # CLI, never to a model. An outsider's issue gets neither key.
+    env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ (github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association) || github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository) && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}", OPENROUTER_API_KEY: "${{ (github.event_name == 'pull_request_target' || github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association)) && secrets.OPENROUTER_API_KEY || '' }}" }
     steps: &event [{ id: e, run: sdlc event }]
   write:  # the Ashigaru App key, no model: verifies and tags a release merge; comments, labels, PRs, leased pushes
     needs: [check, ai]

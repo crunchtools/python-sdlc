@@ -14,7 +14,9 @@ All notable changes to this project are documented here, following
   required review, and the job runs only the digest-pinned bootstrap, which
   passes the key to the gatehouse CLI and never to a model. `tests/test_workflows.py` now evaluates both model-key expressions
   across fork, same-repo and deleted-fork PRs, each `author_association`, push
-  and schedule. Re-copy `examples/ci.yml`.
+  and schedule. `examples/sdlc-ci.yml` and its doc block, which still handed
+  out both keys unconditionally, get the same env, and a test holds them to it.
+  Re-copy `examples/ci.yml`.
 
 ### Fixed
 
