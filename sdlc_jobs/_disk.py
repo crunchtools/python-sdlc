@@ -276,11 +276,11 @@ def check_manifest(raw: str, ref: str, image_digest: str, sha: str) -> dict[str,
         cannot(f"the disk's manifest is not JSON: {exc}")
     if not isinstance(doc, dict):
         cannot("the disk's manifest is not an object")
-    layers = doc.get("layers")
-    notes = doc.get("annotations")
+    config, layers, notes = doc.get("config"), doc.get("layers"), doc.get("annotations")
     if (
         doc.get("artifactType") != ARTIFACT_TYPE
-        or (doc.get("config") or {}).get("mediaType") != EMPTY_TYPE
+        or not isinstance(config, dict)
+        or config.get("mediaType") != EMPTY_TYPE
         or not isinstance(layers, list)
         or len(layers) != 1
         or not isinstance(layers[0], dict)

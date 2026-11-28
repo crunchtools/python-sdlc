@@ -358,10 +358,8 @@ def build_one(job: Job, img: Image, plan: dict[str, tuple[str, str]], linted: bo
     if found:
         print(f"\nimage: a gate found something; {img.name} and what follows are not pushed")
         return FOUND
-    if push(job, img, tag, parent) == FOUND:
-        return FOUND
+    result = push(job, img, tag, parent)
     if img.name in job.disks:
-        result = job.results[-1]
         digest = build_disk(job, img, result["digest"], parent)
         result["disk"] = {"ref": img.ref, "digest": digest, "tag": disk_mod.gated_tag(job.sha)}
     return CLEAN
@@ -1023,7 +1021,8 @@ def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: in
 # ------------------------------------------------------------------ push
 
 
-def push(job: Job, img: Image, tag: str, parent: Parent | None) -> int:
+def push(job: Job, img: Image, tag: str, parent: Parent | None) -> dict:
+    """Push the gated image; the result promote takes for it, also kept in job.results."""
     ref = img.ref
     gated = f"gated-{job.sha}"
     step(f"push {ref}:{gated}")
@@ -1037,18 +1036,17 @@ def push(job: Job, img: Image, tag: str, parent: Parent | None) -> int:
     # A sibling built FROM this one builds on these bytes; its label names the image.
     job.built[f"{ORG}/{img.name}"] = Parent(-1, img.ref, f"{ref}@{digest}", digest)
     pinned = parent.pinned if parent else ""
-    job.results.append(
-        {
-            "name": img.name,
-            "ref": ref,
-            "digest": digest,
-            "sha": job.sha,
-            "tag": gated,
-            "parent": pinned,
-        }
-    )
+    result = {
+        "name": img.name,
+        "ref": ref,
+        "digest": digest,
+        "sha": job.sha,
+        "tag": gated,
+        "parent": pinned,
+    }
+    job.results.append(result)
     print(f"built once: {ref}@{digest} ({gated})", flush=True)
-    return CLEAN
+    return result
 
 
 # ------------------------------------------------------------------ disk

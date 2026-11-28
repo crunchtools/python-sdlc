@@ -203,6 +203,7 @@ def test_check_manifest_refuses_a_manifest_of_another_shape() -> None:
         lambda d: d.update(layers=[]),
         lambda d: d["layers"][0].update(mediaType="application/x"),
         lambda d: d["config"].update(mediaType="application/x"),
+        lambda d: d.update(config=[]),
         lambda d: d.pop("annotations"),
     ):
         broken = json.loads(json.dumps(doc))

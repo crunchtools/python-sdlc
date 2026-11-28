@@ -75,6 +75,7 @@ class FakeTools(Tools):
         self.manifests: dict[str, str] = {}  # digest -> the artifact manifest's bytes
         self.predicates: dict[tuple[str, str], object] = {}  # (digest, type) -> what was attested
         self.sbom_out: str | None = None  # verify-attestation's stdout over what was attested
+        self.misdirect: dict[str, str] = {}  # tag -> what a copy to it lands as, over the source
         self.stdin: list[str | None] = []
         self.cwds: list[str | None] = []
 
@@ -117,7 +118,8 @@ class FakeTools(Tools):
             return cp(0, json.dumps({"Labels": self.labels.get(digest, {})}))
         if argv[1] == "copy":
             source, dest = argv[-2].removeprefix("docker://"), argv[-1].removeprefix("docker://")
-            self.tags[dest.rpartition(":")[2]] = source.rpartition("@")[2]
+            tag = dest.rpartition(":")[2]
+            self.tags[tag] = self.misdirect.get(tag, source.rpartition("@")[2])
         return cp()
 
     def cosign(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -916,6 +918,47 @@ def test_a_rebuild_of_the_release_moves_the_disks_version_tag() -> None:
     held_disk(t, "1.2.3")
     assert go(t, result=result) == 0
     assert t.tags["disk-1.2.3"] == disk and t.tags["1.2.3"] == NEW
+
+
+def test_a_disk_tag_that_lands_elsewhere_after_the_copy_is_a_2() -> None:
+    t = FakeTools()
+    _, result = with_disk(t)
+    other = held_disk(t, "elsewhere")
+    t.misdirect["disk-latest"] = other
+    msg = ""
+    try:
+        go(t, result=result)
+    except CannotRunError as exc:
+        msg = str(exc)
+    assert "does not resolve to the disk after the copy" in msg, msg
+
+
+def sbom_line(predicate: object) -> str:
+    statement = base64.b64encode(json.dumps({"predicate": predicate}).encode()).decode()
+    return json.dumps({"payload": statement})
+
+
+def test_the_disk_takes_the_first_sbom_line_that_decodes() -> None:
+    t = FakeTools()
+    disk, result = with_disk(t)
+    good = {"spdxVersion": "SPDX-2.3", "name": "the image"}
+    junk = ["not json", "[]", json.dumps({"payload": "!!"}), sbom_line("a string")]
+    t.sbom_out = "\n".join([*junk, sbom_line(good)]) + "\n"
+    assert go(t, result=result) == 0
+    assert t.predicates[(disk, "spdxjson")] == good
+
+
+def test_a_disk_whose_image_sbom_lines_all_fail_to_decode_is_a_2() -> None:
+    t = FakeTools()
+    disk, result = with_disk(t)
+    t.sbom_out = "not json\n" + json.dumps({"payload": "!!"}) + "\n"
+    msg = ""
+    try:
+        go(t, result=result)
+    except CannotRunError as exc:
+        msg = str(exc)
+    assert "no verified SBOM" in msg, msg
+    assert (disk, "spdxjson") not in t.attested
 
 
 def test_a_disk_without_an_image_sbom_is_a_2() -> None:
