@@ -67,6 +67,8 @@ COMMIT = re.compile(r"[0-9a-f]{40}")
 RELEASED_REF = re.compile(r"refs/heads/.+")
 BUILD_TYPE = "https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1"
 WORKFLOW = ".github/workflows/ci.yml@"
+# A local-release build ran outside Actions, so it does not claim the workflow buildType.
+LOCAL_BUILD_TYPE = "https://github.com/crunchtools/sdlc/blob/main/scripts/local-release.sh#v1"
 # What scripts/local-release.sh names itself as, pinned to the sdlc commit it ran from.
 LOCAL_BUILDER = re.compile(
     r"https://github\.com/crunchtools/sdlc/blob/[0-9a-f]{40}/scripts/local-release\.sh"
@@ -404,7 +406,20 @@ def local_provenance(job: Job) -> dict | None:
     )
     if not honest:
         return None
-    return predicate(job.repo, ref, sha, builder, f"{builder}#attempt-{attempt}")
+    source = f"https://github.com/{job.repo}"
+    return {
+        "buildDefinition": {
+            "buildType": LOCAL_BUILD_TYPE,
+            "externalParameters": {
+                "script": {"ref": ref, "repository": source, "path": "scripts/local-release.sh"}
+            },
+            "resolvedDependencies": [{"uri": f"git+{source}", "digest": {"gitCommit": sha}}],
+        },
+        "runDetails": {
+            "builder": {"id": builder},
+            "metadata": {"invocationId": f"{builder}#attempt-{attempt}"},
+        },
+    }
 
 
 def predicate(repo: str, ref: str, commit: str, builder: str, run: str) -> dict:
