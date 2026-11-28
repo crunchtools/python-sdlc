@@ -693,13 +693,19 @@ def test_copy_from_image_on_an_untrusted_registry_refused() -> None:
 
 def test_copy_from_image_is_verified_and_pinned() -> None:
     t = FakeTools()
-    cf = f"{QUAY_PARENT}COPY --from=quay.io/crunchtools/tools:1 /t /t\n"
+    cf = (
+        f"{QUAY_PARENT}COPY --from=quay.io/crunchtools/tools:1 /t /t\n"
+        "RUN echo from=quay.io/crunchtools/tools:1\n"
+        "COPY --from=quay.io/crunchtools/tools:1 /u /u\n"
+    )
     rc, _ = go(t, cf)
     verified = [a[-1] for a in t.argvs if a[:2] == ["cosign", "verify"]]
     assert verified == [f"quay.io/crunchtools/{n}@{PARENT}" for n in ("ubi10-core", "tools")]
     lines = t.built_file.splitlines()
     assert lines[0] == f"FROM quay.io/crunchtools/ubi10-core@{PARENT}"
     assert lines[2] == f"COPY --from=quay.io/crunchtools/tools@{PARENT} /t /t"
+    assert lines[3] == "RUN echo from=quay.io/crunchtools/tools:1"  # a shell word, not a source
+    assert lines[4] == f"COPY --from=quay.io/crunchtools/tools@{PARENT} /u /u"
     assert "--from" not in t.build_argv() and rc == 0
 
 

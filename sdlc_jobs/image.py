@@ -110,8 +110,9 @@ SECRETS = (
     "ACTIONS_ID_TOKEN_REQUEST_URL",
 )
 FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE | re.ASCII)
-# A COPY|ADD --from= or a --mount's from= key, and the image or stage it names.
-SOURCE_REF = re.compile(r"((?<![^\s,=])(?:--)?from=)([^\s,]+)", re.ASCII)
+# A COPY|ADD --from= or the from= key of a --mount, and the image or stage it names;
+# never a bare from= in a shell command.
+SOURCE_REF = re.compile(r"(--from=|--mount=(?:[^\s,]+,)*from=)([^\s,]+)", re.ASCII)
 # The `podman run` options the planner emits for a host step (container-smoke,
 # container-scan, bootc-lint), and nothing else: a repo's config cannot add one.
 RUN_FLAGS = ("--rm", "--read-only")
@@ -300,11 +301,12 @@ def stages_of(job: Job, img: Image) -> tuple[str, Parent | None, list[Parent]]:
     text = containerfile_text(job.root / name)
     overrides = build_arg_map(img.settings)
     parent = parent_stage(text, overrides)
+    # A --from= image is no stage: a negative index, which pin_args never takes for a FROM.
+    copies = {src: Parent(-1 - i, src) for i, src in enumerate(copy_sources(text, overrides))}
     stages = [
         *([parent] if parent else []),
         *builder_stages(text, parent.index if parent else -1, overrides),
-        # A --from= image is no stage: a negative index, which pin_args never takes for a FROM.
-        *(Parent(-1 - i, src) for i, src in enumerate(copy_sources(text, overrides))),
+        *copies.values(),
     ]
     for stage in stages:
         host, path = split_ref(stage.image)
@@ -315,18 +317,17 @@ def stages_of(job: Job, img: Image) -> tuple[str, Parent | None, list[Parent]]:
         # Built and gated by this very job, a step ago: its bytes, by digest.
         stage.pinned, stage.digest, stage.image = sibling.pinned, sibling.digest, sibling.image
         print(f"parent built here: {stage.pinned}", flush=True)
-    return pin_sources(text, stages, overrides), parent, stages
+    return pin_sources(text, copies, overrides), parent, stages
 
 
-def pin_sources(text: str, stages: list[Parent], overrides: Mapping[str, str]) -> str:
+def pin_sources(text: str, copies: Mapping[str, Parent], overrides: Mapping[str, str]) -> str:
     """`text` with each image a --from= or from= names at its verified digest.
 
     Read back as the check read it: a source left unpinned (named through a variable,
     or broken across lines) is a 2, not a tag the build pulls unverified.
     """
     # Keyed by the name in the file: a sibling's stage.image is already its pushed ref.
-    named = (stage.pinned for stage in stages if stage.index < 0)
-    sources = dict(zip(copy_sources(text, overrides), named, strict=True))
+    sources = {name: stage.pinned for name, stage in copies.items()}
     out = SOURCE_REF.sub(lambda r: r[1] + sources.get(r[2], r[2]), text)
     left = [s for s in copy_sources(out, overrides) if s not in sources.values()]
     if left:
