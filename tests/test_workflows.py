@@ -159,7 +159,7 @@ def admits_pull_request(job: dict) -> bool:
 # a context path becomes a string the walker looks up, `&&`/`||`/`!` the Python
 # words (which return operands, as GitHub's do), and only the four functions
 # below are callable. Nothing is executed: the tree is walked.
-CONTEXT_PATH = re.compile(r"\b(?:github|vars|needs|inputs)(?:\.[\w-]+)+")
+CONTEXT_PATH = re.compile(r"\b(?:github|vars|needs|inputs|secrets)(?:\.[\w-]+)+")
 FUNCTIONS = {
     "fromJSON": json.loads,
     "contains": lambda haystack, needle: needle in haystack,
@@ -504,6 +504,36 @@ guarded_routes = (
 for label, ctx, want in guarded_routes:
     got = evaluate(GUARDED_RUNNER, ctx)
     check(f"fleet: guarded jobs run {label} on {want}", got == want, str(got))
+# ai's model keys (#294): Claude only where the run is trusted; OpenRouter on
+# every PR as well, a fork's included, because Gatehouse must review it.
+ai_env = fleet["ai"]["env"]
+keys = {"secrets.CLAUDE_CODE_OAUTH_TOKEN": "claude", "secrets.OPENROUTER_API_KEY": "openrouter"}
+key_routes = (
+    *(
+        (f"an issue by {who}", event("issues", **keys, **{author: who}), {"claude", "openrouter"})
+        for who in ("OWNER", "MEMBER", "COLLABORATOR")
+    ),
+    *(
+        (f"an issue by {who}", event("issues", **keys, **{author: who}), set())
+        for who in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE", "")
+    ),
+    (
+        "a same-repo PR's target run",
+        event("pull_request_target", **keys, **same_repo),
+        {"claude", "openrouter"},
+    ),
+    ("a fork's target run", event("pull_request_target", **keys, **fork), {"openrouter"}),
+    ("a deleted fork's target run", event("pull_request_target", **keys), {"openrouter"}),
+    ("a push", event("push", **keys, **same_repo), set()),
+    ("a schedule", event("schedule", **keys), set()),
+)
+for label, ctx, want in key_routes:
+    got = {
+        name
+        for secret, name in keys.items()
+        if evaluate(str(ai_env[secret.removeprefix("secrets.")]), ctx)
+    }
+    check(f"fleet: ai's model keys on {label} are {sorted(want)}", got == want, str(sorted(got)))
 for job_id in ("check", "gate"):
     check(f"fleet: {job_id} holds no secret", not SECRET.search(yaml.safe_dump(fleet[job_id])))
 # check: the one job a fork's PR runs, and the only one on our runners.

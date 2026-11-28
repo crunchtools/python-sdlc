@@ -46,7 +46,9 @@ jobs:
     runs-on: &secret ${{ (github.event_name == 'issues' && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association) || github.event_name != 'issues' && (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.UNCACHED_RUNNER_LABEL == 'crunchtools-uncached' && 'crunchtools-uncached' || 'ubuntu-latest' }}
     permissions: { contents: read, issues: read, pull-requests: read }
     outputs: { p0: "${{ steps.e.outputs.p0 }}", p1: "${{ steps.e.outputs.p1 }}", p2: "${{ steps.e.outputs.p2 }}", p3: "${{ steps.e.outputs.p3 }}" }
-    env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ (github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association) || github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository) && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}", OPENROUTER_API_KEY: "${{ secrets.OPENROUTER_API_KEY }}" }
+    # OpenRouter reaches every PR, a fork's too: Gatehouse is a fork PR's required review, and only
+    # the released gatehouse child holds the key, never a model. An outsider's issue gets neither key.
+    env: { GITHUB_TOKEN: "${{ github.token }}", CLAUDE_CODE_OAUTH_TOKEN: "${{ (github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association) || github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository) && secrets.CLAUDE_CODE_OAUTH_TOKEN || '' }}", OPENROUTER_API_KEY: "${{ (github.event_name == 'pull_request_target' || github.event_name == 'issues' && contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association)) && secrets.OPENROUTER_API_KEY || '' }}" }
     steps: &event
       - id: e
         run: >-

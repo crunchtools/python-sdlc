@@ -6,6 +6,16 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+### Security
+
+- The fleet `ci.yml`'s `ai` job no longer hands `OPENROUTER_API_KEY` to an
+  issue by an outsider (#294). It reaches members' issues and every
+  `pull_request_target` run, a fork's included: Gatehouse is a fork PR's
+  required review, and only the released gatehouse child holds the key, never
+  a model. `tests/test_workflows.py` now evaluates both model-key expressions
+  across fork, same-repo and deleted-fork PRs, each `author_association`, push
+  and schedule. Re-copy `examples/ci.yml`.
+
 ### Fixed
 
 - The fleet `ci.yml`'s `pages` job names its environment through an
