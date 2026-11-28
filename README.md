@@ -266,6 +266,31 @@ gets `containerfile-lint`, `container-build` and `container-scan` as above, no
 
 It is in the build's lane, after `container-build`.
 
+A bootc repo can also ask the `image` job for a disk. It only declares the disk;
+sdlc owns the builder, its digest and its flags (#273):
+
+```toml
+[tool.sdlc.image.disk]
+type = "raw"                                  # the one type today
+rootfs = "xfs"                                # or ext4
+root-keys = "install/root-authorized-keys"    # optional: root's SSH keys
+```
+
+After the gated push, `image` runs a digest-pinned bootc-image-builder against
+`gated-<sha>@sha256:…`. osbuild runs that image's own code as its buildroot, so the
+builder gets no network, no environment and no secret. Its only image store is a
+private one holding that digest, never the engine's. The job then pushes the zstd-compressed raw disk to the image's
+own repo as an OCI artifact tagged `disk-gated-<sha>`. `promote` signs it with
+the fleet key and attests the image's SPDX SBOM and a SLSA v1 provenance, whose
+dependencies are the commit, the image digest and the builder digest. It gets
+the image's tags with a `disk-` prefix (`disk-X.Y.Z`, `disk-latest`). The build
+runs only on a GitHub-hosted runner, where it sets the AppArmor userns sysctl
+and works on `/mnt`. It logs the uid_map and the free space of `/` and `/mnt`
+first, and exits 2 on any other runner, a restricted uid_map, or too little
+space. Pull it with `oras pull quay.io/crunchtools/<repo>:disk-latest` and
+check it with
+`cosign verify --insecure-ignore-tlog --key crunchtools-bootc.pub`.
+
 ### The docs stack
 
 A repo with none of the files above is judged as documentation. Both checks

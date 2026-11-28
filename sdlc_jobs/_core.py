@@ -383,6 +383,7 @@ IMAGE_ENFORCED = {
     "boot-timeout",
     "boot-none-reason",
     "pr-build-paths",
+    "disk",  # a bootc image's disk, [tool.sdlc.image.disk] (sdlc_jobs/_disk.py)
 }
 BOOT_JOB = {"boot-command", "contract-test", "free-disk"}
 
@@ -651,17 +652,30 @@ def host_mount(tools: Tools, env: Mapping[str, str], root: Path) -> tuple[str, s
     is its id) and mapping the longest mount that holds `root`.
     """
     doc = inspect_self(tools, env, str(root))
-    where = str(root)
+    host, image = mapped(tools, env, doc, str(root), str(root)), image_of(doc)
+    if host is None or not image:
+        cannot(f"the workspace {root} is not a mount of this container, or its image is unknown")
+    return host, image
+
+
+def host_of(tools: Tools, env: Mapping[str, str], path: Path) -> str:
+    """The host path of any `path` of this container, mapped as `host_mount` maps the workspace."""
+    cwd = str(path.parent)
+    host = mapped(tools, env, inspect_self(tools, env, cwd), str(path), cwd)
+    if host is None:
+        cannot(f"{path} is not on a mount of this container, so the engine cannot mount it")
+    return host
+
+
+def mapped(tools: Tools, env: Mapping[str, str], doc: Mapping, where: str, cwd: str) -> str | None:
+    """`where` on the host, by the longest mount of the inspected container that holds it."""
     best: tuple[int, str] | None = None
-    for mount in mounts_of(tools, env, doc, str(root)):
+    for mount in mounts_of(tools, env, doc, cwd):
         dest = str(mount.get("Destination", "")).rstrip("/")
         inside = bool(dest) and (where == dest or where.startswith(dest + "/"))
         if inside and (best is None or len(dest) > best[0]):
             best = (len(dest), str(mount["Source"]).rstrip("/") + where[len(dest) :])
-    image = image_of(doc)
-    if best is None or not image:
-        cannot(f"the workspace {root} is not a mount of this container, or its image is unknown")
-    return best[1], image
+    return best[1] if best else None
 
 
 def mounts_of(tools: Tools, env: Mapping[str, str], doc: Mapping, cwd: str) -> list[dict]:

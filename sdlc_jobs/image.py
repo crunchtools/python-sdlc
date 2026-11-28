@@ -34,11 +34,14 @@ in dependency order; a FROM naming a sibling this run pushed builds on that dige
 
 `result` is `{"ref", "digest", "sha", "tag", "parent"}` for a repo's one own image, and
 `{"images": [{..., "name"}], "sha"}` otherwise: all `promote` takes from here, and it
-re-validates every field.
+re-validates every field. An image whose repo declares `[tool.sdlc.image.disk]` also gets
+`"disk": {"ref", "digest", "tag"}`: the bootc raw disk built from the pushed digest, pushed
+as an OCI artifact (sdlc_jobs/_disk.py is the design).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -49,6 +52,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sdlc_jobs import _disk as disk_mod
 from sdlc_jobs import _prs
 from sdlc_jobs._boot import Boot, boot_gate, boot_settings
 from sdlc_jobs._core import (
@@ -72,6 +76,7 @@ from sdlc_jobs._core import (
     fetch_tree,
     final_stage,
     host_mount,
+    host_of,
     image_owner,
     images,
     logical_lines,
@@ -84,6 +89,7 @@ from sdlc_jobs._core import (
     step,
     workspace,
 )
+from sdlc_jobs._disk import Disk
 from sdlc_jobs._tools import safe_directory
 
 QUAY = "quay.io"
@@ -130,6 +136,11 @@ RUN_VALUED = (
 )
 EVENTS = ("push", "schedule", "workflow_dispatch")  # the workflow's `if:`
 PLAN_FIELDS = 4  # name, stage, mode, argv
+MANIFEST_LISTS = (
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+)
+PACKED = re.compile(r"([0-9a-f]{64}) ([0-9]+)")  # PACK's last line: sha256 and size
 STATE_FIELDS = 3  # running, exit code, OOM-killed
 # The one capability a host step may take back, and only bootc-lint on a read-only
 # root: the planner's BOOTC_LINT_CAP, which `bootc container lint` needs to walk
@@ -162,6 +173,7 @@ class Job:
     tree: str = ""  # the git tree of `sha`, stamped as a label
     event: str = ""
     nnp: list[str] = field(default_factory=lambda: [NNP])  # [] on an AppArmor engine
+    disks: dict[str, Disk] = field(default_factory=dict)  # image name -> the disk it declares
 
     def run(
         self,
@@ -229,6 +241,7 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
             )
             print(f"image: {img.name}: {key} {where}")
     job.images, job.needs = build_order(root, job.images)
+    job.disks = disks_of(root, env, job.images)
     job.child_env = {k: v for k, v in env.items() if k not in SECRETS}
     job.child_env["REGISTRY_AUTH_FILE"] = str(job.auth)
     job.child_env.update(
@@ -241,6 +254,19 @@ def run(event_name: str, event: dict, env: Mapping[str, str], tools: Tools) -> i
     finally:
         job.run([*job.podman, "volume", "rm", "-f", job.volume])
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def disks_of(root: Path, env: Mapping[str, str], imgs: list[Image]) -> dict[str, Disk]:
+    """Each image's declared disk, checked; a 2 before anything runs, and off GitHub's runner."""
+    out: dict[str, Disk] = {}
+    for img in imgs:
+        where = "[tool.sdlc.image.disk]" if img.root else f"[[tool.sdlc.images]] {img.name!r} disk"
+        disk = disk_mod.disk_settings(root, img.settings, where)
+        if disk is not None:
+            out[img.name] = disk
+    if out:
+        disk_mod.runner_ok(env)
+    return out
 
 
 def boot_job_declared(root: Path) -> bool:
@@ -363,7 +389,11 @@ def build_one(job: Job, img: Image, plan: dict[str, tuple[str, str]], linted: bo
     if found:
         print(f"\nimage: a gate found something; {img.name} and what follows are not pushed")
         return FOUND
-    return push(job, img, tag, parent)
+    result = push(job, img, tag, parent)
+    if img.name in job.disks:
+        digest = build_disk(job, img, result["digest"], parent)
+        result["disk"] = {"ref": img.ref, "digest": digest, "tag": disk_mod.gated_tag(job.sha)}
+    return CLEAN
 
 
 def extra_gates(job: Job, plan: dict[str, tuple[str, str]], tag: str) -> dict[str, tuple[str, str]]:
@@ -1058,7 +1088,8 @@ def stays_up(job: Job, name: str, safe: list[str], words: list[str], seconds: in
 # ------------------------------------------------------------------ push
 
 
-def push(job: Job, img: Image, tag: str, parent: Parent | None) -> int:
+def push(job: Job, img: Image, tag: str, parent: Parent | None) -> dict:
+    """Push the gated image; the result promote takes for it, also kept in job.results."""
     ref = img.ref
     gated = f"gated-{job.sha}"
     step(f"push {ref}:{gated}")
@@ -1072,15 +1103,149 @@ def push(job: Job, img: Image, tag: str, parent: Parent | None) -> int:
     # A sibling built FROM this one builds on these bytes; its label names the image.
     job.built[f"{ORG}/{img.name}"] = Parent(-1, img.ref, f"{ref}@{digest}", digest)
     pinned = parent.pinned if parent else ""
-    job.results.append(
-        {
-            "name": img.name,
-            "ref": ref,
-            "digest": digest,
-            "sha": job.sha,
-            "tag": gated,
-            "parent": pinned,
-        }
-    )
+    result = {
+        "name": img.name,
+        "ref": ref,
+        "digest": digest,
+        "sha": job.sha,
+        "tag": gated,
+        "parent": pinned,
+    }
+    job.results.append(result)
     print(f"built once: {ref}@{digest} ({gated})", flush=True)
-    return CLEAN
+    return result
+
+
+# ------------------------------------------------------------------ disk
+
+
+def helper(
+    job: Job, args: list[str], script: str, env: Mapping[str, str] | None = None
+) -> list[str]:
+    """`podman run` of `script` in sdlc's own image, with `args` before the image."""
+    named = [w for k, v in (env or {}).items() for w in ("-e", f"{k}={v}")]
+    argv = [*job.podman, "run", "--rm", *args, *named]
+    return [*argv, "--entrypoint", "sh", job.image_id, "-c", script]
+
+
+def build_disk(job: Job, img: Image, digest: str, parent: Parent | None) -> str:
+    """Build the image's disk from its pushed digest, push it; the artifact's digest.
+
+    Any failure is a 2, and the work directory is wiped whatever happened."""
+    disk = job.disks[img.name]
+    work = f"{disk_mod.MNT}/sdlc-disk-{job.volume}-{img.name}"
+    step(f"disk {img.ref}@{digest}")
+    try:
+        size = pull_size(job, img, digest)
+        prepare_disk(job, work, size)
+        seed_store(job, img, digest, work)
+        disk_build(job, img, digest, disk, work)
+        blob, packed = pack_disk(job, work)
+        notes = disk_mod.notes_for(labels(job, parent), img.ref, digest, disk)
+        return push_disk(job, img, work, disk_mod.manifest(blob, packed, notes), blob)
+    finally:
+        wipe = helper(
+            job,
+            ["--security-opt", "label=disable", "-v", f"{disk_mod.MNT}:{disk_mod.MNT}"],
+            disk_mod.WIPE,
+            {"W": work},
+        )
+        job.run(wipe)
+
+
+def pull_size(job: Job, img: Image, digest: str) -> int:
+    """Pull the image by digest into the engine; its size in bytes. A manifest list or
+    index is a 2 here, with a reason, not BIB's own error later."""
+    pinned = f"{img.ref}@{digest}"
+    raw = job.must(
+        ["skopeo", "inspect", "--raw", "--authfile", str(job.auth), f"docker://{pinned}"]
+    )
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        cannot(f"the manifest of {pinned} is not JSON: {exc}")
+    kind = doc.get("mediaType", "") if isinstance(doc, dict) else ""
+    if not isinstance(doc, dict) or kind in MANIFEST_LISTS or "manifests" in doc:
+        cannot(
+            f"{pinned} is a manifest list or index ({kind or 'no mediaType'}): "
+            "bootc-image-builder takes one image manifest, so no disk was built"
+        )
+    job.must([*job.podman, "pull", "--authfile", str(job.auth), pinned])
+    said = job.must([*job.podman, "image", "inspect", "--format", "{{.Size}}", pinned]).strip()
+    try:
+        return int(said)
+    except ValueError:
+        cannot(f"podman image inspect of {pinned} reported a size of {said!r}")
+
+
+def prepare_disk(job: Job, work: str, size: int) -> None:
+    """Make the work directory on /mnt, log what the host has, and refuse what will not fit."""
+    mnt = disk_mod.MNT
+    args = ["--privileged", "--network=none", "--security-opt", "label=disable"]
+    args += ["-v", "/:/host:ro", "-v", f"{mnt}:{mnt}"]
+    report = job.must(helper(job, args, disk_mod.PREPARE, {"W": work}))
+    print(report, end="", flush=True)
+    disk_mod.room(report, size)
+
+
+def seed_store(job: Job, img: Image, digest: str, work: str) -> None:
+    """Copy the gated digest alone into BIB's private image store under `work`."""
+    host_auth = host_of(job.tools, job.env, job.auth)
+    args = ["--privileged", "--security-opt", "label=disable", "-v", f"{work}:{work}"]
+    args += ["-v", f"{host_auth}:/auth.json:ro"]
+    job.must(helper(job, args, disk_mod.SEED, {"W": work, "SRC": f"{img.ref}@{digest}"}))
+
+
+def disk_build(job: Job, img: Image, digest: str, disk: Disk, work: str) -> None:
+    """Run the pinned bootc-image-builder on the digest, privileged, through the socket,
+    with no network, no environment and no store but the one seed_store filled."""
+    config = job.scratch / f"disk-{img.name}.toml"
+    config.write_text(disk_mod.config_toml(disk))
+    host_config = host_of(job.tools, job.env, config)
+    argv = [*job.podman, "run", "--rm", "--privileged", "--pull=missing", "--network=none"]
+    argv += ["--security-opt", "label=type:unconfined_t"]
+    if not job.nnp:  # an AppArmor engine: osbuild's sandbox needs the profile off
+        argv += ["--security-opt", "apparmor=unconfined"]
+    argv += ["-v", f"{host_config}:/config.toml:ro", "-v", f"{work}/output:/output"]
+    argv += ["-v", f"{work}/var-tmp:/var/tmp", "-v", f"{work}/store:/store"]
+    argv += ["-v", f"{work}/graph:/var/lib/containers/storage", disk_mod.BIB]
+    argv += ["build", "--type", disk.type, "--rootfs", disk.rootfs, f"{img.ref}@{digest}"]
+    proc = job.run(argv, stream=True)
+    show(proc)
+    if proc.returncode != 0:
+        cannot(f"bootc-image-builder exited {proc.returncode}: no disk was built")
+
+
+def pack_disk(job: Job, work: str) -> tuple[str, int]:
+    """zstd the raw in a helper with no privilege and no network; (sha256 hex, size)."""
+    args = ["--network=none", "--security-opt", "label=disable", "-v", f"{work}:{work}"]
+    out = job.must(helper(job, args, disk_mod.PACK, {"W": work})).strip().splitlines()
+    found = PACKED.fullmatch(out[-1]) if out else None
+    if found is None:
+        cannot(f"packing the disk reported {out[-1:] or ['nothing']!r}, not '<sha256> <size>'")
+    return found[1], int(found[2])
+
+
+def push_disk(job: Job, img: Image, work: str, raw: bytes, blob: str) -> str:
+    """Push the packed disk as an OCI artifact; its digest, which must be the manifest's."""
+    mine = "sha256:" + hashlib.sha256(raw).hexdigest()
+    dest = f"{img.ref}:{disk_mod.gated_tag(job.sha)}"
+    step(f"push {dest}")
+    host_auth = host_of(job.tools, job.env, job.auth)
+    args = ["--security-opt", "label=disable", "-v", f"{work}:{work}"]
+    args += ["-v", f"{host_auth}:/auth.json:ro"]
+    env = {
+        "W": work,
+        "BLOB": blob,
+        "EMPTY_HEX": disk_mod.EMPTY_DIGEST.split(":", 1)[1],
+        "MANIFEST": raw.decode(),
+        "MANIFEST_HEX": mine.split(":", 1)[1],
+        "INDEX": disk_mod.index(raw).decode(),
+        "DEST": dest,
+    }
+    out = job.must(helper(job, args, disk_mod.PUSH, env)).strip().splitlines()
+    pushed = out[-1] if out else ""
+    if pushed != mine:
+        cannot(f"skopeo pushed {dest} as {pushed!r}, not the manifest's {mine}")
+    print(f"disk: {dest}@{pushed}", flush=True)
+    return pushed
