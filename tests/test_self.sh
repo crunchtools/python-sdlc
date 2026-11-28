@@ -36,7 +36,10 @@ CI=registry.access.redhat.com/hi/cosign@$(hex e)
 # (one version per line) and prints cosign's JSON, sign records one;
 # verify-attestation succeeds for a ref with att/<ref>__<type>, and attest
 # records one unless `att-fails` exists. `scan` is syft, printing an SBOM
-# (nothing on `syft-empty`, exit 1 on `syft-fails`).
+# (nothing on `syft-empty`, exit 1 on `syft-fails`). Every run leaves the
+# container's environment in run-env and its mounts in run-mounts; attest
+# appends its environment to attest-env, scan its own to syft-env and its
+# mounts to syft-mounts.
 { printf '#!/bin/sh\nW=%s\n' "$W"; cat <<'EOF'; } > "$W/bin/podman"
 printf 'podman %s\n' "$*" >> "$W/log"
 san() { printf '%s' "$1" | tr '/:@' '___'; }
@@ -60,6 +63,25 @@ case $1 in
                     [ ! -e "$_ad/config.json" ] \
                       || printf 'authmode %s %s\n' "$(stat -c %a "$_ad")" "$(stat -c %a "$_ad/config.json")" >> "$W/log" ;;
        esac; done
+       # The container's environment and mounts, as podman would make them: a
+       # bare -e NAME takes podman's own value. Any other way in is recorded as
+       # unmodelled, so a test that reads these fails rather than misses it.
+       : > "$W/run-env"; : > "$W/run-mounts"; _o=
+       for _a; do
+         [ "$_a" != -- ] || break
+         case $_o in
+           e) case $_a in *=*) printf '%s\n' "$_a" ;;
+                *) _v=$(printenv "$_a") && printf '%s=%s\n' "$_a" "$_v" ;; esac >> "$W/run-env" ;;
+           v) printf '%s\n' "$_a" >> "$W/run-mounts" ;;
+         esac
+         _o=
+         case $_a in
+           -e|--env) _o=e ;;
+           -v|--volume|--mount|--tmpfs) _o=v ;;
+           -e?*|--env=*|--env-file*|--env-host*|--env-merge*) printf 'unmodelled %s\n' "$_a" >> "$W/run-env" ;;
+           -v?*|--volume=*|--mount=*|--tmpfs=*|--volumes-from*) printf 'unmodelled %s\n' "$_a" >> "$W/run-mounts" ;;
+         esac
+       done
        while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
        [ $# -gt 0 ] || exit 0          # shellcheck, test suites: not cosign
        shift 2
@@ -95,9 +117,17 @@ case $1 in
                done
                _f=$W/att/$(san "$_ref")__$_t
                if [ "$_c" = attest ]; then
+                 cat "$W/run-env" >> "$W/attest-env"
                  [ -e "$W/att-fails" ] || { mkdir -p "$W/att"; : > "$_f"; }
                else [ -e "$_f" ] || { echo "error: no matching attestations for $_ref" >&2; exit 1; }; fi ;;
-         scan) [ ! -e "$W/syft-fails" ] || exit 1
+         scan) cat "$W/run-env" >> "$W/syft-env"
+               # Each mount, and whether its source is a directory syft could write.
+               while IFS= read -r _m; do
+                 _s=${_m%%:*} _wr=
+                 [ ! -d "$_s" ] || [ ! -w "$_s" ] || _wr=' writable-dir'
+                 printf '%s%s\n' "$_m" "$_wr"
+               done < "$W/run-mounts" >> "$W/syft-mounts"
+               [ ! -e "$W/syft-fails" ] || exit 1
                [ -e "$W/syft-empty" ] || printf '{"spdxVersion":"SPDX-2.3"}\n' ;;
          *) exit 99 ;;
        esac ;;
@@ -183,7 +213,16 @@ write_tree() {
   printf '# Changelog\n\n## [Unreleased]\n\n## [0.13.0] - 2026-11-23\n' > "$W/repo/CHANGELOG.md"
 }
 write_tree
-cp scripts/provenance.py "$W/repo/scripts/"
+# provenance.py through a wrapper that appends the names in its environment to
+# prov-env, a line a run, then runs the real one.
+cp scripts/provenance.py "$W/provenance.py"
+cat > "$W/repo/scripts/provenance.py" <<EOF
+import os, runpy, sys
+with open("$W/prov-env", "a") as f:
+    f.write(" ".join(sorted(os.environ)) + "\n")
+sys.argv[0] = "$W/provenance.py"
+runpy.run_path(sys.argv[0], run_name="__main__")
+EOF
 git -C "$W/repo" init -q
 git -C "$W/repo" add -A
 git -C "$W/repo" -c user.name=t -c user.email=t@t commit -q -m init
@@ -191,7 +230,8 @@ REV=$(git -C "$W/repo" rev-parse HEAD)
 
 reset() {
   rm -rf "$W/log" "$W/reg" "$W/signed" "$W/att" "$W/att-fails" "$W/syft-empty" "$W/syft-fails" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/rev-fails" "$W/deleted-0" "$W/tags" \
-         "$W/ls-remote-fails" "$W/curl-stdin" "$W/login-stdin" "$W/repo/boot/keys/"*
+         "$W/ls-remote-fails" "$W/curl-stdin" "$W/login-stdin" "$W/repo/boot/keys/"* \
+         "$W/run-env" "$W/run-mounts" "$W/attest-env" "$W/syft-env" "$W/syft-mounts" "$W/prov-env"
   mkdir -p "$W/reg/tag" "$W/reg/label"
   write_tree
   cp "$W/repo/boot/keys/sdlc.pub" "$W/secret.pub"
@@ -281,6 +321,22 @@ if [ "$RC" -eq 0 ] && in_log "^podman build -f $W/repo/Containerfile" && in_log 
    && in_log 'stub tests/test_self.sh' && [ ! -e "$W/out" ]; then
   ok "test builds, runs every suite, the contract test and sdlc ci, and plans nothing"
 else bad "test: exit $RC"; dump; fi
+# Both builds stamp the build record scripts/provenance.py reads.
+reset; run test test GITHUB_EVENT_NAME=pull_request GITHUB_SERVER_URL=https://github.com \
+  GITHUB_REPOSITORY=crunchtools/sdlc GITHUB_RUN_ID=9 GITHUB_RUN_ATTEMPT=2 \
+  GITHUB_WORKFLOW_REF=crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main
+# shellcheck disable=SC2329  # called through check
+labelled() {         # Containerfile: its build line carries all four labels
+  _l=$(grep "^podman build .*-f $1 " "$W/log" 2> /dev/null) || return 1
+  [ "$(printf '%s\n' "$_l" | wc -l)" -eq 1 ] || return 1
+  for _lb in run=https://github.com/crunchtools/sdlc/actions/runs/9/attempts/2 \
+             builder=crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main \
+             workflow=crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main commit="$REV"; do
+    printf '%s' "$_l" | grep -qF -- " --label com.crunchtools.build.$_lb " || return 1
+  done
+}
+check "the sdlc build carries the four com.crunchtools.build labels" labelled "$W/repo/Containerfile"
+check "the sdlc-bootstrap build carries them too" labelled "$W/repo/boot/Containerfile"
 
 # The git-init fetch has no origin, and the constitution validator names the
 # repo from it (#105): test and check add one, and never replace one.
@@ -450,12 +506,16 @@ if [ "$(n_log "^skopeo inspect .*{{.Digest}}.* docker://$A:latest\$")" -eq 1 ] \
   ok "each retag is a digest-preserving copy and is read back"
 else bad "no read-back"; fi
 # The key reaches cosign on public-key, sign and attest only, never on verify
-# or syft, and cosign is always the pinned digest.
-if [ "$(n_log '-e SDLC_KEY')" -eq 5 ] && ! grep -e ' verify ' -e ' verify-attestation ' -e ' scan ' "$W/log" | grep -q SDLC_KEY \
+# or syft, and cosign is always the pinned digest. This release makes one
+# public-key, two signs and two attests (both SBOMs; no build record, so no
+# provenance), and each of them takes the key.
+KEYED=$(( $(n_log ' public-key ') + $(n_log ' sign --yes ') + $(n_log ' attest --yes ') ))
+if [ "$(n_log ' public-key ')" -eq 1 ] && [ "$(n_log ' sign --yes ')" -eq 2 ] \
+   && [ "$(n_log ' attest --yes ')" -eq 2 ] && [ "$(n_log '-e SDLC_KEY')" -eq "$KEYED" ] && ! grep -e ' verify ' -e ' verify-attestation ' -e ' scan ' "$W/log" | grep -q SDLC_KEY \
    && ! grep 'SDLC_KEY' "$W/log" | grep -qv -e ' public-key ' -e ' sign --yes ' -e ' attest --yes ' \
    && in_log '-e SDLC_KEY .* -- .* public-key ' && ! in_log 'SDLC_KEY=' \
    && [ "$(n_log ' verify ')" -ge 4 ] \
-   && [ "$(n_log "-- $CI ")" -eq "$(( $(n_log ' verify ') + $(n_log ' verify-attestation ') + 5 ))" ]; then
+   && [ "$(n_log "-- $CI ")" -eq "$(( $(n_log ' verify ') + $(n_log ' verify-attestation ') + KEYED ))" ]; then
   ok "the key is passed to public-key, sign and attest only, never to verify or syft, and never as a value"
 else bad "key exposure"; grep -- 'run ' "$W/log" | sed 's/^/     | /'; fi
 
@@ -497,6 +557,39 @@ rel
 if [ "$RC" -eq 0 ] && [ "$(n_log ' attest --yes ')" -eq 0 ] && [ "$(n_log ' scan ')" -eq 0 ]; then
   ok "a re-run on attested digests scans and attests nothing"
 else bad "attest re-run: exit $RC"; dump; fi
+# A partial prior run: each digest gets only the attestation it lacks.
+pre_att() { mkdir -p "$W/att"; for _t in "$@"; do : > "$W/att/$(san "${_t%%=*}")__${_t#*=}"; done; }
+rel_setup; record "$A@$D1"; pre_att "$A@$D1=spdxjson" "$B@$DB=spdxjson" "$B@$DB=slsaprovenance1"; rel
+if [ "$RC" -eq 0 ] && [ "$(n_log ' scan ')" -eq 0 ] && [ "$(n_log ' attest --yes .*--type spdxjson ')" -eq 0 ] \
+   && [ "$(n_log ' attest --yes ')" -eq 1 ] && in_log " attest --yes .*--type slsaprovenance1 .*$A@$D1\$" \
+   && [ "$(wc -l < "$W/prov-env")" -eq 1 ] && printf '%s' "$OUT" | grep -qF "$A@$D1 already carries an SBOM"; then
+  ok "a digest with an SBOM and no provenance gets only its provenance"
+else bad "partial run, SBOM only: exit $RC"; dump; fi
+rel_setup; record "$A@$D1"; pre_att "$A@$D1=slsaprovenance1" "$B@$DB=spdxjson" "$B@$DB=slsaprovenance1"; rel
+if [ "$RC" -eq 0 ] && [ "$(n_log ' scan ')" -eq 1 ] && in_log " scan .*registry:$A@$D1\$" \
+   && [ "$(n_log ' attest --yes ')" -eq 1 ] && in_log " attest --yes .*--type spdxjson .*$A@$D1\$" \
+   && [ ! -e "$W/prov-env" ] && ! in_log "^skopeo inspect --authfile [^ ]* docker://$A@$D1\$" \
+   && printf '%s' "$OUT" | grep -qF "$A@$D1 already carries provenance"; then
+  ok "a digest with provenance and no SBOM gets only its SBOM, and provenance.py never runs"
+else bad "partial run, provenance only: exit $RC"; dump; fi
+# Key isolation, on the environment each parser gets rather than podman's argv.
+# attest-env holding the key shows the model would see it.
+rel_setup; record "$A@$D1"; record "$B@$DB"; rel GITHUB_ACTIONS=true SDLC_KEY_PASSWORD=pw
+keyless() { [ -s "$1" ] && ! grep -qE "$2" "$1"; }
+if [ "$RC" -eq 0 ] && [ "$(wc -l < "$W/prov-env")" -eq 2 ] \
+   && keyless "$W/prov-env" '(^| )(SDLC_KEY|SDLC_KEY_PASSWORD|COSIGN_PASSWORD)( |$)' \
+   && grep -qE '(^| )PATH( |$)' "$W/prov-env"; then
+  ok "provenance.py's environment holds neither SDLC_KEY nor SDLC_KEY_PASSWORD"
+else bad "provenance.py env"; sed 's/^/     | /' "$W/prov-env" 2> /dev/null; dump; fi
+if [ "$(n_log ' scan ')" -eq 2 ] && keyless "$W/syft-env" '^(SDLC_|COSIGN_|DOCKER_CONFIG|REGISTRY_AUTH_FILE|unmodelled)' \
+   && grep -qx 'SDLC_KEY=k' "$W/attest-env" && grep -qx 'COSIGN_PASSWORD=pw' "$W/attest-env"; then
+  ok "syft's environment holds no key, password or registry login (cosign attest's does)"
+else bad "syft env"; sed 's/^/     | /' "$W/syft-env" 2> /dev/null; fi
+# syft's one writable host path is its own scratch at /tmp, under this run's mktemp.
+if [ "$(sort -u "$W/syft-mounts" | wc -l)" -eq 1 ] && [ "$(wc -l < "$W/syft-mounts")" -eq 2 ] \
+   && grep -qx "$W/tmp/tmp\.[^/]*/syft:/tmp:z writable-dir" "$W/syft-mounts"; then
+  ok "syft has exactly one host bind, its writable scratch at /tmp"
+else bad "syft mounts"; sed 's/^/     | /' "$W/syft-mounts" 2> /dev/null; fi
 rel_setup; : > "$W/att-fails"; rel
 refused_late "an attestation that does not verify after attesting moves no tag" "attestation does not verify"
 if printf '%s' "$OUT" | grep -q '^self.sh:   '; then
