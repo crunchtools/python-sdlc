@@ -238,6 +238,56 @@ def test_malformed_ar_size() -> None:
                 assert "malformed ar member size" in msg, (name, field, msg)
 
 
+def test_ar_short_header() -> None:
+    with tempfile.TemporaryDirectory() as t:
+        deb = Path(t) / "a.deb"
+        deb.write_bytes(b"!<arch>\n" + ar_member("debian-binary", b"2.0\n") + b"data.tar.gz/  0 ")
+        assert "malformed ar header" in refusal(lambda: _debrepo.control_of(deb))
+
+
+def test_ar_truncated_body() -> None:
+    """A size past the end is refused for every member, not only those read (sdlc#268)."""
+    for name in ("control.tar.gz", "data.tar.gz", "junk"):
+        with tempfile.TemporaryDirectory() as t:
+            deb = raw_deb(Path(t) / "a.deb", name, b"100")  # 60 bytes follow
+            msg = refusal_fast(lambda d=deb: _debrepo.control_of(d))
+            assert "is truncated in" in msg, (name, msg)
+
+
+def test_ar_oversized_member() -> None:
+    old = _debrepo.MAX_TARBALL
+    _debrepo.MAX_TARBALL = 16  # a real control.tar.gz is more than 16 bytes
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            deb = make_deb(Path(t) / "a.deb")
+            assert "over the limit" in refusal(lambda: _debrepo.control_of(deb))
+    finally:
+        _debrepo.MAX_TARBALL = old
+
+
+def test_ar_duplicate_member() -> None:
+    with tempfile.TemporaryDirectory() as t:
+        good = make_deb(Path(t) / "good.deb").read_bytes()
+        control = ar_member(
+            "control.tar.gz", tar_of([("./control", CONTROL.encode(), b"")], "w:gz")
+        )
+        deb = Path(t) / "a.deb"
+        deb.write_bytes(good + control)
+        assert "has two control.tar.gz members" in refusal(lambda: _debrepo.control_of(deb))
+
+
+def test_ar_unreadable_file() -> None:
+    with tempfile.TemporaryDirectory() as t:
+        missing = Path(t) / "gone.deb"
+        assert "cannot be read" in refusal(lambda: _debrepo.control_of(missing))
+
+
+def test_duplicate_field_any_case() -> None:
+    with tempfile.TemporaryDirectory() as t:
+        deb = make_deb(Path(t) / "a.deb", control=CONTROL + "package: again\n")
+        assert "twice" in refusal(lambda: _debrepo.control_of(deb))
+
+
 def test_too_many_members() -> None:
     with tempfile.TemporaryDirectory() as t:
         junk = [(f"./f{i}", b"", b"") for i in range(_debrepo.MAX_MEMBERS)]

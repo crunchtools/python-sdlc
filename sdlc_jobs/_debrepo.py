@@ -15,6 +15,7 @@ import hashlib
 import importlib
 import io
 import lzma
+import os
 import re
 import tarfile
 from datetime import UTC, datetime
@@ -54,6 +55,17 @@ DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
+def ar_header(deb: str, header: bytes) -> tuple[str, int]:
+    """(member name, size) from one 60-byte ar header, or a 2."""
+    if len(header) != AR_HEADER or header[58:60] != b"`\n":
+        cannot(f"{deb} has a malformed ar header")
+    # bytes.isdigit is ASCII-only; int() would take "-60", "+5" and "1_0"
+    digits = header[48:58].strip()
+    if not digits.isdigit():
+        cannot(f"{deb} has a malformed ar member size")
+    return header[:16].decode("ascii", "replace").strip().rstrip("/"), int(digits)
+
+
 def ar_members(deb: Path) -> tuple[dict[str, bytes], int]:
     """The `debian-binary` and `control.tar*` members of an ar archive, and the data.tar* count.
 
@@ -61,22 +73,22 @@ def ar_members(deb: Path) -> tuple[dict[str, bytes], int]:
     """
     found: dict[str, bytes] = {}
     payloads = 0
-    with deb.open("rb") as fh:
+    try:
+        fh = deb.open("rb")
+    except OSError as exc:
+        cannot(f"{deb.name} cannot be read: {exc}")
+    with fh:
+        total = os.fstat(fh.fileno()).st_size
         if fh.read(len(AR_MAGIC)) != AR_MAGIC:
             cannot(f"{deb.name} is not an ar archive (bad magic)")
         order = 0
         while header := fh.read(AR_HEADER):
-            if len(header) != AR_HEADER or header[58:60] != b"`\n":
-                cannot(f"{deb.name} has a malformed ar header")
-            name = header[:16].decode("ascii", "replace").strip().rstrip("/")
-            # bytes.isdigit is ASCII-only; int() would take "-60", "+5" and "1_0"
-            digits = header[48:58].strip()
-            if not digits.isdigit():
-                cannot(f"{deb.name} has a malformed ar member size")
-            size = int(digits)
+            name, size = ar_header(deb.name, header)
             if order == 0 and name != "debian-binary":
                 cannot(f"{deb.name}: first member is {name!r}, not debian-binary")
             order += 1
+            if fh.tell() + size > total:
+                cannot(f"{deb.name} is truncated in {name}: {size} bytes past the end")
             if name == "debian-binary" or name.startswith("control.tar"):
                 if size > MAX_TARBALL:
                     cannot(f"{deb.name}: member {name} is {size} bytes, over the limit")
@@ -96,6 +108,7 @@ def ar_members(deb: Path) -> tuple[dict[str, bytes], int]:
 def parse_stanza(text: str, where: str) -> dict[str, str]:
     """One deb822 stanza; a continuation line stays in its field's value, newline and all."""
     fields: dict[str, str] = {}
+    seen: set[str] = set()  # field names lowercased: deb822 names are case-insensitive
     last = ""
     blank = False
     for line in text.split("\n"):
@@ -113,8 +126,9 @@ def parse_stanza(text: str, where: str) -> dict[str, str]:
         if not m:
             cannot(f"{where} has a malformed line: {line[:60]!r}")
         last = m.group(1)
-        if last.lower() in {k.lower() for k in fields}:
+        if last.lower() in seen:
             cannot(f"{where} has the field {last} twice")
+        seen.add(last.lower())
         fields[last] = m.group(2)
     if not fields:
         cannot(f"{where} is empty")

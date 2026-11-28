@@ -73,7 +73,6 @@ KEYS = {"name", "site-url", "key", "products", "keep", "static"}
 REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/(?!\.\.?$)[A-Za-z0-9_.-]+")  # no `.` or `..` repo
 ID = re.compile(r"[a-z][a-z0-9-]{0,39}")
 FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+~-]*\.(rpm|deb)")
-SHA = re.compile(r"[0-9a-f]{40}")
 MAX_PRODUCTS = 20
 MAX_KEEP = 20
 FPR_FIELD = 9  # index of the fingerprint in gpg --with-colons: field 10, counting from 1

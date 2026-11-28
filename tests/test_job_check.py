@@ -86,6 +86,7 @@ class FakeTools(Tools):
         self.runs_status = 200  # what listing the merged PR head's Actions runs answers
         self.pr_base = BASE_SHA  # the pull request's base.sha, in the event
         self.before: str | None = None  # a push's `before`, in the event
+        self.inputs: dict[str, str] | None = None  # a dispatch's inputs, in the event
         self.head_repo = ""  # a pull request's head repo, in the event
         self.private = False  # the event's repository.private
         self.tags = f"{SHA}\trefs/tags/v1.2.3\n"  # `git ls-remote --tags origin`: a release here
@@ -244,6 +245,8 @@ def go(
             event["before"] = tools.before
         if cron:
             event["schedule"] = cron
+        if tools.inputs is not None:
+            event["inputs"] = tools.inputs
         rc = check.run(event_name, event, env, tools)
         text = out.read_text() if out.exists() else ""
         lines = text.splitlines()
@@ -609,6 +612,21 @@ def test_dispatch_gates_and_plans_nothing() -> None:
     rc, plan = go("workflow_dispatch", t, files=IMAGE)
     assert rc == 0 and plan["image"] is False and plan["release"] is None and not plan["write"]
     assert gated(t)
+
+
+def test_a_bare_default_branch_dispatch_plans_pages_and_no_other_does() -> None:
+    """`pages` on a dispatch only when it is bare (no version) and on the default branch."""
+    site = {"sdlc.toml": '[tool.sdlc.pages]\nname = "site"\n'}
+    _, plan = go("workflow_dispatch", FakeTools(), files=site)
+    assert plan["pages"] is True
+    versioned = FakeTools()
+    versioned.inputs = {"version": "1.2.3"}
+    _, plan = go("workflow_dispatch", versioned, files=site)
+    assert plan["pages"] is False
+    _, plan = go("workflow_dispatch", FakeTools(), files=site, ref="refs/heads/topic")
+    assert plan["pages"] is False
+    _, plan = go("workflow_dispatch", FakeTools(), files=IMAGE)
+    assert plan["pages"] is False  # no [tool.sdlc.pages]: no site to publish
 
 
 def launched(t: FakeTools) -> list[str]:
