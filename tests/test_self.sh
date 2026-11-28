@@ -163,8 +163,9 @@ case $1 in
         [ ! -e "$W/rev-fails" ] || { echo 'Error: unauthorized: authentication required' >&2; exit 1; }
         cat "$W/reg/rev/$(san "$_ref")" 2> /dev/null || : ;;
       *--format*) cat "$W/reg/label/$(san "$_ref")" 2> /dev/null || : ;;
-      # No --format is the whole inspect, which provenance.py reads.
-      *) cat "$W/reg/json/$(san "$_ref")" 2> /dev/null || printf '{"Labels":{}}\n' ;;
+      # No --format is the whole inspect, which provenance.py reads: a ci.yml
+      # run's build record unless reg/json holds the ref's own.
+      *) cat "$W/reg/json/$(san "$_ref")" 2> /dev/null || cat "$W/record-default" ;;
     esac ;;
   copy)
     for _a; do _src=${_dst:-}; _dst=${_a#docker://}; done
@@ -214,12 +215,14 @@ write_tree() {
 }
 write_tree
 # provenance.py through a wrapper that appends the names in its environment to
-# prov-env, a line a run, then runs the real one.
+# prov-env, a line a run, and "provenance.py run" to the log, then runs the real one.
 cp scripts/provenance.py "$W/provenance.py"
 cat > "$W/repo/scripts/provenance.py" <<EOF
 import os, runpy, sys
 with open("$W/prov-env", "a") as f:
     f.write(" ".join(sorted(os.environ)) + "\n")
+with open("$W/log", "a") as f:
+    f.write("provenance.py run\n")
 sys.argv[0] = "$W/provenance.py"
 runpy.run_path(sys.argv[0], run_name="__main__")
 EOF
@@ -227,6 +230,13 @@ git -C "$W/repo" init -q
 git -C "$W/repo" add -A
 git -C "$W/repo" -c user.name=t -c user.email=t@t commit -q -m init
 REV=$(git -C "$W/repo" rev-parse HEAD)
+# The build record a ci.yml run on main stamps (self.sh build), for provenance.py.
+labels_json() {      # run builder: the record at $REV
+  printf '{"Labels":{"org.opencontainers.image.revision":"%s","com.crunchtools.build.commit":"%s","com.crunchtools.build.run":"%s","com.crunchtools.build.builder":"%s","com.crunchtools.build.workflow":"%s"}}\n' \
+    "$REV" "$REV" "$1" "$2" "$2"
+}
+CI_RUN=https://github.com/crunchtools/sdlc/actions/runs/7/attempts/1
+labels_json "$CI_RUN" crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main > "$W/record-default"
 
 reset() {
   rm -rf "$W/log" "$W/reg" "$W/signed" "$W/att" "$W/att-fails" "$W/syft-empty" "$W/syft-fails" "$W/count" "$W/swap-at" "$W/swap-to" "$W/err-at" "$W/rev-fails" "$W/deleted-0" "$W/tags" \
@@ -507,11 +517,11 @@ if [ "$(n_log "^skopeo inspect .*{{.Digest}}.* docker://$A:latest\$")" -eq 1 ] \
 else bad "no read-back"; fi
 # The key reaches cosign on public-key, sign and attest only, never on verify
 # or syft, and cosign is always the pinned digest. This release makes one
-# public-key, two signs and two attests (both SBOMs; no build record, so no
-# provenance), and each of them takes the key.
+# public-key, two signs and four attests (both SBOMs and both provenances, from
+# the default ci.yml record), and each of them takes the key.
 KEYED=$(( $(n_log ' public-key ') + $(n_log ' sign --yes ') + $(n_log ' attest --yes ') ))
 if [ "$(n_log ' public-key ')" -eq 1 ] && [ "$(n_log ' sign --yes ')" -eq 2 ] \
-   && [ "$(n_log ' attest --yes ')" -eq 2 ] && [ "$(n_log '-e SDLC_KEY')" -eq "$KEYED" ] && ! grep -e ' verify ' -e ' verify-attestation ' -e ' scan ' "$W/log" | grep -q SDLC_KEY \
+   && [ "$(n_log ' attest --yes ')" -eq 4 ] && [ "$(n_log '-e SDLC_KEY')" -eq "$KEYED" ] && ! grep -e ' verify ' -e ' verify-attestation ' -e ' scan ' "$W/log" | grep -q SDLC_KEY \
    && ! grep 'SDLC_KEY' "$W/log" | grep -qv -e ' public-key ' -e ' sign --yes ' -e ' attest --yes ' \
    && in_log '-e SDLC_KEY .* -- .* public-key ' && ! in_log 'SDLC_KEY=' \
    && [ "$(n_log ' verify ')" -ge 4 ] \
@@ -520,26 +530,28 @@ if [ "$(n_log ' public-key ')" -eq 1 ] && [ "$(n_log ' sign --yes ')" -eq 2 ] \
 else bad "key exposure"; grep -- 'run ' "$W/log" | sed 's/^/     | /'; fi
 
 printf '\n%s\n' '-- sign release: attestations (#266)'
-# The build record a ci.yml run on main stamps (self.sh build), for provenance.py.
-record() {
-  mkdir -p "$W/reg/json"
-  _wf=crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main
-  printf '{"Labels":{"org.opencontainers.image.revision":"%s","com.crunchtools.build.commit":"%s","com.crunchtools.build.run":"https://github.com/crunchtools/sdlc/actions/runs/7/attempts/1","com.crunchtools.build.builder":"%s","com.crunchtools.build.workflow":"%s"}}\n' \
-    "$REV" "$REV" "$_wf" "$_wf" > "$W/reg/json/$(san "$1")"
-}
+# Every ref's record is the default ci.yml one unless set here; norecord is an
+# image with none (built before a997, or a hotfix before #275).
+setrecord() { mkdir -p "$W/reg/json"; printf '%s\n' "$2" > "$W/reg/json/$(san "$1")"; }
+norecord()  { setrecord "$1" '{"Labels":{}}'; }
+record()    { setrecord "$1" "$(cat "$W/record-default")"; }
 has_att() { [ -e "$W/att/$(san "$1")__$2" ]; }
-rel_setup; record "$A@$D1"; rel
+rel_setup; rel
 mv_any=$(first '^skopeo copy')
 at_a=$(first " attest --yes .*--type spdxjson .*$A@$D1\$"); at_p=$(first " attest --yes .*--type slsaprovenance1 .*$A@$D1\$")
-at_b=$(first " attest --yes .*--type spdxjson .*$B@$DB\$")
+at_b=$(first " attest --yes .*--type spdxjson .*$B@$DB\$"); at_q=$(first " attest --yes .*--type slsaprovenance1 .*$B@$DB\$")
 if [ "$RC" -eq 0 ] && has_att "$A@$D1" spdxjson && has_att "$A@$D1" slsaprovenance1 \
-   && has_att "$B@$DB" spdxjson && ! has_att "$B@$DB" slsaprovenance1 \
-   && [ -n "$at_a" ] && [ -n "$at_p" ] && [ -n "$at_b" ] && [ -n "$mv_any" ] \
-   && [ "$at_a" -lt "$mv_any" ] && [ "$at_p" -lt "$mv_any" ] && [ "$at_b" -lt "$mv_any" ] \
+   && has_att "$B@$DB" spdxjson && has_att "$B@$DB" slsaprovenance1 \
+   && [ -n "$at_a" ] && [ -n "$at_p" ] && [ -n "$at_b" ] && [ -n "$at_q" ] && [ -n "$mv_any" ] \
+   && [ "$at_a" -lt "$mv_any" ] && [ "$at_p" -lt "$mv_any" ] && [ "$at_b" -lt "$mv_any" ] && [ "$at_q" -lt "$mv_any" ] \
    && in_log ' attest --yes --tlog-upload=false --use-signing-config=false --new-bundle-format=false ' \
-   && printf '%s' "$OUT" | grep -q 'no provenance attested'; then
-  ok "release: SBOMs for both and sdlc's provenance from its build record, all before any tag moves"
-else bad "release attest: exit $RC a=$at_a p=$at_p b=$at_b move=$mv_any"; dump; fi
+   && printf '%s' "$OUT" | grep -qF "provenance: $CI_RUN"; then
+  ok "release: SBOMs and provenance for both from their build records, all before any tag moves"
+else bad "release attest: exit $RC a=$at_a p=$at_p b=$at_b q=$at_q move=$mv_any"; dump; fi
+pr_a=$(first '^provenance.py run$'); sg_1=$(first ' sign --yes ')
+if [ "$(n_log '^provenance.py run$')" -eq 2 ] && [ -n "$pr_a" ] && [ -n "$sg_1" ] && [ "$pr_a" -lt "$sg_1" ]; then
+  ok "provenance.py reads both records before anything is signed"
+else bad "provenance.py order: runs=$(n_log '^provenance.py run$') first=$pr_a sign=$sg_1"; fi
 if [ "$(n_log ' scan ')" -eq 2 ] && ! grep ' scan ' "$W/log" | grep -q -e SDLC_KEY -e "$CI" -e /auth -e DOCKER_CONFIG \
    && ! grep ' scan ' "$W/log" | grep -qv -e ' --read-only ' \
    && in_log "-- docker.io/anchore/syft:v[0-9.]*@sha256:[0-9a-f]\{64\} scan -q -o spdx-json registry:$A@$D1\$"; then
@@ -552,7 +564,7 @@ rel_setup; : > "$W/syft-empty"; rel
 refused_late "an empty SBOM moves no tag" "syft wrote no SBOM for $A@$D1"
 check "  and attests nothing" [ "$(n_log ' attest --yes ')" -eq 0 ]
 rel_setup; mkdir -p "$W/att"
-for at in "$A@$D1"__spdxjson "$A@$D1"__slsaprovenance1 "$B@$DB"__spdxjson; do : > "$W/att/$(san "$at")"; done
+for at in "$A@$D1"__spdxjson "$A@$D1"__slsaprovenance1 "$B@$DB"__spdxjson "$B@$DB"__slsaprovenance1; do : > "$W/att/$(san "$at")"; done
 rel
 if [ "$RC" -eq 0 ] && [ "$(n_log ' attest --yes ')" -eq 0 ] && [ "$(n_log ' scan ')" -eq 0 ]; then
   ok "a re-run on attested digests scans and attests nothing"
@@ -595,12 +607,36 @@ refused_late "an attestation that does not verify after attesting moves no tag" 
 if printf '%s' "$OUT" | grep -q '^self.sh:   '; then
   ok "  and cosign's own words are logged under the refusal"
 else bad "no cosign diagnostic for a failed attestation"; dump; fi
-rel_setup; record "$A@$D1"; record "$B@$DB"; rel GITHUB_ACTIONS=true
-if [ "$RC" -eq 0 ] && has_att "$A@$D1" slsaprovenance1 && has_att "$B@$DB" slsaprovenance1; then
-  ok "in Actions: both images' build records give provenance"
-else bad "actions provenance: exit $RC"; dump; fi
-rel_setup; record "$A@$D1"; rel GITHUB_ACTIONS=true
-refused_late "in Actions: an image with no build record is refused before any tag moves" "refusing to publish it without provenance"
+for gha in true ''; do
+  rel_setup; norecord "$B@$DB"; rel GITHUB_ACTIONS=$gha
+  refused "an image with no build record is refused before anything is signed (GITHUB_ACTIONS='$gha')" \
+    "$B@$DB records no build run; refusing to sign or publish it without provenance"
+  check "  and nothing is attested" [ "$(n_log ' attest --yes ')" -eq 0 ]
+done
+
+printf '\n%s\n' '-- sign release: a scripts/hotfix.sh build (#275)'
+# What hotfix.sh's image step stamps: no run id, its own attempt, no workflow.
+HF=https://github.com/crunchtools/sdlc/blob/$REV/scripts/hotfix.sh
+hf_labels() { labels_json "https://github.com/crunchtools/sdlc/actions/runs//attempts/$1" ''; }
+hf_setup() { rel_setup; setrecord "$A@$D1" "$(hf_labels 42)"; setrecord "$B@$DB" "$(hf_labels 42)"; }
+# shellcheck disable=SC2086
+hf() { rel SDLC_LOCAL_BUILDER="$HF" GITHUB_RUN_ATTEMPT=42 GITHUB_REF=refs/tags/v0.13.0 "$@"; }
+hf_setup; hf
+mv_any=$(first '^skopeo copy'); at_p=$(first " attest --yes .*--type slsaprovenance1 .*$A@$D1\$")
+if [ "$RC" -eq 0 ] && has_att "$A@$D1" slsaprovenance1 && has_att "$B@$DB" slsaprovenance1 \
+   && [ -n "$at_p" ] && [ -n "$mv_any" ] && [ "$at_p" -lt "$mv_any" ] \
+   && [ "$(printf '%s' "$OUT" | grep -cF "provenance: $HF#attempt-42")" -eq 2 ]; then
+  ok "hotfix: this run's own build gets provenance naming hotfix.sh at the commit, before any tag moves"
+else bad "hotfix provenance: exit $RC"; dump; fi
+for change in GITHUB_RUN_ATTEMPT=43 GITHUB_RUN_ATTEMPT= GITHUB_RUN_ID=7 GITHUB_REF=refs/pull/1/merge \
+    "SDLC_LOCAL_BUILDER=${HF%/"$REV"/*}/main/scripts/hotfix.sh" \
+    "SDLC_LOCAL_BUILDER=$(printf '%s' "$HF" | sed "s/$REV/$(printf '%040d' 0)/")" \
+    "SDLC_LOCAL_BUILDER=${HF%/*}/local-release.sh" SDLC_LOCAL_BUILDER=; do
+  hf_setup; hf "$change"
+  refused "hotfix: $change gives no provenance and is refused with nothing signed" "refusing to sign or publish it without provenance"
+done
+hf_setup; setrecord "$A@$D1" "$(labels_json https://github.com/crunchtools/sdlc/actions/runs//attempts/42 crunchtools/sdlc/.github/workflows/ci.yml@refs/heads/main)"; hf
+refused "hotfix: a record naming a workflow is not this run's and is refused" "refusing to sign or publish it without provenance"
 
 rel_setup; carry "$D0" 0.12.0; rel
 if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0")" = "$D1" ] && [ "$(tag_of "$A:latest")" = "$D1" ]; then
@@ -725,7 +761,7 @@ at_r=$(first " attest --yes .*--type spdxjson .*$A@$D1\$"); mv_r=$(first '^skope
 if has_att "$A@$D1" spdxjson && [ -n "$at_r" ] && [ -n "$mv_r" ] && [ "$at_r" -lt "$mv_r" ]; then
   ok "  and an unattested digest (from before #266) gets its SBOM before :0 moves"
 else bad "rollback attest: attest=$at_r move=$mv_r"; dump; fi
-rb_setup; mkdir -p "$W/att"; : > "$W/att/$(san "$A@$D1")__spdxjson"; rb
+rb_setup; mkdir -p "$W/att"; : > "$W/att/$(san "$A@$D1")__spdxjson"; : > "$W/att/$(san "$A@$D1")__slsaprovenance1"; rb
 if [ "$RC" -eq 0 ] && [ "$(n_log ' scan ')" -eq 0 ] && [ "$(n_log ' attest --yes ')" -eq 0 ] \
    && [ "$(tag_of "$A:0")" = "$D1" ]; then
   ok "rollback to an attested digest scans and attests nothing"
@@ -735,11 +771,26 @@ if [ "$RC" -eq 1 ] && printf '%s' "$OUT" | grep -qF "attestation does not verify
    && [ "$(tag_of "$A:0")" = "$D0" ]; then
   ok "rollback to a digest whose attestation does not verify leaves :0 where it was"
 else bad "rollback att-fails: exit $RC"; dump; fi
-rb_setup; rb GITHUB_ACTIONS=true
+rb_setup; norecord "$A@$D1"; rb GITHUB_ACTIONS=true
 if [ "$RC" -eq 0 ] && has_att "$A@$D1" spdxjson && ! has_att "$A@$D1" slsaprovenance1 \
    && [ "$(tag_of "$A:0")" = "$D1" ]; then
-  ok "in Actions, rollback to a digest with no build record (a hotfix) still goes, with its SBOM"
+  ok "rollback to a digest with no build record from before attestation (0.13.0) goes, with its SBOM"
 else bad "rollback actions: exit $RC"; dump; fi
+# Past LAST_UNATTESTED a digest with no record is one sign refused (signed, never
+# tagged, before #275 read the record first): rollback must not publish it.
+rb_ver() { rb_setup; mark_signed "$A@$D1" crunchtools/sdlc "$1"; reg_label "$A@$D1" "$1"; norecord "$A@$D1"
+           rb VERSION="$1"; }
+rb_ver 0.18.0
+if [ "$RC" -eq 0 ] && [ "$(tag_of "$A:0")" = "$D1" ] && ! has_att "$A@$D1" slsaprovenance1; then
+  ok "rollback to 0.18.0, the last release before attestation, goes without provenance"
+else bad "rollback 0.18.0: exit $RC"; dump; fi
+for v in 0.18.1 0.19.0; do
+  rb_ver "$v"
+  if [ "$RC" -eq 1 ] && printf '%s' "$OUT" | grep -qF "refusing to sign or publish it without provenance" \
+     && [ "$(tag_of "$A:0")" = "$D0" ] && [ "$(n_log ' attest --yes ')" -eq 0 ]; then
+    ok "rollback to $v with no build record is refused; :0 stays where it was"
+  else bad "rollback $v: exit $RC"; dump; fi
+done
 if ! printf '%s' "$OUT" | grep -q "cosign said"; then
   ok "a digest that verifies logs no cosign diagnostic"
 else bad "a verified digest still logged a cosign diagnostic"; dump; fi

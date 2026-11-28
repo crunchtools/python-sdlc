@@ -19,6 +19,11 @@
 # The tree must be a commit pushed to crunchtools/sdlc (the revision label
 # names it, and the weekly rebuild fetches it), with its version already bumped.
 #
+# No Actions run builds it, so its SLSA provenance names this script, at the
+# commit it releases, as the builder, with an attempt unique to this run and no
+# run id, as scripts/local-release.sh does (#275). image stamps the attempt
+# into the run label; sign's provenance.py trusts only a label naming it.
+#
 # Usage: <secrets.json scripts/hotfix.sh
 set -eu
 
@@ -54,7 +59,13 @@ API=https://api.github.com
 # The token is revoked however the run ends; it expires within the hour anyway.
 trap '[ -z "$token" ] || printf "Authorization: Bearer %s\n" "$token" \
   | curl -fsS -o /dev/null -X DELETE -H @- "$API/installation/token" \
-  || echo "hotfix: could not revoke the App token" >&2; rm -rf "$work"' EXIT
+  || echo "hotfix: could not revoke the App token" >&2
+  git -C "$here" worktree remove --force "$work/src" 2> /dev/null; rm -rf "$work"' EXIT
+# image and sign run from a worktree of $sha alone: status --porcelain does not
+# see an ignored file (a stale __pycache__), which the Containerfile would copy
+# into an image whose provenance says it was built from $sha.
+git -C "$here" worktree add -q --detach "$work/src" "$sha"
+src=$work/src
 
 # GitHub's REST API with the bearer token $1, on curl's stdin and never argv.
 api() {
@@ -82,11 +93,17 @@ mint() {
 
 export COSIGN_IMAGE=registry.access.redhat.com/hi/cosign@sha256:a64a815e27be23817d46425c97cb93db9e70b8bb2d4170e7d6b015d82b1576b8
 export GITHUB_SERVER_URL=https://github.com GITHUB_REPOSITORY=crunchtools/sdlc
+# The build record: no run id or workflow (a caller's own would be a lie), this
+# script at $sha, and the vX.Y.Z tag it creates before sign reads the record.
+unset GITHUB_RUN_ID GITHUB_WORKFLOW_REF
+export SDLC_LOCAL_BUILDER="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$sha/scripts/hotfix.sh"
+GITHUB_RUN_ATTEMPT=$(date +%s)$$
+export GITHUB_RUN_ATTEMPT GITHUB_REF="refs/tags/v$version"
 
 # image builds the version check would plan; write's verdict is sign's input.
 plan=$(jq -cn --arg v "$version" '{write: true, image: true, release: {version: $v, publish: "image"}}')
 GITHUB_JOB=image MODE=release GITHUB_EVENT_NAME=push SDLC_CHECK=$plan \
-  GITHUB_OUTPUT=$work/out SDLC_KEY='' SDLC_KEY_PASSWORD='' "$here/scripts/self.sh"
+  GITHUB_OUTPUT=$work/out SDLC_KEY='' SDLC_KEY_PASSWORD='' "$src/scripts/self.sh"
 built=$(sed -n 's/^result=//p' "$work/out")
 [ -n "$built" ] || { echo "hotfix: the image step named no digest" >&2; exit 1; }
 
@@ -101,5 +118,5 @@ printf '%s' "$token" | podman run --rm -i \
 
 release=$(jq -cn --arg v "$version" --arg s "$sha" '{version: $v, sha: $s}')
 GITHUB_JOB=sign MODE=release EVENT=push BUILT=$built SDLC_WRITE=success SDLC_RELEASE=$release \
-  "$here/scripts/self.sh"
+  "$src/scripts/self.sh"
 echo "hotfix: $version is quay.io/crunchtools/sdlc:${version%%.*}"

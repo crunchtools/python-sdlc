@@ -16,9 +16,10 @@
 #          Pushes candidates by digest; signs nothing and moves no tag.
 #   sign   the only step with sdlc's key. Never runs the image it signs: cosign
 #          runs from COSIGN_IMAGE, a digest the workflow pins, and the release
-#          is data. Re-validates everything except which digest was built, then
-#          signs and attests an SBOM (syft from SYFT, without the key) and SLSA
-#          v1 provenance (scripts/provenance.py) before any tag moves.
+#          is data. Re-validates everything except which digest was built and
+#          reads its SLSA v1 provenance (scripts/provenance.py), then signs and
+#          attests an SBOM (syft from SYFT, without the key) and that provenance
+#          before any tag moves.
 #
 # Exit 2 is "could not run" (an unknown job or mode); 1 is a refusal or a
 # failed test.
@@ -207,7 +208,7 @@ output() {
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 trap 'exit 2' HUP INT TERM
-mkdir "$work/auth" "$work/keys" "$work/att"
+mkdir "$work/auth" "$work/keys" "$work/att" "$work/rec"
 # cosign's nonroot user reads the predicates sign writes here.
 chmod 0755 "$work/att"
 AUTH=$work/auth/config.json
@@ -449,12 +450,37 @@ attest_one() {
   fi
   say "attested the $3 of $1@$2"
 }
-# The SPDX SBOM and SLSA v1 provenance of $1@$2 under sdlc's key, each unless
-# it already carries one (a re-run): what promote.py attests to every fleet
-# image with the fleet key (#266). syft and provenance.py parse the image and
-# never see the key; only cosign_key does. $3 = rollback: the digest may be a
-# release from before #266 or a hotfix, so a missing build record is not a
-# refusal there; it still gets its SBOM.
+# The last release cut before sdlc attested its own (#266, #275): a rollback
+# to it or older may find no provenance, and goes with its SBOM alone.
+LAST_UNATTESTED=0.18.0
+
+# The SLSA v1 predicate of $1@$2 into $work/rec/<name>.json, unless it already
+# carries one (a re-run). Before anything is signed, so a digest with no build
+# record, from ci.yml or from this very hotfix.sh run, is refused with nothing
+# signed (#275); only $3 = unattested, a rollback to $LAST_UNATTESTED or older,
+# goes without. provenance.py parses the image and never sees the key.
+build_record() {
+  _rec=$work/rec/${1##*/}.json
+  rm -f "$_rec"
+  if attested "$1" "$2" slsaprovenance1; then
+    say "$1@$2 already carries provenance"
+    return
+  fi
+  skopeo inspect --authfile "$AUTH" "docker://$1@$2" > "$work/inspect.json" || die "cannot inspect $1@$2"
+  # --commit is the tree this step runs from, which a hotfix.sh build must be.
+  env -u SDLC_KEY -u SDLC_KEY_PASSWORD python3 -I "$here/scripts/provenance.py" \
+    --repo crunchtools/sdlc --commit "$(git -C "$here" rev-parse HEAD)" \
+    --out "$_rec" < "$work/inspect.json" \
+    || die "provenance.py failed on $1@$2"
+  # provenance.py warns and writes nothing for an image with no build record.
+  [ -e "$_rec" ] || [ "${3:-}" = unattested ] \
+    || die "$1@$2 records no build run; refusing to sign or publish it without provenance"
+}
+
+# The SPDX SBOM of $1@$2 and the predicate build_record kept for it, under
+# sdlc's key, each unless it already carries one (a re-run): what promote.py
+# attests to every fleet image with the fleet key (#266). syft parses the
+# image and never sees the key; only cosign_key does.
 attest() {
   rm -f "$work/att/"*
   if attested "$1" "$2" spdxjson; then
@@ -471,22 +497,10 @@ attest() {
     [ -s "$work/att/sbom.spdx.json" ] || die "syft wrote no SBOM for $1@$2"
     attest_one "$1" "$2" spdxjson sbom.spdx.json
   fi
-  if attested "$1" "$2" slsaprovenance1; then
-    say "$1@$2 already carries provenance"
-    return
-  fi
-  skopeo inspect --authfile "$AUTH" "docker://$1@$2" > "$work/inspect.json" || die "cannot inspect $1@$2"
-  env -u SDLC_KEY -u SDLC_KEY_PASSWORD python3 -I "$here/scripts/provenance.py" \
-    --repo crunchtools/sdlc --out "$work/att/provenance.json" < "$work/inspect.json" \
-    || die "provenance.py failed on $1@$2"
-  # provenance.py warns and writes nothing for an image with no build record.
-  # In Actions, ci.yml's image job stamped one, so its absence is a refusal;
-  # only scripts/hotfix.sh, which records no run, ships without (#275).
-  if [ -e "$work/att/provenance.json" ]; then
-    attest_one "$1" "$2" slsaprovenance1 provenance.json
-  elif [ "${GITHUB_ACTIONS:-}" = true ] && [ "${3:-}" != rollback ]; then
-    die "$1@$2 records no ci.yml build run; refusing to publish it without provenance"
-  fi
+  _rec=$work/rec/${1##*/}.json
+  [ -e "$_rec" ] || return 0
+  cp "$_rec" "$work/att/provenance.json"
+  attest_one "$1" "$2" slsaprovenance1 provenance.json
 }
 
 mode_sign() {
@@ -514,8 +528,12 @@ mode_sign() {
     [ "$(label_version "$QUAY@$DIGEST")" = "$VERSION" ] || die "$QUAY@$DIGEST's version label is not $VERSION"
     # Nothing is built or signed. As on a release, no tag names an unattested
     # digest: one from before #266 is attested now, and verified, before
-    # :<major> moves to it.
-    attest "$QUAY" "$DIGEST" rollback
+    # :<major> moves to it. Only a version from before then may lack a build
+    # record: a newer digest with none is one sign refused (#275).
+    _old=
+    [ "$(vcmp "$VERSION" "$LAST_UNATTESTED")" -gt 0 ] || _old=unattested
+    build_record "$QUAY" "$DIGEST" "$_old"
+    attest "$QUAY" "$DIGEST"
     retag "$QUAY" "$DIGEST" "$MAJOR"
     return
   fi
@@ -561,6 +579,9 @@ mode_sign() {
       || die "$BOOT@$_b carries an ambiguous sdlc signature"
     [ -z "$_bs" ] || [ "$_bs" = "$_v" ] || die "$BOOT@$_b is signed as '$_bs', not $_v"
   fi
+  # The provenance of both, read before anything is signed (#275).
+  build_record "$QUAY" "$_d"
+  [ -z "$_b" ] || build_record "$BOOT" "$_b"
   sign_one "$QUAY" "$_d" crunchtools/sdlc "$_v"
   [ -z "$_b" ] || sign_one "$BOOT" "$_b" crunchtools/sdlc-bootstrap "$_v"
   # Attested before any tag moves, as signed: no tag names an unattested digest.

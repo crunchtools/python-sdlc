@@ -31,6 +31,18 @@ All notable changes to this project are documented here, following
   Accept-Language, User-Agent and X-GitHub-Api-Version when the host changes,
   and refuses a hop to plain http, which comes back as the 3xx it answered. A release
   download, which 302s to a githubusercontent host, still works.
+- A release cut by `scripts/hotfix.sh` carries SLSA v1 provenance again (#275,
+  a1888). hotfix.sh stamps the build record `scripts/local-release.sh` gives a
+  fleet build: itself as the builder, pinned to the commit it releases, an
+  attempt unique to the run and no run id. `scripts/provenance.py` trusts that
+  record only from the sign step of the same run, under a build type of its
+  own (`https://crunchtools.com/sdlc/buildtypes/hotfix/v1`, naming the script
+  at its commit) rather than the Actions workflow's, and hotfix.sh builds from a
+  clean worktree of the commit, so no ignored file (a stale `__pycache__`)
+  ships under it. With every release path now recording a build, self.sh's
+  sign reads the record before it signs anything and refuses a digest with
+  none, in or out of Actions; only a rollback to 0.18.0 or older, from before
+  sdlc attested its own releases, still goes without.
 - The lane memory budget now keeps a quarter of MemTotal (never under 512 MB)
   for the kernel, podman and the page cache, as it already did for a cgroup
   ceiling (a1809, crunchtools/gha-runner#71). A 16G runner VM gave four lanes

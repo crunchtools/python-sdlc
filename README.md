@@ -94,8 +94,10 @@ attests an SPDX SBOM and SLSA v1 provenance to the digest with the fleet key;
 `cosign verify-attestation --insecure-ignore-tlog --type spdxjson` (or
 `slsaprovenance1`) reads them. sdlc's own release job attests the same two to
 its images with sdlc's key (#266); 0.15.9 through the last release before that
-fix are signed but not attested, and a release cut by `scripts/hotfix.sh`
-records no Actions run, so it carries the SBOM and no provenance (#275).
+fix are signed but not attested. A release cut by `scripts/hotfix.sh` records
+no Actions run, so its provenance names that script, at the commit it released,
+as the builder, under its own build type, `https://crunchtools.com/sdlc/buildtypes/hotfix/v1`. 0.18.0, a hotfix before that, carries the SBOM and no
+provenance (#275); sign refuses any newer digest without it, rollback included.
 
 `.pre-commit-config.yaml` is
 [`examples/pre-commit-floating.yaml`](examples/pre-commit-floating.yaml): two
