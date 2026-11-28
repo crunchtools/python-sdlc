@@ -6,6 +6,22 @@ All notable changes to this project are documented here, following
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-28
+
+### Added
+
+- `[tool.sdlc.image.disk]`: a bootc repo's raw disk, built by the `image` job
+  from the gated digest with a digest-pinned bootc-image-builder and pushed to
+  the image's repo as an OCI artifact (`disk-gated-<sha>`). `promote` signs it
+  with the fleet key and attests the image's SBOM and a SLSA v1 provenance,
+  then tags it `disk-X.Y.Z` and `disk-latest` along with the image (#273,
+  a1887). The builder runs with no network, no environment and a private image
+  store seeded with that digest alone, because osbuild runs the image's own code as
+  its buildroot. The table only declares `type`, `rootfs` and a `root-keys` file. The
+  build runs only on GitHub-hosted runners, where it uses `/mnt`. Anywhere else
+  it exits 2, and it also exits 2 when `/mnt` has too little room or the
+  uid_map is not the full range. No `ci.yml` change.
+
 ### Security
 
 - The fleet `ci.yml`'s `ai` job no longer hands `OPENROUTER_API_KEY` to any
@@ -49,17 +65,6 @@ All notable changes to this project are documented here, following
 
 ### Added
 
-- `[tool.sdlc.image.disk]`: a bootc repo's raw disk, built by the `image` job
-  from the gated digest with a digest-pinned bootc-image-builder and pushed to
-  the image's repo as an OCI artifact (`disk-gated-<sha>`). `promote` signs it
-  with the fleet key and attests the image's SBOM and a SLSA v1 provenance,
-  then tags it `disk-X.Y.Z` and `disk-latest` along with the image (#273,
-  a1887). The builder runs with no network, no environment and a private image
-  store seeded with that digest alone, because osbuild runs the image's own code as
-  its buildroot. The table only declares `type`, `rootfs` and a `root-keys` file. The
-  build runs only on GitHub-hosted runners, where it uses `/mnt`. Anywhere else
-  it exits 2, and it also exits 2 when `/mnt` has too little room or the
-  uid_map is not the full range. No `ci.yml` change.
 - `EXTRA_IMAGES` gives crunchtools/trentina `trentina-l2-model`, the L2 model
   image a training round publishes through `ci.yml` (crunchtools/trentina#954,
   a1793).
