@@ -1964,6 +1964,18 @@ def test_a_manifest_list_is_refused_before_anything_is_pulled_for_the_disk() -> 
         assert not any(a[4:5] == ["pull"] and "@" in a[-1] for a in t.argvs), doc
 
 
+def test_a_manifest_that_is_not_json_is_refused_before_the_disk_pull() -> None:
+    t = FakeTools()
+    t.image_manifest = "not json"
+    msg = ""
+    try:
+        disk_go(t)
+    except CannotRunError as exc:
+        msg = str(exc)
+    assert "is not JSON" in msg, msg
+    assert not any(a[4:5] == ["pull"] and "@" in a[-1] for a in t.argvs)
+
+
 def test_an_apparmor_engine_runs_bib_unconfined() -> None:
     t = FakeTools()
     t.apparmor = "true"
