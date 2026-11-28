@@ -110,6 +110,8 @@ SECRETS = (
     "ACTIONS_ID_TOKEN_REQUEST_URL",
 )
 FROM_LINE = re.compile(r"^(\s*FROM\s+(?:--\S+\s+)*)(\S+)", re.IGNORECASE | re.ASCII)
+# A COPY|ADD --from= or a --mount's from= key, and the image or stage it names.
+SOURCE_REF = re.compile(r"((?<![^\s,=])(?:--)?from=)([^\s,]+)", re.ASCII)
 # The `podman run` options the planner emits for a host step (container-smoke,
 # container-scan, bootc-lint), and nothing else: a repo's config cannot add one.
 RUN_FLAGS = ("--rm", "--read-only")
@@ -301,6 +303,8 @@ def stages_of(job: Job, img: Image) -> tuple[str, Parent | None, list[Parent]]:
     stages = [
         *([parent] if parent else []),
         *builder_stages(text, parent.index if parent else -1, overrides),
+        # A --from= image is no stage: a negative index, which pin_args never takes for a FROM.
+        *(Parent(-1 - i, src) for i, src in enumerate(copy_sources(text, overrides))),
     ]
     for stage in stages:
         host, path = split_ref(stage.image)
@@ -311,7 +315,26 @@ def stages_of(job: Job, img: Image) -> tuple[str, Parent | None, list[Parent]]:
         # Built and gated by this very job, a step ago: its bytes, by digest.
         stage.pinned, stage.digest, stage.image = sibling.pinned, sibling.digest, sibling.image
         print(f"parent built here: {stage.pinned}", flush=True)
-    return text, parent, stages
+    return pin_sources(text, stages, overrides), parent, stages
+
+
+def pin_sources(text: str, stages: list[Parent], overrides: Mapping[str, str]) -> str:
+    """`text` with each image a --from= or from= names at its verified digest.
+
+    Read back as the check read it: a source left unpinned (named through a variable,
+    or broken across lines) is a 2, not a tag the build pulls unverified.
+    """
+    # Keyed by the name in the file: a sibling's stage.image is already its pushed ref.
+    named = (stage.pinned for stage in stages if stage.index < 0)
+    sources = dict(zip(copy_sources(text, overrides), named, strict=True))
+    out = SOURCE_REF.sub(lambda r: r[1] + sources.get(r[2], r[2]), text)
+    left = [s for s in copy_sources(out, overrides) if s not in sources.values()]
+    if left:
+        cannot(
+            f"{left[0]}, named by a --from= or a RUN --mount from=, could not be pinned "
+            "to its verified digest: name it literally, on one line"
+        )
+    return out
 
 
 def build_one(job: Job, img: Image, plan: dict[str, tuple[str, str]], linted: bool) -> int:
@@ -390,6 +413,7 @@ def build_order(root: Path, imgs: list[Image]) -> tuple[list[Image], dict[str, s
         stages = [*([parent] if parent else [])]
         if text:
             stages += builder_stages(text, parent.index if parent else -1, overrides)
+            stages += [Parent(-1, src) for src in copy_sources(text, overrides)]
         needs[img.name] = {
             split_ref(st.image)[1].partition("/")[2]
             for st in stages

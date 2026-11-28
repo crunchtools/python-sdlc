@@ -205,6 +205,9 @@ where a dispatch took minutes.
     same key.
   - The build then runs `FROM` that verified `@sha256:` digest, whatever tag
     the Containerfile names.
+  - Every builder `FROM`, and every image a `COPY --from=` or a
+    `RUN --mount=...,from=` names, is held to the same rules and pinned the
+    same way.
 - **Quiet repos stay scheduled.** GitHub disables a public repo's schedule
   after 60 days without activity, and a quiet image repo would then stop
   rebuilding. On the weekly run, `check` re-enables its own workflow through

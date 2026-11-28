@@ -8,6 +8,11 @@ All notable changes to this project are documented here, following
 
 ### Fixed
 
+- The image job verifies an image a `COPY|ADD --from=` or a
+  `RUN --mount=...,from=` names as it does a builder `FROM` (#277, a1890): it
+  is resolved to a digest, verified by the same trust rules, and the build
+  takes it at that `@sha256:`. A stage name or index is not an image. One the
+  build cannot pin (named through a variable, or broken across lines) is a 2.
 - The fleet `ci.yml`'s `pages` job names its environment through an
   expression (`pages-signing` when the plan has pages, else none). With the
   bare name, GitHub refused the whole workflow file in every repo without a
